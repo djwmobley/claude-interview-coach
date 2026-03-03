@@ -3,7 +3,7 @@ name: skill-gap
 description: Analyse skill gaps against a target role and produce a prioritised short-term learning plan
 argument-hint: <job-ad-url-or-file> [--days 30|60|90]
 user-invocable: true
-allowed-tools: Read(*), Glob(*), WebFetch
+allowed-tools: Read(*), Glob(*), WebFetch, WebSearch
 ---
 
 # Skill Gap Analysis
@@ -213,15 +213,125 @@ candidate's career direction or the role's actual screening weight:
 
 ---
 
-### Step 8: Offer to Save
+### Step 8: Learning Resource Discovery
 
-Ask whether the candidate wants the learning plan saved:
+For each gap or upskill item identified in Steps 5–7, search for specific learning
+resources. Focus on short-term, actionable options. Skip the PMP/PgMP certification
+track here — that's a separate long-term thread.
 
-> Want me to save this to `data/learning-plan.md`? I'll include the role,
-> the date, and the full plan so you can track progress.
+**Search strategy (run searches in parallel where possible):**
 
-If yes, write the plan to `data/learning-plan.md` with the role title, analysis
-date, and complete output from steps 6 and 7.
+For each material gap, search:
+1. LinkedIn Learning — search `site:linkedin.com/learning [topic]`
+2. Free alternatives — SAP Learning (for SAP/ERP topics), swift.com (for payments/SWIFT), official vendor docs
+3. Udemy — for topics not well covered by LinkedIn Learning
 
-If a `data/learning-plan.md` already exists, append the new plan below the
-existing content with a dated header — do not overwrite previous plans.
+**WebSearch queries to use:**
+- `site:linkedin.com/learning [topic keyword]` — for each gap topic
+- `[topic] free online course 2025 OR 2026` — for free alternatives
+- `site:udemy.com [topic keyword]` — as a fallback
+
+**For each resource found, capture:**
+- Course title
+- Platform
+- Estimated duration
+- Cost: `Included` (LinkedIn Learning subscription), `Free`, or `Paid (~$X)`
+- URL
+
+**Present as a grouped table:**
+
+```markdown
+### Available Learning Resources
+
+| Priority | Topic | Course | Platform | Duration | Cost | URL |
+|----------|-------|--------|----------|----------|------|-----|
+| 1 | [Gap topic] | [Course name] | LinkedIn Learning | 1h 30m | Included | [URL] |
+| 1 | [Gap topic] | [Alternative] | SAP Learning | 1h | Free | [URL] |
+| 2 | [Gap topic] | [Course name] | Udemy | 3h | Paid ~$15 | [URL] |
+```
+
+Group by: Free / Subscription-included first, Paid second.
+
+---
+
+### Step 9: Learning Path Q&A
+
+Ask the candidate four questions to determine their learning path. Use
+`AskUserQuestion` with four questions in one call:
+
+1. **Daily time available** — 15-20 min / 30-45 min / 1 hour+
+2. **Track priority** — choose the primary gap area (or both in parallel)
+3. **Budget** — Free and subscription only / Open to spending if justified / No limit
+4. **Certification preference** — if a certification is relevant to the role, ask
+   whether to pursue it now, after an offer, or skip it
+
+Wait for answers before proceeding.
+
+---
+
+### Step 10: Write Learning Plan
+
+Based on the gap analysis, discovered resources, and Q&A answers, write a
+structured learning plan to `data/learning-plan.md`.
+
+**Plan format (must follow this structure exactly — the `/learn-today` skill parses it):**
+
+```markdown
+# Learning Plan
+
+*Created: [today's date]*
+*Last updated: [today's date]*
+*Planning horizon: [N] days*
+*Daily commitment: [answer from Q&A]*
+*Budget: [answer from Q&A]*
+*Schedule mode: alternating tracks (A then B then A...) | track-A-only | track-B-only*
+
+## Active Roles
+
+- [Role title at Company] — [goal: interview readiness / application prep / etc.]
+
+---
+
+## Track A: [Primary Gap Track Name]
+
+| ID | Module | Platform | URL | Duration | Status | Date Completed | Test Score |
+|----|--------|----------|-----|----------|--------|----------------|------------|
+| A1 | [Course name] | [Platform] | [URL] | [duration] | pending | — | — |
+| A2 | [Course name] | [Platform] | [URL] | [duration] | pending | — | — |
+
+---
+
+## Track B: [Secondary Track Name — if applicable]
+
+| ID | Module | Platform | URL | Duration | Status | Date Completed | Test Score |
+|----|--------|----------|-----|----------|--------|----------------|------------|
+| B1 | [Course name] | [Platform] | [URL] | [duration] | pending | — | — |
+
+---
+
+## Day-by-Day Schedule
+
+### Week 1
+
+| Day | Track | ID | Focus |
+|-----|-------|----|-------|
+| Day 1 | A | A1 | [Module name and what to focus on] |
+| Day 2 | B | B1 | [Module name and what to focus on] |
+| Day 7 | QUIZ | — | Quiz day — run `/learn-today quiz week1` to test on all Week 1 material |
+
+---
+
+## Progress Log
+
+| Date | ID | Module | Result | Notes |
+|------|-----|--------|--------|-------|
+| — | — | — | — | Start your first module and run `/learn-today done` to log it |
+```
+
+**If `data/learning-plan.md` already exists:**
+- If the existing plan is for different roles: append below with a `---` separator and a new dated header
+- If the existing plan is for the same roles: ask the candidate whether to replace or extend it
+
+**After writing, tell the candidate:**
+> Learning plan saved. Start with `/learn-today` — it will show you exactly what to open and what to look for,
+> based on your background. Type `/learn-today done` when you finish a module to log it and queue the next one.

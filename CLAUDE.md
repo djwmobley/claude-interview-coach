@@ -155,6 +155,8 @@ For voice-based practice, three skills work together:
 - **Practising for interviews:** Provide a job description and ask for a recruiter screening or mock interview session
 - **Fleshing out projects:** After importing, many project files will have TODO sections marking areas that need more detail from your memory — fill these in for better CV generation and coaching
 - **Scanning job boards:** Run `/scan-jobs` with a portal domain (e.g. upwork.com) and optional search terms to find matching projects with fit scoring
+- **Analysing skill gaps:** Run `/skill-gap <job-url>` to identify gaps against a specific role, discover learning resources, and generate a tracked learning plan in `data/learning-plan.md`
+- **Daily learning:** Run `/learn-today` to see today's module with tailored guidance. Type `/learn-today done` when you finish to log it. Type `/learn-today quiz` to test yourself on completed material.
 - **Updating professional identity:** After coaching sessions or moments of professional reflection, update `data/professional-identity.md` with new insights
 
 ## Tools & Environment
