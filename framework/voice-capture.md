@@ -107,6 +107,12 @@ the session — after data files have been updated and before the session closes
 4. Update the **Last updated** date at the top
 5. Add the session to the **Observed Over** list
 
+6. Cross-check "Things to Avoid" against `coaching/anti-pattern-tracker.md`.
+   For any avoidance that is also an interview delivery pattern (essay structure,
+   passive-voice self-description, collective hedging, opening with context not
+   the point), confirm that it appears in the anti-pattern tracker. Add it if
+   missing. This keeps style-level delivery patterns tracked in both places.
+
 Keep entries concise. The profile is a reference for writing, not a biography.
 If a session produced nothing new, say so in the Observed Over entry and move on.
 
