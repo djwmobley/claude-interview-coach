@@ -14,7 +14,7 @@ import fs from 'node:fs';
 import path from 'node:path';
 import { fileURLToPath } from 'node:url';
 import { connectDedicated, withTransaction } from '../src/core/db.js';
-import { normalizeLegacyRow, normalizeTitle, normalizeLocation, dedupHash, LEGACY_UNKNOWN_LOCATION } from '../src/core/normalize.js';
+import { normalizeLegacyRow, normalizeTitle, normalizeLocation, dedupHash, LEGACY_UNKNOWN_LOCATION, cleanTitleText } from '../src/core/normalize.js';
 import { errFields } from '../src/core/errors.js';
 import { computeProfileRev } from '../src/core/upsert.js';
 import { classify, makePgLookups } from '../src/core/dedup.js';
@@ -242,6 +242,12 @@ async function runCheck(client, args) {
  * documented as a blind spot: a row whose location_norm was ALREADY 'unknown:*' for a reason unrelated to
  * the new state-parsing branch (e.g. "Greater Houston Area") is recomputed too but its location_norm will
  * not change, since neither the old nor the new parseLocation() can parse it.
+ *
+ * Also re-cleans the STORED (displayed) `title` text through cleanTitleText() (spec R3.1/R3.2): a row
+ * ingested before the whitespace-collapse/repeated-segment-strip fix can still show raw embedded
+ * newlines and a duplicated LinkedIn boilerplate segment in query_jobs/get_job/the daily report even
+ * after title_norm is fixed, since title_norm and the displayed title are cleaned independently. This
+ * never affects dedup_hash (which is keyed on title_norm, not the raw title).
  * @param {import('pg').ClientBase} client
  */
 export async function renormalizeListings(client) {
@@ -253,13 +259,14 @@ export async function renormalizeListings(client) {
   let collisions = 0;
   for (const row of rows) {
     const newTitleNorm = normalizeTitle(row.title).title_norm;
+    const newTitleText = cleanTitleText(row.title);
     const canRecomputeLocation = row.location_norm === LEGACY_UNKNOWN_LOCATION || (typeof row.location_norm === 'string' && row.location_norm.startsWith('unknown:'));
     const newLocationNorm = canRecomputeLocation
       ? normalizeLocation(row.location, row.remote_declared === true, false).location_norm
       : row.location_norm;
-    if (newTitleNorm === row.title_norm && newLocationNorm === row.location_norm) continue;
+    if (newTitleNorm === row.title_norm && newLocationNorm === row.location_norm && newTitleText === row.title) continue;
     const newHash = dedupHash(row.company_norm, newTitleNorm, newLocationNorm);
-    await client.query(`UPDATE ic_job_listings SET title_norm = $2, location_norm = $3, dedup_hash = $4 WHERE id = $1`, [row.id, newTitleNorm, newLocationNorm, newHash]);
+    await client.query(`UPDATE ic_job_listings SET title = $2, title_norm = $3, location_norm = $4, dedup_hash = $5 WHERE id = $1`, [row.id, newTitleText, newTitleNorm, newLocationNorm, newHash]);
     changed++;
     const collide = await client.query(
       `SELECT id FROM ic_job_listings WHERE dedup_hash = $1 AND id <> $2 AND duplicate_of IS NULL AND coalesce(record_kind,'listing') = 'listing'`,
