@@ -160,9 +160,11 @@ run's `detail_skipped_budget` stat counts how many. A login wall, Cloudflare
 challenge, reCAPTCHA, or HTTP 403/429 stops the source and disables it across
 runs (24 h, then 72 h, then manual: `scans({action:'enable_source', source})`).
 Indeed additionally caps itself to 12 list pages per run (`maxPagesPerRun`,
-independent of the daily and per-query caps) with a slower per-request delay
-(`delayMs` 2500-5500 ms, a 4000 ms base with +-1500 ms jitter) to reduce the
-chance of a 429 mid-run.
+independent of the daily and per-query caps) and keeps its per-request delay
+at `delayMs` 4000-9000 ms (unchanged from before this pass; an earlier draft
+of this change mistakenly lowered it to 2500-5500 ms, the wrong direction for
+R5's actual goal of slowing Indeed down) to reduce the chance of a 429
+mid-run.
 
 ### Sources and boards
 
@@ -186,8 +188,11 @@ many terms and locations the profile carries.
 
 ### Noise classification, title cleanup, and state/remote dedup
 
-Every listing gets a `noise_class` (recomputed on upsert and on `bin/migrate.js`'s
-backfill): `ok`, `ok_manual`, `aggregator_repost`, `fractional_or_founder`,
+Every listing gets a `noise_class` (recomputed on upsert and, for every existing row still missing one,
+by `bin/migrate.js apply`'s `backfillNoiseClass()`, which classifies in batches and prints a per-class
+count -- run once against the real database as of this pass: 650 rows total, 547 `ok`, 28
+`aggregator_repost`, 25 `suspect`, 18 `ok_manual`, 17 `fractional_or_founder`, 12 `unknown_source`, 3
+`staffing_generic`): `ok`, `ok_manual`, `aggregator_repost`, `fractional_or_founder`,
 `staffing_generic`, `unknown_source`, or `suspect`. The rule set is
 config-locked (`config/noise-rules.json`, rules evaluated by an explicit
 integer `priority`, never file position) and linted on every `config-lock`
@@ -197,6 +202,10 @@ original, unweighted score) is stored alongside `prescore` (the noise-class-
 weighted score used for ranking and the detail-fetch gate); nothing is hidden
 from `query_jobs` or the database by default (only the daily report's "Look
 at these" section excludes non-`ok` rows, and it prints how many it excluded).
+A `NULL` `noise_class` (a row some other write path inserted without
+classifying, since the backfill above should leave none) is treated as
+not-ok too, never silently passed as `ok`: both `suspect` and `NULL` rows
+surface in the report's own "Suspect / unclassified" section instead.
 
 `normalizeTitle`/`normalizeListing` strip zero-width/format characters and a
 duplicated leading boilerplate segment (LinkedIn's `"Field CTO\nField CTO
@@ -318,11 +327,14 @@ follow-ups no longer suppresses the email by itself.
 The scan-report portion covers, in order: run summaries since the last report
 (status, duration, fetched/new/updated/repost/ambiguous, errors, per-source
 pages); "Look at these" (top `run.reportTopN`, default 10, by prescore among
-rows first seen since the last report, excluding non-`ok` `noise_class` rows,
-with a count of how many were excluded); "Houston / Texas" (same window,
-filtered to the `exec-default` profile's home locations, any prescore); the
-open review-queue count with its top 5 reasons; and currently disabled
-sources. The email is plain text plus HTML; every listing field is
+rows first seen since the last report, strictly limited to `noise_class` `ok`/
+`ok_manual` -- a `NULL` class is excluded here too, not treated as passing --
+with a count of how many were excluded); "Suspect / unclassified" (a short,
+separate, bounded list of `suspect` and `NULL`-`noise_class` rows from that
+same window, visible rather than silently dropped); "Houston / Texas" (same
+window, filtered to the `exec-default` profile's home locations, any
+prescore); the open review-queue count with its top 5 reasons; and currently
+disabled sources. The email is plain text plus HTML; every listing field is
 HTML-escaped and a URL is shown only when it passes a structural urlguard
 check. The same report is written to
 `output/reports/YYYY-MM-DD-scan-report.md` (gitignored via the existing
@@ -369,11 +381,34 @@ is never opened afterwards. The `/write-resume`, `/write-cover-letter`, and
 
 ## Tests
 
-`node --test` from `mcp/job-search` runs every `test/*.test.js`. The DB-backed suites use marker profiles/companies (`zz-test-*`,
-`ZZ-TEST-*`) and delete them afterwards; they run against the real `ic_context`
-database. Two suites need files that are gitignored in this repo
-(`data/project-index.md` for `render_doc.test.js`), so they only pass in a
-checkout that has them.
+`npm test` (== `node bin/run-tests.js`) is the only supported way to run the suite. It NEVER touches the
+real, shared `ic_context` database: `bin/bootstrap-test-db.js` first creates or refreshes a throwaway
+`<name>_test` database (`ic_context_test` for the default local setup) by `pg_dump --schema-only` of the
+configured real database, then re-applies this server's own SQL migrations (`sql/001-008`) against the
+copy -- idempotent, so this also proves the migrations themselves are sound, not just that the schema
+copy succeeded -- and seeds the `exec-default` profile from the deterministic fallback (never personal
+`data/profile.md`). `bin/run-tests.js` then spawns `node --test --test-concurrency=1` with `PG_DSN` pointed
+at that database, set via the child process's environment (not a shell-exported variable, so this works
+identically on Windows and POSIX). Test FILES run serially (`--test-concurrency=1`), not in parallel:
+several suites write real, shared singleton rows (`ic_report_state`, `ic_source_state`) even in the
+isolated database, and serializing file execution is what makes those tests deterministic rather than
+occasionally racing each other.
+
+**Hard safety gate**: `bin/bootstrap-test-db.js` refuses to create, drop, or dump into any database whose
+name does not end in `_test`, with no override flag. This exists because a bug in an earlier version of
+this test-isolation work briefly wrote duplicate rows into the real, shared production database via a
+plain `npm test` run, before this bootstrap existed; see the PR history for the incident. `PG_TEST_DSN`
+can point the bootstrap at an explicit target (for CI); the same gate still applies to whatever it
+resolves.
+
+`node bin/bootstrap-test-db.js` refreshes the test database on its own, without running the suite (useful
+after a schema change on the real database, so the next `npm test` picks it up without waiting through a
+full run first).
+
+The DB-backed suites use marker profiles/companies (`zz-test-*`, `ZZ-TEST-*`) and delete them afterwards,
+on top of running against the isolated database; this is defense in depth, not the isolation mechanism
+itself. Two suites need files that are gitignored in this repo (`data/project-index.md` for
+`render_doc.test.js`), so they only pass in a checkout that has them.
 
 `test/scenarios.test.js` covers the spec's end-to-end scenarios that need no
 LinkedIn or Indeed: the same cross-source pair scanned three times yields
@@ -385,7 +420,11 @@ second; a closed CDP port yields `partial` plus `BROWSER_UNAVAILABLE`.
 guard, wall classification, and the `render_doc` preflight.
 
 `LIVE=1 node --test test/smoke-greenhouse.test.js` makes one real Greenhouse
-boards-api call. Nothing else in the suite touches the network: fetch adapters
+boards-api call. This one bypasses `bin/run-tests.js`'s isolation entirely, since it is a rare,
+deliberate, opt-in manual check rather than part of `npm test`; it writes (with the usual
+`zz-test-*`/`ZZ-TEST-*` marker-and-cleanup convention) to whatever database `PG_DSN` currently points
+at, so point `PG_DSN` at the test database yourself first if you want this one isolated too. Nothing
+else in the suite touches the network: fetch adapters
 run over recorded fixtures (`test/fixtures/adapters/`) and browser adapters over
 a fake capability. `test/har.test.js` records every request of a full fixture
 run and asserts zero non-GET outside the Workday search POST and zero URLs

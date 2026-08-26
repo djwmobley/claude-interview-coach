@@ -8,7 +8,8 @@
     "node": ">=22"
   },
   "scripts": {
-    "test": "node --test",
+    "test": "node bin/run-tests.js",
+    "test:db-setup": "node bin/bootstrap-test-db.js",
     "migrate": "node bin/migrate.js",
     "migrate:check": "node bin/migrate.js --check",
     "backfill-embeddings": "node bin/backfill-embeddings.js",

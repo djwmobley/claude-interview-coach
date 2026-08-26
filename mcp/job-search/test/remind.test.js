@@ -20,24 +20,21 @@ const MARK = `ZZ-TEST-RM-${process.pid}`;
 /** @type {pg.Client} */
 let client;
 let tmp = '';
-/** Snapshot of the real, shared ic_report_state singleton (spec R1), restored in after() -- several tests
- * here exercise runRemind's real send path, which advances this row (decision 23); tests must not leave
- * production's report marker in a state a real scheduled remind.js run would then read. */
-let reportStateSnapshot = null;
+
+// ic_report_state (spec R1) is a real singleton row, but by this point in the suite it lives in the
+// throwaway, per-run "_test" database that bin/bootstrap-test-db.js/bin/run-tests.js set PG_DSN to
+// (see npm test); tests here can write it freely without any snapshot/restore dance, since the whole
+// database is recreated from scratch on the next `npm test` run and never shared with production.
 
 before(async () => {
   client = new pg.Client(pgConnectionConfig());
   await client.connect();
   await ensureAuxSchema(client);
-  reportStateSnapshot = (await client.query('SELECT last_report_sent_at, last_run_id_included FROM ic_report_state WHERE id = true')).rows[0] ?? null;
   await client.query('DELETE FROM ic_followups WHERE contact LIKE $1', ['ZZ-TEST-%']);
   tmp = fs.mkdtempSync(path.join(os.tmpdir(), 'remind-test-'));
 });
 after(async () => {
   await client.query('DELETE FROM ic_followups WHERE contact LIKE $1', ['ZZ-TEST-%']);
-  if (reportStateSnapshot) {
-    await client.query('UPDATE ic_report_state SET last_report_sent_at = $1, last_run_id_included = $2 WHERE id = true', [reportStateSnapshot.last_report_sent_at, reportStateSnapshot.last_run_id_included]);
-  }
   await client.end();
   fs.rmSync(tmp, { recursive: true, force: true });
 });

@@ -12,6 +12,7 @@ import { ensureAuxSchema } from '../src/core/schema.js';
 import {
   buildScanReport, buildReportSubject, renderReportText, renderReportHtml, renderReportMarkdown,
   dayKeyInTz, isWeekdayInTz, escapeHtml, urlPassesRegistry, getReportState, stampReportSent,
+  collectSuspectAndUnclassified,
 } from '../src/core/report.js';
 import { tool as scanReport } from '../src/tools/scan_report.js';
 import { registryFrom } from '../src/core/urlguard.js';
@@ -20,8 +21,6 @@ const SRC = `zz-test-report-${process.pid}`;
 const CO = `ZZ-TEST-REPORT-${process.pid}`;
 /** @type {pg.Client} */
 let client;
-/** @type {{ last_report_sent_at: Date|null, last_run_id_included: number|null } | null} */
-let stateSnapshot;
 
 /**
  * @param {Partial<{ title: string, prescore: number|null, noise: string|null, location: string, location_norm: string, url: string }>} o
@@ -46,18 +45,17 @@ async function cleanup() {
   await client.query(`DELETE FROM ic_scan_runs WHERE profile = $1`, [`zz-test-report-profile-${process.pid}`]);
 }
 
+// ic_report_state (spec R1) is a real singleton row, but by this point in the suite it lives in the
+// throwaway, per-run "_test" database bin/run-tests.js pointed PG_DSN at; no snapshot/restore is
+// needed since the whole database is recreated from scratch on the next `npm test` run.
 before(async () => {
   client = new pg.Client(pgConnectionConfig());
   await client.connect();
   await ensureAuxSchema(client);
-  stateSnapshot = (await client.query('SELECT last_report_sent_at, last_run_id_included FROM ic_report_state WHERE id = true')).rows[0] ?? null;
   await cleanup();
 });
 after(async () => {
   await cleanup();
-  if (stateSnapshot) {
-    await client.query('UPDATE ic_report_state SET last_report_sent_at = $1, last_run_id_included = $2 WHERE id = true', [stateSnapshot.last_report_sent_at, stateSnapshot.last_run_id_included]);
-  }
   await client.end();
 });
 
@@ -100,6 +98,30 @@ describe('buildScanReport: noise exclusion, home locations, review queue, disabl
     assert.ok(report.lookAtThese.excludedCount >= 1);
     const homeIds = report.homeLocations.map((r) => r.id);
     assert.ok(homeIds.includes(lowHome), 'a low-prescore, noise-classified row still appears in Houston / Texas (R1.2c: any prescore, no noise filter)');
+  });
+
+  test('a NULL noise_class is treated as not-ok (independent review fix): excluded from "Look at these", surfaced in "Suspect / unclassified"', async () => {
+    const since = new Date(Date.now() - 5000);
+    const unclassified = await insertListing({ title: 'Some Unclassified Row', prescore: 95, noise: null });
+    const report = await buildScanReport(client, { sinceOverride: since, homeLocationNorms: [] });
+    const lookIds = report.lookAtThese.rows.map((r) => r.id);
+    assert.ok(!lookIds.includes(unclassified), 'a NULL-noise_class row, even at a very high prescore, must never appear in Look at these');
+    assert.ok(report.lookAtThese.excludedCount >= 1, 'a NULL row counts toward the excluded count too');
+    const suspectIds = report.suspectUnclassified.map((r) => r.id);
+    assert.ok(suspectIds.includes(unclassified), 'a NULL-noise_class row is surfaced in the suspect/unclassified list instead of being silently dropped');
+    const row = report.suspectUnclassified.find((r) => r.id === unclassified);
+    assert.equal(row.noise_class, 'unclassified', 'a NULL db value renders as the readable label "unclassified"');
+  });
+
+  test('collectSuspectAndUnclassified: a suspect row and a NULL row both appear; an ok row never does', async () => {
+    const since = new Date(Date.now() - 5000);
+    const suspect = await insertListing({ title: 'Virtual CTO', prescore: 40, noise: 'suspect' });
+    const nullRow = await insertListing({ title: 'No Class Yet', prescore: 40, noise: null });
+    const ok = await insertListing({ title: 'Chief Technology Officer', prescore: 40, noise: 'ok' });
+    const rows = await collectSuspectAndUnclassified(client, since, 25);
+    const ids = rows.map((r) => r.id);
+    assert.ok(ids.includes(suspect) && ids.includes(nullRow), 'both suspect and NULL rows appear');
+    assert.ok(!ids.includes(ok), 'an ok row never appears in the suspect/unclassified list');
   });
 
   test('run summaries only include runs finished since the marker', async () => {
@@ -168,7 +190,14 @@ describe('report marker (spec R1.1, decisions 23/24)', () => {
 
 describe('scan_report MCP tool (spec R1.4): never writes the marker', () => {
   test('on-demand call returns a report and leaves the marker untouched', async () => {
-    const before = await getReportState(client);
+    // Stamps a test-owned sentinel value immediately before the call and checks it is STILL that value
+    // immediately after, rather than comparing against a "before" snapshot captured earlier -- ic_report_
+    // state is a real singleton row shared by every test FILE against the isolated test database (node
+    // --test runs files in parallel by default), so a snapshot taken well before the call could already
+    // be stale from another file's own marker-writing test; this shrinks the race window to the width of
+    // this one call instead of the whole suite's run time.
+    const sentinel = new Date('2099-01-01T00:00:00.000Z');
+    await stampReportSent(client, sentinel, 999999);
     const deps = /** @type {any} */ ({
       withClient: async (/** @type {any} */ fn) => fn(client),
       config: null,
@@ -178,7 +207,7 @@ describe('scan_report MCP tool (spec R1.4): never writes the marker', () => {
     assert.ok(r.report.startsWith('<<<UNTRUSTED_LISTING_TEXT'));
     assert.ok(r.report.endsWith('>>>END_UNTRUSTED_LISTING_TEXT'));
     const after = await getReportState(client);
-    assert.equal(after.lastReportSentAt?.toISOString(), before.lastReportSentAt?.toISOString(), 'scan_report never advances the marker');
+    assert.equal(after.lastReportSentAt?.toISOString(), sentinel.toISOString(), 'scan_report never advances the marker');
   });
 
   test('run_id scoping returns NOT_FOUND for an unknown run', async () => {
