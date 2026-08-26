@@ -52,12 +52,14 @@
         "^/m/jobs(\\?|$)"
       ],
       "delayMs": [
-        4000,
-        9000
+        2500,
+        5500
       ],
       "dailyPages": 60,
       "dailyDetails": 100,
-      "maxPagesPerQuery": 5
+      "maxPagesPerQuery": 5,
+      "maxPagesPerRun": 12,
+      "detailFetchMinPrescore": 55
     },
     "linkedin": {
       "transport": "browser",

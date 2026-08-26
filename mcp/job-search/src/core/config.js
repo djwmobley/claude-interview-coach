@@ -159,6 +159,10 @@ const adapterSchema = z.object({
   dailyPages: z.number().int().positive(),
   dailyDetails: z.number().int().nonnegative(),
   maxPagesPerQuery: z.number().int().min(1).max(5),
+  /** Per-source override of run.detailFetchMinPrescore (spec R4.1); falls back to the run-level default when absent. */
+  detailFetchMinPrescore: z.number().int().min(0).max(100).optional(),
+  /** Hard cap on pages fetched for this source across the WHOLE run, regardless of how many queries the profile plans (spec R5.1); undefined means no extra cap beyond the daily/per-query ones. */
+  maxPagesPerRun: z.number().int().positive().optional(),
 });
 
 export const adaptersSchema = z.object({
