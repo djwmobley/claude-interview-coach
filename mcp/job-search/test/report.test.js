@@ -116,6 +116,18 @@ describe('buildScanReport: noise exclusion, home locations, review queue, disabl
     assert.ok(withLowerFloor.homeLocations.rows.map((r) => r.id).includes(midScore), 'prescore 30 clears an explicitly lowered floor of 20');
   });
 
+  test('"also posted" annotation includes the ROOT row\'s own state, not just its merged children (regression: the real Gartner AR/OK/TX row initially printed "also posted: OK, TX" with AR silently missing, because the root query did not select location_norm)', async () => {
+    const since = new Date(Date.now() - 5000);
+    const root = await insertListing({ title: 'Executive Partner - CIO Advisory', prescore: 57, noise: 'ok', location: 'Arkansas, United States', location_norm: 'remote-us-ar' });
+    const childOk = await insertListing({ title: 'Executive Partner - CIO Advisory', prescore: 57, noise: 'ok', location: 'Oklahoma, United States', location_norm: 'remote-us-ok' });
+    const childTx = await insertListing({ title: 'Executive Partner - CIO Advisory', prescore: 57, noise: 'ok', location: 'Texas, United States', location_norm: 'remote-us-tx' });
+    await client.query('UPDATE ic_job_listings SET duplicate_of = $1 WHERE id = ANY($2::int[])', [root, [childOk, childTx]]);
+    const report = await buildScanReport(client, { sinceOverride: since, homeLocationNorms: [] });
+    const rootRow = report.lookAtThese.rows.find((r) => r.id === root);
+    assert.ok(rootRow, 'the root row (duplicate_of IS NULL) appears in Look at these');
+    assert.deepEqual(rootRow.also_posted_states, ['AR', 'OK', 'TX'], 'the root\'s own state (AR) must appear alongside its merged children\'s states');
+  });
+
   test('a NULL noise_class is treated as not-ok (independent review fix): excluded from "Look at these", surfaced in "Suspect / unclassified"', async () => {
     const since = new Date(Date.now() - 5000);
     const unclassified = await insertListing({ title: 'Some Unclassified Row', prescore: 95, noise: null });

@@ -180,7 +180,7 @@ export async function collectLookAtThese(client, since, limit) {
   // could still land here) is NOT-ok by default (independent-review fix), same as any other non-ok
   // class; it surfaces in collectSuspectAndUnclassified() instead, never silently in "Look at these".
   const top = await client.query(
-    `SELECT id, title, company, location, remote_mode, salary_min, salary_max, prescore, source, url_normalized, url, company_norm, title_norm
+    `SELECT id, title, company, location, remote_mode, salary_min, salary_max, prescore, source, url_normalized, url, company_norm, title_norm, location_norm
      FROM ic_job_listings
      WHERE first_seen > $1 AND coalesce(record_kind,'listing') = 'listing' AND duplicate_of IS NULL
        AND noise_class IN ('ok','ok_manual')
