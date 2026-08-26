@@ -396,6 +396,27 @@ describe('linkedin (fake capability)', () => {
   });
 });
 
+describe('linkedin mapCard: verified-badge title text (scan-report-fixes item 1)', () => {
+  test('strips the trailing " with verification" badge text at parse time', () => {
+    const listing = mapLinkedin({ id: '4378403522', title: 'Executive Partner - CIO Advisory with verification', company: 'Gartner', location: 'Oklahoma, United States' });
+    assert.ok(listing);
+    assert.equal(listing.title, 'Executive Partner - CIO Advisory');
+  });
+  test('is case-insensitive and tolerates the extra whitespace the badge markup sometimes leaves', () => {
+    const listing = mapLinkedin({ id: '4378403522', title: 'Executive Partner - CIO Advisory  WITH VERIFICATION  ', company: 'Gartner', location: 'Oklahoma, United States' });
+    assert.ok(listing);
+    assert.equal(listing.title, 'Executive Partner - CIO Advisory');
+  });
+  test('a title with no badge text is untouched', () => {
+    const listing = mapLinkedin({ id: '4378403522', title: 'Chief Technology Officer', company: 'Acme', location: 'Houston, TX' });
+    assert.ok(listing);
+    assert.equal(listing.title, 'Chief Technology Officer');
+  });
+  test('a card whose title is empty after whitespace collapse maps to null, same as any other empty title', () => {
+    assert.equal(mapLinkedin({ id: '4378403522', title: '   ', company: 'Gartner', location: 'Oklahoma, United States' }), null);
+  });
+});
+
 describe('exec-generic', () => {
   const cfg = testConfig();
   const fetchBoard = cfg.execBoards.boards.find((b) => b.slug === 'exfetch');

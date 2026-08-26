@@ -468,6 +468,33 @@ describe('classify: branch 6, state/remote same-posting merge (spec R6, decision
     assert.equal(dC.branch, '6-state-remote-dup');
     assert.equal(dC.rootId, 709, 'root must be the ORIGINAL root (A), never the intermediate duplicate (B)');
   });
+  test('reproduces the real Gartner Oklahoma/Arkansas pair (scan-report-fixes item 3): both linkedin, both remote-declared with a bare-state "<State>, United States" location, both title-suffixed "with verification", posted the same day -> branch 6 merge, not the identical-hash ambiguous path they hit before the fix', async () => {
+    const okRaw = { source: 'linkedin', url: 'https://www.linkedin.com/jobs/view/4400000001', title: 'Executive Partner - CIO Advisory with verification', company: 'Gartner', location: 'Oklahoma, United States', remoteMode: 'remote', remoteDeclared: true, postedAt: '2026-08-26' };
+    const arRaw = { source: 'linkedin', url: 'https://www.linkedin.com/jobs/view/4400000002', title: 'Executive Partner - CIO Advisory with verification', company: 'Gartner', location: 'Arkansas, United States', remoteMode: 'remote', remoteDeclared: true, postedAt: '2026-08-26' };
+    const okNorm = normalizeListing(okRaw, OPTS);
+    const arNorm = normalizeListing(arRaw, OPTS);
+    // Preconditions the fix establishes: the badge text no longer differs between the two title_norm
+    // values, and the two states no longer collide on the SAME location_norm/dedup_hash (which is exactly
+    // what routed them into the pre-existing same_source_hash_within_gap ambiguous branch instead of ever
+    // reaching branch 6, before this fix).
+    assert.equal(okNorm.title, 'Executive Partner - CIO Advisory');
+    assert.equal(okNorm.title_norm, arNorm.title_norm);
+    assert.equal(okNorm.location_norm, 'remote-us-ok');
+    assert.equal(arNorm.location_norm, 'remote-us-ar');
+    assert.notEqual(okNorm.dedup_hash, arNorm.dedup_hash);
+    // Oklahoma (#2178 in the real DB) already exists as the stored root; Arkansas (#2187) arrives and must
+    // merge into it via branch 6, deterministically, never queued for human review.
+    const okStored = row({
+      id: 2178, source: 'linkedin', title: okNorm.title, company: 'Gartner',
+      title_norm: okNorm.title_norm, location_norm: okNorm.location_norm, dedup_hash: okNorm.dedup_hash,
+      posted_at: '2026-08-26',
+    });
+    const d = await classify(arNorm, makeMemoryLookups([okStored]), { now: NOW, repostGapDays: 30 });
+    assert.equal(d.branch, '6-state-remote-dup');
+    assert.equal(d.outcome, 'cross_source_dup');
+    assert.equal(d.rootId, 2178);
+    assert.equal(d.queue, false);
+  });
 });
 
 describe('classify: 200-record property test', () => {

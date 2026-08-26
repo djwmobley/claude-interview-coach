@@ -86,18 +86,34 @@ describe('escapeHtml / urlPassesRegistry (spec R1.5)', () => {
 });
 
 describe('buildScanReport: noise exclusion, home locations, review queue, disabled sources', () => {
-  test('"Look at these" excludes noise rows and counts them; "Houston / Texas" ignores prescore and the noise filter', async () => {
+  test('"Look at these" excludes noise rows and counts them; "Houston / Texas" ignores the noise filter but applies the prescore floor', async () => {
     const since = new Date(Date.now() - 5000);
     const ok = await insertListing({ title: 'Chief Technology Officer', prescore: 80, noise: 'ok' });
     const noisy = await insertListing({ title: 'Fractional CTO', prescore: 90, noise: 'fractional_or_founder' });
-    const lowHome = await insertListing({ title: 'Head of Technology', prescore: 5, noise: 'staffing_generic', location: 'Houston, TX', location_norm: 'houston-tx' });
+    // At-or-above the default floor (40) and noise-classified: still included -- R1.2c's "no noise
+    // filter" holds; only the floor is new (scan-report-fixes item 5).
+    const homeAboveFloor = await insertListing({ title: 'Head of Technology', prescore: 45, noise: 'staffing_generic', location: 'Houston, TX', location_norm: 'houston-tx' });
+    // Below the default floor: excluded (this is the actual bug the floor fixes -- an RN Clinical
+    // Director-style very-low-relevance row no longer appears in the Houston/Texas section).
+    const homeBelowFloor = await insertListing({ title: 'RN Clinical Director', prescore: 5, noise: 'ok', location: 'Houston, TX', location_norm: 'houston-tx' });
     const report = await buildScanReport(client, { sinceOverride: since, homeLocationNorms: ['houston-tx'] });
     const lookIds = report.lookAtThese.rows.map((r) => r.id);
     assert.ok(lookIds.includes(ok), 'ok row included');
     assert.ok(!lookIds.includes(noisy), 'noise row excluded from Look at these');
     assert.ok(report.lookAtThese.excludedCount >= 1);
-    const homeIds = report.homeLocations.map((r) => r.id);
-    assert.ok(homeIds.includes(lowHome), 'a low-prescore, noise-classified row still appears in Houston / Texas (R1.2c: any prescore, no noise filter)');
+    const homeIds = report.homeLocations.rows.map((r) => r.id);
+    assert.ok(homeIds.includes(homeAboveFloor), 'a noise-classified row at/above the prescore floor still appears in Houston / Texas (R1.2c: no noise filter)');
+    assert.ok(!homeIds.includes(homeBelowFloor), 'a row below the prescore floor is excluded from Houston / Texas (item 5 fix)');
+    assert.ok(report.homeLocations.excludedCount >= 1, 'the below-floor exclusion is counted, not silently dropped');
+  });
+
+  test('reportHomeMinPrescore option controls the floor directly', async () => {
+    const since = new Date(Date.now() - 5000);
+    const midScore = await insertListing({ title: 'Director of IT', prescore: 30, noise: 'ok', location: 'Houston, TX', location_norm: 'houston-tx' });
+    const belowDefault = await buildScanReport(client, { sinceOverride: since, homeLocationNorms: ['houston-tx'] });
+    assert.ok(!belowDefault.homeLocations.rows.map((r) => r.id).includes(midScore), 'prescore 30 is below the default floor of 40');
+    const withLowerFloor = await buildScanReport(client, { sinceOverride: since, homeLocationNorms: ['houston-tx'], homeMinPrescore: 20 });
+    assert.ok(withLowerFloor.homeLocations.rows.map((r) => r.id).includes(midScore), 'prescore 30 clears an explicitly lowered floor of 20');
   });
 
   test('a NULL noise_class is treated as not-ok (independent review fix): excluded from "Look at these", surfaced in "Suspect / unclassified"', async () => {
@@ -153,12 +169,50 @@ describe('buildScanReport: noise exclusion, home locations, review queue, disabl
   });
 
   test('disabled sources and review queue reasons are surfaced', async () => {
-    await client.query(`INSERT INTO ic_source_state (source, manual_disable, disabled_until) VALUES ($1, true, NULL) ON CONFLICT (source) DO UPDATE SET manual_disable = true`, [`${SRC}-disabled`]);
+    await client.query(`INSERT INTO ic_source_state (source, manual_disable, disabled_until) VALUES ($1, true, NULL) ON CONFLICT (source) DO UPDATE SET manual_disable = true, disabled_until = NULL`, [`${SRC}-disabled`]);
     try {
       const report = await buildScanReport(client, { sinceOverride: new Date(Date.now() - 1000) });
       assert.ok(report.disabledSources.some((s) => s.source === `${SRC}-disabled` && s.manual === true));
     } finally {
       await client.query(`DELETE FROM ic_source_state WHERE source = $1`, [`${SRC}-disabled`]);
+    }
+  });
+
+  test('a source disabled_until a future timestamp (manual_disable false) is also surfaced (scan-report-fixes item 4 regression): buildScanReport, and collectDisabledSources directly', async () => {
+    // Reproduces the exact shape the coordinator observed: `scans status` showing a real future
+    // disabled_until while the report printed "(none)". No functional bug was found in
+    // collectDisabledSources()'s query itself (verified separately end to end against the real DB); this
+    // is a regression test guarding the query's actual, correct behavior against a future change, per the
+    // task's explicit "test it" instruction.
+    const future = new Date(Date.now() + 24 * 3600 * 1000);
+    await client.query(
+      `INSERT INTO ic_source_state (source, manual_disable, disabled_until) VALUES ($1, false, $2)
+       ON CONFLICT (source) DO UPDATE SET manual_disable = false, disabled_until = $2`,
+      [`${SRC}-wall-disabled`, future],
+    );
+    try {
+      const report = await buildScanReport(client, { sinceOverride: new Date(Date.now() - 1000) });
+      const entry = report.disabledSources.find((s) => s.source === `${SRC}-wall-disabled`);
+      assert.ok(entry, 'a source with a future disabled_until (and manual_disable=false) must appear in disabledSources');
+      assert.equal(entry.manual, false);
+      assert.ok(entry.until, 'the until timestamp is carried through');
+    } finally {
+      await client.query(`DELETE FROM ic_source_state WHERE source = $1`, [`${SRC}-wall-disabled`]);
+    }
+  });
+
+  test('a source whose disabled_until is in the PAST and manual_disable is false is NOT surfaced (the query must compare, not just check IS NOT NULL)', async () => {
+    const past = new Date(Date.now() - 24 * 3600 * 1000);
+    await client.query(
+      `INSERT INTO ic_source_state (source, manual_disable, disabled_until) VALUES ($1, false, $2)
+       ON CONFLICT (source) DO UPDATE SET manual_disable = false, disabled_until = $2`,
+      [`${SRC}-expired-disable`, past],
+    );
+    try {
+      const report = await buildScanReport(client, { sinceOverride: new Date(Date.now() - 1000) });
+      assert.ok(!report.disabledSources.some((s) => s.source === `${SRC}-expired-disable`), 'an expired disabled_until must not be reported as currently disabled');
+    } finally {
+      await client.query(`DELETE FROM ic_source_state WHERE source = $1`, [`${SRC}-expired-disable`]);
     }
   });
 });

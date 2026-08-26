@@ -236,13 +236,21 @@ async function runCheck(client, args) {
  * every other near-miss in this system.
  *
  * Location recompute is deliberately conservative: only rows whose CURRENT location_norm is
- * 'legacy-unknown' or an 'unknown:*' hash are recomputed, because normalizeLocation's remote-declared vs
- * remote-inferred distinction is not fully replayable from stored columns alone (remoteInferred is not
- * persisted) -- recomputing an already-classified 'remote-us' or 'city-st' row risks silently
- * reclassifying it on a different code path than the one that produced it at ingest time. This is
- * documented as a blind spot: a row whose location_norm was ALREADY 'unknown:*' for a reason unrelated to
- * the new state-parsing branch (e.g. "Greater Houston Area") is recomputed too but its location_norm will
- * not change, since neither the old nor the new parseLocation() can parse it.
+ * 'legacy-unknown', an 'unknown:*' hash, or a 'remote-*' value are recomputed, because
+ * normalizeLocation's remote-declared vs remote-inferred distinction is not fully replayable from stored
+ * columns alone (remoteInferred is not persisted) -- recomputing an already-classified 'city-st' row
+ * risks silently reclassifying it on a different code path than the one that produced it at ingest time.
+ * 'remote-*' rows are safe to include in this recompute: normalizeLocation() only ever returns a
+ * `remote-<iso>` (or now `remote-<iso>-<state>`) location_norm from its `remoteDeclared` branch, never
+ * from the remoteInferred path (remoteInferred only changes the separately-tracked remote_mode, not
+ * location_norm) -- so any row whose location_norm already starts with 'remote-' is guaranteed to have
+ * been produced via `remote_declared === true`, which IS a persisted column, making
+ * `normalizeLocation(row.location, row.remote_declared === true, false)` a faithful replay for these
+ * rows specifically (spec R6 fix: this is what lets existing bare 'remote-us' rows gain their state
+ * suffix, e.g. Gartner's Oklahoma/Arkansas postings, so R6's backfill pass below can then merge them).
+ * This is documented as a blind spot: a row whose location_norm was ALREADY 'unknown:*' for a reason
+ * unrelated to the new state-parsing branch (e.g. "Greater Houston Area") is recomputed too but its
+ * location_norm will not change, since neither the old nor the new parseLocation() can parse it.
  *
  * Also re-cleans the STORED (displayed) `title` text through cleanTitleText() (spec R3.1/R3.2): a row
  * ingested before the whitespace-collapse/repeated-segment-strip fix can still show raw embedded
@@ -261,7 +269,8 @@ export async function renormalizeListings(client) {
   for (const row of rows) {
     const newTitleNorm = normalizeTitle(row.title).title_norm;
     const newTitleText = cleanTitleText(row.title);
-    const canRecomputeLocation = row.location_norm === LEGACY_UNKNOWN_LOCATION || (typeof row.location_norm === 'string' && row.location_norm.startsWith('unknown:'));
+    const canRecomputeLocation = row.location_norm === LEGACY_UNKNOWN_LOCATION
+      || (typeof row.location_norm === 'string' && (row.location_norm.startsWith('unknown:') || row.location_norm.startsWith('remote-')));
     const newLocationNorm = canRecomputeLocation
       ? normalizeLocation(row.location, row.remote_declared === true, false).location_norm
       : row.location_norm;

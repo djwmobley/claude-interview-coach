@@ -175,6 +175,10 @@ export const adaptersSchema = z.object({
     expireAfterAbsentRuns: z.number().int().positive(),
   }),
   trackingParams: z.array(z.string().min(1)),
+  /** Trailing source-UI fragments to strip from a title (spec R3.1 defense: LinkedIn's verified-badge
+   * text, "<title> with verification"). Total classification in normalize.js's stripTrailingUiFragments:
+   * a fragment not on this list is left in place, never guessed at. */
+  titleTrailingFragments: z.array(z.string().min(1)).default(['with verification']),
   httpAllowedHosts: z.array(domain),
   adapters: z.record(z.string().regex(/^[a-z][a-z0-9-]*$/), adapterSchema),
   run: z.object({
@@ -188,6 +192,8 @@ export const adaptersSchema = z.object({
     timezone: z.string().min(1).default('America/Chicago'),
     /** Default row count for the report's "Look at these" section (spec R1.2b). */
     reportTopN: z.number().int().positive().default(10),
+    /** Minimum prescore for the report's "Houston / Texas" section (independent review round 2 fix: an unfiltered "any prescore" list surfaced very low-relevance rows like an RN Clinical Director posting). */
+    reportHomeMinPrescore: z.number().int().min(0).max(100).default(40),
   }),
 });
 
