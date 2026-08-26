@@ -72,6 +72,7 @@ export const ROWS_WRAP_OVERHEAD_CHARS = JSON.stringify(UNTRUSTED_OPEN).length + 
  * @property {string|null} [status]
  * @property {string|null} [source]
  * @property {string|null} [outcome]
+ * @property {string|null} [noise_class] spec R2.2: shown only when not 'ok'/'ok_manual', so an ordinary row's line stays unchanged
  */
 
 /** @param {string} s @param {number} n */
@@ -139,6 +140,7 @@ export function formatRow(row, opts = {}) {
     typeof row.fit_score === 'number' ? `fit ${row.fit_score}` : '',
     row.status ?? (row.outcome ? row.outcome : 'unscored'),
     row.source ?? '',
+    row.noise_class && row.noise_class !== 'ok' && row.noise_class !== 'ok_manual' ? `noise:${row.noise_class}` : '',
   ].filter((p) => p !== '');
   return truncate(parts.join(' | '), LINE_CHARS);
 }

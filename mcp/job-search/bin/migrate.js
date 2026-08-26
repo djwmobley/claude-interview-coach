@@ -20,7 +20,7 @@ import { computeProfileRev } from '../src/core/upsert.js';
 
 const HERE = path.dirname(fileURLToPath(import.meta.url));
 const SQL_DIR = path.join(HERE, '..', 'sql');
-const MIGRATIONS = ['001_extend_ic_job_listings.sql', '002_search_profiles.sql', '003_scan_runs.sql', '004_review_queue.sql', '005_budget.sql', '006_followups.sql', '007_mark_meta.sql'];
+const MIGRATIONS = ['001_extend_ic_job_listings.sql', '002_search_profiles.sql', '003_scan_runs.sql', '004_review_queue.sql', '005_budget.sql', '006_followups.sql', '007_mark_meta.sql', '008_noise_and_report.sql'];
 const DEFAULT_NOTE_IDS = [53, 54, 55, 56, 57, 58];
 
 const EXPECTED_COLUMNS = [
@@ -28,8 +28,9 @@ const EXPECTED_COLUMNS = [
   'location_norm', 'remote_mode', 'remote_declared', 'salary_min', 'salary_max', 'salary_raw', 'posted_at', 'first_seen',
   'last_seen', 'times_seen', 'absent_runs', 'last_page_index', 'profile_rev', 'description', 'description_hash',
   'search_profile', 'prescore', 'duplicate_of', 'repost_of', 'expired_at', 'stale', 'tsv', 'marked_at',
+  'noise_class', 'prescore_raw', 'detail_skipped',
 ];
-const EXPECTED_TABLES = ['ic_search_profiles', 'ic_scan_runs', 'ic_scan_run_items', 'ic_job_review_queue', 'ic_scan_budget', 'ic_source_state', 'ic_followups'];
+const EXPECTED_TABLES = ['ic_search_profiles', 'ic_scan_runs', 'ic_scan_run_items', 'ic_job_review_queue', 'ic_scan_budget', 'ic_source_state', 'ic_followups', 'ic_report_state'];
 const EXPECTED_INDEXES = [
   'ic_job_listings_tsv_idx', 'ic_job_listings_dedup_hash_idx', 'ic_job_listings_title_norm_trgm_idx',
   'ic_job_listings_company_norm_trgm_idx', 'ic_job_listings_status_last_seen_idx',

@@ -11,6 +11,7 @@ import crypto from 'node:crypto';
 import { withSavepoint, isUniqueViolation } from './db.js';
 import { classify, LISTING_COLUMNS, makePgLookups } from './dedup.js';
 import { normalizeLegacyRow } from './normalize.js';
+import { classifyNoise } from './noise.js';
 
 /**
  * sha256 over the searchable profile fields (spec 2.3 `rev`).
@@ -37,7 +38,10 @@ export function computeProfileRev(p) {
  * @property {number|null} [pageIndex]
  * @property {string|null} [searchProfile]
  * @property {string|null} [profileRev]
- * @property {number|null} [prescore]
+ * @property {number|null} [prescore] final, noise-weighted prescore (spec R2.2)
+ * @property {number|null} [prescoreRaw] the unweighted prescore before the noise_class multiplier
+ * @property {string|null} [noiseClass] one of NOISE_CLASSES (spec R2.1)
+ * @property {boolean} [detailSkipped] true when a detail fetch was queued for this row but skipped for budget reasons (spec R4.2, decision 22)
  * @property {string|null} [embedding] pgvector literal `[a,b,...]` or null
  * @property {Date} [now]
  */
@@ -115,19 +119,19 @@ export async function insertListing(client, rec, decision, ctx) {
        (title, company, status, ad_date, url, notes, record_kind, source, external_id, url_normalized, dedup_hash,
         company_norm, title_norm, location, location_norm, remote_mode, remote_declared, salary_min, salary_max, salary_raw,
         posted_at, first_seen, last_seen, times_seen, absent_runs, last_page_index, profile_rev, description, description_hash,
-        search_profile, prescore, duplicate_of, repost_of, embedding)
+        search_profile, prescore, prescore_raw, noise_class, detail_skipped, duplicate_of, repost_of, embedding)
      VALUES
        ($1,$2,$3,$4,$5,NULL,'listing',$6,$7,$8,$9,
         $10,$11,$12,$13,$14,$15,$16,$17,$18,
         $19,$20,$20,1,0,$21,$22,$23,$24,
-        $25,$26,$27,$28,$29::vector)
+        $25,$26,$27,$28,$29,$30,$31,$32::vector)
      RETURNING id`,
     [
       rec.title, rec.company, status, rec.posted_at, rec.url_normalized,
       rec.source, rec.external_id, rec.url_normalized, rec.dedup_hash,
       rec.company_norm, rec.title_norm, rec.location, rec.location_norm, rec.remote_mode, rec.remote_declared, rec.salary_min, rec.salary_max, rec.salary_raw,
       rec.posted_at, now, ctx.pageIndex ?? null, ctx.profileRev ?? null, rec.description, rec.description_hash,
-      ctx.searchProfile ?? null, ctx.prescore ?? null, decision.rootId, decision.repostOf, ctx.embedding ?? null,
+      ctx.searchProfile ?? null, ctx.prescore ?? null, ctx.prescoreRaw ?? null, ctx.noiseClass ?? null, Boolean(ctx.detailSkipped), decision.rootId, decision.repostOf, ctx.embedding ?? null,
     ],
   );
   return r.rows[0].id;
@@ -160,6 +164,9 @@ export async function updateListing(client, rec, decision, ctx, flags) {
        last_page_index = coalesce($10, last_page_index),
        profile_rev = coalesce($11, profile_rev),
        prescore = coalesce($12, prescore),
+       prescore_raw = coalesce($15, prescore_raw),
+       noise_class = coalesce($16, noise_class),
+       detail_skipped = coalesce($17, detail_skipped),
        expired_at = CASE WHEN $13 THEN NULL ELSE expired_at END,
        absent_runs = CASE WHEN $13 THEN 0 ELSE absent_runs END,
        stale = CASE WHEN $13 THEN false ELSE stale END,
@@ -168,6 +175,7 @@ export async function updateListing(client, rec, decision, ctx, flags) {
     [
       target.id, now, flags.bumpTimesSeen ? 1 : 0, rec.salary_min, rec.salary_max, rec.salary_raw, rec.description, rec.description_hash,
       rec.posted_at, ctx.pageIndex ?? null, ctx.profileRev ?? null, ctx.prescore ?? null, repost, inheritedStatus,
+      ctx.prescoreRaw ?? null, ctx.noiseClass ?? null, typeof ctx.detailSkipped === 'boolean' ? ctx.detailSkipped : null,
     ],
   );
   return target.id;
@@ -257,12 +265,13 @@ export async function adoptUnclassifiedRows(client, opts = {}) {
       salary_max: null,
     };
     try {
+      const noiseClass = classifyNoise(rec);
       await withSavepoint(client, async (c) => {
         await c.query(
           `UPDATE ic_job_listings SET source=$2, external_id=$3, url_normalized=$4, company_norm=$5, title_norm=$6,
-             location_norm=$7, dedup_hash=$8, location=coalesce(location,$9), posted_at=coalesce(posted_at, ad_date)
+             location_norm=$7, dedup_hash=$8, location=coalesce(location,$9), posted_at=coalesce(posted_at, ad_date), noise_class=$10
            WHERE id=$1`,
-          [row.id, n.source, n.external_id, n.url_normalized, n.company_norm, n.title_norm, n.location_norm, n.dedup_hash, n.location],
+          [row.id, n.source, n.external_id, n.url_normalized, n.company_norm, n.title_norm, n.location_norm, n.dedup_hash, n.location, noiseClass],
         );
       });
       adopted++;

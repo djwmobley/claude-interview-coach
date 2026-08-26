@@ -32,6 +32,7 @@ import { normalizeListing } from './normalize.js';
 import { classify, makePgLookups } from './dedup.js';
 import { applyDecision, adoptUnclassifiedRows } from './upsert.js';
 import { prescore } from './prescore.js';
+import { classifyNoise, weightedPrescore, getDefaultNoiseRules } from './noise.js';
 import { embedSafe, embeddingText } from './embed.js';
 import { compactRows, capResponse, MAX_ROWS, MAX_RESPONSE_CHARS, untrustedRows, ROWS_WRAP_OVERHEAD_CHARS } from './compact.js';
 import { buildRegistry, guardedFetch } from './urlguard.js';
@@ -94,6 +95,7 @@ export const USER_AGENT = 'job-search-mcp/0.1 (interview-coach; read-only scanne
  * @property {number} unembedded
  * @property {number} stale_dropped
  * @property {number} detail_fetched
+ * @property {number} detail_skipped_budget rows queued for a detail fetch (outcome new/ambiguous, prescore gate met) but skipped because the source's daily/per-run budget ran out mid-source (spec R4.2, decision 22)
  * @property {number} adopted
  * @property {number} expired
  * @property {Record<string, number>} pages_by_source
@@ -243,9 +245,13 @@ async function executeRun(p) {
   };
   const windowStart = new Date(now.getTime() - profile.posted_within_days * 86400000);
   const windowDate = windowStart.toISOString().slice(0, 10);
+  // Resolved once per run (spec R2): the noise rule set and the known-adapter-name set for the terminal
+  // source check, so every listing in this run is classified against the same snapshot.
+  const noiseRules = config.noiseRules ?? getDefaultNoiseRules();
+  const noiseKnownSources = new Set(Object.keys(config.adapters.adapters));
 
   /** @type {RunStats} */
-  const stats = { fetched: 0, new: 0, updated: 0, cross_source_dup: 0, repost: 0, ambiguous: 0, errors: 0, unembedded: 0, stale_dropped: 0, detail_fetched: 0, adopted: 0, expired: 0, pages_by_source: {} };
+  const stats = { fetched: 0, new: 0, updated: 0, cross_source_dup: 0, repost: 0, ambiguous: 0, errors: 0, unembedded: 0, stale_dropped: 0, detail_fetched: 0, detail_skipped_budget: 0, adopted: 0, expired: 0, pages_by_source: {} };
   /** @type {Array<{ source: string|null, code: string, message: string }>} */
   const errors = [];
   /** @type {string[]} */
@@ -430,21 +436,35 @@ async function executeRun(p) {
     if (seenKeys.has(key)) return;
     seenKeys.add(key);
     stats.fetched++;
-    let ps = prescore(rec, profile);
+    let psRaw = prescore(rec, profile);
+    let noiseClass = classifyNoise(rec, { rules: noiseRules, knownSources: noiseKnownSources });
+    let ps = weightedPrescore(psRaw, noiseClass, { rules: noiseRules });
     let decision = await classify(rec, lookups, classifyOpts);
-    // Detail fetch: prescore gate, details budget, never for same-listing updates.
-    if (s.adapter.fetchDetail && !rec.description && decision.outcome !== 'update' && ps >= runCfg.detailFetchMinPrescore) {
+    // Detail fetch: prescore gate (per-source override, spec R4.1), details budget, never for same-listing
+    // updates, and -- decision 20 -- only for outcomes new/ambiguous (a matched existing row never queues).
+    const detailGate = s.cfg.detailFetchMinPrescore ?? runCfg.detailFetchMinPrescore;
+    let detailSkipped = false;
+    if (s.adapter.fetchDetail && !rec.description && (decision.outcome === 'new' || decision.outcome === 'ambiguous') && ps >= detailGate) {
       try {
         const d = await s.adapter.fetchDetail({ url: ev.listing.url, url_normalized: rec.url_normalized, external_id: rec.external_id, source: rec.source }, ctx);
         if (d && d.description) {
           rec = normalizeListing({ ...ev.listing, description: d.description });
-          ps = prescore(rec, profile);
+          psRaw = prescore(rec, profile);
+          noiseClass = classifyNoise(rec, { rules: noiseRules, knownSources: noiseKnownSources });
+          ps = weightedPrescore(psRaw, noiseClass, { rules: noiseRules });
           decision = await classify(rec, lookups, classifyOpts);
           stats.detail_fetched++;
         }
       } catch (err) {
-        if (err instanceof JobSearchError && (err.code === 'BUDGET_EXHAUSTED' || err.code === 'CANCELLED')) throw err;
-        warnings.push(`detail fetch failed for ${rec.source} ${rec.external_id ?? ''}: ${errFields(err).err_code}`);
+        if (err instanceof JobSearchError && err.code === 'CANCELLED') throw err;
+        if (err instanceof JobSearchError && err.code === 'BUDGET_EXHAUSTED') {
+          // Budget ran out mid-source (spec R4.2, decision 22): this row is still persisted, just without a
+          // description, rather than aborting the rest of the source's list pages.
+          detailSkipped = true;
+          stats.detail_skipped_budget = (stats.detail_skipped_budget ?? 0) + 1;
+        } else {
+          warnings.push(`detail fetch failed for ${rec.source} ${rec.external_id ?? ''}: ${errFields(err).err_code}`);
+        }
       }
     }
     /** @type {{ id: number|null, outcome: string, queued: number|null, branch: string }} */
@@ -462,7 +482,8 @@ async function executeRun(p) {
         }
       }
       applied = await withTransaction(client, (c) => applyDecision(c, rec, decision, {
-        runId, pageIndex: ev.pageIndex, searchProfile: profile.name, profileRev: profile.rev, prescore: ps, embedding, now,
+        runId, pageIndex: ev.pageIndex, searchProfile: profile.name, profileRev: profile.rev,
+        prescore: ps, prescoreRaw: psRaw, noiseClass, detailSkipped, embedding, now,
       }));
     }
     if (applied.outcome === 'update') stats.updated++;
@@ -480,6 +501,7 @@ async function executeRun(p) {
       salary_min: rec.salary_min,
       salary_max: rec.salary_max,
       prescore: ps,
+      noise_class: noiseClass,
       status: decision.outcome === 'ambiguous' ? 'review' : decision.inherit?.status ?? null,
       source: rec.source,
       outcome: applied.outcome,

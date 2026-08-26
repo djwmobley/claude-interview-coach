@@ -1,0 +1,97 @@
+[
+  {
+    "name": "lensa host is aggregator_repost regardless of source",
+    "listing": { "source": "manual", "title": "Chief Technology Officer", "company_norm": "acme corp", "url_normalized": "https://lensa.com/ls/click?x=1" },
+    "expected_class": "aggregator_repost"
+  },
+  {
+    "name": "gmail lensa parser prefix is aggregator_repost even without a resolvable host",
+    "listing": { "source": "gmail", "title": "Chief Technology Officer", "company_norm": "acme corp", "external_id": "gmail:lensa:abc123", "url_normalized": null },
+    "expected_class": "aggregator_repost"
+  },
+  {
+    "name": "native Greenhouse posting with an '(est.)' salary marker is NOT aggregator_repost (adversary finding 6)",
+    "listing": { "source": "greenhouse", "title": "Chief Technology Officer", "company_norm": "acme corp", "url_normalized": "https://boards.greenhouse.io/acme/jobs/123", "salary_raw": "$180K-$220K (est. based on level)" },
+    "expected_class": "ok"
+  },
+  {
+    "name": "gmail LinkedIn alert (not an aggregator parser) is NOT aggregator_repost",
+    "listing": { "source": "gmail", "title": "Chief Technology Officer", "company_norm": "acme corp", "external_id": "gmail:linkedin:def456", "url_normalized": "https://www.linkedin.com/jobs/view/4378403522" },
+    "expected_class": "ok"
+  },
+  {
+    "name": "'Fractional CTO' title is fractional_or_founder",
+    "listing": { "source": "greenhouse", "title": "Fractional CTO", "company_norm": "acme corp" },
+    "expected_class": "fractional_or_founder"
+  },
+  {
+    "name": "'Interim CTO' title is fractional_or_founder",
+    "listing": { "source": "greenhouse", "title": "Interim CTO for Growth-Stage Startup", "company_norm": "acme corp" },
+    "expected_class": "fractional_or_founder"
+  },
+  {
+    "name": "company text alone never triggers fractional_or_founder (adversary finding 1: 'Founding Farmers Restaurant Group')",
+    "listing": { "source": "greenhouse", "title": "Chief Technology Officer", "company_norm": "founding farmers restaurant group" },
+    "expected_class": "ok"
+  },
+  {
+    "name": "rule order resolves a two-class title/company overlap in favor of fractional_or_founder (adversary finding 5)",
+    "listing": { "source": "exec", "title": "Interim CTO for Staffing Solutions Group", "company_norm": "staffing solutions group" },
+    "expected_class": "fractional_or_founder"
+  },
+  {
+    "name": "staffing firm with no description is staffing_generic (decision 3: friction over escape)",
+    "listing": { "source": "linkedin", "title": "Chief Technology Officer", "company_norm": "robert half international" },
+    "expected_class": "staffing_generic"
+  },
+  {
+    "name": "staffing firm WITH a direct-hire description signal is NOT staffing_generic (adversary finding 3, decision 3)",
+    "listing": { "source": "linkedin", "title": "Chief Technology Officer", "company_norm": "robert half international", "description": "Join our leadership team as we build our own platform from the ground up." },
+    "expected_class": "ok"
+  },
+  {
+    "name": "'Virtual CTO' is suspect, not silently ok (adversary finding 7)",
+    "listing": { "source": "exec", "title": "Virtual CTO", "company_norm": "acme corp" },
+    "expected_class": "suspect"
+  },
+  {
+    "name": "a company_norm under 4 chars is suspect",
+    "listing": { "source": "greenhouse", "title": "Chief Technology Officer", "company_norm": "xyz" },
+    "expected_class": "suspect"
+  },
+  {
+    "name": "an ordinary posting with a normal company name and no trigger words is ok",
+    "listing": { "source": "greenhouse", "title": "Chief Technology Officer", "company_norm": "acme corp" },
+    "expected_class": "ok"
+  },
+  {
+    "name": "unrecognized/empty source is unknown_source (decision 4, total classification)",
+    "listing": { "source": "", "title": "Chief Technology Officer", "company_norm": "acme corp" },
+    "expected_class": "unknown_source"
+  },
+  {
+    "name": "null source is unknown_source",
+    "listing": { "source": null, "title": "Chief Technology Officer", "company_norm": "acme corp" },
+    "expected_class": "unknown_source"
+  },
+  {
+    "name": "an unrecognized source name is unknown_source",
+    "listing": { "source": "somerandomboard", "title": "Chief Technology Officer", "company_norm": "acme corp" },
+    "expected_class": "unknown_source"
+  },
+  {
+    "name": "'manual' source is ok_manual (decision 4)",
+    "listing": { "source": "manual", "title": "Chief Technology Officer", "company_norm": "acme corp" },
+    "expected_class": "ok_manual"
+  },
+  {
+    "name": "source comparison is case/whitespace insensitive (adversary finding 4)",
+    "listing": { "source": " GreenHouse ", "title": "Chief Technology Officer", "company_norm": "acme corp" },
+    "expected_class": "ok"
+  },
+  {
+    "name": "an exec: prefixed source resolves to the exec adapter, not unknown_source",
+    "listing": { "source": "exec:gartner", "title": "Chief Technology Officer", "company_norm": "acme corp" },
+    "expected_class": "ok"
+  }
+]
