@@ -8,9 +8,11 @@ budgets, document preflight and rendering, follow-up reminders).
 Design: `~/.claude/plans/plan-it-well-and-eager-wilkes.md` (rev 3).
 
 Status: all four build stages landed (schema, dedup, embeddings, safety
-harness, nine tools, adapters, scheduler, CLI, skill integration). Browser
-adapters (Indeed, LinkedIn, exec boards in browser mode) have not yet run
-against a real scan Chrome; see "Known blind spots".
+harness, ten tools, adapters, scheduler, CLI, skill integration), plus a
+scan-tuning pass (noise classification, title/location normalization fixes,
+state/remote dedup, sorted detail-fetch ordering, indeed rate limiting, and
+the daily scan report) after the first full six-source run against a real
+scan Chrome. See "Known blind spots".
 
 ## Layout
 
@@ -18,18 +20,21 @@ against a real scan Chrome; see "Known blind spots".
 mcp/job-search/
   package.json        plain JS ESM, // @ts-check, no build step
   .env.example        copy to .env (gitignored); config.js loads it itself
-  config/             adapters.json ats-boards.json exec-boards.json company-aliases.json style-checks.json
-  config.lock.json    sha256 of the four scan config files; unattended runs refuse a mismatch
-  sql/                001-007 migrations (each BEGIN/COMMIT, idempotent) + unique_indexes.sql (conditional)
+  config/             adapters.json ats-boards.json exec-boards.json company-aliases.json
+                      alert-senders.json noise-rules.json noise-fixtures.json style-checks.json
+  config.lock.json    sha256 of the six scan config files; unattended runs refuse a mismatch
+  sql/                001-008 migrations (each BEGIN/COMMIT, idempotent) + unique_indexes.sql (conditional)
   bin/                scan.js  migrate.js  backfill-embeddings.js  config-lock.js  remind.js
   src/server.js       MCP server (stdout carries JSON-RPC frames only)
-  src/tools/          search_jobs query_jobs get_job mark_jobs profiles scans review render_doc followups
-  src/core/           config db logger errors normalize dedup upsert prescore compact embed
-                      urlguard budget ratelimit scheduler scan-run google followups remind render schema
+  src/tools/          search_jobs query_jobs get_job mark_jobs profiles scans review render_doc
+                      followups scan_report
+  src/core/           config db logger errors normalize dedup upsert prescore noise compact embed
+                      urlguard budget ratelimit scheduler scan-run google followups remind report render schema
   src/browser/        session (the only playwright import) capability extractors wall
   src/adapters/       index base greenhouse lever workday dayforce indeed linkedin exec-generic
   test/               node --test (fixtures under test/fixtures/)
   logs/               gitignored
+  output/reports/     gitignored; daily scan-report markdown (YYYY-MM-DD-scan-report.md)
 ```
 
 ## Setup
@@ -66,12 +71,12 @@ secrets) and its tools are allowed in `.claude/settings.json`
 (`mcp__job-search__*`). Claude Code starts it with cwd = the repo root and
 `CLAUDE_PROJECT_DIR` set; `config.js` resolves every path from there.
 
-## The nine tools
+## The ten tools
 
 | Tool | Purpose |
 |---|---|
 | `search_jobs` | run one scan (profile, sources, window); returns stats plus at most 25 compact rows; `locked` instantly when another scan runs |
-| `query_jobs` | list stored rows (filters, sort, paging); excludes duplicates, expired rows, and notes by default |
+| `query_jobs` | list stored rows (filters, sort, paging); excludes duplicates, expired rows, and notes by default; `noiseClass` filter narrows (never hides by default) |
 | `get_job` | one row with URL, notes, and a description slice inside an untrusted-content delimiter; `fetchIfMissing` for fetch-backed sources only |
 | `mark_jobs` | set status / fit_score / notes on up to 25 rows; re-embeds changed notes; resolves an open review item as separate |
 | `profiles` | list or upsert search profiles (`exec-default` is seeded from `data/profile.md`) |
@@ -79,8 +84,10 @@ secrets) and its tools are allowed in `.claude/settings.json`
 | `review` | list and resolve dedup review items (`merge`, `separate`, `repost`) |
 | `render_doc` | preflight and render resumes, cover letters, and cheat sheets through the repo's Python converters |
 | `followups` | create / list / complete / snooze / cancel follow-up threads; optional calendar event |
+| `scan_report` | on-demand version of the daily scan-report email for a date or `run_id`; never advances the report marker |
 
-Compact row shape: `#412 | CTO | Mercy Ships | Houston, TX (hybrid) | 2026-08-21 | $250-300k | ps 72 | new | linkedin`.
+Compact row shape: `#412 | CTO | Mercy Ships | Houston, TX (hybrid) | 2026-08-21 | $250-300k | ps 72 | new | linkedin | noise:<class>`
+(the trailing `noise:<class>` segment appears only when the row's `noise_class` is not `ok`/`ok_manual`).
 Every response is capped at 6000 characters; `truncated:true` plus a `hint`
 tells the caller how to page.
 
@@ -140,10 +147,22 @@ One-time setup:
    down, the run degrades to `partial` with `BROWSER_UNAVAILABLE`; fetch sources
    still complete.
 
-Detail fetches on LinkedIn and Indeed (prescore >= 40, under the daily details
-budget) appear as job views on that account. A login wall, Cloudflare
+Detail fetches on LinkedIn and Indeed (prescore >= 55 for these two sources,
+per-adapter `detailFetchMinPrescore` in `config/adapters.json`; other sources
+stay at the run-level default of 40; under the daily details budget) appear as
+job views on that account. Detail fetches for a source run only after every
+list page for that source has been collected, in descending (noise-weighted)
+prescore order, so a limited daily details budget is spent on the
+highest-value rows first rather than in page-arrival order; a row whose
+detail fetch is skipped for budget reasons is still stored (without a
+description) and marked `detail_skipped` (visible on `get_job`), and the
+run's `detail_skipped_budget` stat counts how many. A login wall, Cloudflare
 challenge, reCAPTCHA, or HTTP 403/429 stops the source and disables it across
 runs (24 h, then 72 h, then manual: `scans({action:'enable_source', source})`).
+Indeed additionally caps itself to 12 list pages per run (`maxPagesPerRun`,
+independent of the daily and per-query caps) with a slower per-request delay
+(`delayMs` 2500-5500 ms, a 4000 ms base with +-1500 ms jitter) to reduce the
+chance of a 429 mid-run.
 
 ### Sources and boards
 
@@ -164,6 +183,31 @@ over three fetch sources, two browser sources, and gmail) plans 191 pages,
 so adding a term, a location, or a source needs a cap review. `gmail` is exempt from this multiplication
 (see "Gmail job alerts" below): it plans one page count regardless of how
 many terms and locations the profile carries.
+
+### Noise classification, title cleanup, and state/remote dedup
+
+Every listing gets a `noise_class` (recomputed on upsert and on `bin/migrate.js`'s
+backfill): `ok`, `ok_manual`, `aggregator_repost`, `fractional_or_founder`,
+`staffing_generic`, `unknown_source`, or `suspect`. The rule set is
+config-locked (`config/noise-rules.json`, rules evaluated by an explicit
+integer `priority`, never file position) and linted on every `config-lock`
+run against named fixture cases in `config/noise-fixtures.json`, so a rule
+edit that silently changes a known case fails closed. `prescore_raw` (the
+original, unweighted score) is stored alongside `prescore` (the noise-class-
+weighted score used for ranking and the detail-fetch gate); nothing is hidden
+from `query_jobs` or the database by default (only the daily report's "Look
+at these" section excludes non-`ok` rows, and it prints how many it excluded).
+
+`normalizeTitle`/`normalizeListing` strip zero-width/format characters and a
+duplicated leading boilerplate segment (LinkedIn's `"Field CTO\nField CTO
+with..."` pattern) before tokenizing, cap the stored title at 200 chars, and
+recognize a bare US state name or abbreviation ("Texas") as a location on its
+own, distinct from a city. That last piece feeds a dedicated dedup rule:
+identical company + title postings that are both remote or both a state-only
+location (no city), posted within 14 days of each other, merge automatically
+(never queued for review) -- the "same role broadcast once per state"
+pattern. `bin/migrate.js` re-normalizes every existing listing's title/
+location/hash and backfills this merge rule against the open review queue.
 
 ### Gmail job alerts
 
@@ -260,14 +304,39 @@ Register-ScheduledTask -TaskName "job-search remind" -Action $a2 -Trigger $t2 -R
 `Get-ScheduledTaskInfo "job-search scan"` shows the last run time and result
 code (`0`, `1`, `2` as above). Both scripts prune their own logs after 14 days.
 
-## Follow-up reminders
+## Daily scan report and follow-up reminders
+
+`bin/remind.js [--dry-run] [--to addr]` now sends one combined digest
+(follow-ups plus the daily scan report) whenever EITHER is true: a follow-up
+is due, OR at least one scan run has finished since the last report was sent,
+OR (on a weekday with zero runs recorded at all) the run is silent -- that
+last case sends anyway with a `[NO SCAN]` subject prefix, so a broken
+scheduled scan is visible instead of producing quiet silence. A run whose
+`status` was not `ok` gets a `[SCAN <STATUS>]` subject prefix. Zero due
+follow-ups no longer suppresses the email by itself.
+
+The scan-report portion covers, in order: run summaries since the last report
+(status, duration, fetched/new/updated/repost/ambiguous, errors, per-source
+pages); "Look at these" (top `run.reportTopN`, default 10, by prescore among
+rows first seen since the last report, excluding non-`ok` `noise_class` rows,
+with a count of how many were excluded); "Houston / Texas" (same window,
+filtered to the `exec-default` profile's home locations, any prescore); the
+open review-queue count with its top 5 reasons; and currently disabled
+sources. The email is plain text plus HTML; every listing field is
+HTML-escaped and a URL is shown only when it passes a structural urlguard
+check. The same report is written to
+`output/reports/YYYY-MM-DD-scan-report.md` (gitignored via the existing
+`/output/` entry), overwritten on a same-day re-run. Ask for the same content
+on demand, for a specific date or `run_id`, with the `scan_report` MCP tool
+-- it never advances the report marker, so it cannot cause the scheduled
+email to skip or duplicate content.
 
 `followups` stores threads such as "phone Nina Guthrie Thu 2026-08-27 if silent"
-as rows in `ic_followups`. `bin/remind.js [--dry-run] [--to addr]` selects
-open rows due within one day (plus snoozed rows whose `snoozed_until` has
-passed, which are flipped back to open) and sends one digest email
-(`Follow-ups due: N`) to `REMINDER_TO`. `reminded_at` is stamped only after a
-2xx, so a failed send is retried the next day. Zero due rows means no email.
+as rows in `ic_followups`; `bin/remind.js` selects open rows due within one
+day (plus snoozed rows whose `snoozed_until` has passed, which are flipped
+back to open) for the follow-ups section. `reminded_at` and the report marker
+(`ic_report_state.last_report_sent_at`) are both stamped only after a 2xx
+send, so a failed send is retried the next day and no report window is lost.
 
 Auth model: no Gmail app password anywhere. The script reads the
 workspace-mcp OAuth token file (`GOOGLE_TOKEN_FILE`, no default, set it in
@@ -277,11 +346,12 @@ read-only, refreshes the access token in memory with `google-auth-library`,
 and never writes the file back (workspace-mcp owns it). Token values are never
 logged; only `has_refresh_token`, `scopes_ok`, and `expiry`. Missing file or a
 missing `gmail.send` / `calendar.events` scope: exit 1 with the file name and
-the missing scope. `--dry-run` exercises the token and prints the digest
-without sending.
+the missing scope. `--dry-run` exercises the token and prints the combined
+digest (including the plain-text report body) without sending or writing the
+marker.
 
-Exit codes: `0` sent or nothing due, `1` auth or send failure (rows stay
-un-stamped).
+Exit codes: `0` sent or nothing to report, `1` auth or send failure (rows and
+the report marker stay un-stamped).
 
 ## Document rendering (`render_doc`)
 
@@ -299,8 +369,7 @@ is never opened afterwards. The `/write-resume`, `/write-cover-letter`, and
 
 ## Tests
 
-`node --test` from `mcp/job-search` runs every `test/*.test.js` (338 tests in
-62 suites at the end of stage 4). The DB-backed suites use marker profiles/companies (`zz-test-*`,
+`node --test` from `mcp/job-search` runs every `test/*.test.js`. The DB-backed suites use marker profiles/companies (`zz-test-*`,
 `ZZ-TEST-*`) and delete them afterwards; they run against the real `ic_context`
 database. Two suites need files that are gitignored in this repo
 (`data/project-index.md` for `render_doc.test.js`), so they only pass in a
@@ -328,7 +397,12 @@ file for the same reason.
 ## Config lock
 
 `node bin/config-lock.js` reports whether `config/*.json` matches
-`config.lock.json` (exit 2 on mismatch). After an intentional config edit run
+`config.lock.json` (exit 2 on mismatch). It also lints `config/noise-rules.json`
+against the named fixture cases in `config/noise-fixtures.json` on every run
+(check or `--write`), failing closed (exit 1) if any fixture's expected
+`noise_class` no longer holds under the current rules -- this catches a
+noise-rule edit that silently changes behavior for a known case, not just a
+hash mismatch. After an intentional config edit run
 `node bin/config-lock.js --write` and commit both.
 
 ## Embeddings
@@ -417,3 +491,39 @@ detected by the test suite.
 - `render_doc` checks are lexical: tone, "supported" versus "drove" revenue
   framing, platform names in the summary, and the truth of a bullet stay with
   the model and the review skills.
+- `noise_class`: `staffing_generic`'s "company's own careers host" check is a
+  naive slug-vs-hostname heuristic (no real per-company domain mapping
+  exists); `suspect`'s trigger words ("advisor", "equity") are common enough
+  in legitimate titles that some ok rows will be flagged suspect with no
+  further signal to disambiguate. The `staffingFirms` config list is a
+  documented seed, not exhaustive; an unlisted staffing firm reads as `ok`.
+- Title cleanup (`stripRepeatedLeadingSegment`): a genuine short-title repeat
+  under 12 chars / 2 words (a real "CTO CTO" typo, as opposed to a
+  boilerplate-plus-tagline repeat) is deliberately left unmerged and only
+  logged at debug level, never routed to review.
+- R6 state/remote dedup: a live duplicate whose root listing later expires is
+  out of scope (no re-promotion of a duplicate to root); a bare US state name
+  with no comma/abbreviation ("just 'Texas'" vs. a city that happens to share
+  a state's name, e.g. a town literally called Washington) carries the same
+  inherent free-text-location ambiguity the rest of `normalizeLocation`
+  already has.
+- R4 detail-fetch ordering: a 'new'/'ambiguous' row queued for a detail fetch
+  is NOT persisted until its source's whole detail pass runs (spec R4's
+  "collect then sort"); two such rows that are true near-miss duplicates of
+  EACH OTHER (not caught by the exact-key `seenKeys` check) arriving on
+  different pages of the SAME source in the SAME run could both persist as
+  separate rows instead of one deduping against the other, since neither is
+  in the database yet when the other is classified. Rows that are NOT queued
+  for a detail fetch (ineligible, or the adapter has no detail fetch) are
+  unaffected and persist immediately as before.
+- R1 report: "Look at these" and "Houston / Texas" only see rows whose
+  `first_seen` falls in the window since the last report; a row that already
+  existed and was merely updated (times_seen bumped, no new `first_seen`)
+  never appears there even if its prescore or noise class changed materially
+  on this run. The report's per-run "pages and details used against caps"
+  view relies on each run's own stored `pages_by_source`; it does not
+  separately reconcile against `ic_scan_budget`'s daily totals in the email
+  itself (`scans({action:'status'})` remains the source of truth for that).
+  The URL-safety check for report links is structural (domain + path
+  pattern) only; unlike a live fetch's `urlguard`, it does not re-resolve DNS
+  at report time.
