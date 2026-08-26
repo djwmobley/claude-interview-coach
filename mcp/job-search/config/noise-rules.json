@@ -1,0 +1,61 @@
+{
+  "rules": [
+    {
+      "class": "aggregator_repost",
+      "priority": 10,
+      "aggregatorHosts": ["lensa.com", "ziprecruiter.com", "talent.com"],
+      "aggregatorGmailParsers": ["lensa"]
+    },
+    {
+      "class": "fractional_or_founder",
+      "priority": 20
+    },
+    {
+      "class": "staffing_generic",
+      "priority": 30,
+      "staffingFirms": [
+        "robert half",
+        "robert half international",
+        "robert half technology",
+        "randstad",
+        "randstad us",
+        "randstad usa",
+        "adecco",
+        "adecco group",
+        "adecco usa",
+        "kforce",
+        "kforce inc",
+        "insight global",
+        "teksystems",
+        "apex systems",
+        "cybercoders",
+        "robert walters",
+        "michael page",
+        "hays",
+        "manpower",
+        "manpowergroup",
+        "kelly services",
+        "aerotek",
+        "on assignment",
+        "spherion",
+        "collabera",
+        "modis",
+        "artech",
+        "diversant"
+      ]
+    },
+    {
+      "class": "suspect",
+      "priority": 40
+    }
+  ],
+  "multipliers": {
+    "ok": 1.0,
+    "ok_manual": 1.0,
+    "aggregator_repost": 0.6,
+    "fractional_or_founder": 0.5,
+    "staffing_generic": 0.7,
+    "unknown_source": 0.8,
+    "suspect": 0.8
+  }
+}

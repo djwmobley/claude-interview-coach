@@ -4,6 +4,7 @@ import assert from 'node:assert/strict';
 import {
   normalizeUrl, normalizeCompany, normalizeTitle, normalizeLocation, parseLocation, dedupHash, descriptionHash,
   parseSalary, normalizeListing, normalizeLegacyRow, titleTokenKey, isLocationEligible, sha1, DEFAULT_TRACKING_PARAMS,
+  collapseWhitespace, stripZeroWidth, stripRepeatedLeadingSegment, cleanTitleText, TITLE_MAX_CHARS,
 } from '../src/core/normalize.js';
 import { prescore } from '../src/core/prescore.js';
 
@@ -259,6 +260,74 @@ describe('parseLocation and normalizeLocation: total classification', () => {
   });
   test('hybrid mode detected', () => {
     assert.equal(normalizeLocation('Houston, TX (Hybrid)').remote_mode, 'hybrid');
+  });
+  test('bare state name/abbreviation (spec R6, decision 13): state-only location, no city', () => {
+    assert.deepEqual(parseLocation('Texas'), { kind: 'state', abbr: 'tx' });
+    assert.deepEqual(parseLocation('TX'), { kind: 'state', abbr: 'tx' });
+    assert.deepEqual(parseLocation('Texas, United States'), { kind: 'state', abbr: 'tx' });
+    assert.equal(normalizeLocation('Texas').location_norm, 'state-tx');
+    assert.equal(normalizeLocation('Oklahoma').location_norm, 'state-ok');
+    assert.equal(isLocationEligible('state-tx'), true);
+  });
+  test('bare state name does NOT shadow a real city-st pair', () => {
+    assert.deepEqual(parseLocation('Houston, TX'), { kind: 'city-st', value: 'houston-tx' });
+  });
+});
+
+describe('collapseWhitespace / stripZeroWidth (spec R3.1, decision 11)', () => {
+  test('collapses newlines, tabs, and repeated spaces to one space', () => {
+    assert.equal(collapseWhitespace('Field CTO \n \n Field CTO with very strong background'), 'Field CTO Field CTO with very strong background');
+    assert.equal(collapseWhitespace('  a\t\tb  \n c '), 'a b c');
+  });
+  test('strips zero-width/format characters before collapsing', () => {
+    const zw = '​Field‌ CTO­͏﻿';
+    assert.equal(stripZeroWidth(zw), 'Field CTO');
+    assert.equal(collapseWhitespace(zw), 'Field CTO');
+  });
+  test('null/undefined -> empty string, never throws', () => {
+    assert.equal(collapseWhitespace(null), '');
+    assert.equal(collapseWhitespace(undefined), '');
+    assert.equal(stripZeroWidth(undefined), '');
+  });
+});
+
+describe('stripRepeatedLeadingSegment / cleanTitleText (spec R3.1, decisions 9-11)', () => {
+  test('must match: a genuine boilerplate repeat >=12 chars and >=2 words is stripped, keeping the text once', () => {
+    const r = stripRepeatedLeadingSegment('Field CTO Enterprise Field CTO Enterprise with very strong background in platform architecture');
+    assert.equal(r.stripped, true);
+    assert.equal(r.text, 'Field CTO Enterprise with very strong background in platform architecture');
+  });
+  test('must NOT match: short/single-token repeat is left as-is (decision 9-10)', () => {
+    // "CTO CTO Group": segment "CTO" is 3 chars, 1 word -- below the 12-char/2-word floor.
+    const r1 = stripRepeatedLeadingSegment('CTO CTO Group');
+    assert.equal(r1.stripped, false);
+    assert.equal(r1.text, 'CTO CTO Group');
+    // "Manager, Manager Development Program": segment "Manager," is short/1 word too.
+    const r2 = stripRepeatedLeadingSegment('Manager, Manager Development Program');
+    assert.equal(r2.stripped, false);
+    assert.equal(r2.text, 'Manager, Manager Development Program');
+  });
+  test('must NOT match: no repeat present', () => {
+    const r = stripRepeatedLeadingSegment('Chief Technology Officer');
+    assert.equal(r.stripped, false);
+    assert.equal(r.text, 'Chief Technology Officer');
+  });
+  test('cleanTitleText: full pipeline on the real observed LinkedIn shape', () => {
+    // The real run-1316 sample ("Field CTO" repeated) is itself only 9 chars/2 words, BELOW the 12-char
+    // floor set by decision 9-10, so it is intentionally left unmerged here; a longer, real boilerplate
+    // repeat (title + tagline) is what decision 9-10's floor is designed to still catch, exercised above.
+    const cleaned = cleanTitleText('Field CTO \n \n Field CTO with very strong background in enterprise architecture');
+    assert.equal(cleaned, 'Field CTO Field CTO with very strong background in enterprise architecture');
+  });
+  test('cleanTitleText caps at 200 chars after normalization', () => {
+    const long = 'Chief Technology Officer ' + 'x'.repeat(300);
+    const cleaned = cleanTitleText(long);
+    assert.equal(cleaned.length, TITLE_MAX_CHARS);
+  });
+  test('cleanTitleText: zero-width characters between repeated segments do not defeat the strip', () => {
+    const raw = 'Field CTO Enterprise Group​ ‌\nField CTO Enterprise Group with a very strong background';
+    const cleaned = cleanTitleText(raw);
+    assert.equal(cleaned, 'Field CTO Enterprise Group with a very strong background');
   });
 });
 

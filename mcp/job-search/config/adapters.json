@@ -57,7 +57,9 @@
       ],
       "dailyPages": 60,
       "dailyDetails": 100,
-      "maxPagesPerQuery": 5
+      "maxPagesPerQuery": 5,
+      "maxPagesPerRun": 12,
+      "detailFetchMinPrescore": 55
     },
     "linkedin": {
       "transport": "browser",
@@ -75,7 +77,8 @@
       ],
       "dailyPages": 40,
       "dailyDetails": 60,
-      "maxPagesPerQuery": 3
+      "maxPagesPerQuery": 3,
+      "detailFetchMinPrescore": 55
     },
     "greenhouse": {
       "transport": "fetch",

@@ -11,6 +11,7 @@ import os from 'node:os';
 import path from 'node:path';
 import pg from 'pg';
 import { pgConnectionConfig } from '../src/core/config.js';
+import { ensureAuxSchema } from '../src/core/schema.js';
 import { createFollowup, snoozeFollowup, stampReminded } from '../src/core/followups.js';
 import { runRemind, buildDigest } from '../src/core/remind.js';
 import { readTokenFile, tokenInfo, assertScopes, buildRfc2822, base64url, gmailSend, calendarInsertEvent, calendarDeleteEvent, expiryMs, SCOPE_GMAIL_SEND, SCOPE_GMAIL_READONLY, SCOPE_GMAIL_MODIFY, GMAIL_SEND_URL } from '../src/core/google.js';
@@ -20,9 +21,15 @@ const MARK = `ZZ-TEST-RM-${process.pid}`;
 let client;
 let tmp = '';
 
+// ic_report_state (spec R1) is a real singleton row, but by this point in the suite it lives in the
+// throwaway, per-run "_test" database that bin/bootstrap-test-db.js/bin/run-tests.js set PG_DSN to
+// (see npm test); tests here can write it freely without any snapshot/restore dance, since the whole
+// database is recreated from scratch on the next `npm test` run and never shared with production.
+
 before(async () => {
   client = new pg.Client(pgConnectionConfig());
   await client.connect();
+  await ensureAuxSchema(client);
   await client.query('DELETE FROM ic_followups WHERE contact LIKE $1', ['ZZ-TEST-%']);
   tmp = fs.mkdtempSync(path.join(os.tmpdir(), 'remind-test-'));
 });
@@ -82,7 +89,7 @@ describe('remind digest selection and sending', () => {
     const expectOut = ['later', `${MARK} reminded |`, 'snoozed-future', `${MARK} done`];
     for (const s of expectIn) assert.ok(msg.includes(`${MARK} ${s}`), `digest includes ${s}`);
     for (const s of expectOut) assert.ok(!msg.includes(s), `digest excludes ${s}`);
-    assert.ok(msg.includes(`Subject: Follow-ups due: ${expectIn.length}`), 'subject count');
+    assert.match(msg, new RegExp(`Subject:.*${expectIn.length} follow-ups? due`), 'subject count');
     assert.ok(msg.includes('(overdue)'));
     assert.equal(r.due, expectIn.length);
     assert.equal(r.stamped, expectIn.length);
@@ -157,13 +164,36 @@ describe('remind digest selection and sending', () => {
     assert.equal(calls.length, 0);
   });
 
-  test('zero due rows: no email, exit 0, token layer not even consulted', async () => {
+  test('zero due rows AND zero scan runs since the (overridden, near-now) report marker on a weekend: no email, exit 0, token layer not even consulted', async () => {
     await client.query('DELETE FROM ic_followups WHERE contact LIKE $1', ['ZZ-TEST-%']);
     const { f, calls } = fetchStub(200);
-    const r = await runRemind({ client, tokenFile: 'unused', to: 'x@example.com', now: new Date('2000-01-01T00:00:00Z'), fetch: /** @type {any} */ (f), googleHttp: /** @type {any} */ (async () => { throw new Error('should not be called'); }) });
+    // 2000-01-02 00:00 America/Chicago is a Sunday (decision 26's "[NO SCAN]" weekday trigger does not
+    // apply) far enough in the past that selectDue() cannot pick up any real (non-test) production
+    // follow-up as due; reportSinceOverride is pinned to the real current time (independent of the
+    // fictional `now` above) so the runs query against the real, shared ic_scan_runs table finds nothing
+    // finished after it.
+    const r = await runRemind({
+      client, tokenFile: 'unused', to: 'x@example.com', now: new Date('2000-01-02T06:00:00Z'), reportSinceOverride: new Date(),
+      fetch: /** @type {any} */ (f), googleHttp: /** @type {any} */ (async () => { throw new Error('should not be called'); }),
+    });
     assert.equal(r.code, 0);
     assert.equal(r.due, 0);
     assert.equal(calls.length, 0);
+  });
+
+  test('a weekday with zero due rows and zero scan runs since the marker still sends, with [NO SCAN] in the subject (decision 26)', async () => {
+    await client.query('DELETE FROM ic_followups WHERE contact LIKE $1', ['ZZ-TEST-%']);
+    const { f, calls } = fetchStub(200);
+    // 2026-08-26 is a Wednesday.
+    const r = await runRemind({
+      client, tokenFile: 'unused', to: 'x@example.com', now: new Date('2026-08-26T12:00:00Z'), reportSinceOverride: new Date(),
+      fetch: /** @type {any} */ (f), googleHttp: /** @type {any} */ (fakeGoogle(f)),
+    });
+    assert.equal(r.code, 0);
+    assert.equal(r.sent, true);
+    assert.equal(r.no_scan, true);
+    assert.match(String(r.subject), /^\[NO SCAN\]/);
+    assert.equal(calls.length, 1);
   });
 
   test('digest body format: one line per item', () => {

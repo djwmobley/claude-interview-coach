@@ -9,7 +9,7 @@
 import { test, describe, before, after } from 'node:test';
 import assert from 'node:assert/strict';
 import { LOCK_KEY, resolveSources, fetchDetailForRow } from '../src/core/scan-run.js';
-import { newClient, upsertTestProfile, cleanupScan, offlineDeps, runScanWaiting, testConfig, makeFixtureFetch, DEFAULT_MAP, makeFakeSession } from './helpers/scan-fixtures.js';
+import { newClient, upsertTestProfile, cleanupScan, offlineDeps, runScanWaiting, testConfig, makeFixtureFetch, DEFAULT_MAP, makeFakeSession, memoryReserve } from './helpers/scan-fixtures.js';
 import { untrustedRows } from '../src/core/compact.js';
 
 const [ROWS_OPEN, , ROWS_CLOSE] = untrustedRows(['x']);
@@ -238,7 +238,8 @@ describe('runScan persisted', () => {
     // exactly what browser/capability.js's onPage hook is for (spec section 4);
     // before this fix capFor() never passed onPage at all, so browser sources
     // ignored delayMs entirely -- see mcp/job-search/config/adapters.json's indeed
-    // entry (delayMs [4000,9000]) that this test pins against.
+    // entry (delayMs [4000,9000], spec R5.1: the per-request delay must RISE to
+    // reduce 429s, never fall) that this test pins against.
     /** @type {Array<{ t: 'goto'|'sleep', url?: string, ms?: number }>} */
     const events = [];
     const sleep = async (/** @type {number} */ ms) => {
@@ -274,6 +275,62 @@ describe('runScan persisted', () => {
       const between = events.slice(gotos[0].i + 1, gotos[1].i).filter((e) => e.t === 'sleep');
       assert.equal(between.length, 1, `expected exactly one sleep between the 1st and 2nd goto, got ${JSON.stringify(between)} in ${JSON.stringify(events)}`);
       assert.ok(between[0].ms >= 4000 && between[0].ms <= 9000, `delay ${between[0].ms}ms outside indeed's configured delayMs [4000,9000]`);
+    } finally {
+      await client.query(`UPDATE ic_source_state SET manual_disable = false, disabled_until = NULL, consecutive_walls = 0 WHERE source = 'indeed'`);
+    }
+  });
+
+  test('R4: detail fetches spend a scarce budget on the higher-prescore row, not array/page order', async () => {
+    // Two cards on the SAME page: the lower-prescore one appears FIRST (array/arrival order), the
+    // higher-prescore one SECOND. With exactly one detail fetch left in the daily budget, the OLD
+    // inline-as-encountered behavior would have spent it on the first (lower) card; the sorted pass
+    // (spec R4.1) must spend it on the second (higher) card instead. Company is distinct from the
+    // ZZ-TEST-SCAN rows other tests in this file persist (a real CTO@ZZ-TEST-SCAN@Houston-TX row already
+    // exists by this point in the suite, which would make an indeed CTO card here a cross_source_dup --
+    // decision-20 ineligible for the detail queue -- rather than the 'new' row this test needs).
+    const CO4 = 'ZZ-TEST-SCAN-R4';
+    const lowCard = { jobkey: 'aaaa11112222bbbb', title: 'Chief Information Officer', company: CO4, location: 'Houston, TX', remote: false, postedMs: Date.now(), salaryText: null };
+    const highCard = { jobkey: 'cccc33334444dddd', title: 'Chief Technology Officer', company: CO4, location: 'Houston, TX', remote: false, postedMs: Date.now(), salaryText: '$300,000 - $350,000' };
+    const fake = makeFakeSession({ indeedCards: [lowCard, highCard] });
+    const deps = offlineDeps({ connectSession: fake.connectSession, reserveBudget: memoryReserve({ details: 99 }) });
+    await client.query(`INSERT INTO ic_source_state (source, manual_disable) VALUES ('indeed', false) ON CONFLICT (source) DO UPDATE SET manual_disable = false, disabled_until = NULL, consecutive_walls = 0`);
+    try {
+      const r = await runScanWaiting({ profile: PROFILE, sources: ['indeed'], dryRun: false, wait: true }, deps, { trigger: 'mcp', log: () => {} });
+      assert.ok(['ok', 'partial'].includes(r.status), JSON.stringify(r.errors));
+      assert.equal(r.stats.detail_fetched, 1, 'only one detail fetch: the daily budget had exactly one left');
+      const rows = await client.query(`SELECT title, description, prescore, detail_skipped FROM ic_job_listings WHERE company = $1`, [CO4]);
+      const cio = rows.rows.find((x) => x.title === 'Chief Information Officer');
+      const cto = rows.rows.find((x) => x.title === 'Chief Technology Officer');
+      assert.ok(cio && cto, 'both rows persisted');
+      assert.ok(cto.prescore > cio.prescore, `CTO (${cto.prescore}) must outrank CIO (${cio.prescore}) for this test to prove anything`);
+      assert.ok(cto.description, 'the HIGHER-prescore row (arrived second) got the one available detail fetch');
+      assert.equal(cio.description, null, 'the LOWER-prescore row (arrived first) did NOT get the detail fetch, even though it was encountered first');
+      assert.equal(cio.detail_skipped, true, 'the skipped row is marked detail_skipped (decision 22)');
+      assert.ok(r.stats.detail_skipped_budget >= 1);
+    } finally {
+      await client.query(`UPDATE ic_source_state SET manual_disable = false, disabled_until = NULL, consecutive_walls = 0 WHERE source = 'indeed'`);
+      await client.query(`DELETE FROM ic_job_review_queue WHERE candidate_id IN (SELECT id FROM ic_job_listings WHERE company = $1)`, [CO4]);
+      await client.query(`DELETE FROM ic_scan_run_items WHERE listing_id IN (SELECT id FROM ic_job_listings WHERE company = $1)`, [CO4]);
+      await client.query(`UPDATE ic_job_listings SET duplicate_of = NULL, repost_of = NULL WHERE company = $1`, [CO4]);
+      await client.query(`DELETE FROM ic_job_listings WHERE company = $1`, [CO4]);
+    }
+  });
+
+  test('R5: indeed stops at its per-run page cap even with budget and pages remaining (maxPagesPerRun)', async () => {
+    // The synthetic ZZ-TEST-SCAN indeed fixture always returns exactly one card below PAGE_SIZE, so a
+    // normal run's own pagination already stops after one page per query; this test instead proves the
+    // per-run cap is ENFORCED as a distinct mechanism by setting it to 0 (via a fresh config clone) so
+    // reservePage() must refuse the very first page, mirroring a real BUDGET_EXHAUSTED degrade.
+    const cfg = testConfig();
+    const capped = { ...cfg, adapters: { ...cfg.adapters, adapters: { ...cfg.adapters.adapters, indeed: { ...cfg.adapters.adapters.indeed, maxPagesPerRun: 0 } } } };
+    const fake = makeFakeSession({ indeedCards: [{ jobkey: 'eeee55556666ffff', title: 'Chief Technology Officer', company: 'ZZ-TEST-SCAN', location: 'Houston, TX', remote: false, postedMs: Date.now(), salaryText: null }] });
+    const deps = offlineDeps({ config: capped, connectSession: fake.connectSession });
+    await client.query(`INSERT INTO ic_source_state (source, manual_disable) VALUES ('indeed', false) ON CONFLICT (source) DO UPDATE SET manual_disable = false, disabled_until = NULL, consecutive_walls = 0`);
+    try {
+      const r = await runScanWaiting({ profile: PROFILE, sources: ['indeed'], dryRun: true, wait: true }, deps, { trigger: 'mcp', log: () => {} });
+      assert.equal(r.status, 'partial', 'the per-run page cap degrades the source, like the daily cap does');
+      assert.ok(r.errors.some((e) => e.source === 'indeed' && e.code === 'BUDGET_EXHAUSTED' && /per-run page cap/.test(e.message)), JSON.stringify(r.errors));
+      assert.equal(r.stats.fetched, 0, 'zero pages ever navigated');
     } finally {
       await client.query(`UPDATE ic_source_state SET manual_disable = false, disabled_until = NULL, consecutive_walls = 0 WHERE source = 'indeed'`);
     }

@@ -42,7 +42,7 @@ function runServer(frames, waitMs) {
 }
 
 describe('stdio hygiene', () => {
-  test('every stdout byte is exactly one JSON-RPC frame per line; tools/list shows 9 tools', async () => {
+  test('every stdout byte is exactly one JSON-RPC frame per line; tools/list shows 10 tools', async () => {
     const r = /** @type {{ stdout: string, stderr: string }} */ (await runServer([
       { jsonrpc: '2.0', id: 1, method: 'initialize', params: { protocolVersion: '2025-06-18', capabilities: {}, clientInfo: { name: 'test', version: '0' } } },
       { jsonrpc: '2.0', method: 'notifications/initialized' },
@@ -70,8 +70,8 @@ describe('stdio hygiene', () => {
     const byId = new Map(frames.filter((f) => f.id !== undefined).map((f) => [f.id, f]));
     assert.ok(byId.get(1)?.result?.serverInfo?.name === 'job-search');
     const tools = byId.get(2)?.result?.tools ?? [];
-    assert.equal(tools.length, 9, 'nine tools');
-    assert.deepEqual(tools.map((t) => t.name), ['search_jobs', 'query_jobs', 'get_job', 'mark_jobs', 'profiles', 'scans', 'review', 'render_doc', 'followups']);
+    assert.equal(tools.length, 10, 'ten tools');
+    assert.deepEqual(tools.map((t) => t.name), ['search_jobs', 'query_jobs', 'get_job', 'mark_jobs', 'profiles', 'scans', 'review', 'render_doc', 'followups', 'scan_report']);
     const stub = JSON.parse(byId.get(3).result.content[0].text);
     assert.equal(stub.code, 'VALIDATION');
     assert.equal(stub.ok, false);

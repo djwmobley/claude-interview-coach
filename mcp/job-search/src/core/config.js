@@ -159,6 +159,10 @@ const adapterSchema = z.object({
   dailyPages: z.number().int().positive(),
   dailyDetails: z.number().int().nonnegative(),
   maxPagesPerQuery: z.number().int().min(1).max(5),
+  /** Per-source override of run.detailFetchMinPrescore (spec R4.1); falls back to the run-level default when absent. */
+  detailFetchMinPrescore: z.number().int().min(0).max(100).optional(),
+  /** Hard cap on pages fetched for this source across the WHOLE run, regardless of how many queries the profile plans (spec R5.1); undefined means no extra cap beyond the daily/per-query ones. */
+  maxPagesPerRun: z.number().int().positive().optional(),
 });
 
 export const adaptersSchema = z.object({
@@ -180,6 +184,10 @@ export const adaptersSchema = z.object({
     detailFetchMinPrescore: z.number().int().min(0).max(100),
     backoff: z.object({ maxDelayMs: z.number().int().positive(), retries: z.number().int().nonnegative() }),
     throttleRatio: z.number().min(0).max(1),
+    /** IANA zone for report day-bucketing (spec R1, decision 25). */
+    timezone: z.string().min(1).default('America/Chicago'),
+    /** Default row count for the report's "Look at these" section (spec R1.2b). */
+    reportTopN: z.number().int().positive().default(10),
   }),
 });
 
@@ -243,6 +251,52 @@ export const companyAliasesSchema = z.object({
   aliases: z.record(z.string().min(1), z.string().min(1)),
 });
 
+/**
+ * Total classification of a listing's noise_class (spec R2.1, decisions 1-8): every row maps to exactly
+ * one of these. 'ok' and 'ok_manual' are terminal outcomes of the source check, never a config rule's
+ * `class`; 'unknown_source' is likewise terminal, never a config rule. The four remaining values are the
+ * classes a config/noise-rules.json rule may declare.
+ */
+export const NOISE_CLASSES = Object.freeze(['ok', 'ok_manual', 'aggregator_repost', 'fractional_or_founder', 'staffing_generic', 'unknown_source', 'suspect']);
+/** Classes a config/noise-rules.json rule is allowed to declare (excludes the terminal source-check outcomes). */
+export const NOISE_RULE_CLASSES = Object.freeze(['aggregator_repost', 'fractional_or_founder', 'staffing_generic', 'suspect']);
+
+const noiseRuleSchema = z.discriminatedUnion('class', [
+  z.object({
+    class: z.literal('aggregator_repost'),
+    priority: z.number().int(),
+    aggregatorHosts: z.array(domain).default([]),
+    aggregatorGmailParsers: z.array(z.string().min(1)).default([]),
+  }),
+  z.object({ class: z.literal('fractional_or_founder'), priority: z.number().int() }),
+  z.object({
+    class: z.literal('staffing_generic'),
+    priority: z.number().int(),
+    staffingFirms: z.array(z.string().min(1)).default([]),
+  }),
+  z.object({ class: z.literal('suspect'), priority: z.number().int() }),
+]);
+
+/**
+ * config/noise-rules.json (spec R2.1, decision 5/8): rules are evaluated in ascending `priority` order,
+ * first match wins -- never file position (no positional/contiguity assumption on a human-edited file).
+ * Two rules sharing a priority, or a rule missing one, fails validation outright (decision 5/8).
+ */
+export const noiseRulesSchema = z.object({
+  rules: z.array(noiseRuleSchema).refine((rules) => {
+    const seen = new Set();
+    for (const r of rules) {
+      if (seen.has(r.priority)) return false;
+      seen.add(r.priority);
+    }
+    return true;
+  }, { message: 'noise-rules.json: every rule must have a distinct priority' }),
+  multipliers: z.record(z.enum(/** @type {[string, ...string[]]} */ (NOISE_CLASSES)), z.number().min(0).max(2)).refine(
+    (m) => NOISE_CLASSES.every((c) => typeof m[c] === 'number'),
+    { message: `noise-rules.json: multipliers must define every noise class: ${NOISE_CLASSES.join(', ')}` },
+  ),
+});
+
 /** Closed enum: every alert-senders.json entry must map to a parser that exists (src/adapters/gmail-parsers.js). */
 export const GMAIL_PARSER_NAMES = Object.freeze(['linkedin', 'indeed-alert', 'indeed-match', 'lensa', 'ladders']);
 
@@ -257,7 +311,7 @@ export const alertSendersSchema = z.object({
   })),
 });
 
-export const CONFIG_FILES = Object.freeze(['adapters.json', 'ats-boards.json', 'exec-boards.json', 'company-aliases.json', 'alert-senders.json']);
+export const CONFIG_FILES = Object.freeze(['adapters.json', 'ats-boards.json', 'exec-boards.json', 'company-aliases.json', 'alert-senders.json', 'noise-rules.json']);
 
 /**
  * @typedef {Object} LoadedConfig
@@ -266,6 +320,7 @@ export const CONFIG_FILES = Object.freeze(['adapters.json', 'ats-boards.json', '
  * @property {z.infer<typeof execBoardsSchema>} execBoards
  * @property {Record<string, string>} companyAliases
  * @property {z.infer<typeof alertSendersSchema>['senders']} alertSenders
+ * @property {z.infer<typeof noiseRulesSchema>} noiseRules
  * @property {string} configDir
  * @property {string} hash sha256 over the raw config files
  */
@@ -336,6 +391,7 @@ export function loadConfig(opts = {}) {
   const execBoards = readValidated(dir, 'exec-boards.json', execBoardsSchema);
   const aliasesFile = readValidated(dir, 'company-aliases.json', companyAliasesSchema);
   const alertSendersFile = readValidated(dir, 'alert-senders.json', alertSendersSchema);
+  const noiseRules = readValidated(dir, 'noise-rules.json', noiseRulesSchema);
   /** @type {LoadedConfig} */
   const cfg = {
     adapters,
@@ -343,6 +399,7 @@ export function loadConfig(opts = {}) {
     execBoards,
     companyAliases: aliasesFile.aliases,
     alertSenders: alertSendersFile.senders,
+    noiseRules,
     configDir: dir,
     hash: computeConfigHash(dir),
   };

@@ -32,6 +32,7 @@ import { normalizeListing } from './normalize.js';
 import { classify, makePgLookups } from './dedup.js';
 import { applyDecision, adoptUnclassifiedRows } from './upsert.js';
 import { prescore } from './prescore.js';
+import { classifyNoise, weightedPrescore, getDefaultNoiseRules } from './noise.js';
 import { embedSafe, embeddingText } from './embed.js';
 import { compactRows, capResponse, MAX_ROWS, MAX_RESPONSE_CHARS, untrustedRows, ROWS_WRAP_OVERHEAD_CHARS } from './compact.js';
 import { buildRegistry, guardedFetch } from './urlguard.js';
@@ -94,6 +95,7 @@ export const USER_AGENT = 'job-search-mcp/0.1 (interview-coach; read-only scanne
  * @property {number} unembedded
  * @property {number} stale_dropped
  * @property {number} detail_fetched
+ * @property {number} detail_skipped_budget rows queued for a detail fetch (outcome new/ambiguous, prescore gate met) but skipped because the source's daily/per-run budget ran out mid-source (spec R4.2, decision 22)
  * @property {number} adopted
  * @property {number} expired
  * @property {Record<string, number>} pages_by_source
@@ -243,9 +245,13 @@ async function executeRun(p) {
   };
   const windowStart = new Date(now.getTime() - profile.posted_within_days * 86400000);
   const windowDate = windowStart.toISOString().slice(0, 10);
+  // Resolved once per run (spec R2): the noise rule set and the known-adapter-name set for the terminal
+  // source check, so every listing in this run is classified against the same snapshot.
+  const noiseRules = config.noiseRules ?? getDefaultNoiseRules();
+  const noiseKnownSources = new Set(Object.keys(config.adapters.adapters));
 
   /** @type {RunStats} */
-  const stats = { fetched: 0, new: 0, updated: 0, cross_source_dup: 0, repost: 0, ambiguous: 0, errors: 0, unembedded: 0, stale_dropped: 0, detail_fetched: 0, adopted: 0, expired: 0, pages_by_source: {} };
+  const stats = { fetched: 0, new: 0, updated: 0, cross_source_dup: 0, repost: 0, ambiguous: 0, errors: 0, unembedded: 0, stale_dropped: 0, detail_fetched: 0, detail_skipped_budget: 0, adopted: 0, expired: 0, pages_by_source: {} };
   /** @type {Array<{ source: string|null, code: string, message: string }>} */
   const errors = [];
   /** @type {string[]} */
@@ -361,6 +367,11 @@ async function executeRun(p) {
     const limiter = makeRateLimiter({ delayMs: s.cfg.delayMs, backoff: runCfg.backoff, sleep: deps.sleep, random: deps.random });
     const caps_ = { dailyPages: s.cfg.dailyPages, dailyDetails: s.cfg.dailyDetails };
     const reserve = deps.reserveBudget ?? reserveBudget;
+    // Per-run page cap (spec R5.1: Indeed's list pages per run drop to a config cap, default 12,
+    // regardless of how many queries the profile plans). Independent of and in addition to the daily
+    // budget below; reuses the same BUDGET_EXHAUSTED code so the scheduler/adapter stop this source the
+    // same way they already do for the daily cap.
+    let pagesThisRun = 0;
     /** @type {import('../adapters/base.js').AdapterCtx['fetchText']} */
     const fetchText = async (url, o = {}) => {
       const method = o.method ?? 'GET';
@@ -403,8 +414,13 @@ async function executeRun(p) {
         return { status: r.status, url: r.url, json };
       },
       async reservePage() {
+        const perRunCap = s.cfg.maxPagesPerRun;
+        if (typeof perRunCap === 'number' && pagesThisRun >= perRunCap) {
+          throw new JobSearchError('BUDGET_EXHAUSTED', `per-run page cap (${perRunCap}) reached for ${s.name}`, { details: { source: s.name, cap: perRunCap, scope: 'run' } });
+        }
         const r = await reserve(client, s.name, { pages: 1 }, caps_, now);
         if (!r.ok) throw new JobSearchError('BUDGET_EXHAUSTED', `daily page budget exhausted for ${s.name}`, { details: { source: s.name, remaining_pages: r.remainingPages } });
+        pagesThisRun++;
       },
       async reserveDetail() {
         const r = await reserve(client, s.name, { details: 1 }, caps_, now);
@@ -420,33 +436,18 @@ async function executeRun(p) {
   const lookups = makePgLookups(client);
 
   /**
+   * Persist one classified listing (insert/update, stats, response row, log). Shared by the immediate path
+   * (a row not eligible for a detail fetch) and the sorted detail pass below (spec R4).
    * @param {{ name: string, adapter: import('../adapters/base.js').Adapter, cfg: any }} s
-   * @param {import('../adapters/base.js').AdapterCtx} ctx
    * @param {import('../adapters/base.js').ListingEvent} ev
+   * @param {import('./normalize.js').NormalizedListing} rec
+   * @param {import('./dedup.js').Decision} decision
+   * @param {number} ps
+   * @param {number} psRaw
+   * @param {string} noiseClass
+   * @param {boolean} detailSkipped
    */
-  async function processListing(s, ctx, ev) {
-    let rec = normalizeListing(ev.listing);
-    const key = `${rec.source}|${rec.external_id ?? rec.url_normalized ?? rec.dedup_hash}`;
-    if (seenKeys.has(key)) return;
-    seenKeys.add(key);
-    stats.fetched++;
-    let ps = prescore(rec, profile);
-    let decision = await classify(rec, lookups, classifyOpts);
-    // Detail fetch: prescore gate, details budget, never for same-listing updates.
-    if (s.adapter.fetchDetail && !rec.description && decision.outcome !== 'update' && ps >= runCfg.detailFetchMinPrescore) {
-      try {
-        const d = await s.adapter.fetchDetail({ url: ev.listing.url, url_normalized: rec.url_normalized, external_id: rec.external_id, source: rec.source }, ctx);
-        if (d && d.description) {
-          rec = normalizeListing({ ...ev.listing, description: d.description });
-          ps = prescore(rec, profile);
-          decision = await classify(rec, lookups, classifyOpts);
-          stats.detail_fetched++;
-        }
-      } catch (err) {
-        if (err instanceof JobSearchError && (err.code === 'BUDGET_EXHAUSTED' || err.code === 'CANCELLED')) throw err;
-        warnings.push(`detail fetch failed for ${rec.source} ${rec.external_id ?? ''}: ${errFields(err).err_code}`);
-      }
-    }
+  async function finalizeListing(s, ev, rec, decision, ps, psRaw, noiseClass, detailSkipped) {
     /** @type {{ id: number|null, outcome: string, queued: number|null, branch: string }} */
     let applied;
     if (dryRun) {
@@ -462,7 +463,8 @@ async function executeRun(p) {
         }
       }
       applied = await withTransaction(client, (c) => applyDecision(c, rec, decision, {
-        runId, pageIndex: ev.pageIndex, searchProfile: profile.name, profileRev: profile.rev, prescore: ps, embedding, now,
+        runId, pageIndex: ev.pageIndex, searchProfile: profile.name, profileRev: profile.rev,
+        prescore: ps, prescoreRaw: psRaw, noiseClass, detailSkipped, embedding, now,
       }));
     }
     if (applied.outcome === 'update') stats.updated++;
@@ -480,11 +482,117 @@ async function executeRun(p) {
       salary_min: rec.salary_min,
       salary_max: rec.salary_max,
       prescore: ps,
+      noise_class: noiseClass,
       status: decision.outcome === 'ambiguous' ? 'review' : decision.inherit?.status ?? null,
       source: rec.source,
       outcome: applied.outcome,
     });
     log({ evt: 'listing', run_id: runId, source: rec.source, outcome: applied.outcome, branch: applied.branch, id: applied.id, prescore: ps, url_normalized: rec.url_normalized });
+  }
+
+  /**
+   * Attempt one detail fetch and re-derive prescore/noise/classification from the fetched description
+   * (spec R4). Returns the (possibly unchanged) rec/decision/ps/psRaw/noiseClass plus whether the fetch
+   * was skipped for budget reasons.
+   * @param {{ name: string, adapter: import('../adapters/base.js').Adapter, cfg: any }} s
+   * @param {import('../adapters/base.js').AdapterCtx} ctx
+   * @param {import('../adapters/base.js').ListingEvent} ev
+   * @param {import('./normalize.js').NormalizedListing} rec
+   */
+  async function tryFetchDetail(s, ctx, ev, rec) {
+    try {
+      const d = await s.adapter.fetchDetail({ url: ev.listing.url, url_normalized: rec.url_normalized, external_id: rec.external_id, source: rec.source }, ctx);
+      if (d && d.description) {
+        const rec2 = normalizeListing({ ...ev.listing, description: d.description });
+        const psRaw2 = prescore(rec2, profile);
+        const noiseClass2 = classifyNoise(rec2, { rules: noiseRules, knownSources: noiseKnownSources });
+        const ps2 = weightedPrescore(psRaw2, noiseClass2, { rules: noiseRules });
+        const decision2 = await classify(rec2, lookups, classifyOpts);
+        stats.detail_fetched++;
+        return { rec: rec2, decision: decision2, ps: ps2, psRaw: psRaw2, noiseClass: noiseClass2, skipped: false };
+      }
+    } catch (err) {
+      if (err instanceof JobSearchError && err.code === 'CANCELLED') throw err;
+      if (err instanceof JobSearchError && err.code === 'BUDGET_EXHAUSTED') {
+        // Budget ran out mid-source (spec R4.2, decision 22): this row (and the rest of the sorted queue
+        // behind it) is still persisted, just without a description, rather than aborting the source.
+        return { skipped: true };
+      }
+      warnings.push(`detail fetch failed for ${rec.source} ${rec.external_id ?? ''}: ${errFields(err).err_code}`);
+    }
+    return { skipped: false };
+  }
+
+  /**
+   * @param {{ name: string, adapter: import('../adapters/base.js').Adapter, cfg: any }} s
+   * @param {import('../adapters/base.js').AdapterCtx} ctx
+   * @param {import('../adapters/base.js').ListingEvent} ev
+   * @param {Array<{ ev: import('../adapters/base.js').ListingEvent, rec: import('./normalize.js').NormalizedListing, decision: import('./dedup.js').Decision, ps: number, psRaw: number, noiseClass: string, seq: number }>} detailQueue
+   * @param {() => number} nextSeq
+   */
+  async function processListing(s, ctx, ev, detailQueue, nextSeq) {
+    const rec = normalizeListing(ev.listing);
+    const key = `${rec.source}|${rec.external_id ?? rec.url_normalized ?? rec.dedup_hash}`;
+    if (seenKeys.has(key)) return;
+    seenKeys.add(key);
+    stats.fetched++;
+    const psRaw = prescore(rec, profile);
+    const noiseClass = classifyNoise(rec, { rules: noiseRules, knownSources: noiseKnownSources });
+    const ps = weightedPrescore(psRaw, noiseClass, { rules: noiseRules });
+    const decision = await classify(rec, lookups, classifyOpts);
+    // Detail fetch eligibility (spec R4.1, decision 20): prescore gate (per-source override), and ONLY
+    // outcomes new/ambiguous ever queue -- a matched existing row (update/cross_source_dup/repost) is
+    // finalized immediately, same as before. Eligible rows are queued here (spec R4.1: "collecting list
+    // results for the source first") instead of fetched inline; the whole source's queue is sorted by
+    // prescore descending once list collection for the source finishes (runDetailPass below) so budget is
+    // spent on the highest-value rows first, not in page-arrival order.
+    const detailGate = s.cfg.detailFetchMinPrescore ?? runCfg.detailFetchMinPrescore;
+    const eligible = Boolean(s.adapter.fetchDetail) && !rec.description && (decision.outcome === 'new' || decision.outcome === 'ambiguous') && ps >= detailGate;
+    if (eligible) {
+      detailQueue.push({ ev, rec, decision, ps, psRaw, noiseClass, seq: nextSeq() });
+      return;
+    }
+    await finalizeListing(s, ev, rec, decision, ps, psRaw, noiseClass, false);
+  }
+
+  /**
+   * Phase 2 (spec R4): drain one source's detail queue in descending prescore order (tie-break: posted_at
+   * desc nulls last, then arrival sequence asc -- decision 19's "id asc", read as arrival order since a
+   * queued 'new' row has no id yet). Ordering is a FIXED snapshot taken once here (decision 21): a row's
+   * prescore can change after its own detail fetch, but that never re-sorts the rest of the queue.
+   * @param {{ name: string, adapter: import('../adapters/base.js').Adapter, cfg: any }} s
+   * @param {import('../adapters/base.js').AdapterCtx} ctx
+   * @param {Array<{ ev: import('../adapters/base.js').ListingEvent, rec: import('./normalize.js').NormalizedListing, decision: import('./dedup.js').Decision, ps: number, psRaw: number, noiseClass: string, seq: number }>} detailQueue
+   */
+  async function runDetailPass(s, ctx, detailQueue) {
+    const dateNum = (/** @type {string|null} */ d) => (d ? Date.parse(d) || 0 : -Infinity);
+    const sorted = [...detailQueue].sort((a, b) => (b.ps - a.ps) || (dateNum(b.rec.posted_at) - dateNum(a.rec.posted_at)) || (a.seq - b.seq));
+    let queuedSkippedFromHere = false;
+    for (const item of sorted) {
+      if (signal.aborted) break;
+      let { ev, rec, decision, ps, psRaw, noiseClass } = item;
+      let detailSkipped = false;
+      if (queuedSkippedFromHere) {
+        // Budget already exhausted earlier in this SAME sorted pass: every remaining item skips the
+        // network attempt outright (decision 22: queued minus fetched) rather than re-throwing per item.
+        detailSkipped = true;
+        stats.detail_skipped_budget = (stats.detail_skipped_budget ?? 0) + 1;
+      } else {
+        const r = await tryFetchDetail(s, ctx, ev, rec);
+        if (r.skipped) {
+          detailSkipped = true;
+          queuedSkippedFromHere = true;
+          stats.detail_skipped_budget = (stats.detail_skipped_budget ?? 0) + 1;
+        } else if (r.rec) {
+          rec = r.rec;
+          decision = r.decision;
+          ps = r.ps;
+          psRaw = r.psRaw;
+          noiseClass = r.noiseClass;
+        }
+      }
+      await finalizeListing(s, ev, rec, decision, ps, psRaw, noiseClass, detailSkipped);
+    }
   }
 
   /**
@@ -541,9 +649,12 @@ async function executeRun(p) {
       let walled = false;
       /** @type {import('./scheduler.js').ScheduleResult|null} */
       let result = null;
+      /** @type {Array<{ ev: import('../adapters/base.js').ListingEvent, rec: import('./normalize.js').NormalizedListing, decision: import('./dedup.js').Decision, ps: number, psRaw: number, noiseClass: string, seq: number }>} */
+      const detailQueue = [];
+      let detailSeq = 0;
       try {
         result = await runSearch(s.adapter, profile, ctx, {
-          onListing: (ev) => processListing(s, ctx, ev),
+          onListing: (ev) => processListing(s, ctx, ev, detailQueue, () => detailSeq++),
           async onBatch(ev) {
             stats.pages_by_source[s.name] = (stats.pages_by_source[s.name] ?? 0) + 1;
             progress({ run_id: runId, source: s.name, query: ev.query.slice(0, 80), page_index: ev.pageIndex, parsed: ev.parsed, fetched: stats.fetched });
@@ -570,6 +681,10 @@ async function executeRun(p) {
             return { stopSource: true };
           },
         }, { maxPages: ctx.maxPages, windowStart, staleLimit: s.adapter.dateOrdered ? undefined : Number.POSITIVE_INFINITY });
+        // Phase 2 (spec R4): sorted detail-fetch pass over everything list-collection queued for this
+        // source, run BEFORE expiryPass below so every queued row is persisted (and so has an
+        // ic_scan_run_items row) before absence accounting looks for it.
+        if (detailQueue.length) await runDetailPass(s, ctx, detailQueue);
         stats.stale_dropped += result.stale;
         if (result.completed && !walled) {
           await recordClean(client, s.name);

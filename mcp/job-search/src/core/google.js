@@ -190,6 +190,39 @@ export function buildRfc2822(m) {
 }
 
 /**
+ * Multipart/alternative RFC 2822 message (plain text + HTML), for the scan report (spec R1.2). Same
+ * header-injection guard as buildRfc2822; a random boundary avoids any collision with body content.
+ * @param {{ to: string, from?: string, subject: string, text: string, html: string, date?: Date }} m
+ */
+export function buildRfc2822Multipart(m) {
+  const clean = (/** @type {string} */ s) => String(s).replace(/[\r\n]+/g, ' ').trim();
+  const boundary = `job-search-${Date.now().toString(36)}-${Math.random().toString(36).slice(2)}`;
+  const lines = [
+    `To: ${clean(m.to)}`,
+    m.from ? `From: ${clean(m.from)}` : null,
+    `Subject: ${clean(m.subject)}`,
+    `Date: ${(m.date ?? new Date()).toUTCString()}`,
+    'MIME-Version: 1.0',
+    `Content-Type: multipart/alternative; boundary="${boundary}"`,
+    '',
+    `--${boundary}`,
+    'Content-Type: text/plain; charset="UTF-8"',
+    'Content-Transfer-Encoding: 8bit',
+    '',
+    String(m.text).replace(/\r?\n/g, '\r\n'),
+    '',
+    `--${boundary}`,
+    'Content-Type: text/html; charset="UTF-8"',
+    'Content-Transfer-Encoding: 8bit',
+    '',
+    String(m.html).replace(/\r?\n/g, '\r\n'),
+    '',
+    `--${boundary}--`,
+  ].filter((l) => l !== null);
+  return lines.join('\r\n');
+}
+
+/**
  * @typedef {Object} HttpDeps
  * @property {typeof fetch} fetch
  * @property {string} accessToken

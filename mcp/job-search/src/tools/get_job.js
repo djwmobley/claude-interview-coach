@@ -24,8 +24,8 @@ export const tool = {
   async handler(a, deps) {
     const row = await deps.withClient(async (c) => {
       const r = await c.query(
-        `SELECT id, title, company, location, location_norm, remote_mode, posted_at, salary_min, salary_max, salary_raw, prescore, fit_score, status, source,
-                url, url_normalized, external_id, notes, description, first_seen, last_seen, times_seen, duplicate_of, repost_of, expired_at, stale, record_kind, search_profile
+        `SELECT id, title, company, location, location_norm, remote_mode, posted_at, salary_min, salary_max, salary_raw, prescore, prescore_raw, noise_class, fit_score, status, source,
+                url, url_normalized, external_id, notes, description, first_seen, last_seen, times_seen, duplicate_of, repost_of, expired_at, stale, record_kind, search_profile, detail_skipped
          FROM ic_job_listings WHERE id = $1`,
         [a.id],
       );
@@ -69,6 +69,9 @@ export const tool = {
       status: row.status,
       fit_score: row.fit_score,
       prescore: row.prescore,
+      prescore_raw: row.prescore_raw,
+      noise_class: row.noise_class,
+      detail_skipped: Boolean(row.detail_skipped),
       salary_raw: row.salary_raw,
       // notes is not job-board/email data: it is written only by mark_jobs, with the
       // caller's own text, and insertListing()/updateListing() never populate it from

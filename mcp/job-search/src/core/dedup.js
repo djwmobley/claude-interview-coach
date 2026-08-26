@@ -10,7 +10,7 @@
  * in tests). Similarity for the fuzzy checks is computed by pg_trgm in
  * Postgres; `trigramSimilarity` here mirrors it for in-memory tests only.
  */
-import { isLocationEligible, titleTokenKey } from './normalize.js';
+import { isLocationEligible, titleTokenKey, isStateOnlyLocation, isRemoteLocation } from './normalize.js';
 
 export const BRANCHES = Object.freeze([
   '0-confidential-update',
@@ -20,6 +20,7 @@ export const BRANCHES = Object.freeze([
   '1b-repost-same-url',
   '2-cross-source-dup',
   '3-repost',
+  '6-state-remote-dup',
   '4-ambiguous',
   '5-new',
 ]);
@@ -376,6 +377,45 @@ export async function classify(rec, lookups, opts = {}) {
     }
     // Candidate location is absent/unknown/legacy: any hash match is a near-miss.
     return decide('4-ambiguous', 'ambiguous', { reason: 'hash_location_unknown', matches: ids(hashRows), queue: true });
+  }
+
+  // Branch 6 (spec R6, decisions 13-15/18): same posting broadcast once per US state, or the identical
+  // role posted as remote from two sources -- merged automatically, ahead of the title_similar_same_company
+  // near-miss below, NOT queued for review. Requires: identical company_norm AND identical title_norm
+  // (already true here, both rows share rec.company_norm/title_norm by construction of the lookup below);
+  // both locations dedup-eligible (isLocationEligible -- decision 14: an 'unknown:*'/'absent'/
+  // 'legacy-unknown' location on either side never qualifies); both sides EITHER remote (location_norm
+  // 'remote-*') OR both a state-only location (location_norm 'state-*', no city -- R6.2: a city-level
+  // location never satisfies this) -- a remote/state MIX does not qualify, and neither does an identical
+  // location_norm on both sides (that case is already handled by the dedup_hash branches 2/3 above, since
+  // dedup_hash includes location_norm); posted_at present on BOTH sides and within 14 days of each other
+  // (decision 15: a null posted_at on either side falls through to the ordinary near-miss path instead).
+  // Deliberately has NO same/different-source requirement (unlike branch 2/3): the spec's own motivating
+  // case -- one exec board listing "Executive Partner CIO Advisory" once per state -- is a SAME-source
+  // repeat, and R6.1's text does not condition on source either.
+  if (recEligible && rec.company_norm && rec.title_norm && toDate(rec.posted_at)) {
+    const recRemote = isRemoteLocation(rec.location_norm);
+    const recState = isStateOnlyLocation(rec.location_norm);
+    if (recRemote || recState) {
+      const sameCompanySameTitle = notes(await lookups.byCompany(rec.company_norm, rec.title_norm)).filter((r) => r.title_norm === rec.title_norm);
+      const stateRemoteCandidates = sameCompanySameTitle.filter((r) => {
+        if (!isLocationEligible(r.location_norm)) return false;
+        if (r.location_norm === rec.location_norm) return false; // identical location: owned by branch 2/3 above
+        const bothRemote = recRemote && isRemoteLocation(r.location_norm);
+        const bothState = recState && isStateOnlyLocation(r.location_norm);
+        if (!bothRemote && !bothState) return false;
+        const rDate = toDate(r.posted_at);
+        if (!rDate) return false;
+        if (Math.abs(rDate.getTime() - toDate(rec.posted_at).getTime()) > 14 * 86400000) return false;
+        return isLive(r, now, gap);
+      });
+      if (stateRemoteCandidates.length) {
+        const target = /** @type {ListingRow} */ (selectTarget(stateRemoteCandidates));
+        const rootId = target.duplicate_of ?? target.id;
+        const inh = inheritStatus(target.status);
+        return decide('6-state-remote-dup', 'cross_source_dup', { target, rootId, inherit: inh, matches: ids(stateRemoteCandidates), queue: Boolean(inh.queueReason), reason: inh.queueReason });
+      }
+    }
   }
 
   // Branch 4: near-miss triggers.

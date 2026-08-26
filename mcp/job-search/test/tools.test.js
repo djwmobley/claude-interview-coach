@@ -36,15 +36,15 @@ let client;
 let deps;
 
 /**
- * @param {Partial<{ title: string, status: string|null, fit: number|null, dup: number|null, expired: boolean, kind: string, url: string, ext: string, prescore: number|null, desc: string|null }>} o
+ * @param {Partial<{ title: string, status: string|null, fit: number|null, dup: number|null, expired: boolean, kind: string, url: string, ext: string, prescore: number|null, desc: string|null, noise: string|null, prescoreRaw: number|null, detailSkipped: boolean }>} o
  */
 async function insert(o = {}) {
   const n = Math.floor(Math.random() * 1e9);
   const url = o.url ?? `https://example.test/${SRC}/${n}`;
   const r = await client.query(
-    `INSERT INTO ic_job_listings (title, company, status, fit_score, url, url_normalized, source, external_id, record_kind, duplicate_of, expired_at, location, posted_at, prescore, description, company_norm, title_norm, location_norm, dedup_hash, last_seen)
-     VALUES ($1,$2,$3,$4,$5,$5,$6,$7,$8,$9,$10,'Houston, TX',current_date,$11,$12,lower($2),lower($1),'houston-tx',md5($5),now()) RETURNING id`,
-    [o.title ?? 'CTO', CO, o.status ?? null, o.fit ?? null, url, SRC, o.ext ?? `${SRC}:${n}`, o.kind ?? 'listing', o.dup ?? null, o.expired ? new Date() : null, o.prescore ?? null, o.desc ?? null],
+    `INSERT INTO ic_job_listings (title, company, status, fit_score, url, url_normalized, source, external_id, record_kind, duplicate_of, expired_at, location, posted_at, prescore, description, company_norm, title_norm, location_norm, dedup_hash, last_seen, noise_class, prescore_raw, detail_skipped)
+     VALUES ($1,$2,$3,$4,$5,$5,$6,$7,$8,$9,$10,'Houston, TX',current_date,$11,$12,lower($2),lower($1),'houston-tx',md5($5),now(),$13,$14,$15) RETURNING id`,
+    [o.title ?? 'CTO', CO, o.status ?? null, o.fit ?? null, url, SRC, o.ext ?? `${SRC}:${n}`, o.kind ?? 'listing', o.dup ?? null, o.expired ? new Date() : null, o.prescore ?? null, o.desc ?? null, o.noise ?? null, o.prescoreRaw ?? null, Boolean(o.detailSkipped)],
   );
   return Number(r.rows[0].id);
 }
@@ -132,6 +132,22 @@ describe('query_jobs', () => {
       await client.query('DELETE FROM ic_scan_runs WHERE id = $1', [runId]);
     }
   });
+
+  test('noiseClass filters, and noise rows are never hidden by the defaults (spec R2.2/R2.4)', async () => {
+    const ok = await insert({ title: 'CTO plain', noise: 'ok' });
+    const agg = await insert({ title: 'CTO via lensa', noise: 'aggregator_repost' });
+    const base = { includeDuplicates: false, includeExpired: false, sort: 'posted', limit: 25, offset: 0, source: [SRC] };
+    const all = /** @type {any} */ (await queryJobs.handler(base, deps));
+    const allIds = dataRows(all.rows).map((l) => Number(l.match(/^#(\d+)/)[1]));
+    assert.ok(allIds.includes(ok) && allIds.includes(agg), 'a noise row is present by default, never hidden');
+    const filtered = /** @type {any} */ (await queryJobs.handler({ ...base, noiseClass: ['aggregator_repost'] }, deps));
+    const filteredIds = dataRows(filtered.rows).map((l) => Number(l.match(/^#(\d+)/)[1]));
+    assert.ok(filteredIds.includes(agg) && !filteredIds.includes(ok));
+    const aggRow = dataRows(filtered.rows).find((l) => l.startsWith(`#${agg} `));
+    assert.match(aggRow, /noise:/, 'row line is capped at 120 chars, so the exact noise class text may itself be truncated');
+    const okRow = dataRows(all.rows).find((l) => l.startsWith(`#${ok} `));
+    assert.doesNotMatch(okRow, /noise:/, 'an ok row never carries a noise: segment');
+  });
 });
 
 describe('get_job', () => {
@@ -152,6 +168,15 @@ describe('get_job', () => {
     assert.match(r2.warnings[0], /refused for browser-backed source linkedin/);
     await client.query(`UPDATE ic_job_listings SET source = $2 WHERE id = $1`, [noDesc, SRC]);
     await assert.rejects(getJob.handler({ id: 999999999, detail_chars: 1200, fetchIfMissing: false }, deps), /not found/);
+  });
+
+  test('surfaces noise_class, prescore_raw, and detail_skipped (spec R2.2, decision 22)', async () => {
+    const id = await insert({ title: 'Noise fields', noise: 'staffing_generic', prescore: 40, prescoreRaw: 57, detailSkipped: true });
+    const r = /** @type {any} */ (await getJob.handler({ id, detail_chars: 300, fetchIfMissing: false }, deps));
+    assert.equal(r.noise_class, 'staffing_generic');
+    assert.equal(r.prescore_raw, 57);
+    assert.equal(r.prescore, 40);
+    assert.equal(r.detail_skipped, true);
   });
 });
 
