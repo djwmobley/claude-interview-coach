@@ -16,7 +16,7 @@
  */
 import * as cheerio from 'cheerio';
 import { rawListing, relativeDate, isoDate } from './base.js';
-import { sha1, normalizeTitle, normalizeCompany, normalizeLocation } from '../core/normalize.js';
+import { sha1, normalizeTitle, normalizeCompany, normalizeLocation, stripZeroWidth } from '../core/normalize.js';
 
 /**
  * Identity hash for senders whose link carries no stable id (R5): sha1 of
@@ -93,19 +93,10 @@ export function parseLinkedin(text, now) {
 // Indeed job alert digest (donotreply@jobalert.indeed.com)
 // ---------------------------------------------------------------------------
 
-/** Zero-width characters observed in real Indeed alert text (U+200B, U+00AD, U+034F) must be stripped before parsing. */
-const ZERO_WIDTH_RE = /[​­͏]/g;
 const INDEED_SALARY_RE = /\$[\d,]+(?:\.\d+)?\s*-\s*\$[\d,]+(?:\.\d+)?\s*(?:a year|an hour|\/\s*(?:year|hour|hr|yr))?/i;
 const INDEED_RELATIVE_DATE_RE = /^(today|just posted|yesterday|\d+\+?\s*(day|hour|minute|week|month)s?\s*ago)$/i;
 /** Real captured links are /rc/clk/dl?jk=... or /pagead/clk?jk=...; jk is read from the query string regardless of exact path shape. */
 const INDEED_CLICK_URL_RE = /^https?:\/\/(?:www\.)?indeed\.com\/(?:rc|pagead)\/clk/i;
-
-/**
- * @param {string} s
- */
-function stripZeroWidth(s) {
-  return String(s ?? '').replace(ZERO_WIDTH_RE, '');
-}
 
 /**
  * @param {string} text decoded text/plain body

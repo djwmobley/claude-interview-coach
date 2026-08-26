@@ -117,6 +117,87 @@ function collapse(s) {
   return s.replace(/[^a-z0-9]+/g, ' ').replace(/\s+/g, ' ').trim();
 }
 
+// ---------------------------------------------------------------------------
+// Title/company/location text cleaning (spec R3.1, decisions 9-11)
+// ---------------------------------------------------------------------------
+
+/**
+ * Zero-width / invisible format characters observed in real source markup
+ * (LinkedIn embeds U+200B etc. between repeated title segments) plus the
+ * Unicode Cf (format) category generally, since \s does not match any of
+ * these and they defeat a plain whitespace collapse. Explicit codepoints are
+ * listed because U+034F (COMBINING GRAPHEME JOINER) is category Mn, not Cf,
+ * and would otherwise slip through a Cf-only test. This is the canonical
+ * definition; gmail-parsers.js re-exports it for its own zero-width strip
+ * rather than keeping a second copy.
+ */
+export const ZERO_WIDTH_RE = /[\u200b\u200c\u200d\u00ad\u034f\ufeff]|\p{Cf}/gu;
+
+/** @param {unknown} s */
+export function stripZeroWidth(s) {
+  return String(s ?? '').replace(ZERO_WIDTH_RE, '');
+}
+
+/**
+ * Strip zero-width/format characters, then collapse every whitespace run
+ * (including newlines and tabs) to a single space, and trim (spec R3.1).
+ * @param {unknown} s
+ */
+export function collapseWhitespace(s) {
+  return stripZeroWidth(s).replace(/\s+/g, ' ').trim();
+}
+
+/** Minimum size of a repeated leading segment eligible to be stripped (decision 9-10). */
+export const MIN_REPEAT_SEGMENT_CHARS = 12;
+export const MIN_REPEAT_SEGMENT_WORDS = 2;
+
+/**
+ * Strip a repeated leading segment (spec R3.1, decisions 9-11): when the
+ * (already whitespace-collapsed) string is `A + ' ' + B` and B starts with
+ * A, keep only B -- UNLESS A is short (fewer than 12 chars or fewer than 2
+ * words), in which case the string is returned unchanged (decision 9-10:
+ * "CTO CTO Group" and "Manager, Manager Development Program" must not be
+ * mangled by a single-token or otherwise short coincidental repeat). Among
+ * every valid split point the LONGEST matching A is chosen, so a title with
+ * one genuine boilerplate repeat resolves in a single pass. No recursion:
+ * at most one repeat is stripped per call, matching the spec's "keep the
+ * text once."
+ * @param {string} s already collapseWhitespace()-d
+ * @returns {{ text: string, stripped: boolean, segment: string|null }}
+ */
+export function stripRepeatedLeadingSegment(s) {
+  const text = String(s ?? '');
+  /** @type {{ a: string, rest: string } | null} */
+  let best = null;
+  for (let i = text.indexOf(' '); i !== -1; i = text.indexOf(' ', i + 1)) {
+    const a = text.slice(0, i);
+    const rest = text.slice(i + 1);
+    if (a && rest.startsWith(a)) best = { a, rest };
+  }
+  if (!best) return { text, stripped: false, segment: null };
+  const words = best.a.split(' ').filter(Boolean).length;
+  if (best.a.length < MIN_REPEAT_SEGMENT_CHARS || words < MIN_REPEAT_SEGMENT_WORDS) {
+    return { text, stripped: false, segment: best.a };
+  }
+  return { text: best.rest, stripped: true, segment: best.a };
+}
+
+/** Titles are capped at this many chars after normalization (spec R3.1). */
+export const TITLE_MAX_CHARS = 200;
+
+/**
+ * Full title text cleaning pipeline (spec R3.1): zero-width strip, whitespace
+ * collapse, repeated-leading-segment strip, 200-char cap. Used both for the
+ * stored `title` column and as the input to normalizeTitle()'s tokenizer, so
+ * a duplicated boilerplate segment never reaches title_norm either.
+ * @param {unknown} raw
+ */
+export function cleanTitleText(raw) {
+  const collapsed = collapseWhitespace(raw);
+  const { text } = stripRepeatedLeadingSegment(collapsed);
+  return text.length > TITLE_MAX_CHARS ? text.slice(0, TITLE_MAX_CHARS) : text;
+}
+
 /** @param {string} s */
 function slugify(s) {
   return stripAccents(s.toLowerCase()).replace(/[^a-z0-9]+/g, '-').replace(/^-+|-+$/g, '');
@@ -455,7 +536,7 @@ function stateAbbr(s) {
 }
 
 /**
- * @typedef {{ kind: 'city-st', value: string } | { kind: 'country', iso: string }} ParsedLocation
+ * @typedef {{ kind: 'city-st', value: string } | { kind: 'country', iso: string } | { kind: 'state', abbr: string }} ParsedLocation
  */
 
 /**
@@ -479,6 +560,11 @@ export function parseLocation(raw) {
   const only = parts[0];
   const iso = countryIso(only);
   if (iso) return { kind: 'country', iso };
+  // A single part that IS a state name/abbreviation on its own (spec R6, decision 13: "Texas" or
+  // "Texas, United States" -- the country suffix was already popped above -- with no city). Checked
+  // before the "City ST" regex below so a bare state name is never mistaken for a one-word "city."
+  const bareState = stateAbbr(only);
+  if (bareState) return { kind: 'state', abbr: bareState };
   const m = /^([a-z .'-]+?)\s+([a-z]{2})$/i.exec(stripAccents(only));
   if (m && stateAbbr(m[2]) && !countryIso(m[2])) return { kind: 'city-st', value: `${slugify(m[1])}-${stateAbbr(m[2])}` };
   return null;
@@ -532,7 +618,18 @@ export function normalizeLocation(raw, remoteDeclared = false, remoteInferred = 
   if (raw === null || raw === undefined || !text) return { location_norm: ABSENT_LOCATION, remote_mode: mode };
   if (parsed && parsed.kind === 'city-st') return { location_norm: parsed.value, remote_mode: mode };
   if (parsed && parsed.kind === 'country') return { location_norm: `country-${parsed.iso}`, remote_mode: mode };
+  if (parsed && parsed.kind === 'state') return { location_norm: `state-${parsed.abbr}`, remote_mode: mode };
   return { location_norm: `unknown:${sha1(lower)}`, remote_mode: mode };
+}
+
+/** True when a location_norm value is a US state-only location (no city) -- spec R6.1/R6.2. */
+export function isStateOnlyLocation(locationNorm) {
+  return typeof locationNorm === 'string' && locationNorm.startsWith('state-');
+}
+
+/** True when a location_norm value is a remote-<iso> location. */
+export function isRemoteLocation(locationNorm) {
+  return typeof locationNorm === 'string' && locationNorm.startsWith('remote-');
 }
 
 // ---------------------------------------------------------------------------
@@ -576,7 +673,7 @@ const DROP_SEGMENT_RE = /^(?:remote|hybrid|on-?site|in-?office|work from home|wf
  */
 export function normalizeTitle(raw) {
   if (typeof raw !== 'string' || !raw.trim()) return { title_norm: '', location_from_title: null };
-  let t = raw.replace(/\s+/g, ' ').trim();
+  let t = cleanTitleText(raw);
   /** @type {string|null} */
   let promoted = null;
   for (let guard = 0; guard < 6; guard++) {
@@ -772,7 +869,9 @@ export function normalizeListing(raw, opts) {
   const externalId = url.external_id ?? (raw.externalId ? `${raw.source}:${raw.externalId}` : null);
   const title = normalizeTitle(raw.title);
   const company = normalizeCompany(raw.company, { ...o, confidentialFirm: raw.confidentialFirm ?? undefined, source: raw.source });
-  const locationRaw = raw.location ?? title.location_from_title ?? null;
+  // Company/location get the same whitespace treatment as title (spec R3.1) but not the repeated-segment
+  // strip or the 200-char cap, which are title-specific.
+  const locationRaw = raw.location != null ? collapseWhitespace(raw.location) : (title.location_from_title ?? null);
   // Adapters set remoteDeclared=true whenever the source states ANY work mode (remote, hybrid, or onsite).
   // Only a declared REMOTE mode may collapse the location to remote-<iso> (spec 3.1); a declared hybrid or
   // onsite role keeps its city, and an undeclared "remote" in the text is inferred (keeps the city too).
@@ -789,8 +888,8 @@ export function normalizeListing(raw, opts) {
     external_id: externalId,
     url_normalized: url.url_normalized,
     url_kind: url.kind,
-    title: String(raw.title ?? '').trim(),
-    company: String(raw.company ?? '').trim(),
+    title: cleanTitleText(raw.title),
+    company: collapseWhitespace(raw.company),
     title_norm: title.title_norm,
     company_norm: company.company_norm,
     company_note: company.company_note,

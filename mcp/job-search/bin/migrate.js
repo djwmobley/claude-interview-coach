@@ -14,7 +14,7 @@ import fs from 'node:fs';
 import path from 'node:path';
 import { fileURLToPath } from 'node:url';
 import { connectDedicated, withTransaction } from '../src/core/db.js';
-import { normalizeLegacyRow } from '../src/core/normalize.js';
+import { normalizeLegacyRow, normalizeTitle, normalizeLocation, dedupHash, LEGACY_UNKNOWN_LOCATION } from '../src/core/normalize.js';
 import { errFields } from '../src/core/errors.js';
 import { computeProfileRev } from '../src/core/upsert.js';
 
@@ -218,6 +218,66 @@ async function runCheck(client, args) {
 }
 
 /**
+ * Re-normalize title_norm, location_norm, and dedup_hash for every listing row (spec R3.2, decision 12).
+ * Needed for two reasons: (1) normalizeTitle now strips a repeated leading boilerplate segment and
+ * zero-width characters that the original ingest-time normalization did not, so a row stored before this
+ * change can carry a title_norm computed from the un-cleaned title; (2) normalizeLocation now recognizes a
+ * bare US state name/abbreviation ("Texas") as location_norm 'state-tx' instead of an opaque unknown hash,
+ * which R6's state/remote dedup rule (bin/migrate.js's R6 backfill pass, run right after this one) depends
+ * on to find the existing Gartner-style review rows at all.
+ *
+ * Runs in id order (never assumes contiguity: rows are read and updated by their actual id, not by
+ * position). A collision -- another live row already has the row's NEWLY computed dedup_hash -- is never
+ * auto-merged; it is queued for review with reason 'title_renormalized' so a human decides, exactly like
+ * every other near-miss in this system.
+ *
+ * Location recompute is deliberately conservative: only rows whose CURRENT location_norm is
+ * 'legacy-unknown' or an 'unknown:*' hash are recomputed, because normalizeLocation's remote-declared vs
+ * remote-inferred distinction is not fully replayable from stored columns alone (remoteInferred is not
+ * persisted) -- recomputing an already-classified 'remote-us' or 'city-st' row risks silently
+ * reclassifying it on a different code path than the one that produced it at ingest time. This is
+ * documented as a blind spot: a row whose location_norm was ALREADY 'unknown:*' for a reason unrelated to
+ * the new state-parsing branch (e.g. "Greater Houston Area") is recomputed too but its location_norm will
+ * not change, since neither the old nor the new parseLocation() can parse it.
+ * @param {import('pg').ClientBase} client
+ */
+async function renormalizeListings(client) {
+  const rows = (await client.query(
+    `SELECT id, title, location, remote_declared, company_norm, title_norm, location_norm, dedup_hash
+     FROM ic_job_listings WHERE coalesce(record_kind,'listing') = 'listing' ORDER BY id`,
+  )).rows;
+  let changed = 0;
+  let collisions = 0;
+  for (const row of rows) {
+    const newTitleNorm = normalizeTitle(row.title).title_norm;
+    const canRecomputeLocation = row.location_norm === LEGACY_UNKNOWN_LOCATION || (typeof row.location_norm === 'string' && row.location_norm.startsWith('unknown:'));
+    const newLocationNorm = canRecomputeLocation
+      ? normalizeLocation(row.location, row.remote_declared === true, false).location_norm
+      : row.location_norm;
+    if (newTitleNorm === row.title_norm && newLocationNorm === row.location_norm) continue;
+    const newHash = dedupHash(row.company_norm, newTitleNorm, newLocationNorm);
+    await client.query(`UPDATE ic_job_listings SET title_norm = $2, location_norm = $3, dedup_hash = $4 WHERE id = $1`, [row.id, newTitleNorm, newLocationNorm, newHash]);
+    changed++;
+    const collide = await client.query(
+      `SELECT id FROM ic_job_listings WHERE dedup_hash = $1 AND id <> $2 AND duplicate_of IS NULL AND coalesce(record_kind,'listing') = 'listing'`,
+      [newHash, row.id],
+    );
+    if (collide.rowCount) {
+      const already = await client.query(`SELECT id FROM ic_job_review_queue WHERE resolved_at IS NULL AND candidate_id = $1 AND reason = 'title_renormalized'`, [row.id]);
+      if (already.rowCount === 0) {
+        await client.query(
+          `INSERT INTO ic_job_review_queue (candidate, candidate_id, matches, reason, status_at_create)
+           VALUES ($1::jsonb, $2, $3::int[], 'title_renormalized', NULL)`,
+          [JSON.stringify({ id: row.id, title_norm: newTitleNorm, location_norm: newLocationNorm, dedup_hash: newHash }), row.id, collide.rows.map((r) => Number(r.id))],
+        );
+        collisions++;
+      }
+    }
+  }
+  return { changed, collisions };
+}
+
+/**
  * @param {import('pg').ClientBase} client
  * @param {ReturnType<typeof parseArgs>} args
  */
@@ -265,6 +325,11 @@ async function runApply(client, args) {
     }
   });
   say(`backfilled ${listingRows.length} listing rows and ${noteRows.length} note rows (rows already backfilled: ${rows.length - pending.length})`);
+
+  // Re-normalization pass (spec R3.2, decision 12): title_norm/location_norm/dedup_hash for every listing,
+  // including rows backfilled in earlier migration runs.
+  const renorm = await renormalizeListings(client);
+  say(`re-normalized title/location: ${renorm.changed} row(s) changed, ${renorm.collisions} new dedup_hash collision(s) queued for review (reason=title_renormalized)`);
 
   // Conflict groups from the stored columns (covers rows backfilled in earlier runs too).
   const urlConf = await client.query(`
