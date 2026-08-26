@@ -266,14 +266,19 @@ export async function renormalizeListings(client) {
       [newHash, row.id],
     );
     if (collide.rowCount) {
-      const already = await client.query(`SELECT id FROM ic_job_review_queue WHERE resolved_at IS NULL AND candidate_id = $1 AND reason = 'title_renormalized'`, [row.id]);
+      // The review-queue invariant (checked by --check's queueInvariant) requires AT MOST one open queue
+      // row per status='review' listing. Check for ANY open row on this candidate, not just one with
+      // reason='title_renormalized' -- a row already queued for a different reason (e.g. an earlier
+      // same_source_hash_within_gap near-miss) must not get a second, competing queue entry.
+      const already = await client.query(`SELECT id FROM ic_job_review_queue WHERE resolved_at IS NULL AND candidate_id = $1`, [row.id]);
+      collisions++;
       if (already.rowCount === 0) {
         await client.query(
           `INSERT INTO ic_job_review_queue (candidate, candidate_id, matches, reason, status_at_create)
            VALUES ($1::jsonb, $2, $3::int[], 'title_renormalized', NULL)`,
           [JSON.stringify({ id: row.id, title_norm: newTitleNorm, location_norm: newLocationNorm, dedup_hash: newHash }), row.id, collide.rows.map((r) => Number(r.id))],
         );
-        collisions++;
+        await client.query(`UPDATE ic_job_listings SET status = 'review' WHERE id = $1 AND status IS DISTINCT FROM 'review'`, [row.id]);
       }
     }
   }
