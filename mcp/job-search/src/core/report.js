@@ -14,7 +14,7 @@ import fs from 'node:fs';
 import path from 'node:path';
 import { formatDate } from './compact.js';
 import { formatFollowup, selectDue, unsnoozeDue } from './followups.js';
-import { repoRoot } from './config.js';
+import { repoRoot, DEFAULT_REPORT_HOME_MIN_PRESCORE } from './config.js';
 
 /** Directory the markdown report is written to (spec R1.3), relative to the repo root; covered by the existing `/output/` .gitignore entry. */
 export const REPORTS_DIR = path.join('output', 'reports');
@@ -180,7 +180,7 @@ export async function collectLookAtThese(client, since, limit) {
   // could still land here) is NOT-ok by default (independent-review fix), same as any other non-ok
   // class; it surfaces in collectSuspectAndUnclassified() instead, never silently in "Look at these".
   const top = await client.query(
-    `SELECT id, title, company, location, remote_mode, salary_min, salary_max, prescore, source, url_normalized, url, company_norm, title_norm
+    `SELECT id, title, company, location, remote_mode, salary_min, salary_max, prescore, source, url_normalized, url, company_norm, title_norm, location_norm
      FROM ic_job_listings
      WHERE first_seen > $1 AND coalesce(record_kind,'listing') = 'listing' AND duplicate_of IS NULL
        AND noise_class IN ('ok','ok_manual')
@@ -212,10 +212,63 @@ export async function collectLookAtThese(client, since, limit) {
       siblings.set(owner.id, list);
     }
   }
+  const alsoPosted = await collectAlsoPostedStates(client, top.rows);
   return {
-    rows: top.rows.map((r) => ({ ...r, also_seen_via: siblings.get(r.id) ?? [] })),
+    rows: top.rows.map((r) => ({ ...r, also_seen_via: siblings.get(r.id) ?? [], also_posted_states: alsoPosted.get(r.id) ?? [] })),
     excludedCount: excludedCount.rows[0].n,
   };
+}
+
+/**
+ * Extracts the lowercase US state abbreviation from a location_norm value produced by normalizeLocation
+ * ('remote-<iso>-<st>' or 'state-<st>'); null for every other shape (city-st, country-<iso>, absent,
+ * legacy-unknown, unknown:*, or a remote-<iso> value with no state suffix).
+ * @param {string|null|undefined} locationNorm
+ */
+function stateSuffixOf(locationNorm) {
+  if (typeof locationNorm !== 'string') return null;
+  const m = /^(?:remote-[a-z]{2}-|state-)([a-z]{2})$/.exec(locationNorm);
+  return m ? m[1] : null;
+}
+
+/**
+ * "Also posted" annotation (spec R6.3 verification): when the R6 state/remote backfill has merged one or
+ * more same-listing-different-state postings into a row via duplicate_of (e.g. Gartner's "Executive
+ * Partner - CIO Advisory" posted separately for Oklahoma and Arkansas), the merged-away rows stop
+ * appearing as their own entries -- this recovers the other state(s) so the report shows ONE row
+ * annotated with every state it represents, instead of silently dropping the fact that a merge happened.
+ * Only rows carrying an extractable state (via stateSuffixOf) contribute; a merge with no parseable state
+ * on either side is not annotated (there is nothing state-specific to report).
+ * @param {import('pg').ClientBase} client
+ * @param {{id: number, location_norm?: string|null}[]} rows
+ * @returns {Promise<Map<number, string[]>>}
+ */
+async function collectAlsoPostedStates(client, rows) {
+  /** @type {Map<number, string[]>} */
+  const result = new Map();
+  const ids = rows.map((r) => r.id);
+  if (!ids.length) return result;
+  const dup = await client.query(`SELECT id, duplicate_of, location_norm FROM ic_job_listings WHERE duplicate_of = ANY($1::int[])`, [ids]);
+  /** @type {Map<number, string[]>} */
+  const byRoot = new Map();
+  for (const d of dup.rows) {
+    const list = byRoot.get(d.duplicate_of) ?? [];
+    list.push(d.location_norm);
+    byRoot.set(d.duplicate_of, list);
+  }
+  for (const r of rows) {
+    const childLocs = byRoot.get(r.id);
+    if (!childLocs || !childLocs.length) continue;
+    const states = new Set();
+    const ownState = stateSuffixOf(r.location_norm);
+    if (ownState) states.add(ownState.toUpperCase());
+    for (const loc of childLocs) {
+      const st = stateSuffixOf(loc);
+      if (st) states.add(st.toUpperCase());
+    }
+    if (states.size > 1) result.set(r.id, [...states].sort());
+  }
+  return result;
 }
 
 /**
@@ -241,23 +294,34 @@ export async function collectSuspectAndUnclassified(client, since, limit) {
 }
 
 /**
- * "Houston / Texas" (spec R1.2c): same first_seen window, filtered to the profile's home locations, ANY
- * prescore (no ranking cut). location_norm values are derived from the profile's own `locations` list.
+ * "Houston / Texas" (spec R1.2c): same first_seen window, filtered to the profile's home locations, with
+ * a prescore floor (run.reportHomeMinPrescore, default 40 -- independent review round 2 fix: an
+ * unfiltered "any prescore" list surfaced very low-relevance rows, e.g. an RN Clinical Director posting,
+ * which the spec's own "any prescore" wording did not anticipate). Excluded count is reported the same
+ * way collectLookAtThese() reports its own exclusions, so the operator can see rows were filtered, not
+ * silently dropped.
  * @param {import('pg').ClientBase} client
  * @param {Date} since
  * @param {string[]} locationNorms
+ * @param {number} minPrescore
  */
-export async function collectHomeLocations(client, since, locationNorms) {
-  if (!locationNorms.length) return [];
+export async function collectHomeLocations(client, since, locationNorms, minPrescore) {
+  if (!locationNorms.length) return { rows: [], excludedCount: 0 };
   const r = await client.query(
     `SELECT id, title, company, location, remote_mode, salary_min, salary_max, prescore, source, url_normalized, url
      FROM ic_job_listings
      WHERE first_seen > $1 AND coalesce(record_kind,'listing') = 'listing' AND duplicate_of IS NULL
-       AND location_norm = ANY($2::text[])
+       AND location_norm = ANY($2::text[]) AND coalesce(prescore, 0) >= $3
      ORDER BY prescore DESC NULLS LAST, id DESC LIMIT 25`,
-    [since, locationNorms],
+    [since, locationNorms, minPrescore],
   );
-  return r.rows;
+  const excluded = await client.query(
+    `SELECT count(*)::int AS n FROM ic_job_listings
+     WHERE first_seen > $1 AND coalesce(record_kind,'listing') = 'listing' AND duplicate_of IS NULL
+       AND location_norm = ANY($2::text[]) AND coalesce(prescore, 0) < $3`,
+    [since, locationNorms, minPrescore],
+  );
+  return { rows: r.rows, excludedCount: excluded.rows[0].n };
 }
 
 /** @param {import('pg').ClientBase} client */
@@ -279,15 +343,17 @@ export async function collectDisabledSources(client) {
 
 /**
  * @param {import('pg').ClientBase} client
- * @param {{ now?: Date, timezone?: string, topN?: number, homeLocationNorms?: string[], profile?: string, sinceOverride?: Date|null }} [opts]
+ * @param {{ now?: Date, timezone?: string, topN?: number, homeLocationNorms?: string[], homeMinPrescore?: number, profile?: string, sinceOverride?: Date|null }} [opts]
  *   sinceOverride bypasses the DB marker read entirely (test seam / on-demand scan_report with an explicit
  *   date, spec R1.4): when provided (including explicitly null, meaning "no lower bound"), it is used as
- *   `since` instead of ic_report_state.last_report_sent_at.
+ *   `since` instead of ic_report_state.last_report_sent_at. homeMinPrescore defaults to 40
+ *   (run.reportHomeMinPrescore); see collectHomeLocations().
  */
 export async function buildScanReport(client, opts = {}) {
   const now = opts.now ?? new Date();
   const timezone = opts.timezone ?? 'America/Chicago';
   const topN = opts.topN ?? 10;
+  const homeMinPrescore = opts.homeMinPrescore ?? DEFAULT_REPORT_HOME_MIN_PRESCORE;
   const homeLocationNorms = opts.homeLocationNorms ?? [];
   const overriding = Object.prototype.hasOwnProperty.call(opts, 'sinceOverride');
   const state = overriding ? { lastReportSentAt: null, lastRunIdIncluded: null } : await getReportState(client);
@@ -299,7 +365,7 @@ export async function buildScanReport(client, opts = {}) {
   const noScan = runs.length === 0 && isWeekdayInTz(now, timezone);
   const lookAtThese = await collectLookAtThese(client, since, topN);
   const suspectUnclassified = await collectSuspectAndUnclassified(client, since, 10);
-  const homeLocations = await collectHomeLocations(client, since, homeLocationNorms);
+  const homeLocations = await collectHomeLocations(client, since, homeLocationNorms, homeMinPrescore);
   const reviewQueue = await collectReviewQueueSummary(client);
   const disabledSources = await collectDisabledSources(client);
   const worstStatus = runs.reduce((worst, r) => (REPORT_STATUS_PRIORITY[r.status] ?? 0) > (REPORT_STATUS_PRIORITY[worst] ?? 0) ? r.status : worst, 'ok');
@@ -381,7 +447,8 @@ export function renderReportText(data, registry) {
   for (const r of data.lookAtThese.rows) {
     const url = urlPassesRegistry(r.url_normalized ?? r.url, registry ?? { entries: [], httpAllowedHosts: new Set() }) ? (r.url_normalized ?? r.url) : null;
     const also = r.also_seen_via.length ? ` (also seen via ${r.also_seen_via.join(', ')})` : '';
-    lines.push(`#${r.id} | ${r.title} | ${r.company} | ${r.location ?? 'n/a'} | ${salaryText(r)} | ps ${r.prescore ?? 0} | ${r.source}${also}${url ? ` | ${url}` : ''}`);
+    const alsoPosted = r.also_posted_states && r.also_posted_states.length ? ` (also posted: ${r.also_posted_states.join(', ')})` : '';
+    lines.push(`#${r.id} | ${r.title} | ${r.company} | ${r.location ?? 'n/a'} | ${salaryText(r)} | ps ${r.prescore ?? 0} | ${r.source}${also}${alsoPosted}${url ? ` | ${url}` : ''}`);
   }
   lines.push('');
   lines.push(`== Suspect / unclassified (${data.suspectUnclassified.length}) ==`);
@@ -389,8 +456,9 @@ export function renderReportText(data, registry) {
   for (const r of data.suspectUnclassified) lines.push(`#${r.id} | ${r.title} | ${r.company} | ${r.location ?? 'n/a'} | ${r.source} | ${r.noise_class}`);
   lines.push('');
   lines.push('== Houston / Texas ==');
-  if (data.homeLocations.length === 0) lines.push('(none)');
-  for (const r of data.homeLocations) {
+  if (data.homeLocations.excludedCount) lines.push(`(${data.homeLocations.excludedCount} row(s) below the prescore floor excluded from this list; they are still in the database)`);
+  if (data.homeLocations.rows.length === 0) lines.push('(none)');
+  for (const r of data.homeLocations.rows) {
     const url = urlPassesRegistry(r.url_normalized ?? r.url, registry ?? { entries: [], httpAllowedHosts: new Set() }) ? (r.url_normalized ?? r.url) : null;
     lines.push(`#${r.id} | ${r.title} | ${r.company} | ${r.location ?? 'n/a'} | ${salaryText(r)} | ps ${r.prescore ?? 0} | ${r.source}${url ? ` | ${url}` : ''}`);
   }
@@ -418,7 +486,8 @@ export function renderReportHtml(data, registry) {
   };
   const rowLi = (/** @type {any} */ r, /** @type {boolean} */ withAlso) => {
     const also = withAlso && r.also_seen_via && r.also_seen_via.length ? ` (also seen via ${esc(r.also_seen_via.join(', '))})` : '';
-    return `<li>#${r.id} ${linkOrText(r)} at ${esc(r.company)}, ${esc(r.location ?? 'n/a')}, ${esc(salaryText(r))}, ps ${r.prescore ?? 0}, ${esc(r.source)}${also}</li>`;
+    const alsoPosted = withAlso && r.also_posted_states && r.also_posted_states.length ? ` (also posted: ${esc(r.also_posted_states.join(', '))})` : '';
+    return `<li>#${r.id} ${linkOrText(r)} at ${esc(r.company)}, ${esc(r.location ?? 'n/a')}, ${esc(salaryText(r))}, ps ${r.prescore ?? 0}, ${esc(r.source)}${also}${alsoPosted}</li>`;
   };
   const parts = [];
   parts.push(`<h2>Job scan report for ${esc(data.dayKey)} (times ${esc(data.timezone)})</h2>`);
@@ -441,7 +510,8 @@ export function renderReportHtml(data, registry) {
   parts.push(`<h3>Suspect / unclassified (${data.suspectUnclassified.length})</h3>`);
   parts.push(data.suspectUnclassified.length ? `<ul>${data.suspectUnclassified.map((r) => `<li>#${r.id} ${esc(r.title)} at ${esc(r.company)}, ${esc(r.location ?? 'n/a')}, ${esc(r.source)}, ${esc(r.noise_class)}</li>`).join('')}</ul>` : '<p>(none)</p>');
   parts.push('<h3>Houston / Texas</h3>');
-  parts.push(data.homeLocations.length ? `<ul>${data.homeLocations.map((r) => rowLi(r, false)).join('')}</ul>` : '<p>(none)</p>');
+  if (data.homeLocations.excludedCount) parts.push(`<p>(${data.homeLocations.excludedCount} row(s) below the prescore floor excluded from this list; they are still in the database)</p>`);
+  parts.push(data.homeLocations.rows.length ? `<ul>${data.homeLocations.rows.map((r) => rowLi(r, false)).join('')}</ul>` : '<p>(none)</p>');
   parts.push(`<h3>Review queue: ${data.reviewQueue.total} open</h3>`);
   parts.push(data.reviewQueue.topReasons.length ? `<ul>${data.reviewQueue.topReasons.map((t) => `<li>${esc(t.reason)}: ${t.count}</li>`).join('')}</ul>` : '<p>(none)</p>');
   parts.push('<h3>Disabled sources</h3>');
@@ -485,7 +555,8 @@ export function renderReportMarkdown(data, registry) {
   for (const r of data.lookAtThese.rows) {
     const url = urlPassesRegistry(r.url_normalized ?? r.url, reg) ? (r.url_normalized ?? r.url) : null;
     const also = r.also_seen_via.length ? ` (also seen via ${r.also_seen_via.join(', ')})` : '';
-    lines.push(`- #${r.id} ${r.title} at ${r.company}, ${r.location ?? 'n/a'}, ${salaryText(r)}, ps ${r.prescore ?? 0}, ${r.source}${also}${url ? ` (${url})` : ''}`);
+    const alsoPosted = r.also_posted_states && r.also_posted_states.length ? ` (also posted: ${r.also_posted_states.join(', ')})` : '';
+    lines.push(`- #${r.id} ${r.title} at ${r.company}, ${r.location ?? 'n/a'}, ${salaryText(r)}, ps ${r.prescore ?? 0}, ${r.source}${also}${alsoPosted}${url ? ` (${url})` : ''}`);
   }
   lines.push('');
   lines.push(`## Suspect / unclassified (${data.suspectUnclassified.length})`);
@@ -495,8 +566,9 @@ export function renderReportMarkdown(data, registry) {
   lines.push('');
   lines.push('## Houston / Texas');
   lines.push('');
-  if (data.homeLocations.length === 0) lines.push('(none)');
-  for (const r of data.homeLocations) {
+  if (data.homeLocations.excludedCount) lines.push(`(${data.homeLocations.excludedCount} row(s) below the prescore floor excluded from this list; they are still in the database)`);
+  if (data.homeLocations.rows.length === 0) lines.push('(none)');
+  for (const r of data.homeLocations.rows) {
     const url = urlPassesRegistry(r.url_normalized ?? r.url, reg) ? (r.url_normalized ?? r.url) : null;
     lines.push(`- #${r.id} ${r.title} at ${r.company}, ${r.location ?? 'n/a'}, ${salaryText(r)}, ps ${r.prescore ?? 0}, ${r.source}${url ? ` (${url})` : ''}`);
   }

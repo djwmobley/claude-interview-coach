@@ -75,6 +75,60 @@ describe('renormalizeListings (spec R3.2, decision 12)', () => {
     assert.equal(row.location_norm, 'state-tx');
   });
 
+  test('recomputes location_norm for a remote-* row to gain its state suffix (scan-report-fixes item 3): bare remote-us -> remote-us-ok', async () => {
+    const id = await insert({ location: 'Oklahoma, United States', location_norm: 'remote-us', remote_declared: true });
+    await renormalizeListings(client);
+    const row = (await client.query('SELECT location_norm FROM ic_job_listings WHERE id = $1', [id])).rows[0];
+    assert.equal(row.location_norm, 'remote-us-ok');
+  });
+
+  test('a remote-* row with no discernible state stays the bare remote-<iso> (no-op, no spurious UPDATE)', async () => {
+    const id = await insert({ location: 'United States', location_norm: 'remote-us', remote_declared: true });
+    await renormalizeListings(client);
+    const row = (await client.query('SELECT location_norm FROM ic_job_listings WHERE id = $1', [id])).rows[0];
+    assert.equal(row.location_norm, 'remote-us');
+  });
+
+  test('recomputes title (badge stripped) for a row whose title_norm predates the trailing-UI-fragment strip', async () => {
+    const id = await insert({ title: 'Chief Technology Officer with verification', title_norm: 'chief technology officer with verification' });
+    await renormalizeListings(client);
+    const row = (await client.query('SELECT title, title_norm FROM ic_job_listings WHERE id = $1', [id])).rows[0];
+    assert.equal(row.title, 'Chief Technology Officer');
+    assert.equal(row.title_norm, 'chief technology officer');
+  });
+
+  test('the real Gartner Oklahoma/Arkansas shape end to end (scan-report-fixes item 3): renormalizeListings recomputes title (badge stripped) and location (state suffix gained) for two "remote-us" rows that currently share one dedup_hash; backfillStateRemoteDedup then merges the already-queued pair via branch 6', async () => {
+    const dirtyTitle = 'Executive Partner - CIO Advisory with verification';
+    const dirtyTitleNorm = 'executive partner chief information officer advisory with verification';
+    const ok = await insert({ title: dirtyTitle, title_norm: dirtyTitleNorm, location: 'Oklahoma, United States', location_norm: 'remote-us', remote_declared: true, posted_at: '2026-08-26' });
+    const ar = await insert({ title: dirtyTitle, title_norm: dirtyTitleNorm, location: 'Arkansas, United States', location_norm: 'remote-us', remote_declared: true, posted_at: '2026-08-26' });
+    // Simulate the pre-existing review-queue row the identical-hash ambiguous branch created for this
+    // pair before the fix (matches the real production shape: both rows open, duplicate_of NULL, queued
+    // under reason 'same_source_hash_within_gap' because they collided on dedup_hash).
+    const preRow = (await client.query('SELECT dedup_hash FROM ic_job_listings WHERE id = $1', [ok])).rows[0];
+    const preRowAr = (await client.query('SELECT dedup_hash FROM ic_job_listings WHERE id = $1', [ar])).rows[0];
+    assert.equal(preRow.dedup_hash, preRowAr.dedup_hash, 'precondition: both rows collide on dedup_hash before renormalization, exactly like the real DB bug');
+    await client.query(
+      `INSERT INTO ic_job_review_queue (candidate_id, matches, reason, status_at_create) VALUES ($1, $2::int[], 'same_source_hash_within_gap', NULL)`,
+      [ar, [ok]],
+    );
+    await renormalizeListings(client);
+    const okRow = (await client.query('SELECT title, title_norm, location_norm, dedup_hash FROM ic_job_listings WHERE id = $1', [ok])).rows[0];
+    const arRow = (await client.query('SELECT title, title_norm, location_norm, dedup_hash FROM ic_job_listings WHERE id = $1', [ar])).rows[0];
+    assert.equal(okRow.title, 'Executive Partner - CIO Advisory');
+    assert.equal(okRow.location_norm, 'remote-us-ok');
+    assert.equal(arRow.location_norm, 'remote-us-ar');
+    assert.equal(okRow.title_norm, arRow.title_norm);
+    assert.notEqual(okRow.dedup_hash, arRow.dedup_hash, 'the two states no longer collide on dedup_hash after renormalization');
+    const { merged, details } = await backfillStateRemoteDedup(client);
+    assert.ok(merged >= 1);
+    const found = details.find((d) => d.candidate_id === ar);
+    assert.ok(found, 'the Arkansas row merges via the R6 backfill');
+    assert.equal(found.root_id, ok, 'Oklahoma (the earlier/lower id) is the root');
+    const dupCheck = (await client.query('SELECT duplicate_of FROM ic_job_listings WHERE id = $1', [ar])).rows[0];
+    assert.equal(dupCheck.duplicate_of, ok, 'the real DB now shows ONE root for this Gartner posting, not two open rows');
+  });
+
   test('a dedup_hash collision from renormalization is queued for review, never auto-merged', async () => {
     // Two rows that will renormalize to the SAME title_norm/location_norm/dedup_hash once cleaned.
     const a = await insert({ title: 'CTO Enterprise Boilerplate Segment CTO Enterprise Boilerplate Segment with strong background', title_norm: 'cto enterprise boilerplate segment cto enterprise boilerplate segment with strong background', location: 'Texas', location_norm: 'legacy-unknown' });

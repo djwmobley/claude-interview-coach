@@ -6,7 +6,7 @@
  * `connectDedicated()` and release it in `finally`.
  */
 import pg from 'pg';
-import { pgConnectionConfig } from './config.js';
+import { pgConnectionConfig, assertTestDbGuard } from './config.js';
 import { wrapDbError } from './errors.js';
 
 const { Pool, Client } = pg;
@@ -20,7 +20,11 @@ let pool = null;
  */
 export function getPool(opts = {}) {
   if (pool) return pool;
-  pool = new Pool({ ...pgConnectionConfig(opts.dsn ?? null), max: opts.max ?? 4, idleTimeoutMillis: 30000 });
+  const cfg = pgConnectionConfig(opts.dsn ?? null);
+  // pgConnectionConfig() already enforces this (it is the real single chokepoint -- see its doc
+  // comment); called again here as a second, redundant layer directly on this entry point.
+  assertTestDbGuard(cfg);
+  pool = new Pool({ ...cfg, max: opts.max ?? 4, idleTimeoutMillis: 30000 });
   pool.on('error', () => {
     /* idle client errors are surfaced on next query; nothing to log here without an object */
   });
@@ -41,7 +45,10 @@ export async function closePool() {
  * @returns {Promise<import('pg').Client>}
  */
 export async function connectDedicated(opts = {}) {
-  const client = new Client(pgConnectionConfig(opts.dsn ?? null));
+  const cfg = pgConnectionConfig(opts.dsn ?? null);
+  // See the comment in getPool() above: redundant with pgConnectionConfig()'s own enforcement.
+  assertTestDbGuard(cfg);
+  const client = new Client(cfg);
   try {
     await client.connect();
   } catch (err) {

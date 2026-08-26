@@ -17,6 +17,7 @@
  *                   dice:<uuid>, oracle:<host>/<id>.
  */
 import crypto from 'node:crypto';
+import { log } from './logger.js';
 
 // ---------------------------------------------------------------------------
 // Options (config-backed, with built-in fallbacks so the module is importable
@@ -30,11 +31,15 @@ export const DEFAULT_TRACKING_PARAMS = Object.freeze([
   'xpse', 'sc', 'hidesmb', 'alid', 'acatk', 'pub', 'mo',
 ]);
 
+/** Built-in trailing UI-fragment list; config/adapters.json's titleTrailingFragments extends/replaces it. */
+export const DEFAULT_TITLE_TRAILING_FRAGMENTS = Object.freeze(['with verification']);
+
 /**
  * @typedef {Object} NormalizeOptions
  * @property {readonly string[]} [trackingParams] lowercase keys; `utm_*` style prefixes allowed
  * @property {ReadonlyArray<{ board: string, hosts?: string[] }>} [greenhouseBoards] host -> board lookup for embedded gh_jid
  * @property {Record<string, string>} [aliases] company alias map (keys are collapsed the same way as company names)
+ * @property {readonly string[]} [titleTrailingFragments] source-UI fragments to strip from the END of a title (spec: LinkedIn's verified-badge text; total classification -- a trailing fragment not on this list is left in place, never guessed at)
  */
 
 /** @type {NormalizeOptions | null} */
@@ -48,7 +53,7 @@ let defaultOpts = null;
 export function getDefaultNormalizeOptions() {
   if (defaultOpts) return defaultOpts;
   /** @type {NormalizeOptions} */
-  let opts = { trackingParams: DEFAULT_TRACKING_PARAMS, greenhouseBoards: [], aliases: {} };
+  let opts = { trackingParams: DEFAULT_TRACKING_PARAMS, greenhouseBoards: [], aliases: {}, titleTrailingFragments: DEFAULT_TITLE_TRAILING_FRAGMENTS };
   try {
     // Dynamic require-free import would be async; config.js is sync, so import it statically below.
     const cfg = _loadConfigSync();
@@ -57,6 +62,7 @@ export function getDefaultNormalizeOptions() {
         trackingParams: cfg.adapters.trackingParams.map((p) => p.toLowerCase()),
         greenhouseBoards: cfg.atsBoards.greenhouse.map((b) => ({ board: b.board, hosts: b.hosts })),
         aliases: buildAliasMap(cfg.companyAliases),
+        titleTrailingFragments: (cfg.adapters.titleTrailingFragments ?? DEFAULT_TITLE_TRAILING_FRAGMENTS).map((f) => String(f).toLowerCase()),
       };
     }
   } catch {
@@ -147,26 +153,47 @@ export function collapseWhitespace(s) {
   return stripZeroWidth(s).replace(/\s+/g, ' ').trim();
 }
 
-/** Minimum size of a repeated leading segment eligible to be stripped (decision 9-10). */
-export const MIN_REPEAT_SEGMENT_CHARS = 12;
+/**
+ * Minimum size of a repeated leading segment eligible to be stripped (decision 9-10, narrowed by
+ * scan-report-fixes item 2: word count only, no character-count floor -- a char floor was blocking
+ * genuine short-title repeats like "Field CTO Field CTO" (9 chars, 2 words) from collapsing. A
+ * single-word segment ("CTO CTO Group", "Manager, Manager Development Program") is still never
+ * mangled: "CTO" and "Manager," are each one token, below this floor either way.
+ */
 export const MIN_REPEAT_SEGMENT_WORDS = 2;
 
 /**
- * Strip a repeated leading segment (spec R3.1, decisions 9-11): when the
- * (already whitespace-collapsed) string is `A + ' ' + B` and B starts with
- * A, keep only B -- UNLESS A is short (fewer than 12 chars or fewer than 2
- * words), in which case the string is returned unchanged (decision 9-10:
- * "CTO CTO Group" and "Manager, Manager Development Program" must not be
- * mangled by a single-token or otherwise short coincidental repeat). Among
- * every valid split point the LONGEST matching A is chosen, so a title with
- * one genuine boilerplate repeat resolves in a single pass. No recursion:
- * at most one repeat is stripped per call, matching the spec's "keep the
+ * Strip a repeated leading segment (spec R3.1, decisions 9-11, floor narrowed by scan-report-fixes item
+ * 2): when the (already whitespace-collapsed) string is `A + ' ' + B` and B starts with A, keep only B
+ * -- UNLESS A is a single word, in which case the string is returned unchanged (decision 9-10: "CTO CTO
+ * Group" and "Manager, Manager Development Program" must not be mangled by a single-token coincidental
+ * repeat; there is no longer a minimum character count -- "Field CTO Field CTO" collapses to "Field
+ * CTO" even though "Field CTO" is under 12 characters, because it is 2 words). Among every valid split
+ * point the LONGEST matching A is chosen, so a title with one genuine boilerplate repeat resolves in a
+ * single pass. No recursion: at most one repeat is stripped per call, matching the spec's "keep the
  * text once."
  * @param {string} s already collapseWhitespace()-d
  * @returns {{ text: string, stripped: boolean, segment: string|null }}
  */
 export function stripRepeatedLeadingSegment(s) {
   const text = String(s ?? '');
+
+  // Whole-string exact duplication with no reliable space separator ("Chief AI Transformation
+  // OfficerChief AI Transformation Officer", "...ComplianceSenior Director..."): A+A directly
+  // concatenated, or A + exactly one separator character + A. Checked first since it is a stronger,
+  // unambiguous signal (the ENTIRE title is two copies of the same text) than the space-delimited
+  // prefix search below, which only requires a matching PREFIX followed by arbitrary trailing text.
+  const exact = matchExactHalfRepeat(text);
+  if (exact) {
+    const exactWords = exact.split(' ').filter(Boolean).length;
+    if (exactWords >= MIN_REPEAT_SEGMENT_WORDS) {
+      return { text: exact, stripped: true, segment: exact };
+    }
+    // Below the floor (e.g. "CTOCTO" or "CTO CTO", both a single token): deliberately falls through to
+    // the space-delimited search below, which applies the identical floor and will also correctly leave
+    // it untouched.
+  }
+
   /** @type {{ a: string, rest: string } | null} */
   let best = null;
   for (let i = text.indexOf(' '); i !== -1; i = text.indexOf(' ', i + 1)) {
@@ -174,27 +201,87 @@ export function stripRepeatedLeadingSegment(s) {
     const rest = text.slice(i + 1);
     if (a && rest.startsWith(a)) best = { a, rest };
   }
-  if (!best) return { text, stripped: false, segment: null };
+  if (!best) return { text, stripped: false, segment: exact };
   const words = best.a.split(' ').filter(Boolean).length;
-  if (best.a.length < MIN_REPEAT_SEGMENT_CHARS || words < MIN_REPEAT_SEGMENT_WORDS) {
+  if (words < MIN_REPEAT_SEGMENT_WORDS) {
     return { text, stripped: false, segment: best.a };
   }
   return { text: best.rest, stripped: true, segment: best.a };
+}
+
+/**
+ * Does `text` consist of exactly two copies of the same substring A, either directly concatenated
+ * (A+A) or separated by exactly one character (A+sep+A, e.g. a stray comma or dash the source dropped
+ * the surrounding whitespace from)? Returns A (the un-floor-checked candidate) or null. The floor
+ * (length/word-count) is applied by the caller, same as the space-delimited search.
+ * @param {string} text
+ * @returns {string|null}
+ */
+function matchExactHalfRepeat(text) {
+  const n = text.length;
+  if (n >= 2 && n % 2 === 0) {
+    const half = n / 2;
+    const a = text.slice(0, half);
+    if (a && text.slice(half) === a) return a;
+  }
+  if (n >= 3 && (n - 1) % 2 === 0) {
+    const half = (n - 1) / 2;
+    const a = text.slice(0, half);
+    const rest = text.slice(half + 1);
+    if (a && rest === a) return a;
+  }
+  return null;
 }
 
 /** Titles are capped at this many chars after normalization (spec R3.1). */
 export const TITLE_MAX_CHARS = 200;
 
 /**
- * Full title text cleaning pipeline (spec R3.1): zero-width strip, whitespace
- * collapse, repeated-leading-segment strip, 200-char cap. Used both for the
- * stored `title` column and as the input to normalizeTitle()'s tokenizer, so
- * a duplicated boilerplate segment never reaches title_norm either.
- * @param {unknown} raw
+ * Strip a trailing source-UI fragment (spec: LinkedIn's verified-badge text, "<title> with
+ * verification", appended by the list scraper) from the end of `text`. Total classification: a
+ * fragment on the configured list is stripped (case-insensitively, exactly once, longest match wins
+ * so a fragment that is itself a suffix of another configured fragment does not partially match); a
+ * trailing fragment NOT on the list is left in place -- this never guesses, it only ever acts on a
+ * known, explicit list.
+ * @param {string} text already collapseWhitespace()-d
+ * @param {readonly string[]} fragments lowercase, from config (or DEFAULT_TITLE_TRAILING_FRAGMENTS)
+ * @returns {{ text: string, stripped: boolean, fragment: string|null }}
  */
-export function cleanTitleText(raw) {
+export function stripTrailingUiFragments(text, fragments) {
+  const lower = text.toLowerCase();
+  /** @type {string|null} */
+  let longest = null;
+  for (const f of fragments ?? []) {
+    const frag = String(f ?? '').toLowerCase();
+    if (!frag) continue;
+    const suffix = ` ${frag}`;
+    if (lower.endsWith(suffix) && (longest === null || suffix.length > longest.length)) longest = suffix;
+  }
+  if (longest === null) return { text, stripped: false, fragment: null };
+  const kept = text.slice(0, text.length - longest.length).trimEnd();
+  return { text: kept, stripped: true, fragment: longest.trim() };
+}
+
+/**
+ * Full title text cleaning pipeline (spec R3.1, plus a defense against source-UI fragments like
+ * LinkedIn's verified-badge text): zero-width strip, whitespace collapse, trailing-UI-fragment strip,
+ * repeated-leading-segment strip, 200-char cap. Used both for the stored `title` column and as the
+ * input to normalizeTitle()'s tokenizer, so a duplicated boilerplate segment or a UI fragment never
+ * reaches title_norm either.
+ * @param {unknown} raw
+ * @param {NormalizeOptions} [opts]
+ */
+export function cleanTitleText(raw, opts) {
+  const o = opts ?? getDefaultNormalizeOptions();
   const collapsed = collapseWhitespace(raw);
-  const { text } = stripRepeatedLeadingSegment(collapsed);
+  const { text: defragmented, stripped, fragment } = stripTrailingUiFragments(collapsed, o.titleTrailingFragments ?? DEFAULT_TITLE_TRAILING_FRAGMENTS);
+  // Total classification (spec R3.1 item 1): a fragment on the configured list is stripped silently in
+  // the normal case, but the strip event itself is logged at debug so an operator reviewing logs can
+  // confirm which titles were affected and by which fragment -- an audit trail, not a gate. A trailing
+  // fragment NOT on the list is left in place and is not logged here (there is nothing specific to
+  // report about it; it is indistinguishable from a title that never had one).
+  if (stripped) log.debug({ event: 'title_ui_fragment_stripped', fragment, title_before: collapsed, title_after: defragmented });
+  const { text } = stripRepeatedLeadingSegment(defragmented);
   return text.length > TITLE_MAX_CHARS ? text.slice(0, TITLE_MAX_CHARS) : text;
 }
 
@@ -605,14 +692,34 @@ export function normalizeLocation(raw, remoteDeclared = false, remoteInferred = 
   const parsed = text ? parseLocation(text) : null;
   if (remoteDeclared) {
     let iso = 'us';
-    if (parsed && parsed.kind === 'country') iso = parsed.iso;
-    else if (text) {
-      // "Remote - Canada", "Remote (UK)"
+    let stateAbbrFound = parsed && parsed.kind === 'state' ? parsed.abbr : null;
+    if (parsed && parsed.kind === 'country') {
+      iso = parsed.iso;
+    } else if (text) {
+      // "Remote - Canada", "Remote (UK)", "Remote - Texas": strip the "remote" word and separator
+      // punctuation so the remaining text can be re-parsed on its own for a country OR a bare state, the
+      // same way the direct (non-"Remote -" prefixed) case already parses via `parsed` above.
       const inner = text.replace(/\bremote\b/gi, ' ').replace(/[()\-|,]/g, ' ').trim();
-      const c = inner ? countryIso(inner) : null;
-      if (c) iso = c;
+      if (inner) {
+        const c = countryIso(inner);
+        if (c) iso = c;
+        if (!stateAbbrFound) {
+          const innerParsed = parseLocation(inner);
+          if (innerParsed && innerParsed.kind === 'state') stateAbbrFound = innerParsed.abbr;
+        }
+      }
     }
-    return { location_norm: `remote-${iso}`, remote_mode: 'remote' };
+    // A remote-declared role whose location text still names a US state ("Oklahoma, United States",
+    // "Remote - Texas") keeps that state as a suffix (spec R6 fix): collapsing every remote-declared
+    // posting straight to the bare `remote-<iso>` value regardless of any stated state throws away the
+    // one signal that distinguishes "the identical role, broadcast once per state" postings (e.g.
+    // Gartner's "Executive Partner - CIO Advisory" in Oklahoma vs. Arkansas) from each other, which in
+    // turn made them collide on an IDENTICAL dedup_hash and get caught by the existing same-source
+    // -repost-within-gap ambiguous branch instead of ever reaching the state/remote merge rule (R6) that
+    // is supposed to consolidate them deliberately. A location with no discernible state (bare "Remote",
+    // "United States") is unaffected and still collapses to the original bare `remote-<iso>`.
+    const stateSuffix = stateAbbrFound ? `-${stateAbbrFound}` : '';
+    return { location_norm: `remote-${iso}${stateSuffix}`, remote_mode: 'remote' };
   }
   const mode = remoteInferred || /\bremote\b/.test(lower) ? 'remote' : hybrid ? 'hybrid' : text ? 'onsite' : null;
   if (raw === null || raw === undefined || !text) return { location_norm: ABSENT_LOCATION, remote_mode: mode };
@@ -669,11 +776,12 @@ const DROP_SEGMENT_RE = /^(?:remote|hybrid|on-?site|in-?office|work from home|wf
 
 /**
  * @param {unknown} raw
+ * @param {NormalizeOptions} [opts]
  * @returns {NormalizedTitle}
  */
-export function normalizeTitle(raw) {
+export function normalizeTitle(raw, opts) {
   if (typeof raw !== 'string' || !raw.trim()) return { title_norm: '', location_from_title: null };
-  let t = cleanTitleText(raw);
+  let t = cleanTitleText(raw, opts);
   /** @type {string|null} */
   let promoted = null;
   for (let guard = 0; guard < 6; guard++) {
@@ -867,7 +975,7 @@ export function normalizeListing(raw, opts) {
   const o = opts ?? getDefaultNormalizeOptions();
   const url = normalizeUrl(raw.url ?? null, o);
   const externalId = url.external_id ?? (raw.externalId ? `${raw.source}:${raw.externalId}` : null);
-  const title = normalizeTitle(raw.title);
+  const title = normalizeTitle(raw.title, o);
   const company = normalizeCompany(raw.company, { ...o, confidentialFirm: raw.confidentialFirm ?? undefined, source: raw.source });
   // Company/location get the same whitespace treatment as title (spec R3.1) but not the repeated-segment
   // strip or the 200-char cap, which are title-specific.
@@ -888,7 +996,7 @@ export function normalizeListing(raw, opts) {
     external_id: externalId,
     url_normalized: url.url_normalized,
     url_kind: url.kind,
-    title: cleanTitleText(raw.title),
+    title: cleanTitleText(raw.title, o),
     company: collapseWhitespace(raw.company),
     title_norm: title.title_norm,
     company_norm: company.company_norm,
@@ -917,7 +1025,7 @@ export function normalizeLegacyRow(row, opts) {
   const o = opts ?? getDefaultNormalizeOptions();
   const url = normalizeUrl(row.url, o);
   const source = row.source || url.source || 'manual';
-  const title = normalizeTitle(row.title);
+  const title = normalizeTitle(row.title, o);
   const company = normalizeCompany(row.company, { ...o, source });
   const location_norm = LEGACY_UNKNOWN_LOCATION;
   return {

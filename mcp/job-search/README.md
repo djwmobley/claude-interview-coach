@@ -207,11 +207,23 @@ classifying, since the backfill above should leave none) is treated as
 not-ok too, never silently passed as `ok`: both `suspect` and `NULL` rows
 surface in the report's own "Suspect / unclassified" section instead.
 
-`normalizeTitle`/`normalizeListing` strip zero-width/format characters and a
-duplicated leading boilerplate segment (LinkedIn's `"Field CTO\nField CTO
-with..."` pattern) before tokenizing, cap the stored title at 200 chars, and
-recognize a bare US state name or abbreviation ("Texas") as a location on its
-own, distinct from a city. That last piece feeds a dedicated dedup rule:
+`normalizeTitle`/`normalizeListing` strip zero-width/format characters, a
+known trailing source-UI fragment (LinkedIn's verified-badge text, `"<title>
+with verification"`; the list lives in `config/adapters.json`'s
+`titleTrailingFragments`, total classification -- an unlisted trailing
+fragment is left in place, never guessed at, and a successful strip is
+logged at debug for audit visibility), and a duplicated leading boilerplate
+segment before tokenizing. The repeated-segment strip covers both the
+space-delimited shape (LinkedIn's `"Field CTO\nField CTO with..."` pattern)
+and a whole-string repeat with no separator at all (`"Chief AI
+Transformation OfficerChief AI Transformation Officer"`); the floor for
+either shape is a single word only (scan-report-fixes item 2 narrowed this
+from "under 12 chars AND under 2 words" -- a real short 2-word repeat like
+`"Field CTO Field CTO"` now collapses correctly to `"Field CTO"`; a
+single-word coincidence like `"CTO CTO Group"` still never gets mangled).
+Title cleanup caps the stored title at 200 chars, and separately recognizes
+a bare US state name or abbreviation ("Texas") as a location on its own,
+distinct from a city. That last piece feeds a dedicated dedup rule:
 identical company + title postings that are both remote or both a state-only
 location (no city), posted within 14 days of each other, merge automatically
 (never queued for review) -- the "same role broadcast once per state"
@@ -405,6 +417,28 @@ resolves.
 after a schema change on the real database, so the next `npm test` picks it up without waiting through a
 full run first).
 
+**Second hard safety gate, at the point of connection**: `bin/bootstrap-test-db.js`'s gate above only
+protects the *bootstrap* step. A DIFFERENT mistake -- running a test file directly with `node --test
+test/x.test.js` instead of through `npm test` -- skips the bootstrap entirely, so `PG_DSN` resolves to
+whatever `.env` already points at (the real, shared database, most of the time), and every query that
+file's tests run goes straight to production with no warning. This happened once: a direct `node --test
+test/report.test.js` / `test/migrate.test.js` run corrupted the real `ic_report_state` singleton row and
+performed a real-data migration outside any tracked, deliberate invocation; it was caught and repaired by
+hand, which is not a defense, just luck. `src/core/config.js`'s `pgConnectionConfig()` (the function every
+database connection in this codebase is built from, including test files that construct `new
+pg.Client(pgConnectionConfig())` directly rather than going through `src/core/db.js`) now calls
+`assertTestDbGuard()` before returning: if the process is running under the Node test runner --
+`process.env.NODE_TEST_CONTEXT` is set (Node's own `node --test` marker), any `process.argv` entry
+contains `--test`, or `process.env.JOBSEARCH_TEST_GUARD === '1'` (set explicitly by `bin/run-tests.js` on
+its spawned child, as a first-party backup to `NODE_TEST_CONTEXT` in case a future Node version stops
+setting it) -- and the resolved database name does not end in `_test`, it throws immediately, before any
+connection is opened, telling the caller to run tests through `bin/run-tests.js`. `src/core/db.js`'s
+`getPool()`/`connectDedicated()` call the same guard again as a second, redundant layer. `test/config.test.js`
+proves the guard actually trips (and does not false-positive) by spawning real child `node` processes with
+each combination of these environment variables. **One consequence**: `LIVE=1 node --test
+test/smoke-greenhouse.test.js` below now also requires `PG_DSN` to point at a `_test`-suffixed database
+before it will run at all -- it is no longer possible to run it unisolated by omission.
+
 The DB-backed suites use marker profiles/companies (`zz-test-*`, `ZZ-TEST-*`) and delete them afterwards,
 on top of running against the isolated database; this is defense in depth, not the isolation mechanism
 itself. Two suites need files that are gitignored in this repo (`data/project-index.md` for
@@ -419,12 +453,14 @@ second; a closed CDP port yields `partial` plus `BROWSER_UNAVAILABLE`.
 `test/adversary.test.js` holds the refusal cases for `classify()`, the URL
 guard, wall classification, and the `render_doc` preflight.
 
-`LIVE=1 node --test test/smoke-greenhouse.test.js` makes one real Greenhouse
-boards-api call. This one bypasses `bin/run-tests.js`'s isolation entirely, since it is a rare,
+`LIVE=1 PG_DSN=<a _test DSN> node --test test/smoke-greenhouse.test.js` makes one real Greenhouse
+boards-api call. This one bypasses `bin/run-tests.js`'s bootstrap/isolation entirely, since it is a rare,
 deliberate, opt-in manual check rather than part of `npm test`; it writes (with the usual
-`zz-test-*`/`ZZ-TEST-*` marker-and-cleanup convention) to whatever database `PG_DSN` currently points
-at, so point `PG_DSN` at the test database yourself first if you want this one isolated too. Nothing
-else in the suite touches the network: fetch adapters
+`zz-test-*`/`ZZ-TEST-*` marker-and-cleanup convention) to whatever database `PG_DSN` points at. `PG_DSN`
+must point at a database whose name ends in `_test` -- `assertTestDbGuard()` (see above) now refuses to
+connect otherwise, since this file also runs under `node --test`. Point it at your bootstrapped test
+database (`node bin/bootstrap-test-db.js` creates/refreshes one on its own) rather than the real one.
+Nothing else in the suite touches the network: fetch adapters
 run over recorded fixtures (`test/fixtures/adapters/`) and browser adapters over
 a fake capability. `test/har.test.js` records every request of a full fixture
 run and asserts zero non-GET outside the Workday search POST and zero URLs
@@ -536,10 +572,17 @@ detected by the test suite.
   in legitimate titles that some ok rows will be flagged suspect with no
   further signal to disambiguate. The `staffingFirms` config list is a
   documented seed, not exhaustive; an unlisted staffing firm reads as `ok`.
-- Title cleanup (`stripRepeatedLeadingSegment`): a genuine short-title repeat
-  under 12 chars / 2 words (a real "CTO CTO" typo, as opposed to a
-  boilerplate-plus-tagline repeat) is deliberately left unmerged and only
-  logged at debug level, never routed to review.
+- Title cleanup (`stripRepeatedLeadingSegment`): the floor is a single word
+  only (scan-report-fixes item 2 narrowed it from "under 12 chars AND under 2
+  words" to "under 2 words" -- a genuine short-title 2-word repeat like
+  "Field CTO Field CTO" now collapses correctly). A real single-word
+  coincidence ("CTO CTO Group", "Manager, Manager Development Program") is
+  still deliberately left unmerged, with no signal distinguishing it from a
+  genuine boilerplate repeat that happens to be one word -- there is no
+  debug-level logging for this path (unlike the trailing-UI-fragment strip
+  above, which does log its own strip events), so an unmerged single-word
+  repeat is invisible unless someone notices it in a listing's title
+  directly.
 - R6 state/remote dedup: a live duplicate whose root listing later expires is
   out of scope (no re-promotion of a duplicate to root); a bare US state name
   with no comma/abbreviation ("just 'Texas'" vs. a city that happens to share

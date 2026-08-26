@@ -40,12 +40,21 @@ export function listUrl(term, location, days, pageIndex, remote = 'any') {
 }
 
 /**
+ * LinkedIn appends its verified-badge text to the title element's accessible text ("<title> with
+ * verification"); the linkedinJobCards extractor reads that text.content wholesale, so it arrives here
+ * still attached. Stripped at the point the card is parsed (structural fix; normalize.js's
+ * cleanTitleText also strips known trailing UI fragments as a config-driven defense in depth for any
+ * source, in case this or another adapter ever misses one).
+ */
+const TITLE_BADGE_RE = /\s+with verification\s*$/i;
+
+/**
  * Map one card from the `linkedinJobCards` extractor. Exported for tests.
  * @param {any} card
  */
 export function mapCard(card) {
   const id = card && typeof card.id === 'string' && /^\d{6,}$/.test(card.id) ? card.id : null;
-  const title = String(card && card.title ? card.title : '').trim();
+  const title = String(card && card.title ? card.title : '').replace(TITLE_BADGE_RE, '').trim();
   if (!id || !title) return null;
   const location = card.location ? String(card.location).replace(/\s+/g, ' ').trim() : null;
   const remote = /\bremote\b/i.test(location ?? '') ? 'remote' : /\bhybrid\b/i.test(location ?? '') ? 'hybrid' : null;

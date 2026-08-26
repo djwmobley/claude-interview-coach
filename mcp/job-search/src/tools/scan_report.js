@@ -10,6 +10,7 @@ import { buildScanReport, buildReportSubject, renderReportText, dayKeyInTz } fro
 import { normalizeLocation } from '../core/normalize.js';
 import { buildRegistry } from '../core/urlguard.js';
 import { JobSearchError } from '../core/errors.js';
+import { DEFAULT_REPORT_HOME_MIN_PRESCORE } from '../core/config.js';
 
 export const schema = {
   date: z.string().regex(/^\d{4}-\d{2}-\d{2}$/).optional().describe('YYYY-MM-DD in the report timezone; defaults to the window since the last sent report'),
@@ -26,6 +27,7 @@ export const tool = {
     const config = deps.config;
     const timezone = config?.adapters.run.timezone ?? 'America/Chicago';
     const topN = config?.adapters.run.reportTopN ?? 10;
+    const homeMinPrescore = config?.adapters.run.reportHomeMinPrescore ?? DEFAULT_REPORT_HOME_MIN_PRESCORE;
     const registry = config ? buildRegistry(config) : { entries: [], httpAllowedHosts: new Set() };
 
     /** @type {Date} */
@@ -57,7 +59,7 @@ export const tool = {
     const homeLocationNorms = [...new Set(locations.map((l) => normalizeLocation(l).location_norm).filter((n) => n && n !== 'absent'))];
 
     const report = await deps.withClient((c) => buildScanReport(c, {
-      now, timezone, topN, homeLocationNorms,
+      now, timezone, topN, homeMinPrescore, homeLocationNorms,
       ...(sinceOverride !== null ? { sinceOverride } : {}),
     }));
     const subject = buildReportSubject(report, {});
@@ -72,7 +74,7 @@ export const tool = {
       worst_status: report.worstStatus,
       look_at_these_count: report.lookAtThese.rows.length,
       look_at_these_excluded: report.lookAtThese.excludedCount,
-      home_locations_count: report.homeLocations.length,
+      home_locations_count: report.homeLocations.rows.length,
       review_queue_open: report.reviewQueue.total,
       disabled_sources: report.disabledSources.map((s) => s.source),
       report: untrusted(text),

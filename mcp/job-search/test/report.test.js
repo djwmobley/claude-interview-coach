@@ -16,6 +16,7 @@ import {
 } from '../src/core/report.js';
 import { tool as scanReport } from '../src/tools/scan_report.js';
 import { registryFrom } from '../src/core/urlguard.js';
+import { testConfig } from './helpers/scan-fixtures.js';
 
 const SRC = `zz-test-report-${process.pid}`;
 const CO = `ZZ-TEST-REPORT-${process.pid}`;
@@ -86,18 +87,46 @@ describe('escapeHtml / urlPassesRegistry (spec R1.5)', () => {
 });
 
 describe('buildScanReport: noise exclusion, home locations, review queue, disabled sources', () => {
-  test('"Look at these" excludes noise rows and counts them; "Houston / Texas" ignores prescore and the noise filter', async () => {
+  test('"Look at these" excludes noise rows and counts them; "Houston / Texas" ignores the noise filter but applies the prescore floor', async () => {
     const since = new Date(Date.now() - 5000);
     const ok = await insertListing({ title: 'Chief Technology Officer', prescore: 80, noise: 'ok' });
     const noisy = await insertListing({ title: 'Fractional CTO', prescore: 90, noise: 'fractional_or_founder' });
-    const lowHome = await insertListing({ title: 'Head of Technology', prescore: 5, noise: 'staffing_generic', location: 'Houston, TX', location_norm: 'houston-tx' });
+    // At-or-above the default floor (40) and noise-classified: still included -- R1.2c's "no noise
+    // filter" holds; only the floor is new (scan-report-fixes item 5).
+    const homeAboveFloor = await insertListing({ title: 'Head of Technology', prescore: 45, noise: 'staffing_generic', location: 'Houston, TX', location_norm: 'houston-tx' });
+    // Below the default floor: excluded (this is the actual bug the floor fixes -- an RN Clinical
+    // Director-style very-low-relevance row no longer appears in the Houston/Texas section).
+    const homeBelowFloor = await insertListing({ title: 'RN Clinical Director', prescore: 5, noise: 'ok', location: 'Houston, TX', location_norm: 'houston-tx' });
     const report = await buildScanReport(client, { sinceOverride: since, homeLocationNorms: ['houston-tx'] });
     const lookIds = report.lookAtThese.rows.map((r) => r.id);
     assert.ok(lookIds.includes(ok), 'ok row included');
     assert.ok(!lookIds.includes(noisy), 'noise row excluded from Look at these');
     assert.ok(report.lookAtThese.excludedCount >= 1);
-    const homeIds = report.homeLocations.map((r) => r.id);
-    assert.ok(homeIds.includes(lowHome), 'a low-prescore, noise-classified row still appears in Houston / Texas (R1.2c: any prescore, no noise filter)');
+    const homeIds = report.homeLocations.rows.map((r) => r.id);
+    assert.ok(homeIds.includes(homeAboveFloor), 'a noise-classified row at/above the prescore floor still appears in Houston / Texas (R1.2c: no noise filter)');
+    assert.ok(!homeIds.includes(homeBelowFloor), 'a row below the prescore floor is excluded from Houston / Texas (item 5 fix)');
+    assert.ok(report.homeLocations.excludedCount >= 1, 'the below-floor exclusion is counted, not silently dropped');
+  });
+
+  test('reportHomeMinPrescore option controls the floor directly', async () => {
+    const since = new Date(Date.now() - 5000);
+    const midScore = await insertListing({ title: 'Director of IT', prescore: 30, noise: 'ok', location: 'Houston, TX', location_norm: 'houston-tx' });
+    const belowDefault = await buildScanReport(client, { sinceOverride: since, homeLocationNorms: ['houston-tx'] });
+    assert.ok(!belowDefault.homeLocations.rows.map((r) => r.id).includes(midScore), 'prescore 30 is below the default floor of 40');
+    const withLowerFloor = await buildScanReport(client, { sinceOverride: since, homeLocationNorms: ['houston-tx'], homeMinPrescore: 20 });
+    assert.ok(withLowerFloor.homeLocations.rows.map((r) => r.id).includes(midScore), 'prescore 30 clears an explicitly lowered floor of 20');
+  });
+
+  test('"also posted" annotation includes the ROOT row\'s own state, not just its merged children (regression: the real Gartner AR/OK/TX row initially printed "also posted: OK, TX" with AR silently missing, because the root query did not select location_norm)', async () => {
+    const since = new Date(Date.now() - 5000);
+    const root = await insertListing({ title: 'Executive Partner - CIO Advisory', prescore: 57, noise: 'ok', location: 'Arkansas, United States', location_norm: 'remote-us-ar' });
+    const childOk = await insertListing({ title: 'Executive Partner - CIO Advisory', prescore: 57, noise: 'ok', location: 'Oklahoma, United States', location_norm: 'remote-us-ok' });
+    const childTx = await insertListing({ title: 'Executive Partner - CIO Advisory', prescore: 57, noise: 'ok', location: 'Texas, United States', location_norm: 'remote-us-tx' });
+    await client.query('UPDATE ic_job_listings SET duplicate_of = $1 WHERE id = ANY($2::int[])', [root, [childOk, childTx]]);
+    const report = await buildScanReport(client, { sinceOverride: since, homeLocationNorms: [] });
+    const rootRow = report.lookAtThese.rows.find((r) => r.id === root);
+    assert.ok(rootRow, 'the root row (duplicate_of IS NULL) appears in Look at these');
+    assert.deepEqual(rootRow.also_posted_states, ['AR', 'OK', 'TX'], 'the root\'s own state (AR) must appear alongside its merged children\'s states');
   });
 
   test('a NULL noise_class is treated as not-ok (independent review fix): excluded from "Look at these", surfaced in "Suspect / unclassified"', async () => {
@@ -153,12 +182,50 @@ describe('buildScanReport: noise exclusion, home locations, review queue, disabl
   });
 
   test('disabled sources and review queue reasons are surfaced', async () => {
-    await client.query(`INSERT INTO ic_source_state (source, manual_disable, disabled_until) VALUES ($1, true, NULL) ON CONFLICT (source) DO UPDATE SET manual_disable = true`, [`${SRC}-disabled`]);
+    await client.query(`INSERT INTO ic_source_state (source, manual_disable, disabled_until) VALUES ($1, true, NULL) ON CONFLICT (source) DO UPDATE SET manual_disable = true, disabled_until = NULL`, [`${SRC}-disabled`]);
     try {
       const report = await buildScanReport(client, { sinceOverride: new Date(Date.now() - 1000) });
       assert.ok(report.disabledSources.some((s) => s.source === `${SRC}-disabled` && s.manual === true));
     } finally {
       await client.query(`DELETE FROM ic_source_state WHERE source = $1`, [`${SRC}-disabled`]);
+    }
+  });
+
+  test('a source disabled_until a future timestamp (manual_disable false) is also surfaced (scan-report-fixes item 4 regression): buildScanReport, and collectDisabledSources directly', async () => {
+    // Reproduces the exact shape the coordinator observed: `scans status` showing a real future
+    // disabled_until while the report printed "(none)". No functional bug was found in
+    // collectDisabledSources()'s query itself (verified separately end to end against the real DB); this
+    // is a regression test guarding the query's actual, correct behavior against a future change, per the
+    // task's explicit "test it" instruction.
+    const future = new Date(Date.now() + 24 * 3600 * 1000);
+    await client.query(
+      `INSERT INTO ic_source_state (source, manual_disable, disabled_until) VALUES ($1, false, $2)
+       ON CONFLICT (source) DO UPDATE SET manual_disable = false, disabled_until = $2`,
+      [`${SRC}-wall-disabled`, future],
+    );
+    try {
+      const report = await buildScanReport(client, { sinceOverride: new Date(Date.now() - 1000) });
+      const entry = report.disabledSources.find((s) => s.source === `${SRC}-wall-disabled`);
+      assert.ok(entry, 'a source with a future disabled_until (and manual_disable=false) must appear in disabledSources');
+      assert.equal(entry.manual, false);
+      assert.ok(entry.until, 'the until timestamp is carried through');
+    } finally {
+      await client.query(`DELETE FROM ic_source_state WHERE source = $1`, [`${SRC}-wall-disabled`]);
+    }
+  });
+
+  test('a source whose disabled_until is in the PAST and manual_disable is false is NOT surfaced (the query must compare, not just check IS NOT NULL)', async () => {
+    const past = new Date(Date.now() - 24 * 3600 * 1000);
+    await client.query(
+      `INSERT INTO ic_source_state (source, manual_disable, disabled_until) VALUES ($1, false, $2)
+       ON CONFLICT (source) DO UPDATE SET manual_disable = false, disabled_until = $2`,
+      [`${SRC}-expired-disable`, past],
+    );
+    try {
+      const report = await buildScanReport(client, { sinceOverride: new Date(Date.now() - 1000) });
+      assert.ok(!report.disabledSources.some((s) => s.source === `${SRC}-expired-disable`), 'an expired disabled_until must not be reported as currently disabled');
+    } finally {
+      await client.query(`DELETE FROM ic_source_state WHERE source = $1`, [`${SRC}-expired-disable`]);
     }
   });
 });
@@ -213,5 +280,42 @@ describe('scan_report MCP tool (spec R1.4): never writes the marker', () => {
   test('run_id scoping returns NOT_FOUND for an unknown run', async () => {
     const deps = /** @type {any} */ ({ withClient: async (/** @type {any} */ fn) => fn(client), config: null });
     await assert.rejects(scanReport.handler({ run_id: 999999999, profile: 'exec-default' }, deps), /not found/);
+  });
+
+  test('every numeric field in the response is a real number (regression: home_locations_count silently drifted to undefined when buildScanReport() started returning homeLocations as {rows, excludedCount} instead of a bare array)', async () => {
+    // Scoped to "today" via the date param, independent of the shared ic_report_state marker other
+    // tests in this describe block stamp -- avoids any ordering dependency on those tests.
+    const today = dayKeyInTz(new Date(), 'America/Chicago');
+    await insertListing({ title: 'Chief Technology Officer', prescore: 80, noise: 'ok' });
+    await insertListing({ title: 'Fractional CTO', prescore: 90, noise: 'fractional_or_founder' });
+    await insertListing({ title: 'Head of Technology', prescore: 60, noise: 'ok', location: 'Houston, TX', location_norm: 'houston-tx' });
+    const deps = /** @type {any} */ ({ withClient: async (/** @type {any} */ fn) => fn(client), config: null });
+    const r = /** @type {any} */ (await scanReport.handler({ date: today, profile: 'exec-default' }, deps));
+    assert.equal(r.ok, true);
+    const numericFields = ['run_count', 'look_at_these_count', 'look_at_these_excluded', 'home_locations_count', 'review_queue_open'];
+    for (const field of numericFields) {
+      assert.equal(typeof r[field], 'number', `${field} must be a number, got ${typeof r[field]} (${JSON.stringify(r[field])})`);
+      assert.equal(Number.isNaN(r[field]), false, `${field} must not be NaN`);
+    }
+    // The specific field the regression broke: with the seeded Houston row present and un-filtered by
+    // the default prescore floor (60 >= 40), it must be counted, not merely typed correctly.
+    assert.ok(r.home_locations_count >= 1, 'home_locations_count must actually count the seeded Houston row, not just happen to be a number');
+  });
+
+  test('run.reportHomeMinPrescore is threaded from config through to buildScanReport: changing it changes which rows the "Houston / Texas" section counts (item 2 threading fix)', async () => {
+    const today = dayKeyInTz(new Date(), 'America/Chicago');
+    const midScore = await insertListing({ title: 'Director of IT', prescore: 30, noise: 'ok', location: 'Houston, TX', location_norm: 'houston-tx' });
+    void midScore;
+    const deps = (/** @type {number} */ minPrescore) => {
+      const cfg = testConfig();
+      cfg.adapters.run.reportHomeMinPrescore = minPrescore;
+      return /** @type {any} */ ({ withClient: async (/** @type {any} */ fn) => fn(client), config: cfg });
+    };
+    const withDefaultFloor = /** @type {any} */ (await scanReport.handler({ date: today, profile: 'exec-default' }, deps(40)));
+    const withLoweredFloor = /** @type {any} */ (await scanReport.handler({ date: today, profile: 'exec-default' }, deps(20)));
+    assert.ok(
+      withLoweredFloor.home_locations_count > withDefaultFloor.home_locations_count,
+      `lowering reportHomeMinPrescore from 40 to 20 must surface the prescore-30 row: got ${withDefaultFloor.home_locations_count} at floor 40 and ${withLoweredFloor.home_locations_count} at floor 20`,
+    );
   });
 });

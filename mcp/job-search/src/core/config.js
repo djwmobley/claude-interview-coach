@@ -118,6 +118,69 @@ export function getEnv() {
 }
 
 /**
+ * Best-effort database name extraction from a connection string, for assertTestDbGuard() only -- an
+ * unparseable string just fails that guard's "_test" check, which is the safe direction.
+ * @param {string} connectionString
+ * @returns {string|null}
+ */
+function dbNameFromConnectionString(connectionString) {
+  try {
+    return decodeURIComponent(new URL(connectionString).pathname.replace(/^\//, ''));
+  } catch {
+    return null;
+  }
+}
+
+/**
+ * Structural guard against running a test file directly (`node --test test/x.test.js`) instead of
+ * through `npm test` / bin/run-tests.js: PG_DSN then resolves to whatever .env already points at -- the
+ * real, configured database, not the isolated "_test" database bin/run-tests.js bootstraps and points
+ * PG_DSN at for its spawned child. That exact mistake corrupted a real, shared singleton row
+ * (ic_report_state) in this project's own database once; it was caught and repaired by hand, which is
+ * not a defense, just luck. This guard makes the same mistake fail loudly and immediately, before any
+ * connection is opened, instead of silently succeeding against production.
+ *
+ * Called from pgConnectionConfig() itself (not only from src/core/db.js's getPool()/connectDedicated()):
+ * several test files construct `new pg.Client(pgConnectionConfig())` directly rather than going through
+ * db.js, which is exactly the pathway the real incident went through -- a guard placed only in db.js
+ * would not have caught it. pgConnectionConfig() is the one function every one of those paths actually
+ * calls, so the check lives here; db.js additionally calls this same guard on its own two entry points
+ * as a second, redundant layer.
+ *
+ * "Running under the test runner" is detected three ways -- any one trips the guard, this is a total
+ * classification of the ways this project's tests get invoked, not a best-effort heuristic:
+ *   - process.env.NODE_TEST_CONTEXT is set (Node's own `node --test` marker; present on every worker
+ *     under this project's supported Node versions)
+ *   - any process.argv entry contains "--test" (belt and braces for an invocation shape where Node
+ *     surfaces the flag in argv instead of consuming it before argv is built)
+ *   - process.env.JOBSEARCH_TEST_GUARD === '1' (bin/run-tests.js sets this explicitly on its spawned
+ *     child alongside the test PG_DSN, so the guard still trips even on a future Node version that stops
+ *     setting NODE_TEST_CONTEXT)
+ *
+ * When running under the test runner, the resolved database name MUST end in "_test" -- this mirrors
+ * bin/bootstrap-test-db.js's own hard safety gate. bootstrap-test-db.js itself calls pgConnectionConfig()
+ * from bin/run-tests.js's PARENT process (before the `node --test` child is even spawned), which is
+ * never itself running under the test runner, so its legitimate need to resolve the REAL source
+ * database's DSN (to pg_dump the schema FROM it) is unaffected by this guard.
+ * @param {import('pg').ClientConfig} cfg
+ */
+export function assertTestDbGuard(cfg) {
+  const underTestRunner = Boolean(process.env.NODE_TEST_CONTEXT)
+    || process.argv.some((a) => typeof a === 'string' && a.includes('--test'))
+    || process.env.JOBSEARCH_TEST_GUARD === '1';
+  if (!underTestRunner) return;
+  const dbName = 'connectionString' in cfg && typeof cfg.connectionString === 'string'
+    ? dbNameFromConnectionString(cfg.connectionString)
+    : /** @type {{ database?: string }} */ (cfg).database ?? null;
+  if (typeof dbName === 'string' && dbName.endsWith('_test')) return;
+  throw new Error(
+    `refusing to connect to database "${dbName ?? '(unknown)'}" while running under the Node test runner: its name does not end in "_test". `
+    + `Run tests through "npm test" (bin/run-tests.js), which bootstraps an isolated "_test" database and points PG_DSN at it for you. `
+    + `Never run a test file directly with "node --test <file>" -- that connects to whatever PG_DSN/.env already points at, which is the real database most of the time.`,
+  );
+}
+
+/**
  * pg connection options. With PG_DSN set, the URL is used verbatim; otherwise
  * the local trust-auth defaults (host localhost, port 5432, db ic_context,
  * user postgres, no password) are given as discrete fields. Kept as fields on
@@ -128,8 +191,10 @@ export function getEnv() {
 export function pgConnectionConfig(dsn) {
   const env = getEnv();
   const url = dsn ?? env.PG_DSN;
-  if (url) return { connectionString: url };
-  return { host: 'localhost', port: 5432, database: 'ic_context', user: 'postgres' };
+  /** @type {import('pg').ClientConfig} */
+  const cfg = url ? { connectionString: url } : { host: 'localhost', port: 5432, database: 'ic_context', user: 'postgres' };
+  assertTestDbGuard(cfg);
+  return cfg;
 }
 
 // ---------------------------------------------------------------------------
@@ -165,6 +230,14 @@ const adapterSchema = z.object({
   maxPagesPerRun: z.number().int().positive().optional(),
 });
 
+/**
+ * Single source of truth for the "Houston / Texas" report section's prescore floor (spec item 5;
+ * threading fix: report.js's buildScanReport() imports this directly instead of hardcoding its own copy
+ * of the number 40, so there is exactly one place this default lives -- the zod schema below and every
+ * caller's own fallback, when config is unavailable, both reference it).
+ */
+export const DEFAULT_REPORT_HOME_MIN_PRESCORE = 40;
+
 export const adaptersSchema = z.object({
   dedup: z.object({
     repostGapDays: z.number().int().positive(),
@@ -175,6 +248,10 @@ export const adaptersSchema = z.object({
     expireAfterAbsentRuns: z.number().int().positive(),
   }),
   trackingParams: z.array(z.string().min(1)),
+  /** Trailing source-UI fragments to strip from a title (spec R3.1 defense: LinkedIn's verified-badge
+   * text, "<title> with verification"). Total classification in normalize.js's stripTrailingUiFragments:
+   * a fragment not on this list is left in place, never guessed at. */
+  titleTrailingFragments: z.array(z.string().min(1)).default(['with verification']),
   httpAllowedHosts: z.array(domain),
   adapters: z.record(z.string().regex(/^[a-z][a-z0-9-]*$/), adapterSchema),
   run: z.object({
@@ -188,6 +265,8 @@ export const adaptersSchema = z.object({
     timezone: z.string().min(1).default('America/Chicago'),
     /** Default row count for the report's "Look at these" section (spec R1.2b). */
     reportTopN: z.number().int().positive().default(10),
+    /** Minimum prescore for the report's "Houston / Texas" section (independent review round 2 fix: an unfiltered "any prescore" list surfaced very low-relevance rows like an RN Clinical Director posting). */
+    reportHomeMinPrescore: z.number().int().min(0).max(100).default(DEFAULT_REPORT_HOME_MIN_PRESCORE),
   }),
 });
 

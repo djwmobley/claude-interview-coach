@@ -5,6 +5,7 @@ import {
   normalizeUrl, normalizeCompany, normalizeTitle, normalizeLocation, parseLocation, dedupHash, descriptionHash,
   parseSalary, normalizeListing, normalizeLegacyRow, titleTokenKey, isLocationEligible, sha1, DEFAULT_TRACKING_PARAMS,
   collapseWhitespace, stripZeroWidth, stripRepeatedLeadingSegment, cleanTitleText, TITLE_MAX_CHARS,
+  stripTrailingUiFragments, DEFAULT_TITLE_TRAILING_FRAGMENTS,
 } from '../src/core/normalize.js';
 import { prescore } from '../src/core/prescore.js';
 
@@ -242,6 +243,22 @@ describe('parseLocation and normalizeLocation: total classification', () => {
     assert.equal(normalizeLocation('Remote - Canada', true).location_norm, 'remote-ca');
     assert.equal(normalizeLocation('Remote', false).location_norm, `unknown:${sha1('remote')}`);
   });
+  test('remote-declared with a state-only location text keeps the state as a suffix (scan-report-fixes item 3: Gartner Oklahoma/Arkansas)', () => {
+    assert.equal(normalizeLocation('Oklahoma, United States', true).location_norm, 'remote-us-ok');
+    assert.equal(normalizeLocation('Arkansas, United States', true).location_norm, 'remote-us-ar');
+    assert.equal(normalizeLocation('Remote - Texas', true).location_norm, 'remote-us-tx');
+    assert.equal(normalizeLocation('Texas', true).location_norm, 'remote-us-tx');
+    // Two DIFFERENT states must produce DIFFERENT location_norm values (this is the actual fix: before
+    // it, both collapsed to the identical bare 'remote-us' and collided on dedup_hash).
+    assert.notEqual(normalizeLocation('Oklahoma, United States', true).location_norm, normalizeLocation('Arkansas, United States', true).location_norm);
+    // A remote-declared location with NO discernible state still collapses to the bare 'remote-<iso>'
+    // (unaffected: bare "Remote" / "United States" carry no state signal to preserve).
+    assert.equal(normalizeLocation('United States', true).location_norm, 'remote-us');
+    assert.equal(normalizeLocation('Remote', true).location_norm, 'remote-us');
+    // A city-st location remote-declared is unaffected -- the state suffix only applies when parseLocation
+    // resolved a bare STATE (no city), never when a city was also present.
+    assert.equal(normalizeLocation('Houston, TX', true).location_norm, 'remote-us');
+  });
   test('inferred remote keeps the city', () => {
     const r = normalizeLocation('Houston, TX', false, true);
     assert.equal(r.location_norm, 'houston-tx');
@@ -291,18 +308,23 @@ describe('collapseWhitespace / stripZeroWidth (spec R3.1, decision 11)', () => {
   });
 });
 
-describe('stripRepeatedLeadingSegment / cleanTitleText (spec R3.1, decisions 9-11)', () => {
-  test('must match: a genuine boilerplate repeat >=12 chars and >=2 words is stripped, keeping the text once', () => {
+describe('stripRepeatedLeadingSegment / cleanTitleText (spec R3.1, decisions 9-11, floor narrowed to word-count-only by scan-report-fixes item 2)', () => {
+  test('must match: a genuine boilerplate repeat of >=2 words is stripped, keeping the text once', () => {
     const r = stripRepeatedLeadingSegment('Field CTO Enterprise Field CTO Enterprise with very strong background in platform architecture');
     assert.equal(r.stripped, true);
     assert.equal(r.text, 'Field CTO Enterprise with very strong background in platform architecture');
   });
-  test('must NOT match: short/single-token repeat is left as-is (decision 9-10)', () => {
-    // "CTO CTO Group": segment "CTO" is 3 chars, 1 word -- below the 12-char/2-word floor.
+  test('must match: a SHORT (under 12 chars) 2-word repeat is now also stripped -- "Field CTO Field CTO" -> "Field CTO" (scan-report-fixes item 2: the character-count floor was removed; only the 1-word floor remains)', () => {
+    const r = stripRepeatedLeadingSegment('Field CTO Field CTO');
+    assert.equal(r.stripped, true);
+    assert.equal(r.text, 'Field CTO');
+  });
+  test('must NOT match: single-token repeat is left as-is (decision 9-10) -- this is the ONLY floor remaining after item 2', () => {
+    // "CTO CTO Group": segment "CTO" is a single token -- below the (now word-count-only) floor.
     const r1 = stripRepeatedLeadingSegment('CTO CTO Group');
     assert.equal(r1.stripped, false);
     assert.equal(r1.text, 'CTO CTO Group');
-    // "Manager, Manager Development Program": segment "Manager," is short/1 word too.
+    // "Manager, Manager Development Program": segment "Manager," is a single token too.
     const r2 = stripRepeatedLeadingSegment('Manager, Manager Development Program');
     assert.equal(r2.stripped, false);
     assert.equal(r2.text, 'Manager, Manager Development Program');
@@ -312,12 +334,12 @@ describe('stripRepeatedLeadingSegment / cleanTitleText (spec R3.1, decisions 9-1
     assert.equal(r.stripped, false);
     assert.equal(r.text, 'Chief Technology Officer');
   });
-  test('cleanTitleText: full pipeline on the real observed LinkedIn shape', () => {
-    // The real run-1316 sample ("Field CTO" repeated) is itself only 9 chars/2 words, BELOW the 12-char
-    // floor set by decision 9-10, so it is intentionally left unmerged here; a longer, real boilerplate
-    // repeat (title + tagline) is what decision 9-10's floor is designed to still catch, exercised above.
+  test('cleanTitleText: full pipeline on the real observed LinkedIn shape (run #2143, "Field CTO Field CTO")', () => {
+    // The real run-1316/#2143 sample ("Field CTO" repeated) is 9 chars/2 words. Before scan-report-fixes
+    // item 2 this was BELOW the (now-removed) 12-char floor and stayed unmerged; the floor is word-count
+    // only now, so this genuine boilerplate repeat is correctly collapsed.
     const cleaned = cleanTitleText('Field CTO \n \n Field CTO with very strong background in enterprise architecture');
-    assert.equal(cleaned, 'Field CTO Field CTO with very strong background in enterprise architecture');
+    assert.equal(cleaned, 'Field CTO with very strong background in enterprise architecture');
   });
   test('cleanTitleText caps at 200 chars after normalization', () => {
     const long = 'Chief Technology Officer ' + 'x'.repeat(300);
@@ -328,6 +350,93 @@ describe('stripRepeatedLeadingSegment / cleanTitleText (spec R3.1, decisions 9-1
     const raw = 'Field CTO Enterprise Group​ ‌\nField CTO Enterprise Group with a very strong background';
     const cleaned = cleanTitleText(raw);
     assert.equal(cleaned, 'Field CTO Enterprise Group with a very strong background');
+  });
+});
+
+describe('stripRepeatedLeadingSegment: whole-string A+A / A+sep+A with no space separator (scan-report-fixes item 2)', () => {
+  test('must match: A+A directly concatenated, no separator, above the floor', () => {
+    const r = stripRepeatedLeadingSegment('Chief AI Transformation OfficerChief AI Transformation Officer');
+    assert.equal(r.stripped, true);
+    assert.equal(r.text, 'Chief AI Transformation Officer');
+  });
+  test('must match: a longer A+A directly concatenated, no separator, above the floor', () => {
+    const r = stripRepeatedLeadingSegment(
+      'Senior Director, IT Governance, Risk and ComplianceSenior Director, IT Governance, Risk and Compliance',
+    );
+    assert.equal(r.stripped, true);
+    assert.equal(r.text, 'Senior Director, IT Governance, Risk and Compliance');
+  });
+  test('must match: A + one separator char + A, above the floor', () => {
+    const r = stripRepeatedLeadingSegment('Chief AI Transformation Officer-Chief AI Transformation Officer');
+    assert.equal(r.stripped, true);
+    assert.equal(r.text, 'Chief AI Transformation Officer');
+  });
+  test('must match: a SHORT (under 12 chars) 2-word A+A repeat is now also stripped (scan-report-fixes item 2: word-count-only floor)', () => {
+    const r = stripRepeatedLeadingSegment('IT VPIT VP');
+    assert.equal(r.stripped, true);
+    assert.equal(r.text, 'IT VP');
+  });
+  test('must NOT match: "CTO CTO Group" is untouched (floor is a single word, not a character count) even though the whole-string checker runs first', () => {
+    const r = stripRepeatedLeadingSegment('CTO CTO Group');
+    assert.equal(r.stripped, false);
+    assert.equal(r.text, 'CTO CTO Group');
+  });
+  test('must NOT match: single-word A+sep+A below the floor ("IT-IT") is untouched', () => {
+    const r = stripRepeatedLeadingSegment('IT-IT');
+    assert.equal(r.stripped, false);
+    assert.equal(r.text, 'IT-IT');
+  });
+  test('must NOT match: single-word A+A below the floor ("CTOCTO") is untouched', () => {
+    const r = stripRepeatedLeadingSegment('CTOCTO');
+    assert.equal(r.stripped, false);
+    assert.equal(r.text, 'CTOCTO');
+  });
+  test('must NOT match: even-length string that is not an actual repeat is untouched', () => {
+    const r = stripRepeatedLeadingSegment('Chief Technology OfficerXX');
+    assert.equal(r.stripped, false);
+    assert.equal(r.text, 'Chief Technology OfficerXX');
+  });
+  test('cleanTitleText: full pipeline strips a real LinkedIn-shaped repeated-no-separator title', () => {
+    assert.equal(
+      cleanTitleText('Chief AI Transformation OfficerChief AI Transformation Officer'),
+      'Chief AI Transformation Officer',
+    );
+  });
+});
+
+describe('stripTrailingUiFragments / cleanTitleText: LinkedIn verified-badge text (scan-report-fixes item 1)', () => {
+  test('strips a configured trailing fragment, case-insensitively, exactly once', () => {
+    const r = stripTrailingUiFragments('Executive Partner - CIO Advisory with verification', DEFAULT_TITLE_TRAILING_FRAGMENTS);
+    assert.equal(r.stripped, true);
+    assert.equal(r.text, 'Executive Partner - CIO Advisory');
+    assert.equal(r.fragment, 'with verification');
+    const r2 = stripTrailingUiFragments('Executive Partner - CIO Advisory WITH VERIFICATION', DEFAULT_TITLE_TRAILING_FRAGMENTS);
+    assert.equal(r2.stripped, true);
+    assert.equal(r2.text, 'Executive Partner - CIO Advisory');
+  });
+  test('total classification: a trailing fragment NOT on the list is left in place, never guessed at', () => {
+    const r = stripTrailingUiFragments('Executive Partner - CIO Advisory with some other badge text', DEFAULT_TITLE_TRAILING_FRAGMENTS);
+    assert.equal(r.stripped, false);
+    assert.equal(r.text, 'Executive Partner - CIO Advisory with some other badge text');
+    assert.equal(r.fragment, null);
+  });
+  test('a title with no trailing fragment at all is untouched', () => {
+    const r = stripTrailingUiFragments('Chief Technology Officer', DEFAULT_TITLE_TRAILING_FRAGMENTS);
+    assert.equal(r.stripped, false);
+    assert.equal(r.text, 'Chief Technology Officer');
+  });
+  test('an empty fragment list strips nothing', () => {
+    const r = stripTrailingUiFragments('Executive Partner - CIO Advisory with verification', []);
+    assert.equal(r.stripped, false);
+    assert.equal(r.text, 'Executive Partner - CIO Advisory with verification');
+  });
+  test('cleanTitleText strips the badge text as part of the full pipeline, before the repeated-segment check', () => {
+    assert.equal(cleanTitleText('Executive Partner - CIO Advisory with verification'), 'Executive Partner - CIO Advisory');
+  });
+  test('cleanTitleText: badge text on a title that ALSO needs repeated-segment stripping (the real Gartner shape)', () => {
+    const raw = 'Executive Partner - CIO AdvisoryExecutive Partner - CIO Advisory with verification';
+    // The badge is stripped first, leaving a clean A+A repeat which is then collapsed to A.
+    assert.equal(cleanTitleText(raw), 'Executive Partner - CIO Advisory');
   });
 });
 

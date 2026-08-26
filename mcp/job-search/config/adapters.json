@@ -38,6 +38,9 @@
     "pub",
     "mo"
   ],
+  "titleTrailingFragments": [
+    "with verification"
+  ],
   "httpAllowedHosts": [],
   "adapters": {
     "indeed": {
