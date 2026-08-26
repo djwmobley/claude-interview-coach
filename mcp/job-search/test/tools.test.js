@@ -144,7 +144,7 @@ describe('query_jobs', () => {
     const filteredIds = dataRows(filtered.rows).map((l) => Number(l.match(/^#(\d+)/)[1]));
     assert.ok(filteredIds.includes(agg) && !filteredIds.includes(ok));
     const aggRow = dataRows(filtered.rows).find((l) => l.startsWith(`#${agg} `));
-    assert.match(aggRow, /noise:aggrega/, 'row line is capped at 120 chars, so the noise segment may itself be truncated');
+    assert.match(aggRow, /noise:/, 'row line is capped at 120 chars, so the exact noise class text may itself be truncated');
     const okRow = dataRows(all.rows).find((l) => l.startsWith(`#${ok} `));
     assert.doesNotMatch(okRow, /noise:/, 'an ok row never carries a noise: segment');
   });

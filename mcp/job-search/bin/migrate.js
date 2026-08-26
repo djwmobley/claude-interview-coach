@@ -17,6 +17,8 @@ import { connectDedicated, withTransaction } from '../src/core/db.js';
 import { normalizeLegacyRow, normalizeTitle, normalizeLocation, dedupHash, LEGACY_UNKNOWN_LOCATION } from '../src/core/normalize.js';
 import { errFields } from '../src/core/errors.js';
 import { computeProfileRev } from '../src/core/upsert.js';
+import { classify, makePgLookups } from '../src/core/dedup.js';
+import { resolveItem } from '../src/tools/review.js';
 
 const HERE = path.dirname(fileURLToPath(import.meta.url));
 const SQL_DIR = path.join(HERE, '..', 'sql');
@@ -242,7 +244,7 @@ async function runCheck(client, args) {
  * not change, since neither the old nor the new parseLocation() can parse it.
  * @param {import('pg').ClientBase} client
  */
-async function renormalizeListings(client) {
+export async function renormalizeListings(client) {
   const rows = (await client.query(
     `SELECT id, title, location, remote_declared, company_norm, title_norm, location_norm, dedup_hash
      FROM ic_job_listings WHERE coalesce(record_kind,'listing') = 'listing' ORDER BY id`,
@@ -276,6 +278,50 @@ async function renormalizeListings(client) {
     }
   }
   return { changed, collisions };
+}
+
+/**
+ * Backfill pass for R6 (spec R6.3): re-runs classify() against every currently-open review-queue candidate
+ * and, wherever the state/remote merge rule (branch '6-state-remote-dup') now fires -- it could not have
+ * fired before this migration recomputed location_norm's state-only shape in renormalizeListings() above --
+ * merges the candidate into the matched root via the SAME resolveItem('merge') path the review tool uses
+ * (no chains, matching children re-pointed, other open queue items for the candidate closed). Logs what it
+ * merged; anything classify() does not resolve to branch 6 is left untouched in the queue for a human.
+ * @param {import('pg').ClientBase} client
+ */
+export async function backfillStateRemoteDedup(client) {
+  const lookups = makePgLookups(client);
+  const open = (await client.query(
+    `SELECT q.id AS queue_id, l.id, l.source, l.external_id, l.url_normalized, l.title, l.company, l.title_norm, l.company_norm,
+            l.location, l.location_norm, l.remote_mode, l.remote_declared, l.dedup_hash, l.description, l.description_hash,
+            l.posted_at, l.salary_raw, l.salary_min, l.salary_max
+     FROM ic_job_review_queue q JOIN ic_job_listings l ON l.id = q.candidate_id
+     WHERE q.resolved_at IS NULL AND coalesce(l.record_kind,'listing') = 'listing' AND l.duplicate_of IS NULL
+     ORDER BY l.id`,
+  )).rows;
+  let merged = 0;
+  /** @type {Array<{ candidate_id: number, root_id: number, queue_id: number }>} */
+  const details = [];
+  for (const row of open) {
+    /** @type {import('../src/core/normalize.js').NormalizedListing} */
+    const rec = {
+      source: row.source, external_id: row.external_id, url_normalized: row.url_normalized, url_kind: 'residual',
+      title: row.title, company: row.company, title_norm: row.title_norm, company_norm: row.company_norm, company_note: null,
+      location: row.location, location_norm: row.location_norm, remote_mode: row.remote_mode, remote_declared: Boolean(row.remote_declared),
+      dedup_hash: row.dedup_hash, description: row.description, description_hash: row.description_hash, posted_at: row.posted_at,
+      salary_raw: row.salary_raw, salary_min: row.salary_min, salary_max: row.salary_max,
+    };
+    const decision = await classify(rec, lookups, { excludeId: row.id });
+    if (decision.branch !== '6-state-remote-dup' || !decision.target) continue;
+    await withTransaction(client, async (c) => {
+      const out = await resolveItem(c, { queueId: row.queue_id, resolution: 'merge', targetId: decision.target.id });
+      if (out.resolution === 'merge') {
+        merged++;
+        details.push({ candidate_id: row.id, root_id: /** @type {number} */ (out.root_id), queue_id: row.queue_id });
+      }
+    });
+  }
+  return { merged, details };
 }
 
 /**
@@ -331,6 +377,13 @@ async function runApply(client, args) {
   // including rows backfilled in earlier migration runs.
   const renorm = await renormalizeListings(client);
   say(`re-normalized title/location: ${renorm.changed} row(s) changed, ${renorm.collisions} new dedup_hash collision(s) queued for review (reason=title_renormalized)`);
+
+  // R6 backfill (spec R6.3): resolve open review items that the new state/remote merge rule now catches
+  // (Gartner-style same-role-per-state postings) now that renormalizeListings() above has given them a
+  // 'state-<abbr>' location_norm instead of an opaque unknown hash.
+  const r6 = await backfillStateRemoteDedup(client);
+  say(`R6 state/remote backfill: ${r6.merged} open review item(s) auto-merged`);
+  for (const d of r6.details) say(`  candidate #${d.candidate_id} -> root #${d.root_id} (queue #${d.queue_id})`);
 
   // Conflict groups from the stored columns (covers rows backfilled in earlier runs too).
   const urlConf = await client.query(`
@@ -422,4 +475,5 @@ async function main() {
   process.exit(code);
 }
 
-main();
+const isMain = process.argv[1] && path.resolve(process.argv[1]) === fileURLToPath(import.meta.url);
+if (isMain) main();

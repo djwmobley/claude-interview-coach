@@ -65,6 +65,7 @@ const OUTCOME_FOR_BRANCH = {
   '1b-repost-same-url': 'repost',
   '2-cross-source-dup': 'cross_source_dup',
   '3-repost': 'repost',
+  '6-state-remote-dup': 'cross_source_dup',
   '4-ambiguous': 'ambiguous',
   '5-new': 'new',
 };
@@ -395,6 +396,77 @@ describe('classify: one test per branch (in-memory lookups)', () => {
     const self = row({ id: 500, source: 'linkedin', external_id: 'linkedin:4289469969' });
     const d = await classify(rec({ url: 'https://www.linkedin.com/jobs/view/4289469969' }), makeMemoryLookups([self]), { ...opts, excludeId: 500 });
     assert.equal(d.branch, '5-new');
+  });
+});
+
+describe('classify: branch 6, state/remote same-posting merge (spec R6, decisions 13-15/18)', () => {
+  const opts = { now: NOW, repostGapDays: 30 };
+  test('must match: same company/title, two different US states, posted within 14 days -> auto-merged, not queued', async () => {
+    const tx = row({ id: 700, source: 'exec', company: 'Gartner', title: 'Executive Partner CIO Advisory', location_norm: 'state-tx', posted_at: '2026-08-10' });
+    const d = await classify(rec({ source: 'exec', company: 'Gartner', title: 'Executive Partner CIO Advisory', location: 'Oklahoma', postedAt: '2026-08-15' }), makeMemoryLookups([tx]), opts);
+    assert.equal(d.branch, '6-state-remote-dup');
+    assert.equal(d.outcome, 'cross_source_dup');
+    assert.equal(d.rootId, 700);
+    assert.equal(d.queue, false, 'a state/remote merge is deterministic, never queued for review');
+  });
+  test('must match: same-SOURCE repeat also merges (no source-difference requirement, unlike branch 2)', async () => {
+    const ar = row({ id: 701, source: 'exec:gartner', company: 'Gartner', title: 'Executive Partner CIO Advisory', location_norm: 'state-ar', posted_at: '2026-08-12' });
+    const d = await classify(rec({ source: 'exec:gartner', company: 'Gartner', title: 'Executive Partner CIO Advisory', location: 'Texas', postedAt: '2026-08-13' }), makeMemoryLookups([ar]), opts);
+    assert.equal(d.branch, '6-state-remote-dup');
+    assert.equal(d.rootId, 701);
+  });
+  test('must match: both remote listings (different remote-<iso> regions, so the dedup_hash differs and branch 2 does not already own it) merge', async () => {
+    const remoteCa = row({ id: 702, source: 'linkedin', company: 'Acme', title: 'CTO', location_norm: 'remote-ca', posted_at: '2026-08-10' });
+    const d = await classify(rec({ source: 'greenhouse', company: 'Acme', title: 'CTO', location: null, remoteMode: 'remote', remoteDeclared: true, postedAt: '2026-08-12' }), makeMemoryLookups([remoteCa]), opts);
+    assert.equal(d.branch, '6-state-remote-dup');
+    assert.equal(d.rootId, 702);
+  });
+  test('an IDENTICAL remote-<iso> on both sides is owned by branch 2 (hash match), not branch 6', async () => {
+    const remoteUs = row({ id: 7020, source: 'linkedin', company: 'Acme', title: 'CTO', location_norm: 'remote-us', posted_at: '2026-08-10' });
+    const d = await classify(rec({ source: 'greenhouse', company: 'Acme', title: 'CTO', location: null, remoteMode: 'remote', remoteDeclared: true, postedAt: '2026-08-12' }), makeMemoryLookups([remoteUs]), opts);
+    assert.equal(d.branch, '2-cross-source-dup');
+  });
+  test('must NOT match: a city-level location never satisfies R6 (R6.2)', async () => {
+    const existing = row({ id: 703, source: 'exec', company: 'Gartner', title: 'Executive Partner CIO Advisory', location_norm: 'houston-tx', posted_at: '2026-08-10' });
+    const d = await classify(rec({ source: 'exec', company: 'Gartner', title: 'Executive Partner CIO Advisory', location: 'Oklahoma', postedAt: '2026-08-12' }), makeMemoryLookups([existing]), opts);
+    assert.notEqual(d.branch, '6-state-remote-dup');
+  });
+  test('must NOT match: a remote listing and a state-only listing do not merge (mixed, not "both")', async () => {
+    const remote = row({ id: 704, source: 'linkedin', company: 'Acme', title: 'CTO', location_norm: 'remote-us', posted_at: '2026-08-10' });
+    const d = await classify(rec({ source: 'exec', company: 'Acme', title: 'CTO', location: 'Texas', postedAt: '2026-08-11' }), makeMemoryLookups([remote]), opts);
+    assert.notEqual(d.branch, '6-state-remote-dup');
+  });
+  test('must NOT match: an unknown:* location never qualifies even though isStateOnlyLocation-adjacent (decision 14)', async () => {
+    const existing = row({ id: 705, source: 'exec', company: 'Gartner', title: 'Executive Partner CIO Advisory', location_norm: `unknown:${'a'.repeat(40)}`, posted_at: '2026-08-10' });
+    const d = await classify(rec({ source: 'exec', company: 'Gartner', title: 'Executive Partner CIO Advisory', location: 'Oklahoma', postedAt: '2026-08-11' }), makeMemoryLookups([existing]), opts);
+    assert.notEqual(d.branch, '6-state-remote-dup');
+  });
+  test('must NOT match: posted_at null on either side falls through to the ordinary near-miss path (decision 15)', async () => {
+    const existing = row({ id: 706, source: 'exec', company: 'Gartner', title: 'Executive Partner CIO Advisory', location_norm: 'state-tx', posted_at: null });
+    const d = await classify(rec({ source: 'exec', company: 'Gartner', title: 'Executive Partner CIO Advisory', location: 'Oklahoma', postedAt: '2026-08-11' }), makeMemoryLookups([existing]), opts);
+    assert.notEqual(d.branch, '6-state-remote-dup');
+  });
+  test('must NOT match: more than 14 days apart', async () => {
+    const existing = row({ id: 707, source: 'exec', company: 'Gartner', title: 'Executive Partner CIO Advisory', location_norm: 'state-tx', posted_at: '2026-07-01' });
+    const d = await classify(rec({ source: 'exec', company: 'Gartner', title: 'Executive Partner CIO Advisory', location: 'Oklahoma', postedAt: '2026-08-20' }), makeMemoryLookups([existing]), opts);
+    assert.notEqual(d.branch, '6-state-remote-dup');
+  });
+  test('must NOT match: identical location_norm is owned by branch 2/3 (hash match), not branch 6', async () => {
+    const same = row({ id: 708, source: 'linkedin', company: 'Gartner', title: 'Executive Partner CIO Advisory', location_norm: 'state-tx', posted_at: '2026-08-10' });
+    const d = await classify(rec({ source: 'greenhouse', company: 'Gartner', title: 'Executive Partner CIO Advisory', location: 'Texas', postedAt: '2026-08-11' }), makeMemoryLookups([same]), opts);
+    assert.notEqual(d.branch, '6-state-remote-dup');
+    assert.equal(d.branch, '2-cross-source-dup');
+  });
+  test('three rows arriving out of order never chain: root stays the true root, not an intermediate duplicate', async () => {
+    // Row A (root, TX) arrives first; row B (OK) arrives second and merges into A (duplicate_of=709); row C
+    // (AR) arrives third. isLive() (same precondition branch 2 uses) excludes B from candidacy because it
+    // already has a non-null duplicate_of, so C matches only the live root A and rootId resolves to 709,
+    // never to B -- the no-chains invariant holds by construction, the same way it does for branch 2/3.
+    const a = row({ id: 709, source: 'exec', company: 'Gartner', title: 'Executive Partner CIO Advisory', location_norm: 'state-tx', posted_at: '2026-08-10' });
+    const b = row({ id: 710, source: 'exec', company: 'Gartner', title: 'Executive Partner CIO Advisory', location_norm: 'state-ok', posted_at: '2026-08-11', duplicate_of: 709 });
+    const dC = await classify(rec({ source: 'exec', company: 'Gartner', title: 'Executive Partner CIO Advisory', location: 'Arkansas', postedAt: '2026-08-12' }), makeMemoryLookups([a, b]), opts);
+    assert.equal(dC.branch, '6-state-remote-dup');
+    assert.equal(dC.rootId, 709, 'root must be the ORIGINAL root (A), never the intermediate duplicate (B)');
   });
 });
 
