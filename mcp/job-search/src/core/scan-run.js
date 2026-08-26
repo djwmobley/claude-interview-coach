@@ -33,7 +33,7 @@ import { classify, makePgLookups } from './dedup.js';
 import { applyDecision, adoptUnclassifiedRows } from './upsert.js';
 import { prescore } from './prescore.js';
 import { embedSafe, embeddingText } from './embed.js';
-import { compactRows, capResponse, MAX_ROWS } from './compact.js';
+import { compactRows, capResponse, MAX_ROWS, MAX_RESPONSE_CHARS, untrustedRows, ROWS_WRAP_OVERHEAD_CHARS } from './compact.js';
 import { buildRegistry, guardedFetch } from './urlguard.js';
 import { planPages, assertPlanWithinCap, reserveBudget } from './budget.js';
 import { makeRateLimiter } from './ratelimit.js';
@@ -652,7 +652,9 @@ async function executeRun(p) {
     blind_spots: blind.slice(0, 6),
     hint: dryRun ? 'dry run: nothing persisted; rerun with dryRun:false to store rows' : `query_jobs({runId:${runId}, offset:${compact.rows.length}}) for the rest`,
   };
-  return capResponse(response, { hint: `query_jobs({runId:${runId}, offset:25}) for the rest` });
+  const capped = capResponse(response, { hint: `query_jobs({runId:${runId}, offset:25}) for the rest`, maxChars: MAX_RESPONSE_CHARS - ROWS_WRAP_OVERHEAD_CHARS });
+  capped.rows = untrustedRows(capped.rows);
+  return capped;
 }
 
 /**

@@ -54,8 +54,12 @@ default to `''` in `config.js`) and must be set in `.env` before
 either unset fails visibly (`VALIDATION` from `remind.js`, `AUTH_UNAVAILABLE`
 from the Gmail adapter and the calendar provider) rather than silently
 falling back to a real path. Real values live only in `.env` (gitignored via
-`**/.env`); the pre-commit hook in `.claude/hooks/pre-commit-secret-grep.sh`
-blocks connection strings in any staged file other than `.env.example`.
+`**/.env`); `.claude/hooks/pre-commit-secret-grep.sh` is a Claude Code
+PreToolUse hook (registered in `.claude/settings.json`, matched on the Bash
+and PowerShell tools), not a git pre-commit hook, and it blocks connection
+strings in any staged file other than `.env.example` before Claude Code runs
+a `git commit`. It only guards commits made through Claude Code; a commit run
+from a plain terminal (outside Claude Code) bypasses it entirely.
 
 The server is registered in the repo root `.mcp.json` (no env block, no
 secrets) and its tools are allowed in `.claude/settings.json`

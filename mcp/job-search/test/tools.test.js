@@ -16,6 +16,17 @@ import { tool as review, resolveItem, autoSeparate } from '../src/tools/review.j
 import { tool as profiles } from '../src/tools/profiles.js';
 import { tool as scans } from '../src/tools/scans.js';
 import { wrapHandler } from '../src/tools/_shared.js';
+import { untrustedRows } from '../src/core/compact.js';
+
+// Derived from untrustedRows() itself rather than duplicated string literals,
+// so a delimiter-text change would only need to happen in one place.
+const [ROWS_OPEN, , ROWS_CLOSE] = untrustedRows(['x']);
+/** Strip the untrusted-rows bookend markers and return only the data lines. */
+const dataRows = (/** @type {string[]} */ rows) => {
+  assert.equal(rows[0], ROWS_OPEN, 'rows are wrapped in the untrusted delimiter');
+  assert.equal(rows[rows.length - 1], ROWS_CLOSE, 'rows are wrapped in the untrusted delimiter');
+  return rows.slice(1, -1);
+};
 
 const SRC = `zz-test-tools-${process.pid}`;
 const CO = `ZZ-TEST-TOOLS-${process.pid}`;
@@ -84,7 +95,7 @@ describe('query_jobs', () => {
     const r1 = /** @type {any} */ (await queryJobs.handler(base, deps));
     assert.equal(r1.ok, true);
     assert.equal(r1.total, 2);
-    const ids = r1.rows.map((l) => Number(l.match(/^#(\d+)/)[1]));
+    const ids = dataRows(r1.rows).map((l) => Number(l.match(/^#(\d+)/)[1]));
     assert.ok(ids.includes(a) && ids.includes(e));
     assert.ok(!ids.includes(b) && !ids.includes(c) && !ids.includes(d));
     assert.equal(/** @type {any} */ (await queryJobs.handler({ ...base, includeDuplicates: true }, deps)).total, 3);
@@ -97,9 +108,9 @@ describe('query_jobs', () => {
     assert.equal(/** @type {any} */ (await queryJobs.handler({ ...base, location: 'Houston, TX' }, deps)).total, 2);
     assert.equal(/** @type {any} */ (await queryJobs.handler({ ...base, q: 'CIO' }, deps)).total, 1);
     const byFit = /** @type {any} */ (await queryJobs.handler({ ...base, sort: 'fit' }, deps));
-    assert.ok(byFit.rows[0].startsWith(`#${e} `));
+    assert.ok(dataRows(byFit.rows)[0].startsWith(`#${e} `));
     const page = /** @type {any} */ (await queryJobs.handler({ ...base, limit: 1 }, deps));
-    assert.equal(page.rows.length, 1);
+    assert.equal(dataRows(page.rows).length, 1);
     assert.equal(page.next_offset, 1);
     // SQL shape
     const q = buildQuery(base);
@@ -132,6 +143,9 @@ describe('get_job', () => {
     assert.ok(r.description_truncated);
     assert.ok(r.description.length < 500);
     assert.ok(!r.description.includes('<p>'), 'html stripped');
+    assert.ok(r.row.startsWith('<<<UNTRUSTED_LISTING_TEXT'), 'row line (title/company/location) is wrapped too');
+    assert.ok(r.row.includes('#' + id + ' | Detail'), 'wrapping does not corrupt the row content');
+    assert.ok(r.row.endsWith('>>>END_UNTRUSTED_LISTING_TEXT'));
     const noDesc = await insert({ title: 'NoDesc' });
     await client.query(`UPDATE ic_job_listings SET source = 'linkedin' WHERE id = $1`, [noDesc]);
     const r2 = /** @type {any} */ (await getJob.handler({ id: noDesc, detail_chars: 1200, fetchIfMissing: true }, deps));
@@ -254,8 +268,9 @@ describe('review merge / separate / repost', () => {
     await client.query(`INSERT INTO ic_job_review_queue (candidate_id, matches, reason, status_at_create) VALUES ($1, '{}', 'legacy_exact', 'review')`, [fresh]);
     const l = /** @type {any} */ (await review.handler({ action: 'list', limit: 25 }, deps));
     assert.equal(l.ok, true);
-    assert.ok(l.rows.every((x) => x.length <= 120));
-    assert.ok(l.rows.some((x) => x.includes(`#${fresh} Fresh`)) || l.total > 25);
+    const listRows = dataRows(l.rows);
+    assert.ok(listRows.every((x) => x.length <= 120));
+    assert.ok(listRows.some((x) => x.includes(`#${fresh} Fresh`)) || l.total > 25);
     await assert.rejects(resolveItem(client, { queueId: 999999999, resolution: 'separate' }), /not found/);
   });
 });

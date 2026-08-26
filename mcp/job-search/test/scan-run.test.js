@@ -10,6 +10,9 @@ import { test, describe, before, after } from 'node:test';
 import assert from 'node:assert/strict';
 import { LOCK_KEY, resolveSources, fetchDetailForRow } from '../src/core/scan-run.js';
 import { newClient, upsertTestProfile, cleanupScan, offlineDeps, runScanWaiting, testConfig, makeFixtureFetch, DEFAULT_MAP, makeFakeSession } from './helpers/scan-fixtures.js';
+import { untrustedRows } from '../src/core/compact.js';
+
+const [ROWS_OPEN, , ROWS_CLOSE] = untrustedRows(['x']);
 
 const PROFILE = `zz-test-scan-${process.pid}`;
 /** @type {import('pg').Client} */
@@ -63,7 +66,9 @@ describe('runScan persisted', () => {
     const items = await client.query('SELECT listing_id, outcome, page_index FROM ic_scan_run_items WHERE run_id = $1 ORDER BY listing_id', [r.run_id]);
     assert.equal(items.rowCount, 2);
     assert.ok(items.rows.every((i) => i.outcome === 'new' && i.page_index === 1));
-    assert.ok(r.rows.every((/** @type {string} */ line) => /^#\d+ \| /.test(line)), 'real ids in rows');
+    assert.equal(r.rows[0], ROWS_OPEN, 'rows wrapped in the untrusted delimiter');
+    assert.equal(r.rows[r.rows.length - 1], ROWS_CLOSE, 'rows wrapped in the untrusted delimiter');
+    assert.ok(r.rows.slice(1, -1).every((/** @type {string} */ line) => /^#\d+ \| /.test(line)), 'real ids in rows');
     assert.match(r.hint, /query_jobs\(\{runId:\d+/);
     const state = await client.query(`SELECT consecutive_walls FROM ic_source_state WHERE source = 'greenhouse'`);
     assert.equal(state.rows[0].consecutive_walls, 0, 'clean run recorded');

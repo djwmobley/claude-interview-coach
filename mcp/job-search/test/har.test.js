@@ -14,6 +14,9 @@ import { tool as searchJobs } from '../src/tools/search_jobs.js';
 import { wrapHandler } from '../src/tools/_shared.js';
 import { deps as gmailAuthDeps } from '../src/adapters/gmail.js';
 import { newClient, upsertTestProfile, cleanupScan, makeFixtureFetch, makeFakeSession, fakeLookup, testConfig, readJsonFixture, runScanWaiting, memoryReserve, fakeGmailAuthDeps } from './helpers/scan-fixtures.js';
+import { untrustedRows } from '../src/core/compact.js';
+
+const [ROWS_OPEN, , ROWS_CLOSE] = untrustedRows(['x']);
 
 const PROFILE = `zz-test-har-${process.pid}`;
 /** @type {import('pg').Client} */
@@ -71,7 +74,9 @@ describe('HAR: full fixture run', () => {
     }
     const hosts = new Set(recorded.map((q) => new URL(q.url).hostname));
     assert.ok(hosts.has('boards-api.greenhouse.io') && hosts.has('api.lever.co') && hosts.has('example.wd5.myworkdayjobs.com') && hosts.has('www.indeed.com') && hosts.has('www.linkedin.com') && hosts.has('www.example-exec.test') && hosts.has('gmail.googleapis.com'));
-    assert.ok(r.rows.every((/** @type {string} */ line) => line.startsWith('#dry:')), 'dry-run ids');
+    assert.equal(r.rows[0], ROWS_OPEN, 'rows wrapped in the untrusted delimiter');
+    assert.equal(r.rows[r.rows.length - 1], ROWS_CLOSE, 'rows wrapped in the untrusted delimiter');
+    assert.ok(r.rows.slice(1, -1).every((/** @type {string} */ line) => line.startsWith('#dry:')), 'dry-run ids');
     assert.ok(r.warnings.some((/** @type {string} */ w) => /dry run/.test(w)));
     const runRow = await client.query('SELECT status, dry_run, stats FROM ic_scan_runs WHERE id = $1', [r.run_id]);
     assert.equal(runRow.rows[0].dry_run, true);
@@ -112,8 +117,9 @@ describe('HAR: full fixture run', () => {
     assert.equal(out.content.length, 1);
     const parsed = JSON.parse(out.content[0].text);
     assert.equal(parsed.ok, true, out.content[0].text);
-    assert.ok(parsed.rows.length <= 5);
-    assert.ok(out.content[0].text.length <= 6000);
+    const dataLen = parsed.rows.length && parsed.rows[0] === ROWS_OPEN ? parsed.rows.length - 2 : parsed.rows.length;
+    assert.ok(dataLen <= 5);
+    assert.ok(out.content[0].text.length <= 6000, 'response, including the untrusted-rows wrap, still fits the budget');
     assert.ok(Array.isArray(parsed.blind_spots) && parsed.blind_spots.length >= 1);
   });
 });
