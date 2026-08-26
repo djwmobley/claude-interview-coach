@@ -1,0 +1,18 @@
+{
+  "_comment": "Keys are compared after lowercase, accent strip, and whitespace collapse. Values are the canonical company_norm. Aliased names are exempt from suffix stripping. Edits here can silently merge two companies; keep the list short and reviewed.",
+  "aliases": {
+    "jpmorgan chase": "jpmorgan chase",
+    "jpmorgan chase & co": "jpmorgan chase",
+    "jpmorgan chase and co": "jpmorgan chase",
+    "jp morgan": "jpmorgan chase",
+    "jpmc": "jpmorgan chase",
+    "hewlett packard enterprise": "hewlett packard enterprise",
+    "hpe": "hewlett packard enterprise",
+    "kpmg us": "kpmg",
+    "kpmg llp": "kpmg",
+    "baker tilly advisory group": "baker tilly",
+    "baker tilly us": "baker tilly",
+    "unitedhealth group": "unitedhealth group",
+    "optum": "unitedhealth group"
+  }
+}

@@ -1,0 +1,193 @@
+{
+  "dedup": {
+    "repostGapDays": 30,
+    "reviewAutoSeparateDays": 30,
+    "titleSimilarity": 0.55,
+    "companySimilarity": 0.7,
+    "postedAtCorroborationDays": 3,
+    "expireAfterAbsentRuns": 3
+  },
+  "trackingParams": [
+    "utm_*",
+    "ref",
+    "refid",
+    "trk",
+    "trackingid",
+    "position",
+    "pagenum",
+    "src",
+    "from",
+    "vjs",
+    "tk",
+    "fccid",
+    "xkcb",
+    "gh_src",
+    "lever-source",
+    "source",
+    "sid",
+    "advn",
+    "adid",
+    "ad",
+    "sjdu",
+    "vjk",
+    "xpse",
+    "sc",
+    "hidesmb",
+    "alid",
+    "acatk",
+    "pub",
+    "mo"
+  ],
+  "httpAllowedHosts": [],
+  "adapters": {
+    "indeed": {
+      "transport": "browser",
+      "domains": [
+        "indeed.com",
+        "www.indeed.com"
+      ],
+      "pathPatterns": [
+        "^/jobs(\\?|$)",
+        "^/viewjob(\\?|$)",
+        "^/m/jobs(\\?|$)"
+      ],
+      "delayMs": [
+        4000,
+        9000
+      ],
+      "dailyPages": 60,
+      "dailyDetails": 100,
+      "maxPagesPerQuery": 5
+    },
+    "linkedin": {
+      "transport": "browser",
+      "domains": [
+        "linkedin.com",
+        "www.linkedin.com"
+      ],
+      "pathPatterns": [
+        "^/jobs/search/?(\\?|$)",
+        "^/jobs/view/\\d+/?(\\?|$)"
+      ],
+      "delayMs": [
+        6000,
+        12000
+      ],
+      "dailyPages": 40,
+      "dailyDetails": 60,
+      "maxPagesPerQuery": 3
+    },
+    "greenhouse": {
+      "transport": "fetch",
+      "domains": [
+        "boards-api.greenhouse.io",
+        "boards.greenhouse.io",
+        "job-boards.greenhouse.io",
+        "boards.eu.greenhouse.io",
+        "my.greenhouse.io"
+      ],
+      "pathPatterns": [
+        "^/v1/boards/[a-z0-9-]+/jobs(/\\d+)?(\\?|$)",
+        "^/[a-z0-9-]+/jobs/\\d+/?(\\?|$)"
+      ],
+      "delayMs": [
+        500,
+        1000
+      ],
+      "dailyPages": 500,
+      "dailyDetails": 500,
+      "maxPagesPerQuery": 5
+    },
+    "lever": {
+      "transport": "fetch",
+      "domains": [
+        "api.lever.co",
+        "jobs.lever.co"
+      ],
+      "pathPatterns": [
+        "^/v0/postings/[a-z0-9-]+(\\?|$)",
+        "^/[a-z0-9-]+/[0-9a-f-]{36}/?(\\?|$)"
+      ],
+      "delayMs": [
+        500,
+        1000
+      ],
+      "dailyPages": 500,
+      "dailyDetails": 500,
+      "maxPagesPerQuery": 5
+    },
+    "workday": {
+      "transport": "fetch",
+      "domains": [
+        "myworkdayjobs.com"
+      ],
+      "pathPatterns": [
+        "^/wday/cxs/[A-Za-z0-9_-]+/[A-Za-z0-9_-]+/jobs(\\?|$)",
+        "^/wday/cxs/[A-Za-z0-9_-]+/[A-Za-z0-9_-]+/job/.+$",
+        "^/(?:[a-z]{2}-[A-Za-z]{2}/)?[A-Za-z0-9_-]+/job/.+$"
+      ],
+      "delayMs": [
+        2000,
+        4000
+      ],
+      "dailyPages": 200,
+      "dailyDetails": 200,
+      "maxPagesPerQuery": 5
+    },
+    "dayforce": {
+      "transport": "html",
+      "domains": [
+        "dayforcehcm.com"
+      ],
+      "pathPatterns": [
+        "^/CandidatePortal/[a-z]{2}-[A-Za-z]{2}/[A-Za-z0-9_-]+(/Posting/View/\\d+)?/?(\\?|$)"
+      ],
+      "delayMs": [
+        2000,
+        4000
+      ],
+      "dailyPages": 100,
+      "dailyDetails": 100,
+      "maxPagesPerQuery": 3
+    },
+    "exec": {
+      "transport": "html",
+      "domains": [],
+      "pathPatterns": [],
+      "delayMs": [
+        3000,
+        6000
+      ],
+      "dailyPages": 100,
+      "dailyDetails": 100,
+      "maxPagesPerQuery": 3
+    },
+    "gmail": {
+      "transport": "fetch",
+      "domains": [
+        "gmail.googleapis.com"
+      ],
+      "pathPatterns": [
+        "^/gmail/v1/users/me/messages(/[0-9a-f]{8,32})?(\\?|$)"
+      ],
+      "delayMs": [
+        200,
+        400
+      ],
+      "dailyPages": 300,
+      "dailyDetails": 0,
+      "maxPagesPerQuery": 5
+    }
+  },
+  "run": {
+    "maxPlannedPagesPerRun": 200,
+    "runTimeoutMinutes": 20,
+    "heartbeatStaleMinutes": 10,
+    "detailFetchMinPrescore": 40,
+    "backoff": {
+      "maxDelayMs": 300000,
+      "retries": 3
+    },
+    "throttleRatio": 0.4
+  }
+}

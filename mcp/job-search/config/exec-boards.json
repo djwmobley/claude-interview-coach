@@ -1,0 +1,82 @@
+{
+  "boards": [
+    {
+      "slug": "east57th",
+      "name": "East 57th Street Partners",
+      "listUrl": "https://www1.jobdiva.com/portal/?a=wjjdnw26tqm5zr5716f7vo08oi7hrx0793esclv1ut0mrjm5kxl1a0ch79el9hlj&compid=0",
+      "domains": [
+        "www1.jobdiva.com",
+        "e57partners.com",
+        "www.e57partners.com"
+      ],
+      "pathPatterns": [
+        "^/portal/(\\?.*)?$"
+      ],
+      "mode": "browser",
+      "enabled": false,
+      "comment": "VERIFIED 2026-08-25 in a real browser: the firm's site is e57partners.com (east57th.com does not resolve; e57partners.com returns 403 to non-browser clients). Its Careers link is a JobDiva candidate portal SPA that lists client mandates without login (12 rows on 2026-08-25, including Executive Search: CTO/CFO/CEO, all dated 03/19/2025). Not enableable yet: rows use Details buttons, not anchors, so JSON-LD, selectors, and the anchor scan all yield zero; needs a JobDiva-specific extractor that reads the list and builds detail URLs. Listings observed were stale (5 months), so low priority."
+    },
+    {
+      "slug": "kornferry",
+      "name": "Korn Ferry",
+      "listUrl": "https://jobs.candidate.kornferry.com/jobs/",
+      "domains": [
+        "kornferry.com",
+        "www.kornferry.com",
+        "jobs.candidate.kornferry.com"
+      ],
+      "pathPatterns": [
+        "^/jobs(/.*)?$"
+      ],
+      "mode": "browser",
+      "enabled": false,
+      "comment": "VERIFIED 2026-08-25: /executive-search/opportunities is 404. The public board is jobs.candidate.kornferry.com/jobs/ (Loopworks): the static page is a search form only and results load via a Kendo grid after a search is submitted. The capability object forbids form submission by design, so this board cannot be scanned without a policy change. Keep disabled."
+    },
+    {
+      "slug": "heidrick",
+      "name": "Heidrick & Struggles",
+      "listUrl": "https://www.heidrick.com/en/careers",
+      "domains": [
+        "heidrick.com",
+        "www.heidrick.com"
+      ],
+      "pathPatterns": [
+        "^/en/careers(/.*)?$"
+      ],
+      "mode": "browser",
+      "enabled": false,
+      "comment": "VERIFIED 2026-08-25: no public list of client searches. /en/opportunities is 404; /en/careers is the firm's own staff hiring page (Workday) and leaders.heidrick.com is a registration-only candidate intake. Nothing to scan. Keep disabled."
+    },
+    {
+      "slug": "spencerstuart",
+      "name": "Spencer Stuart",
+      "listUrl": "https://www.spencerstuart.com/",
+      "domains": [
+        "spencerstuart.com",
+        "www.spencerstuart.com"
+      ],
+      "pathPatterns": [
+        "^/executive-search(/.*)?$"
+      ],
+      "mode": "browser",
+      "enabled": false,
+      "comment": "VERIFIED 2026-08-25: no public list of client searches. /executive-search/opportunities is 404; only the firm's own Workday careers page and a login-gated candidate registration portal exist. Nothing to scan. Keep disabled."
+    },
+    {
+      "slug": "russellreynolds",
+      "name": "Russell Reynolds Associates",
+      "listUrl": "https://www.russellreynolds.com/en/about/careers/careers-with-our-clients",
+      "domains": [
+        "russellreynolds.com",
+        "www.russellreynolds.com"
+      ],
+      "pathPatterns": [
+        "^/en/about/careers(/.*)?$"
+      ],
+      "mode": "browser",
+      "enabled": false,
+      "comment": "VERIFIED 2026-08-25: no public list of client searches. /en/opportunities is 404; careers-with-our-clients is a resume-submission CTA page with no listings (refers candidates to AESC BlueSteps). Nothing to scan. Keep disabled."
+    }
+  ],
+  "_comment": "Exec-search firm boards for the exec-generic adapter. All five were verified on 2026-08-25: none exposes a scannable public list today. Retained-search firms (Heidrick, Spencer Stuart, Russell Reynolds) publish no client mandates; Korn Ferry needs a form submit the capability object forbids; East 57th is a JobDiva SPA that needs its own extractor. Every entry stays disabled; a wrong listUrl fails closed (CONFIG_INVALID) and never reaches the network."
+}

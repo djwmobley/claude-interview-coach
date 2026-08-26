@@ -1,0 +1,44 @@
+{
+  "boards": [
+    {
+      "slug": "exfetch",
+      "name": "Example Search Partners (fetch)",
+      "listUrl": "https://www.example-exec.test/opportunities",
+      "domains": [
+        "example-exec.test",
+        "www.example-exec.test"
+      ],
+      "pathPatterns": [
+        "^/opportunities(/.*)?$"
+      ],
+      "mode": "fetch",
+      "enabled": true,
+      "selectors": {
+        "item": "article.search-card",
+        "title": "a.card-link",
+        "link": "a.card-link",
+        "location": ".card-location"
+      }
+    },
+    {
+      "slug": "exbrowser",
+      "name": "Example Search Partners (browser)",
+      "listUrl": "https://www.example-exec-js.test/en/opportunities",
+      "domains": [
+        "example-exec-js.test",
+        "www.example-exec-js.test"
+      ],
+      "pathPatterns": [
+        "^/en/opportunities(/.*)?$"
+      ],
+      "mode": "browser",
+      "enabled": true,
+      "selectors": {
+        "item": "article.search-card",
+        "title": "a.card-link",
+        "link": "a.card-link",
+        "location": ".card-location"
+      }
+    }
+  ]
+}

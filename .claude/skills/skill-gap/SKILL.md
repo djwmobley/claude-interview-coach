@@ -259,11 +259,17 @@ Group by: Free / Subscription-included first, Paid second.
 Ask the candidate four questions to determine their learning path. Use
 `AskUserQuestion` with four questions in one call:
 
-1. **Daily time available** — 15-20 min / 30-45 min / 1 hour+
-2. **Track priority** — choose the primary gap area (or both in parallel)
-3. **Budget** — Free and subscription only / Open to spending if justified / No limit
-4. **Certification preference** — if a certification is relevant to the role, ask
-   whether to pursue it now, after an offer, or skip it
+1. **Daily time available** — Be specific: "roughly how many hours per day can
+   you realistically dedicate to learning right now?"
+   - Under 30 min / 30–60 min / 1–2 hours / 3–4 hours / 5+ hours (full-day)
+   - Note: the answer determines how `/learn-today` adapts its daily output.
+     Under 30 min activates micro-task mode; 3h+ enables sprint sessions.
+2. **Track priority** — choose the primary gap area to attack first (or both
+   in parallel if time permits)
+3. **Budget** — Free and subscription-included only / Open to paid if
+   clearly worth it / No limit
+4. **Certification preference** — if a certification is relevant to the role,
+   ask whether to pursue it before applying, after an offer, or skip it
 
 Wait for answers before proceeding.
 
@@ -282,7 +288,7 @@ structured learning plan to `data/learning-plan.md`.
 *Created: [today's date]*
 *Last updated: [today's date]*
 *Planning horizon: [N] days*
-*Daily commitment: [answer from Q&A]*
+*Daily commitment: [exact answer from Q&A — e.g., "30–60 min" or "3–4 hours"]*
 *Budget: [answer from Q&A]*
 *Schedule mode: alternating tracks (A then B then A...) | track-A-only | track-B-only*
 
@@ -333,5 +339,10 @@ structured learning plan to `data/learning-plan.md`.
 - If the existing plan is for the same roles: ask the candidate whether to replace or extend it
 
 **After writing, tell the candidate:**
-> Learning plan saved. Start with `/learn-today` — it will show you exactly what to open and what to look for,
-> based on your background. Type `/learn-today done` when you finish a module to log it and queue the next one.
+> Learning plan saved. How to use it:
+>
+> - **`/learn-today`** — shows today's module with guidance tailored to your background and the JPMC roles
+> - **`/learn-today 15min`** — if you only have a few minutes; adapts to what's actually useful at that time
+> - **`/learn-today sprint`** or **`/learn-today sprint 4h`** — sequences a full block of modules when you have time to make serious progress
+> - **`/learn-today done`** — log a completed module and queue the next one
+> - **`/learn-today quiz`** — test yourself on what you've done so far

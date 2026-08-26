@@ -1,0 +1,15 @@
+{
+ "jobPostingInfo": {
+  "id": "x",
+  "title": "Chief Technology Officer",
+  "jobDescription": "<p>Synthetic Workday detail. Owns technology strategy for a PE-backed manufacturer.</p><ul><li>Reports to the CEO</li></ul>",
+  "location": "Houston, TX",
+  "postedOn": "Posted 3 Days Ago",
+  "startDate": "2026-08-21",
+  "jobReqId": "R-10021",
+  "externalUrl": "https://example.wd5.myworkdayjobs.com/External/job/Houston-TX/Chief-Technology-Officer_R-10021"
+ },
+ "hiringOrganization": {
+  "name": "Example Workday Co"
+ }
+}

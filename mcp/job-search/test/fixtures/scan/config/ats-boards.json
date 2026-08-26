@@ -1,0 +1,43 @@
+{
+  "greenhouse": [
+    {
+      "board": "gitlab",
+      "company": "GitLab",
+      "hosts": [
+        "about.gitlab.com"
+      ],
+      "enabled": true
+    },
+    {
+      "board": "zztest",
+      "company": "ZZ-TEST-SCAN",
+      "hosts": [],
+      "enabled": true
+    }
+  ],
+  "lever": [
+    {
+      "company": "palantir",
+      "displayName": "Palantir Technologies",
+      "enabled": true
+    }
+  ],
+  "workday": [
+    {
+      "tenant": "example",
+      "site": "External",
+      "wd": "wd5",
+      "displayName": "Example Workday Co",
+      "enabled": true
+    }
+  ],
+  "dayforce": [
+    {
+      "host": "example.dayforcehcm.com",
+      "client": "example",
+      "lang": "en-US",
+      "displayName": "Example Dayforce Co",
+      "enabled": true
+    }
+  ]
+}

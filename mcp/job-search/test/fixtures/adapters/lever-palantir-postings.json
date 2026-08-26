@@ -1,0 +1,116 @@
+[
+ {
+  "id": "ac978161-6f46-4f6b-ad9e-a258e642751c",
+  "text": "Administrative Business Partner",
+  "categories": {
+   "commitment": "Full-time",
+   "location": "London, United Kingdom",
+   "team": "Administrative",
+   "allLocations": [
+    "London, United Kingdom"
+   ]
+  },
+  "createdAt": 1711403416463,
+  "country": "GB",
+  "workplaceType": "hybrid",
+  "hostedUrl": "https://jobs.lever.co/palantir/ac978161-6f46-4f6b-ad9e-a258e642751c",
+  "applyUrl": "https://jobs.lever.co/palantir/ac978161-6f46-4f6b-ad9e-a258e642751c/apply",
+  "descriptionPlain": "A World-Changing Company\n\u00a0\nPalantir builds the world\u2019s leading software for data-driven decisions and operations. By bringing the right data to the people who need it, our platforms empower our partners to develop lifesaving drugs, forecast supply chain disruptions, locate missing children, and more.\n\n\nThe Role\n\u00a0\nOur team of Administrative Business Partners does more than just support our leaders:"
+ },
+ {
+  "id": "0bbfd4f4-41ff-4ec6-b73f-5200efd5d4d3",
+  "text": "Administrative Business Partner - Security",
+  "categories": {
+   "commitment": "Full-time",
+   "location": "Palo Alto, CA",
+   "team": "Administrative",
+   "allLocations": [
+    "Palo Alto, CA"
+   ]
+  },
+  "createdAt": 1778622524938,
+  "country": "US",
+  "workplaceType": "hybrid",
+  "hostedUrl": "https://jobs.lever.co/palantir/0bbfd4f4-41ff-4ec6-b73f-5200efd5d4d3",
+  "applyUrl": "https://jobs.lever.co/palantir/0bbfd4f4-41ff-4ec6-b73f-5200efd5d4d3/apply",
+  "descriptionPlain": "A World-Changing Company\n\u00a0\nPalantir builds the world\u2019s leading software for data-driven decisions and operations. By bringing the right data to the people who need it, our platforms empower our partners to develop lifesaving drugs, forecast supply chain disruptions, locate missing children, and more.\n\n\nThe Role\n\u00a0\nOur Administrative Business Partners do more than support leaders, they are operation"
+ },
+ {
+  "id": "fe2a8c69-49b7-405f-816c-a6c6f894399a",
+  "text": "Administrative Business Partner - Security",
+  "categories": {
+   "commitment": "Full-time",
+   "location": "New York, NY",
+   "team": "Administrative",
+   "allLocations": [
+    "New York, NY"
+   ]
+  },
+  "createdAt": 1772551058051,
+  "country": "US",
+  "workplaceType": "hybrid",
+  "hostedUrl": "https://jobs.lever.co/palantir/fe2a8c69-49b7-405f-816c-a6c6f894399a",
+  "applyUrl": "https://jobs.lever.co/palantir/fe2a8c69-49b7-405f-816c-a6c6f894399a/apply",
+  "descriptionPlain": "A World-Changing Company\n\u00a0\nPalantir builds the world\u2019s leading software for data-driven decisions and operations. By bringing the right data to the people who need it, our platforms empower our partners to develop lifesaving drugs, forecast supply chain disruptions, locate missing children, and more.\n\n\nThe Role\n\u00a0\nOur Administrative Business Partners do more than support leaders, they are operation"
+ },
+ {
+  "id": "a237973c-cb29-41fe-9c80-416e6f42e087",
+  "text": "Administrative Business Partner - ShipOS",
+  "categories": {
+   "commitment": "Full-time",
+   "location": "Washington, D.C.",
+   "team": "Administrative",
+   "allLocations": [
+    "Washington, D.C."
+   ]
+  },
+  "createdAt": 1781771660468,
+  "country": "US",
+  "workplaceType": "hybrid",
+  "hostedUrl": "https://jobs.lever.co/palantir/a237973c-cb29-41fe-9c80-416e6f42e087",
+  "applyUrl": "https://jobs.lever.co/palantir/a237973c-cb29-41fe-9c80-416e6f42e087/apply",
+  "descriptionPlain": "A World-Changing Company\n\u00a0\nPalantir builds the world\u2019s leading software for data-driven decisions and operations. By bringing the right data to the people who need it, our platforms empower our partners to develop lifesaving drugs, forecast supply chain disruptions, locate missing children, and more.\n\n\nThe Role\nShipOS is Palantir's partnership with the U.S. Navy to modernize the American maritime "
+ },
+ {
+  "id": "aaaaaaaa-1111-4222-8333-444444444444",
+  "text": "Vice President, Engineering (synthetic fixture)",
+  "categories": {
+   "commitment": "Full-time",
+   "location": "Houston, TX",
+   "team": "Engineering",
+   "allLocations": [
+    "Houston, TX"
+   ]
+  },
+  "createdAt": 1787000000000,
+  "country": "US",
+  "workplaceType": "hybrid",
+  "hostedUrl": "https://jobs.lever.co/palantir/aaaaaaaa-1111-4222-8333-444444444444",
+  "applyUrl": "https://jobs.lever.co/palantir/aaaaaaaa-1111-4222-8333-444444444444/apply",
+  "descriptionPlain": "Synthetic posting added to the real Palantir fixture so a title matches the exec profile. Leads platform engineering for a payments product.",
+  "salaryRange": {
+   "min": 250000,
+   "max": 320000,
+   "currency": "USD",
+   "interval": "per-year-salary"
+  }
+ },
+ {
+  "id": "bbbbbbbb-1111-4222-8333-444444444444",
+  "text": "Director of Product, Payments (synthetic fixture)",
+  "categories": {
+   "commitment": "Full-time",
+   "location": "Remote, United States",
+   "team": "Product",
+   "allLocations": [
+    "Remote, United States"
+   ]
+  },
+  "createdAt": 1600000000000,
+  "country": "US",
+  "workplaceType": "remote",
+  "hostedUrl": "https://jobs.lever.co/palantir/bbbbbbbb-1111-4222-8333-444444444444",
+  "applyUrl": "https://jobs.lever.co/palantir/bbbbbbbb-1111-4222-8333-444444444444/apply",
+  "descriptionPlain": "Synthetic posting with an old createdAt so the window filter drops it."
+ }
+]

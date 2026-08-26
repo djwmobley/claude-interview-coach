@@ -57,14 +57,15 @@ This step should take 1-2 minutes, not become a second session. If the enrichmen
 
 ## Voice Capture Update
 
-If voice capture was enabled at the start of this session, update `data/voice.md`
-as the **final step** — after all data file updates are complete.
+Update `memory/voice.md` as the **final step** — after all data file updates
+are complete. Voice capture runs every session; no opt-in is required.
 
 Follow the full procedure in `framework/voice-capture.md`: review the session for
 observations, append new entries to the relevant sections, update the **Last
 updated** date, and add the session to the **Observed Over** list.
 
-If voice capture was not enabled, skip this step entirely.
+If the session produced no new observations, note that in the Observed Over
+entry and move on.
 
 ---
 

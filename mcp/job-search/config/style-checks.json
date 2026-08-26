@@ -1,0 +1,21 @@
+{
+  "_comment": "Lexical checks for render_doc preflight (spec 12a). Source of truth for the buzzword list is .claude/skills/write-resume/SKILL.md; keep in sync. Not part of config.lock.json (that lock covers scan config only).",
+  "buzzwords": [
+    "spearheaded", "spearhead", "spearheads", "spearheading",
+    "leveraged", "leverage", "leverages", "leveraging",
+    "championed", "champion", "champions", "championing",
+    "harnessed", "harnessing",
+    "utilized", "utilize", "utilizes", "utilizing", "utilization",
+    "orchestrated", "orchestrate", "orchestrates", "orchestrating",
+    "revolutionized", "revolutionize", "revolutionizes", "revolutionizing",
+    "transformative", "cutting-edge", "game-changing", "game changer",
+    "robust", "seamless", "seamlessly", "synergies", "synergy", "synergistic", "unlock", "unlocks", "unlocked", "unlocking"
+  ],
+  "problemComparisonPatterns": [
+    "\\b(?:this |that |it )?(?:is not|isn't|is no longer|was not|wasn't|not) (?:just |only |really |simply |merely )?an? [^.;]{1,60} (?:problem|issue|question|challenge)[.;,]? (?:but |and )?(?:it is|it's|this is|that is|that's|rather|instead|but rather)?\\s*an? [^.;]{1,60} (?:problem|issue|question|challenge)\\b",
+    "\\bless an? [^.;]{1,60} (?:problem|issue|question|challenge) than an? [^.;]{1,60} (?:problem|issue|question|challenge)\\b"
+  ],
+  "pmpExact": "PMP (Expired 2017), Project Management Institute",
+  "jenkonTitle": "Director of Program Management",
+  "jenkonForbidden": ["Director, Program Management", "Director of PMO", "Director, PMO"]
+}

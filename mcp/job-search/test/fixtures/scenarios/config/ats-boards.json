@@ -1,0 +1,20 @@
+{
+  "_comment": "Scenario test config: one synthetic Greenhouse board and one synthetic Lever company that share the company name ZZ-TEST-SCEN so a cross-source pair can be scanned offline.",
+  "greenhouse": [
+    {
+      "board": "zzscen",
+      "company": "ZZ-TEST-SCEN",
+      "hosts": [],
+      "enabled": true
+    }
+  ],
+  "lever": [
+    {
+      "company": "zzscen",
+      "displayName": "ZZ-TEST-SCEN",
+      "enabled": true
+    }
+  ],
+  "workday": [],
+  "dayforce": []
+}

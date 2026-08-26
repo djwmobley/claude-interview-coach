@@ -1,0 +1,35 @@
+{
+ "total": 3,
+ "jobPostings": [
+  {
+   "title": "Chief Technology Officer",
+   "externalPath": "/job/Houston-TX/Chief-Technology-Officer_R-10021",
+   "locationsText": "Houston, TX",
+   "postedOn": "Posted 3 Days Ago",
+   "bulletFields": [
+    "R-10021"
+   ]
+  },
+  {
+   "title": "Vice President, Digital Transformation",
+   "externalPath": "/job/Dallas-TX/Vice-President-Digital-Transformation_R-10022",
+   "locationsText": "2 Locations",
+   "postedOn": "Posted Today",
+   "bulletFields": [
+    "R-10022",
+    "$220,000 - $260,000"
+   ]
+  },
+  {
+   "title": "Senior Software Engineer",
+   "externalPath": "/job/Remote-USA/Senior-Software-Engineer_R-10023",
+   "locationsText": "Remote, USA",
+   "postedOn": "Posted 30+ Days Ago",
+   "bulletFields": [
+    "R-10023"
+   ]
+  }
+ ],
+ "facets": [],
+ "userAuthenticated": false
+}

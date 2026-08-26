@@ -1,0 +1,15 @@
+{
+  "messages": [
+    { "id": "fedcba98765401", "threadId": "fedcba98765401" },
+    { "id": "fedcba98765402", "threadId": "fedcba98765402" },
+    { "id": "fedcba98765403", "threadId": "fedcba98765403" },
+    { "id": "fedcba98765404", "threadId": "fedcba98765404" },
+    { "id": "fedcba98765405", "threadId": "fedcba98765405" },
+    { "id": "fedcba98765406", "threadId": "fedcba98765406" },
+    { "id": "fedcba98765407", "threadId": "fedcba98765407" },
+    { "id": "fedcba98765408", "threadId": "fedcba98765408" },
+    { "id": "fedcba98765409", "threadId": "fedcba98765409" },
+    { "id": "fedcba9876540a", "threadId": "fedcba9876540a" }
+  ],
+  "resultSizeEstimate": 10
+}

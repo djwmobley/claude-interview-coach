@@ -1,0 +1,112 @@
+{
+  "_comment": "Boards scanned by the fetch adapters. Greenhouse/Lever entries were chosen as large companies that plausibly post executive roles; each was verified only by the first LIVE=1 dry run recorded in the stage 3 report (a 404 there means the board token is wrong: disable it). Workday and Dayforce entries are examples, disabled: no live run has touched those adapters.",
+  "greenhouse": [
+    {
+      "board": "gitlab",
+      "company": "GitLab",
+      "hosts": [
+        "about.gitlab.com"
+      ],
+      "enabled": true
+    },
+    {
+      "board": "stripe",
+      "company": "Stripe",
+      "hosts": [
+        "stripe.com"
+      ],
+      "enabled": true
+    },
+    {
+      "board": "airbnb",
+      "company": "Airbnb",
+      "hosts": [
+        "careers.airbnb.com"
+      ],
+      "enabled": true
+    },
+    {
+      "board": "coinbase",
+      "company": "Coinbase",
+      "hosts": [
+        "www.coinbase.com"
+      ],
+      "enabled": true
+    },
+    {
+      "board": "databricks",
+      "company": "Databricks",
+      "hosts": [
+        "www.databricks.com"
+      ],
+      "enabled": true
+    },
+    {
+      "board": "cloudflare",
+      "company": "Cloudflare",
+      "hosts": [
+        "www.cloudflare.com"
+      ],
+      "enabled": true
+    },
+    {
+      "board": "twilio",
+      "company": "Twilio",
+      "hosts": [
+        "www.twilio.com"
+      ],
+      "enabled": true
+    },
+    {
+      "board": "dropbox",
+      "company": "Dropbox",
+      "hosts": [
+        "jobs.dropbox.com"
+      ],
+      "enabled": true
+    }
+  ],
+  "lever": [
+    {
+      "company": "palantir",
+      "displayName": "Palantir Technologies",
+      "enabled": true
+    },
+    {
+      "company": "netflix",
+      "displayName": "Netflix",
+      "enabled": false,
+      "comment": "HTTP 404 from api.lever.co on the 2026-08-25 live dry run: Netflix no longer publishes through Lever. Kept disabled as a record."
+    },
+    {
+      "company": "atlassian",
+      "displayName": "Atlassian",
+      "enabled": false,
+      "comment": "HTTP 404 from api.lever.co on the 2026-08-25 live dry run. Kept disabled as a record."
+    },
+    {
+      "company": "plaid",
+      "displayName": "Plaid",
+      "enabled": false,
+      "comment": "HTTP 200 with an empty postings array on the 2026-08-25 live dry run (board exists but is unused). Kept disabled as a record."
+    }
+  ],
+  "workday": [
+    {
+      "tenant": "example",
+      "site": "External",
+      "wd": "wd5",
+      "displayName": "Example Workday Co",
+      "enabled": false
+    }
+  ],
+  "dayforce": [
+    {
+      "host": "example.dayforcehcm.com",
+      "client": "example",
+      "lang": "en-US",
+      "displayName": "Example Dayforce Co",
+      "enabled": false
+    }
+  ]
+}

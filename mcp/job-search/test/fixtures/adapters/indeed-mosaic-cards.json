@@ -1,0 +1,42 @@
+[
+ {
+  "jobkey": "a1b2c3d4e5f60718",
+  "title": "Chief Information Officer",
+  "company": "Acme Manufacturing",
+  "location": "Houston, TX",
+  "remote": false,
+  "postedMs": 1787100000000,
+  "salaryText": "$250,000 - $300,000 a year",
+  "snippet": "Lead enterprise technology..."
+ },
+ {
+  "jobkey": "0f1e2d3c4b5a6978",
+  "title": "VP Payments Strategy",
+  "company": "Northstar Fintech",
+  "location": "Remote",
+  "remote": true,
+  "postedMs": 1786900000000,
+  "salaryText": null,
+  "snippet": "Own payments roadmap"
+ },
+ {
+  "jobkey": "deadbeef00112233",
+  "title": "Junior Analyst",
+  "company": "Widgets LLC",
+  "location": "Austin, TX",
+  "remote": false,
+  "postedMs": 1780000000000,
+  "salaryText": null,
+  "snippet": ""
+ },
+ {
+  "jobkey": null,
+  "title": "broken card",
+  "company": "x",
+  "location": null,
+  "remote": false,
+  "postedMs": null,
+  "salaryText": null,
+  "snippet": null
+ }
+]

@@ -1,30 +1,13 @@
 # Voice Capture — Passive Observation Guide
 
-Voice capture builds a profile of how the candidate naturally communicates. It is
-passive — Claude observes throughout a session and updates `data/voice.md` at the
-end. The candidate is never asked to describe their own voice directly. Prepared
-answers to "how do you say things?" are too curated to be useful; spontaneous
-corrections and pushback are not.
+Voice capture builds a profile of how the candidate naturally communicates. It
+runs passively and automatically every session: Claude observes throughout and
+updates `memory/voice.md` at the end, with no prompt or opt-in required from
+the candidate. Prepared answers to "how do you say things?" are too curated to
+be useful; spontaneous corrections and pushback are not.
 
----
-
-## The Opt-In Question
-
-Ask this once, at the very start of any resume or coaching session, before any
-other question:
-
-> **Voice capture available.** If you say yes, I'll observe how you naturally
-> communicate throughout this session — the corrections you make to my drafts,
-> how you push back on framing, the words you add or cut — and update
-> `data/voice.md` at the end. That profile is used in future sessions to match
-> your natural writing style when generating resume bullets and coached answers.
-> It builds over time without any extra effort from you. Enable? (yes / no)
-
-If the candidate says no, skip all voice capture steps for the session.
-If the candidate says yes, set an internal flag and follow this guide.
-
-Do not ask again mid-session. Do not reference voice capture again during the
-session — observation should be invisible.
+Observation should be invisible during the session. Do not reference voice
+capture or ask permission at any point.
 
 ---
 
@@ -98,14 +81,20 @@ Be specific and concrete. Quote where possible.
 
 ## When to Update
 
-Update `data/voice.md` as the **last step** of data enrichment at the end of
+Update `memory/voice.md` as the **last step** of data enrichment at the end of
 the session — after data files have been updated and before the session closes.
 
-1. Read the current `data/voice.md`
+1. Read the current `memory/voice.md`
 2. Review the session for observations matching the categories above
 3. Add new observations — do not overwrite existing entries, append to them
 4. Update the **Last updated** date at the top
 5. Add the session to the **Observed Over** list
+
+6. Cross-check "Things to Avoid" against `coaching/anti-pattern-tracker.md`.
+   For any avoidance that is also an interview delivery pattern (essay structure,
+   passive-voice self-description, collective hedging, opening with context not
+   the point), confirm that it appears in the anti-pattern tracker. Add it if
+   missing. This keeps style-level delivery patterns tracked in both places.
 
 Keep entries concise. The profile is a reference for writing, not a biography.
 If a session produced nothing new, say so in the Observed Over entry and move on.
@@ -114,7 +103,7 @@ If a session produced nothing new, say so in the Observed Over entry and move on
 
 ## How Voice Profile Is Used
 
-When `data/voice.md` is non-empty, it is read alongside `data/professional-identity.md`
+When `memory/voice.md` is non-empty, it is read alongside `data/professional-identity.md`
 during resume generation and coaching sessions. Specifically:
 
 - **Resume bullets:** Apply characteristic phrases, sentence structure, and

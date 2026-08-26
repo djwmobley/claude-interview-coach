@@ -1,0 +1,386 @@
+// @ts-check
+/**
+ * Configuration loader.
+ *
+ * - Resolves the repo root (CLAUDE_PROJECT_DIR, else the directory four levels
+ *   above this file, which is where mcp/job-search/src/core lives). The MCP
+ *   launch does not run a shell, so this module loads mcp/job-search/.env
+ *   itself before anything reads process.env.
+ * - Validates config/*.json with zod. Config files fail closed: an invalid
+ *   file refuses the run with CONFIG_INVALID.
+ * - Computes sha256 over config/*.json for the config lock.
+ *
+ * All exports are synchronous so normalize.js can pull defaults at import.
+ */
+import fs from 'node:fs';
+import os from 'node:os';
+import path from 'node:path';
+import crypto from 'node:crypto';
+import { fileURLToPath } from 'node:url';
+import { z } from 'zod';
+import { JobSearchError } from './errors.js';
+
+const HERE = path.dirname(fileURLToPath(import.meta.url));
+
+/** Repo root: CLAUDE_PROJECT_DIR wins; otherwise derive from this file's location. */
+export function repoRoot() {
+  const env = process.env.CLAUDE_PROJECT_DIR;
+  if (env && env.trim()) return path.resolve(env.trim());
+  return path.resolve(HERE, '..', '..', '..', '..');
+}
+
+/** mcp/job-search directory. */
+export function packageRoot() {
+  return path.join(repoRoot(), 'mcp', 'job-search');
+}
+
+/**
+ * Minimal .env parser: KEY=VALUE lines, `#` comments, optional single or double quotes.
+ * Existing process.env values win (an explicit environment beats the file).
+ * @param {string} file
+ * @returns {number} count of keys applied
+ */
+export function loadDotenv(file) {
+  let text;
+  try {
+    text = fs.readFileSync(file, 'utf8');
+  } catch {
+    return 0;
+  }
+  let applied = 0;
+  for (const rawLine of text.split(/\r?\n/)) {
+    const line = rawLine.trim();
+    if (!line || line.startsWith('#')) continue;
+    const eq = line.indexOf('=');
+    if (eq <= 0) continue;
+    const key = line.slice(0, eq).trim();
+    let val = line.slice(eq + 1).trim();
+    if ((val.startsWith('"') && val.endsWith('"')) || (val.startsWith("'") && val.endsWith("'"))) {
+      val = val.slice(1, -1);
+    }
+    if (!/^[A-Z_][A-Z0-9_]*$/i.test(key)) continue;
+    if (process.env[key] === undefined) {
+      process.env[key] = val;
+      applied++;
+    }
+  }
+  return applied;
+}
+
+let dotenvLoaded = false;
+/** Load mcp/job-search/.env once. Safe to call repeatedly. */
+export function ensureDotenv() {
+  if (dotenvLoaded) return;
+  dotenvLoaded = true;
+  loadDotenv(path.join(packageRoot(), '.env'));
+}
+
+/**
+ * @typedef {Object} Env
+ * @property {string|null} PG_DSN full connection URL from .env, or null to use the local defaults
+ * @property {string} SCAN_CDP_URL
+ * @property {string} SCAN_PROFILE_DIR
+ * @property {string|null} CHROME_EXECUTABLE
+ * @property {string} OLLAMA_URL
+ * @property {string} OLLAMA_MODEL
+ * @property {string} JOBSEARCH_LOG_DIR
+ * @property {string} JOBSEARCH_CONFIG_DIR
+ * @property {string} GOOGLE_TOKEN_FILE
+ * @property {string} REMINDER_TO
+ * @property {string} LOG_LEVEL
+ */
+
+/**
+ * Resolve a path against the repo root when relative.
+ * @param {string} p
+ */
+export function resolveFromRoot(p) {
+  return path.isAbsolute(p) ? p : path.resolve(repoRoot(), p);
+}
+
+/** @returns {Env} */
+export function getEnv() {
+  ensureDotenv();
+  const e = process.env;
+  return {
+    PG_DSN: e.PG_DSN || null,
+    SCAN_CDP_URL: e.SCAN_CDP_URL || 'http://127.0.0.1:9333',
+    SCAN_PROFILE_DIR: e.SCAN_PROFILE_DIR || path.join(os.homedir(), 'chrome-scan-profile'),
+    CHROME_EXECUTABLE: e.CHROME_EXECUTABLE || null,
+    OLLAMA_URL: (e.OLLAMA_URL || 'http://localhost:11434').replace(/\/+$/, ''),
+    OLLAMA_MODEL: e.OLLAMA_MODEL || 'mxbai-embed-large',
+    JOBSEARCH_LOG_DIR: resolveFromRoot(e.JOBSEARCH_LOG_DIR || path.join('mcp', 'job-search', 'logs')),
+    JOBSEARCH_CONFIG_DIR: resolveFromRoot(e.JOBSEARCH_CONFIG_DIR || path.join('mcp', 'job-search', 'config')),
+    GOOGLE_TOKEN_FILE: e.GOOGLE_TOKEN_FILE || '',
+    REMINDER_TO: e.REMINDER_TO || '',
+    LOG_LEVEL: e.LOG_LEVEL || 'info',
+  };
+}
+
+/**
+ * pg connection options. With PG_DSN set, the URL is used verbatim; otherwise
+ * the local trust-auth defaults (host localhost, port 5432, db ic_context,
+ * user postgres, no password) are given as discrete fields. Kept as fields on
+ * purpose: no connection URL literal lives in tracked source.
+ * @param {string|null} [dsn] override (CLI --dsn)
+ * @returns {import('pg').ClientConfig}
+ */
+export function pgConnectionConfig(dsn) {
+  const env = getEnv();
+  const url = dsn ?? env.PG_DSN;
+  if (url) return { connectionString: url };
+  return { host: 'localhost', port: 5432, database: 'ic_context', user: 'postgres' };
+}
+
+// ---------------------------------------------------------------------------
+// zod schemas
+// ---------------------------------------------------------------------------
+
+const FORBIDDEN_SELECTOR = /(text=|:has-text|>>|xpath=)/i;
+const selector = z.string().min(1).max(300).refine((s) => !FORBIDDEN_SELECTOR.test(s), {
+  message: 'selector may not contain text=, :has-text, >>, or xpath=',
+});
+
+const domain = z.string().regex(/^[a-z0-9.-]+$/i, 'domain must be a bare hostname');
+const pathPattern = z.string().min(1).max(300).refine((p) => {
+  try {
+    new RegExp(p);
+    return true;
+  } catch {
+    return false;
+  }
+}, { message: 'pathPattern must be a valid regex' });
+
+const adapterSchema = z.object({
+  transport: z.enum(['browser', 'fetch', 'html']),
+  domains: z.array(domain),
+  pathPatterns: z.array(pathPattern),
+  delayMs: z.tuple([z.number().int().nonnegative(), z.number().int().nonnegative()]).refine(([a, b]) => a <= b, 'delayMs min must be <= max'),
+  dailyPages: z.number().int().positive(),
+  dailyDetails: z.number().int().nonnegative(),
+  maxPagesPerQuery: z.number().int().min(1).max(5),
+});
+
+export const adaptersSchema = z.object({
+  dedup: z.object({
+    repostGapDays: z.number().int().positive(),
+    reviewAutoSeparateDays: z.number().int().positive(),
+    titleSimilarity: z.number().min(0).max(1),
+    companySimilarity: z.number().min(0).max(1),
+    postedAtCorroborationDays: z.number().int().nonnegative(),
+    expireAfterAbsentRuns: z.number().int().positive(),
+  }),
+  trackingParams: z.array(z.string().min(1)),
+  httpAllowedHosts: z.array(domain),
+  adapters: z.record(z.string().regex(/^[a-z][a-z0-9-]*$/), adapterSchema),
+  run: z.object({
+    maxPlannedPagesPerRun: z.number().int().positive(),
+    runTimeoutMinutes: z.number().int().positive(),
+    heartbeatStaleMinutes: z.number().int().positive(),
+    detailFetchMinPrescore: z.number().int().min(0).max(100),
+    backoff: z.object({ maxDelayMs: z.number().int().positive(), retries: z.number().int().nonnegative() }),
+    throttleRatio: z.number().min(0).max(1),
+  }),
+});
+
+export const atsBoardsSchema = z.object({
+  greenhouse: z.array(z.object({
+    board: z.string().regex(/^[a-z0-9-]+$/),
+    company: z.string().min(1),
+    hosts: z.array(domain).default([]),
+    enabled: z.boolean().default(true),
+  })),
+  lever: z.array(z.object({
+    company: z.string().regex(/^[a-z0-9-]+$/),
+    displayName: z.string().min(1),
+    enabled: z.boolean().default(true),
+  })),
+  workday: z.array(z.object({
+    tenant: z.string().regex(/^[a-z0-9_-]+$/),
+    site: z.string().min(1),
+    wd: z.string().regex(/^wd\d+$/),
+    displayName: z.string().min(1),
+    enabled: z.boolean().default(true),
+  })),
+  dayforce: z.array(z.object({
+    host: domain,
+    client: z.string().regex(/^[a-z0-9_-]+$/i),
+    lang: z.string().regex(/^[a-z]{2}-[A-Z]{2}$/),
+    displayName: z.string().min(1),
+    enabled: z.boolean().default(true),
+  })),
+});
+
+const httpsUrl = z.string().url().refine((u) => /^https:\/\//i.test(u), { message: 'listUrl must be https' });
+
+export const execBoardsSchema = z.object({
+  boards: z.array(z.object({
+    slug: z.string().regex(/^[a-z0-9-]+$/),
+    name: z.string().min(1),
+    listUrl: httpsUrl,
+    domains: z.array(domain).min(1),
+    pathPatterns: z.array(pathPattern).min(1),
+    mode: z.enum(['fetch', 'browser']),
+    enabled: z.boolean().default(true),
+    selectors: z.object({
+      item: selector.optional(),
+      title: selector.optional(),
+      link: selector.optional(),
+      location: selector.optional(),
+    }).optional(),
+  }).refine((b) => {
+    try {
+      const host = new URL(b.listUrl).hostname.toLowerCase();
+      return b.domains.some((d) => host === d.toLowerCase() || host.endsWith('.' + d.toLowerCase()));
+    } catch {
+      return false;
+    }
+  }, { message: 'listUrl host must be one of the board domains' })),
+});
+
+export const companyAliasesSchema = z.object({
+  _comment: z.string().optional(),
+  aliases: z.record(z.string().min(1), z.string().min(1)),
+});
+
+/** Closed enum: every alert-senders.json entry must map to a parser that exists (src/adapters/gmail-parsers.js). */
+export const GMAIL_PARSER_NAMES = Object.freeze(['linkedin', 'indeed-alert', 'indeed-match', 'lensa', 'ladders']);
+
+const emailAddress = z.string().min(3).max(200).regex(/^[a-z0-9._%+-]+@[a-z0-9.-]+\.[a-z]{2,}$/, 'address must be a lowercase email address');
+
+export const alertSendersSchema = z.object({
+  senders: z.array(z.object({
+    address: emailAddress,
+    parser: z.enum(/** @type {[string, ...string[]]} */ (GMAIL_PARSER_NAMES)),
+    enabled: z.boolean().default(true),
+    comment: z.string().optional(),
+  })),
+});
+
+export const CONFIG_FILES = Object.freeze(['adapters.json', 'ats-boards.json', 'exec-boards.json', 'company-aliases.json', 'alert-senders.json']);
+
+/**
+ * @typedef {Object} LoadedConfig
+ * @property {z.infer<typeof adaptersSchema>} adapters
+ * @property {z.infer<typeof atsBoardsSchema>} atsBoards
+ * @property {z.infer<typeof execBoardsSchema>} execBoards
+ * @property {Record<string, string>} companyAliases
+ * @property {z.infer<typeof alertSendersSchema>['senders']} alertSenders
+ * @property {string} configDir
+ * @property {string} hash sha256 over the raw config files
+ */
+
+/**
+ * @param {string} dir
+ * @param {string} name
+ * @param {z.ZodTypeAny} schema
+ */
+function readValidated(dir, name, schema) {
+  const file = path.join(dir, name);
+  let text;
+  try {
+    text = fs.readFileSync(file, 'utf8');
+  } catch (err) {
+    throw new JobSearchError('CONFIG_INVALID', `config file missing: ${name}`, { details: { file: name } });
+  }
+  let json;
+  try {
+    json = JSON.parse(text);
+  } catch (err) {
+    throw new JobSearchError('CONFIG_INVALID', `config file is not valid JSON: ${name}`, { details: { file: name } });
+  }
+  const parsed = schema.safeParse(json);
+  if (!parsed.success) {
+    const first = parsed.error.issues[0];
+    const where = first ? first.path.join('.') : '';
+    throw new JobSearchError('CONFIG_INVALID', `config validation failed: ${name} at ${where}: ${first ? first.message : 'unknown'}`, {
+      details: { file: name, path: where },
+    });
+  }
+  return parsed.data;
+}
+
+/**
+ * sha256 over the raw bytes of every config file, in CONFIG_FILES order, with
+ * the filename mixed in so renames change the hash.
+ * @param {string} [dir]
+ */
+export function computeConfigHash(dir = getEnv().JOBSEARCH_CONFIG_DIR) {
+  const h = crypto.createHash('sha256');
+  for (const name of CONFIG_FILES) {
+    h.update(name + '\n');
+    try {
+      // Line endings are normalized so git autocrlf checkouts and LF worktrees agree on the hash.
+      h.update(fs.readFileSync(path.join(dir, name), 'utf8').replace(/\r\n/g, '\n'));
+    } catch {
+      h.update('<missing>');
+    }
+    h.update('\n');
+  }
+  return h.digest('hex');
+}
+
+/** @type {LoadedConfig | null} */
+let cached = null;
+
+/**
+ * Load and validate all config files. Cached after first call unless `fresh`.
+ * @param {{ fresh?: boolean, dir?: string }} [opts]
+ * @returns {LoadedConfig}
+ */
+export function loadConfig(opts = {}) {
+  if (cached && !opts.fresh && !opts.dir) return cached;
+  const dir = opts.dir ?? getEnv().JOBSEARCH_CONFIG_DIR;
+  const adapters = readValidated(dir, 'adapters.json', adaptersSchema);
+  const atsBoards = readValidated(dir, 'ats-boards.json', atsBoardsSchema);
+  const execBoards = readValidated(dir, 'exec-boards.json', execBoardsSchema);
+  const aliasesFile = readValidated(dir, 'company-aliases.json', companyAliasesSchema);
+  const alertSendersFile = readValidated(dir, 'alert-senders.json', alertSendersSchema);
+  /** @type {LoadedConfig} */
+  const cfg = {
+    adapters,
+    atsBoards,
+    execBoards,
+    companyAliases: aliasesFile.aliases,
+    alertSenders: alertSendersFile.senders,
+    configDir: dir,
+    hash: computeConfigHash(dir),
+  };
+  if (!opts.dir) cached = cfg;
+  return cfg;
+}
+
+/** Path of the committed lock file (JOBSEARCH_CONFIG_LOCK overrides it for tests that use a fixture config dir). */
+export function configLockPath() {
+  ensureDotenv();
+  const override = process.env.JOBSEARCH_CONFIG_LOCK;
+  if (override && override.trim()) return resolveFromRoot(override.trim());
+  return path.join(packageRoot(), 'config.lock.json');
+}
+
+/**
+ * Compare the live config hash with config.lock.json.
+ * @returns {{ ok: boolean, expected: string|null, actual: string }}
+ */
+export function checkConfigLock() {
+  const actual = computeConfigHash();
+  let expected = null;
+  try {
+    const lock = JSON.parse(fs.readFileSync(configLockPath(), 'utf8'));
+    expected = typeof lock.sha256 === 'string' ? lock.sha256 : null;
+  } catch {
+    expected = null;
+  }
+  return { ok: expected === actual, expected, actual };
+}
+
+/**
+ * Write config.lock.json for the current config files.
+ * @returns {string} the hash written
+ */
+export function writeConfigLock() {
+  const hash = computeConfigHash();
+  const body = { sha256: hash, files: [...CONFIG_FILES], updated_at: new Date().toISOString() };
+  fs.writeFileSync(configLockPath(), JSON.stringify(body, null, 2) + '\n');
+  return hash;
+}

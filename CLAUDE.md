@@ -118,7 +118,9 @@ Own business entities with founding dates, purposes, and outcomes. Only relevant
 
 ## Resume Generation
 
-See `framework/resume-workflow.md` — read this file before generating any resume. It contains the full workflow (11 steps), tailoring rules, CV quality standards, and the mandatory pre-output checklist.
+Use `/write-resume <job-ad-url-or-paste>` to generate a targeted resume. This skill enforces all non-negotiable rules (role inclusion, format, writing rules, DOCX output) and produces both the resume and a recruiter call cheat sheet.
+
+See `framework/resume-workflow.md` for the underlying workflow detail and quality standards. The skill references these automatically — do not run resume generation without using the skill.
 
 ## Interview Training
 
@@ -158,6 +160,52 @@ For voice-based practice, three skills work together:
 - **Analysing skill gaps:** Run `/skill-gap <job-url>` to identify gaps against a specific role, discover learning resources, and generate a tracked learning plan in `data/learning-plan.md`
 - **Daily learning:** Run `/learn-today` to see today's module with tailored guidance. Type `/learn-today done` when you finish to log it. Type `/learn-today quiz` to test yourself on completed material.
 - **Updating professional identity:** After coaching sessions or moments of professional reflection, update `data/professional-identity.md` with new insights
+
+## Session Start — Memory Query
+
+At the start of **every session**, before giving any advice on outreach, job search
+strategy, recruiter engagement, resume decisions, or coaching topics, query the
+semantic memory for relevant context from past sessions:
+
+```bash
+python tools/query_memory.py "<topic of session>"
+```
+
+This is **mandatory, not optional.** Past strategy decisions — including outreach
+approach, attachment rules, email tone, firms contacted, and agreed conventions —
+are stored here. Skipping this step causes contradictory advice across sessions.
+
+Example queries:
+- `python tools/query_memory.py "executive recruiter outreach cold email strategy"`
+- `python tools/query_memory.py "JPMC application resume decisions"`
+- `python tools/query_memory.py "resume content formatting decisions"`
+- `python tools/query_memory.py "recent job search strategy decisions"`
+
+Session moments cover both coaching Q&A **and strategy decisions** (`role_type=strategy`).
+Both types are queryable and both must be considered before advising.
+
+After retrieving context, store any new strategy decisions made this session as
+`role_type=strategy` moments via `tools/store_session_moments.py` before closing.
+
+## Session Close — Voice Capture
+
+At the end of **every session where Damian corrects, rewrites, or edits any
+output**, update `memory/voice.md` following the guide in `framework/voice-capture.md`.
+
+This applies to ALL session types, not just coaching or resume generation.
+Content creation (LinkedIn posts, emails, cover letters), strategy discussions,
+and any session where Damian changes what you wrote all count. If he rewrote
+your draft, that is a voice signal. Capture it.
+
+This runs automatically. No user prompt required. Observe corrections,
+pushbacks, and natural phrasing throughout the session. Update voice.md
+as the final step before closing, even if the session was brief.
+
+**Additionally, store voice observations to Postgres** via `store_session_moments.py`
+with `role_type=strategy` and tags including `voice`. The markdown file is the
+reference; the database makes it searchable. Both must be updated. If Damian
+rewrote a draft, store a moment capturing what he changed and in which direction.
+If he added characteristic phrases or metaphors, store those too.
 
 ## Tools & Environment
 

@@ -1,0 +1,8 @@
+{
+ "https://boards-api.greenhouse.io/v1/boards/gitlab/jobs/8700245002": "../adapters/greenhouse-job-detail.json",
+ "https://boards-api.greenhouse.io/v1/boards/": "../adapters/greenhouse-gitlab-jobs.json",
+ "https://api.lever.co/v0/postings/": "../adapters/lever-palantir-postings.json",
+ "https://example.wd5.myworkdayjobs.com/wday/cxs/example/External/jobs": "../adapters/workday-search.json",
+ "https://example.wd5.myworkdayjobs.com/wday/cxs/example/External/job/": "../adapters/workday-detail.json",
+ "https://example.dayforcehcm.com/CandidatePortal/en-US/example": "../adapters/dayforce-list.html"
+}

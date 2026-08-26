@@ -1,0 +1,59 @@
+{
+ "jobs": [
+  {
+   "absolute_url": "https://boards.greenhouse.io/zztest/jobs/7000000001",
+   "internal_job_id": 1,
+   "location": {
+    "name": "Houston, TX"
+   },
+   "id": 7000000001,
+   "updated_at": "2026-08-23T10:00:00-04:00",
+   "requisition_id": "Z1",
+   "title": "Chief Technology Officer",
+   "company_name": "ZZ-TEST-SCAN",
+   "first_published": "2026-08-23T10:00:00-04:00"
+  },
+  {
+   "absolute_url": "https://boards.greenhouse.io/zztest/jobs/7000000002",
+   "internal_job_id": 2,
+   "location": {
+    "name": "Dallas, TX"
+   },
+   "id": 7000000002,
+   "updated_at": "2026-08-22T10:00:00-04:00",
+   "requisition_id": "Z2",
+   "title": "Vice President, Technology",
+   "company_name": "ZZ-TEST-SCAN",
+   "first_published": "2026-08-22T10:00:00-04:00"
+  },
+  {
+   "absolute_url": "https://boards.greenhouse.io/zztest/jobs/7000000003",
+   "internal_job_id": 3,
+   "location": {
+    "name": "Austin, TX"
+   },
+   "id": 7000000003,
+   "updated_at": "2026-08-22T10:00:00-04:00",
+   "requisition_id": "Z3",
+   "title": "Software Engineer II",
+   "company_name": "ZZ-TEST-SCAN",
+   "first_published": "2026-08-22T10:00:00-04:00"
+  },
+  {
+   "absolute_url": "https://boards.greenhouse.io/zztest/jobs/7000000004",
+   "internal_job_id": 4,
+   "location": {
+    "name": "Remote, US"
+   },
+   "id": 7000000004,
+   "updated_at": "2026-01-02T10:00:00-05:00",
+   "requisition_id": "Z4",
+   "title": "Chief Information Officer (old)",
+   "company_name": "ZZ-TEST-SCAN",
+   "first_published": "2026-01-02T10:00:00-05:00"
+  }
+ ],
+ "meta": {
+  "total": 4
+ }
+}

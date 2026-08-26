@@ -1,0 +1,25 @@
+{
+  "messages": [
+    {
+      "id": "fedcba987654f0",
+      "threadId": "fedcba987654f0"
+    },
+    {
+      "id": "fedcba987654f1",
+      "threadId": "fedcba987654f1"
+    },
+    {
+      "id": "fedcba987654f2",
+      "threadId": "fedcba987654f2"
+    },
+    {
+      "id": "fedcba98765407",
+      "threadId": "fedcba98765407"
+    },
+    {
+      "id": "fedcba98765401",
+      "threadId": "fedcba98765401"
+    }
+  ],
+  "resultSizeEstimate": 5
+}

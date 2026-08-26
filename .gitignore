@@ -1,4 +1,4 @@
-# Personal data — ignored by default to prevent accidental exposure.
+# Personal data: ignored by default to prevent accidental exposure.
 # If you use a private repo and want to version your data, remove these lines.
 /data/
 /coaching/
@@ -19,3 +19,14 @@ __pycache__/
 # System
 nul
 .DS_Store
+
+# Personal session memory, research notes, and local tool state (public repo)
+/memory/
+/.memory-engine
+/.playwright-mcp/
+/*.png
+
+# job-search MCP server: local env, logs, dependencies
+**/.env
+mcp/job-search/logs/
+mcp/job-search/node_modules/

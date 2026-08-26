@@ -1,0 +1,70 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+<title>Opportunities - Example Search Partners (synthetic fixture)</title>
+<script type="application/ld+json">
+{
+  "@context": "https://schema.org",
+  "@type": "ItemList",
+  "itemListElement": [
+    {
+      "@type": "ListItem",
+      "position": 1,
+      "item": {
+        "@type": "JobPosting",
+        "title": "Chief Technology Officer",
+        "url": "https://www.example-exec.test/opportunities/chief-technology-officer-9001",
+        "datePosted": "2026-08-20",
+        "description": "<p>Our client, a PE-backed manufacturer, seeks a CTO to lead a technology transformation. Reports to the CEO.</p>",
+        "hiringOrganization": { "@type": "Organization", "name": "Confidential" },
+        "jobLocation": { "@type": "Place", "address": { "@type": "PostalAddress", "addressLocality": "Houston", "addressRegion": "TX", "addressCountry": "US" } },
+        "baseSalary": { "@type": "MonetaryAmount", "currency": "USD", "value": { "@type": "QuantitativeValue", "minValue": 300000, "maxValue": 375000, "unitText": "YEAR" } }
+      }
+    },
+    {
+      "@type": "ListItem",
+      "position": 2,
+      "item": {
+        "@type": "JobPosting",
+        "title": "Chief Information Officer",
+        "url": "https://www.example-exec.test/opportunities/chief-information-officer-9002",
+        "datePosted": "2026-08-18",
+        "description": "<p>Named client: leads IT for a regional health system.</p>",
+        "hiringOrganization": { "@type": "Organization", "name": "Gulf Coast Health" },
+        "jobLocationType": "TELECOMMUTE",
+        "applicantLocationRequirements": { "@type": "Country", "name": "USA" }
+      }
+    },
+    {
+      "@type": "ListItem",
+      "position": 3,
+      "item": {
+        "@type": "JobPosting",
+        "title": "Executive Assistant",
+        "url": "https://www.example-exec.test/opportunities/executive-assistant-9003",
+        "datePosted": "2026-08-19",
+        "description": "<p>Not a match for the exec profile.</p>"
+      }
+    },
+    {
+      "@type": "ListItem",
+      "position": 4,
+      "item": {
+        "@type": "JobPosting",
+        "title": "Chief Digital Officer (off-domain link)",
+        "url": "https://elsewhere.test/jobs/1",
+        "datePosted": "2026-08-19",
+        "description": "<p>URL outside the board domain must be dropped to null, listing kept with a synthetic id.</p>"
+      }
+    }
+  ]
+}
+</script>
+</head>
+<body>
+<h1>Current opportunities</h1>
+<ul>
+  <li><a href="/opportunities/chief-technology-officer-9001">Chief Technology Officer</a></li>
+</ul>
+</body>
+</html>

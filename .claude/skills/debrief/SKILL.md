@@ -3,7 +3,7 @@ name: debrief
 description: Debrief a voice simulation — analyze transcript against coached answers, track anti-patterns, log session
 argument-hint: <path-to-cv>
 user-invocable: true
-allowed-tools: Read(*), Glob(*), Grep(*), Write(coaching/**), Edit(coaching/**)
+allowed-tools: Read(*), Glob(*), Grep(*), Write(coaching/**), Edit(coaching/**), Bash(python tools/store_session_moments.py *), Bash(python tools/load_coached_answers.py)
 ---
 
 # Debrief — Voice Simulation Post-Session Analysis
@@ -34,7 +34,8 @@ Load these files in parallel using the CV path to derive filenames:
 3. **Deep review** — `*-DEEP-REVIEW.md` matching CV filename (to know what tough questions were expected)
 4. **Anti-pattern scorecard** — `coaching/progress-recruiter/_summary.md`
 5. **Anti-pattern tracker** — `coaching/anti-pattern-tracker.md` (global pattern status — which are resolved, which to watch for)
-6. **Session template** — `framework/templates/recruiter-session.md`
+6. **Voice profile** — `memory/voice.md` (candidate's communication style and avoidances)
+7. **Session template** — `framework/templates/recruiter-session.md`
 
 If the transcript is not yet in the conversation, ask the user to paste it.
 
@@ -86,6 +87,19 @@ Scan each answer for known anti-patterns. Load the full pattern list from `coach
 - Essay structure (verdict last)
 
 Also watch for any NEW anti-patterns not yet tracked — add them to the tracker after the debrief.
+
+#### E. Voice Profile Cross-Reference
+
+After identifying triggered anti-patterns, scan voice.md "Things to Avoid":
+- If a triggered anti-pattern also appears in voice.md, flag it as a deep-rooted
+  pattern (shows up in both writing and delivery) — note this in the debrief report.
+- If a newly discovered anti-pattern reflects a fundamental communication style
+  (not a one-off performance mistake), add it to voice.md "Things to Avoid"
+  with a note that it was first observed in a debrief session.
+
+Patterns that cross both systems (e.g. essay structure, passive-voice self-description,
+leading with context before the point): label these **deep-rooted** in the Anti-Patterns
+Triggered section of the report so the candidate knows the issue spans writing and speech.
 
 ### Step 4: Generate Debrief Report
 
@@ -175,8 +189,26 @@ After the user confirms the assessment:
    - Add session to the Session Index table
 
 3. **Update coached-answers.md** if the user approved any new strong phrasings.
+   Then immediately sync new entries to the DB:
+   ```bash
+   python tools/load_coached_answers.py
+   ```
 
-4. **Update anti-pattern tracker** at `coaching/anti-pattern-tracker.md`:
+4. **Store session moments to local semantic DB** — write to the local PostgreSQL
+   database (`ic_context`, localhost:5432) using local Ollama embeddings (`mxbai-embed-large`).
+   Build a JSON array of every Q&A pair from the transcript, including coach notes and
+   quality scores. Store all moments where quality_score <= 3 OR coach_notes is non-empty
+   (lower-quality answers with coaching commentary are the most useful for future retrieval):
+   ```bash
+   echo '[
+     {"question":"...", "response":"...", "coach_notes":"...",
+      "quality_score":2, "company":"IDC", "role_type":"recruiter",
+      "session_date":"2026-03-03", "tags":["stakeholder","roi"]},
+     ...
+   ]' | python tools/store_session_moments.py
+   ```
+
+5. **Update anti-pattern tracker** at `coaching/anti-pattern-tracker.md`:
    - Update status, last-seen, and trend for any pattern triggered or notably absent
    - Move patterns between status categories if warranted (e.g., persistent → resolved after multiple clean sessions)
    - Add new patterns if discovered during the simulation

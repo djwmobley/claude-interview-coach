@@ -1,0 +1,12 @@
+{
+  "senders": [
+    { "address": "jobalerts-noreply@linkedin.com", "parser": "linkedin", "enabled": true, "comment": "LinkedIn job alert digest (semantic search alert)" },
+    { "address": "jobs-noreply@linkedin.com", "parser": "linkedin", "enabled": true, "comment": "LinkedIn Jobs You Might Be Interested In digest" },
+    { "address": "donotreply@jobalert.indeed.com", "parser": "indeed-alert", "enabled": true, "comment": "Indeed saved-search job alert digest" },
+    { "address": "donotreply@match.indeed.com", "parser": "indeed-match", "enabled": true, "comment": "Indeed personalized single-job match email" },
+    { "address": "jobalert@lensa.com", "parser": "lensa", "enabled": true, "comment": "Lensa job alert digest" },
+    { "address": "aggregated@lensa.com", "parser": "lensa", "enabled": true, "comment": "Lensa Aggregated multi-job-board digest" },
+    { "address": "lensa24@lensa.com", "parser": "lensa", "enabled": true, "comment": "Lensa 24 recent-postings digest" },
+    { "address": "jobs@my.theladders.com", "parser": "ladders", "enabled": true, "comment": "Ladders new-jobs digest" }
+  ]
+}

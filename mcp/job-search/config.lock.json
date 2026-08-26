@@ -1,0 +1,11 @@
+{
+  "sha256": "eee1970b889a45db44be6074aa48cef2cb7d2dad01391077223266e320eb01c0",
+  "files": [
+    "adapters.json",
+    "ats-boards.json",
+    "exec-boards.json",
+    "company-aliases.json",
+    "alert-senders.json"
+  ],
+  "updated_at": "2026-08-26T03:43:33.259Z"
+}

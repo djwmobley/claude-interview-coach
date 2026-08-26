@@ -23,6 +23,7 @@ Target: 2 pages maximum. Adjust spacing/sizes here if overflowing.
 import re
 import sys
 from docx import Document
+from docx.enum.text import WD_ALIGN_PARAGRAPH
 from docx.oxml import OxmlElement
 from docx.oxml.ns import qn
 from docx.shared import Inches, Pt, RGBColor
@@ -34,16 +35,18 @@ GREY  = RGBColor(0x55, 0x55, 0x55)   # contact line, company descriptions
 BLACK = RGBColor(0x1A, 0x1A, 0x1A)   # body text
 
 # ── Size / spacing constants (tune here to control page count) ────────────────
+# All sizes below NAME_PT must stay within 1pt of each other (ATS compliance).
+# Current range: 9–10pt. NAME_PT is the sole exception (title treatment).
 NAME_PT         = 18
 TAGLINE_PT      = 10
 CONTACT_PT      = 9
 SECTION_HDR_PT  = 10
-ROLE_PT         = 10.5
+ROLE_PT         = 10
 COMPANY_PT      = 9
-DESC_PT         = 8.5
+DESC_PT         = 9
 BODY_PT         = 9
 BULLET_PT       = 9
-COMPETENCY_PT   = 8.5
+COMPETENCY_PT   = 9
 
 MARGIN_IN       = 0.65   # all four sides
 
@@ -151,20 +154,23 @@ def render_header(doc, lines):
     if not non_blank:
         return
 
-    # Name
+    # Name — centered
     p = doc.add_paragraph()
+    p.alignment = WD_ALIGN_PARAGRAPH.CENTER
     spacing(p, before=0, after=1)
     run(p, non_blank[0], size=NAME_PT, bold=True, color=NAVY)
 
-    # Contact
+    # Contact — centered
     if len(non_blank) > 1:
         p = doc.add_paragraph()
+        p.alignment = WD_ALIGN_PARAGRAPH.CENTER
         spacing(p, before=0, after=3)
         run(p, non_blank[1], size=CONTACT_PT, color=GREY)
 
-    # Tagline
+    # Tagline — centered
     if len(non_blank) > 2:
         p = doc.add_paragraph()
+        p.alignment = WD_ALIGN_PARAGRAPH.CENTER
         spacing(p, before=1, after=0)
         run(p, non_blank[2], size=TAGLINE_PT, color=BLUE)
 
@@ -212,7 +218,7 @@ def add_company_line(doc, text):
     keep_with_next(p)
     run(p, parts[0], size=COMPANY_PT, bold=True, color=NAVY)
     for part in parts[1:]:
-        run(p, "  \u2022  " + part, size=COMPANY_PT, color=BLACK)
+        run(p, "  |  " + part, size=COMPANY_PT, color=BLACK)
 
 
 def add_company_description(doc, text):

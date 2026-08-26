@@ -1,0 +1,8 @@
+{
+  "mcpServers": {
+    "job-search": {
+      "command": "node",
+      "args": ["${CLAUDE_PROJECT_DIR:-.}/mcp/job-search/src/server.js"]
+    }
+  }
+}
