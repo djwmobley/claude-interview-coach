@@ -16,6 +16,7 @@ import {
 } from '../src/core/report.js';
 import { tool as scanReport } from '../src/tools/scan_report.js';
 import { registryFrom } from '../src/core/urlguard.js';
+import { testConfig } from './helpers/scan-fixtures.js';
 
 const SRC = `zz-test-report-${process.pid}`;
 const CO = `ZZ-TEST-REPORT-${process.pid}`;
@@ -279,5 +280,42 @@ describe('scan_report MCP tool (spec R1.4): never writes the marker', () => {
   test('run_id scoping returns NOT_FOUND for an unknown run', async () => {
     const deps = /** @type {any} */ ({ withClient: async (/** @type {any} */ fn) => fn(client), config: null });
     await assert.rejects(scanReport.handler({ run_id: 999999999, profile: 'exec-default' }, deps), /not found/);
+  });
+
+  test('every numeric field in the response is a real number (regression: home_locations_count silently drifted to undefined when buildScanReport() started returning homeLocations as {rows, excludedCount} instead of a bare array)', async () => {
+    // Scoped to "today" via the date param, independent of the shared ic_report_state marker other
+    // tests in this describe block stamp -- avoids any ordering dependency on those tests.
+    const today = dayKeyInTz(new Date(), 'America/Chicago');
+    await insertListing({ title: 'Chief Technology Officer', prescore: 80, noise: 'ok' });
+    await insertListing({ title: 'Fractional CTO', prescore: 90, noise: 'fractional_or_founder' });
+    await insertListing({ title: 'Head of Technology', prescore: 60, noise: 'ok', location: 'Houston, TX', location_norm: 'houston-tx' });
+    const deps = /** @type {any} */ ({ withClient: async (/** @type {any} */ fn) => fn(client), config: null });
+    const r = /** @type {any} */ (await scanReport.handler({ date: today, profile: 'exec-default' }, deps));
+    assert.equal(r.ok, true);
+    const numericFields = ['run_count', 'look_at_these_count', 'look_at_these_excluded', 'home_locations_count', 'review_queue_open'];
+    for (const field of numericFields) {
+      assert.equal(typeof r[field], 'number', `${field} must be a number, got ${typeof r[field]} (${JSON.stringify(r[field])})`);
+      assert.equal(Number.isNaN(r[field]), false, `${field} must not be NaN`);
+    }
+    // The specific field the regression broke: with the seeded Houston row present and un-filtered by
+    // the default prescore floor (60 >= 40), it must be counted, not merely typed correctly.
+    assert.ok(r.home_locations_count >= 1, 'home_locations_count must actually count the seeded Houston row, not just happen to be a number');
+  });
+
+  test('run.reportHomeMinPrescore is threaded from config through to buildScanReport: changing it changes which rows the "Houston / Texas" section counts (item 2 threading fix)', async () => {
+    const today = dayKeyInTz(new Date(), 'America/Chicago');
+    const midScore = await insertListing({ title: 'Director of IT', prescore: 30, noise: 'ok', location: 'Houston, TX', location_norm: 'houston-tx' });
+    void midScore;
+    const deps = (/** @type {number} */ minPrescore) => {
+      const cfg = testConfig();
+      cfg.adapters.run.reportHomeMinPrescore = minPrescore;
+      return /** @type {any} */ ({ withClient: async (/** @type {any} */ fn) => fn(client), config: cfg });
+    };
+    const withDefaultFloor = /** @type {any} */ (await scanReport.handler({ date: today, profile: 'exec-default' }, deps(40)));
+    const withLoweredFloor = /** @type {any} */ (await scanReport.handler({ date: today, profile: 'exec-default' }, deps(20)));
+    assert.ok(
+      withLoweredFloor.home_locations_count > withDefaultFloor.home_locations_count,
+      `lowering reportHomeMinPrescore from 40 to 20 must surface the prescore-30 row: got ${withDefaultFloor.home_locations_count} at floor 40 and ${withLoweredFloor.home_locations_count} at floor 20`,
+    );
   });
 });

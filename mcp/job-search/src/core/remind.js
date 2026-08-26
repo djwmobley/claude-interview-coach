@@ -10,7 +10,7 @@
 import { selectDue, unsnoozeDue, stampReminded, formatFollowup } from './followups.js';
 import { googleHttp, gmailSend, buildRfc2822, buildRfc2822Multipart, readTokenFile, tokenInfo } from './google.js';
 import { errFields, JobSearchError } from './errors.js';
-import { loadConfig } from './config.js';
+import { loadConfig, DEFAULT_REPORT_HOME_MIN_PRESCORE } from './config.js';
 import { normalizeLocation } from './normalize.js';
 import { buildRegistry } from './urlguard.js';
 import { buildScanReport, buildReportSubject, renderReportText, renderReportHtml, renderReportMarkdown, writeReportFile, stampReportSent, escapeHtml } from './report.js';
@@ -91,6 +91,7 @@ export async function runRemind(opts) {
   })();
   const timezone = config?.adapters.run.timezone ?? 'America/Chicago';
   const topN = config?.adapters.run.reportTopN ?? 10;
+  const homeMinPrescore = config?.adapters.run.reportHomeMinPrescore ?? DEFAULT_REPORT_HOME_MIN_PRESCORE;
   const registry = config ? buildRegistry(config) : { entries: [], httpAllowedHosts: new Set() };
   const reportProfile = opts.reportProfile ?? 'exec-default';
 
@@ -99,7 +100,7 @@ export async function runRemind(opts) {
   const homeLocationNorms = await homeLocationNormsFor(opts.client, reportProfile);
   /** @type {{ sinceOverride?: Date|null }} */
   const sinceOpt = Object.prototype.hasOwnProperty.call(opts, 'reportSinceOverride') ? { sinceOverride: opts.reportSinceOverride } : {};
-  const report = await buildScanReport(opts.client, { now, timezone, topN, homeLocationNorms, ...sinceOpt });
+  const report = await buildScanReport(opts.client, { now, timezone, topN, homeMinPrescore, homeLocationNorms, ...sinceOpt });
   say({
     evt: 'remind_select', due: rows.length, flipped: flippedIds.length, dry_run: Boolean(opts.dryRun),
     scan_runs: report.runs.length, no_scan: report.noScan, worst_status: report.worstStatus,

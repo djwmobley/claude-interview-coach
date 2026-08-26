@@ -230,6 +230,14 @@ const adapterSchema = z.object({
   maxPagesPerRun: z.number().int().positive().optional(),
 });
 
+/**
+ * Single source of truth for the "Houston / Texas" report section's prescore floor (spec item 5;
+ * threading fix: report.js's buildScanReport() imports this directly instead of hardcoding its own copy
+ * of the number 40, so there is exactly one place this default lives -- the zod schema below and every
+ * caller's own fallback, when config is unavailable, both reference it).
+ */
+export const DEFAULT_REPORT_HOME_MIN_PRESCORE = 40;
+
 export const adaptersSchema = z.object({
   dedup: z.object({
     repostGapDays: z.number().int().positive(),
@@ -258,7 +266,7 @@ export const adaptersSchema = z.object({
     /** Default row count for the report's "Look at these" section (spec R1.2b). */
     reportTopN: z.number().int().positive().default(10),
     /** Minimum prescore for the report's "Houston / Texas" section (independent review round 2 fix: an unfiltered "any prescore" list surfaced very low-relevance rows like an RN Clinical Director posting). */
-    reportHomeMinPrescore: z.number().int().min(0).max(100).default(40),
+    reportHomeMinPrescore: z.number().int().min(0).max(100).default(DEFAULT_REPORT_HOME_MIN_PRESCORE),
   }),
 });
 

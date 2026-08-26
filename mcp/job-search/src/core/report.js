@@ -14,7 +14,7 @@ import fs from 'node:fs';
 import path from 'node:path';
 import { formatDate } from './compact.js';
 import { formatFollowup, selectDue, unsnoozeDue } from './followups.js';
-import { repoRoot } from './config.js';
+import { repoRoot, DEFAULT_REPORT_HOME_MIN_PRESCORE } from './config.js';
 
 /** Directory the markdown report is written to (spec R1.3), relative to the repo root; covered by the existing `/output/` .gitignore entry. */
 export const REPORTS_DIR = path.join('output', 'reports');
@@ -353,7 +353,7 @@ export async function buildScanReport(client, opts = {}) {
   const now = opts.now ?? new Date();
   const timezone = opts.timezone ?? 'America/Chicago';
   const topN = opts.topN ?? 10;
-  const homeMinPrescore = opts.homeMinPrescore ?? 40;
+  const homeMinPrescore = opts.homeMinPrescore ?? DEFAULT_REPORT_HOME_MIN_PRESCORE;
   const homeLocationNorms = opts.homeLocationNorms ?? [];
   const overriding = Object.prototype.hasOwnProperty.call(opts, 'sinceOverride');
   const state = overriding ? { lastReportSentAt: null, lastRunIdIncluded: null } : await getReportState(client);
