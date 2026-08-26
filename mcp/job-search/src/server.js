@@ -26,11 +26,12 @@ import { tool as scans } from './tools/scans.js';
 import { tool as review } from './tools/review.js';
 import { tool as renderDoc } from './tools/render_doc.js';
 import { tool as followups } from './tools/followups.js';
+import { tool as scanReport } from './tools/scan_report.js';
 
 export const SERVER_INFO = Object.freeze({ name: 'job-search', version: '0.1.0' });
 
 /** Registration order is the tools/list order. */
-export const TOOLS = Object.freeze([searchJobs, queryJobs, getJob, markJobs, profiles, scans, review, renderDoc, followups]);
+export const TOOLS = Object.freeze([searchJobs, queryJobs, getJob, markJobs, profiles, scans, review, renderDoc, followups, scanReport]);
 
 /**
  * Lazy calendar deps: token loaded on first use, access token cached until

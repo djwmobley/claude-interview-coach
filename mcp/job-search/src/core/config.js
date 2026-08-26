@@ -184,6 +184,10 @@ export const adaptersSchema = z.object({
     detailFetchMinPrescore: z.number().int().min(0).max(100),
     backoff: z.object({ maxDelayMs: z.number().int().positive(), retries: z.number().int().nonnegative() }),
     throttleRatio: z.number().min(0).max(1),
+    /** IANA zone for report day-bucketing (spec R1, decision 25). */
+    timezone: z.string().min(1).default('America/Chicago'),
+    /** Default row count for the report's "Look at these" section (spec R1.2b). */
+    reportTopN: z.number().int().positive().default(10),
   }),
 });
 

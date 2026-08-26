@@ -54,6 +54,13 @@ async function main() {
     });
     code = r.code;
     console.log(JSON.stringify({ ok: r.code === 0, ...r }));
+    if (args.dryRun && r.body) {
+      // The scan-report + follow-ups plain-text body a real send would carry, so the operator can see
+      // exactly what tomorrow's email looks like without sending it.
+      console.log('----- report body (plain text) -----');
+      console.log(r.body);
+      console.log('----- end report body -----');
+    }
   } catch (err) {
     const f = errFields(err);
     logger.error({ evt: 'remind_failed', ...f });
