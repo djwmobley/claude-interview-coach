@@ -52,8 +52,8 @@
         "^/m/jobs(\\?|$)"
       ],
       "delayMs": [
-        2500,
-        5500
+        4000,
+        9000
       ],
       "dailyPages": 60,
       "dailyDetails": 100,

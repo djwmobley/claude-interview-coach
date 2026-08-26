@@ -238,8 +238,8 @@ describe('runScan persisted', () => {
     // exactly what browser/capability.js's onPage hook is for (spec section 4);
     // before this fix capFor() never passed onPage at all, so browser sources
     // ignored delayMs entirely -- see mcp/job-search/config/adapters.json's indeed
-    // entry (delayMs [2500,5500], spec R5.1: 4000ms base with jitter +-1500ms)
-    // that this test pins against.
+    // entry (delayMs [4000,9000], spec R5.1: the per-request delay must RISE to
+    // reduce 429s, never fall) that this test pins against.
     /** @type {Array<{ t: 'goto'|'sleep', url?: string, ms?: number }>} */
     const events = [];
     const sleep = async (/** @type {number} */ ms) => {
@@ -274,7 +274,7 @@ describe('runScan persisted', () => {
       // Exactly one wait between the 1st and 2nd goto, sized within the configured [4000,9000] range.
       const between = events.slice(gotos[0].i + 1, gotos[1].i).filter((e) => e.t === 'sleep');
       assert.equal(between.length, 1, `expected exactly one sleep between the 1st and 2nd goto, got ${JSON.stringify(between)} in ${JSON.stringify(events)}`);
-      assert.ok(between[0].ms >= 2500 && between[0].ms <= 5500, `delay ${between[0].ms}ms outside indeed's configured delayMs [2500,5500]`);
+      assert.ok(between[0].ms >= 4000 && between[0].ms <= 9000, `delay ${between[0].ms}ms outside indeed's configured delayMs [4000,9000]`);
     } finally {
       await client.query(`UPDATE ic_source_state SET manual_disable = false, disabled_until = NULL, consecutive_walls = 0 WHERE source = 'indeed'`);
     }

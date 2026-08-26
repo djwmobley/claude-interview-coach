@@ -1,5 +1,5 @@
 {
-  "sha256": "0db9436b87a7a177bb9b3c4549654b669467cf482c38d3e63112f2361e32b87e",
+  "sha256": "ac187cc59248d467e205c40973e7896a18cf592e127923f0a2ba0871e53edd17",
   "files": [
     "adapters.json",
     "ats-boards.json",
@@ -8,5 +8,5 @@
     "alert-senders.json",
     "noise-rules.json"
   ],
-  "updated_at": "2026-08-26T15:47:36.048Z"
+  "updated_at": "2026-08-26T17:19:57.595Z"
 }
