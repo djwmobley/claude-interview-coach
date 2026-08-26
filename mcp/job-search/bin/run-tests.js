@@ -32,7 +32,10 @@ async function main() {
   const child = spawn(process.execPath, ['--test', '--test-concurrency=1', ...extraArgs], {
     cwd: ROOT,
     stdio: 'inherit',
-    env: { ...process.env, PG_DSN: testDsn },
+    // JOBSEARCH_TEST_GUARD=1 backs up src/core/config.js's assertTestDbGuard() in case a future Node
+    // version stops setting NODE_TEST_CONTEXT under `node --test` -- the guard trips on any of the
+    // three signals, this is just an explicit, first-party one this file controls directly.
+    env: { ...process.env, PG_DSN: testDsn, JOBSEARCH_TEST_GUARD: '1' },
   });
   child.on('error', (err) => {
     process.stderr.write(`bin/run-tests.js: failed to start node --test: ${err.message}\n`);

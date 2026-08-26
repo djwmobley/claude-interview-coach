@@ -153,20 +153,24 @@ export function collapseWhitespace(s) {
   return stripZeroWidth(s).replace(/\s+/g, ' ').trim();
 }
 
-/** Minimum size of a repeated leading segment eligible to be stripped (decision 9-10). */
-export const MIN_REPEAT_SEGMENT_CHARS = 12;
+/**
+ * Minimum size of a repeated leading segment eligible to be stripped (decision 9-10, narrowed by
+ * scan-report-fixes item 2: word count only, no character-count floor -- a char floor was blocking
+ * genuine short-title repeats like "Field CTO Field CTO" (9 chars, 2 words) from collapsing. A
+ * single-word segment ("CTO CTO Group", "Manager, Manager Development Program") is still never
+ * mangled: "CTO" and "Manager," are each one token, below this floor either way.
+ */
 export const MIN_REPEAT_SEGMENT_WORDS = 2;
 
 /**
- * Strip a repeated leading segment (spec R3.1, decisions 9-11): when the
- * (already whitespace-collapsed) string is `A + ' ' + B` and B starts with
- * A, keep only B -- UNLESS A is short (fewer than 12 chars or fewer than 2
- * words), in which case the string is returned unchanged (decision 9-10:
- * "CTO CTO Group" and "Manager, Manager Development Program" must not be
- * mangled by a single-token or otherwise short coincidental repeat). Among
- * every valid split point the LONGEST matching A is chosen, so a title with
- * one genuine boilerplate repeat resolves in a single pass. No recursion:
- * at most one repeat is stripped per call, matching the spec's "keep the
+ * Strip a repeated leading segment (spec R3.1, decisions 9-11, floor narrowed by scan-report-fixes item
+ * 2): when the (already whitespace-collapsed) string is `A + ' ' + B` and B starts with A, keep only B
+ * -- UNLESS A is a single word, in which case the string is returned unchanged (decision 9-10: "CTO CTO
+ * Group" and "Manager, Manager Development Program" must not be mangled by a single-token coincidental
+ * repeat; there is no longer a minimum character count -- "Field CTO Field CTO" collapses to "Field
+ * CTO" even though "Field CTO" is under 12 characters, because it is 2 words). Among every valid split
+ * point the LONGEST matching A is chosen, so a title with one genuine boilerplate repeat resolves in a
+ * single pass. No recursion: at most one repeat is stripped per call, matching the spec's "keep the
  * text once."
  * @param {string} s already collapseWhitespace()-d
  * @returns {{ text: string, stripped: boolean, segment: string|null }}
@@ -182,11 +186,12 @@ export function stripRepeatedLeadingSegment(s) {
   const exact = matchExactHalfRepeat(text);
   if (exact) {
     const exactWords = exact.split(' ').filter(Boolean).length;
-    if (exact.length >= MIN_REPEAT_SEGMENT_CHARS && exactWords >= MIN_REPEAT_SEGMENT_WORDS) {
+    if (exactWords >= MIN_REPEAT_SEGMENT_WORDS) {
       return { text: exact, stripped: true, segment: exact };
     }
-    // Below the floor (e.g. "CTOCTO" or "CTO CTO"): deliberately falls through to the space-delimited
-    // search below, which applies the identical floor and will also correctly leave it untouched.
+    // Below the floor (e.g. "CTOCTO" or "CTO CTO", both a single token): deliberately falls through to
+    // the space-delimited search below, which applies the identical floor and will also correctly leave
+    // it untouched.
   }
 
   /** @type {{ a: string, rest: string } | null} */
@@ -198,7 +203,7 @@ export function stripRepeatedLeadingSegment(s) {
   }
   if (!best) return { text, stripped: false, segment: exact };
   const words = best.a.split(' ').filter(Boolean).length;
-  if (best.a.length < MIN_REPEAT_SEGMENT_CHARS || words < MIN_REPEAT_SEGMENT_WORDS) {
+  if (words < MIN_REPEAT_SEGMENT_WORDS) {
     return { text, stripped: false, segment: best.a };
   }
   return { text: best.rest, stripped: true, segment: best.a };
