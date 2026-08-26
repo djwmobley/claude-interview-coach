@@ -19,6 +19,7 @@ import { errFields } from '../src/core/errors.js';
 import { computeProfileRev } from '../src/core/upsert.js';
 import { classify, makePgLookups } from '../src/core/dedup.js';
 import { resolveItem } from '../src/tools/review.js';
+import { classifyNoise, NOISE_CLASSES } from '../src/core/noise.js';
 
 const HERE = path.dirname(fileURLToPath(import.meta.url));
 const SQL_DIR = path.join(HERE, '..', 'sql');
@@ -337,6 +338,45 @@ export async function backfillStateRemoteDedup(client) {
 }
 
 /**
+ * Noise classification backfill (spec R2.1): classifyNoise() over every existing listing row whose
+ * noise_class is still NULL, in batches (so a large table does not hold one enormous result set in
+ * memory), printing a per-class count. classifyNoise() needs only the row's own stored fields (source,
+ * title, company_norm, url_normalized, external_id, description, salary_raw) -- never a search profile
+ * -- so this is safe to run unconditionally on every apply, regardless of which profile(s) exist.
+ * @param {import('pg').ClientBase} client
+ * @param {{ batchSize?: number }} [opts]
+ */
+export async function backfillNoiseClass(client, opts = {}) {
+  const batchSize = opts.batchSize ?? 500;
+  /** @type {Record<string, number>} */
+  const counts = {};
+  let total = 0;
+  for (;;) {
+    const batch = await client.query(
+      `SELECT id, source, title, company_norm, url_normalized, external_id, description, salary_raw
+       FROM ic_job_listings
+       WHERE noise_class IS NULL AND coalesce(record_kind,'listing') = 'listing'
+       ORDER BY id LIMIT $1`,
+      [batchSize],
+    );
+    if (batch.rowCount === 0) break;
+    for (const row of batch.rows) {
+      const cls = classifyNoise({
+        source: row.source, title: row.title, company_norm: row.company_norm,
+        url_normalized: row.url_normalized, external_id: row.external_id, description: row.description, salary_raw: row.salary_raw,
+      });
+      await client.query(`UPDATE ic_job_listings SET noise_class = $2 WHERE id = $1`, [row.id, cls]);
+      counts[cls] = (counts[cls] ?? 0) + 1;
+      total++;
+    }
+    // A batch smaller than batchSize means this was the last one (the WHERE clause only ever matches
+    // rows that still have noise_class IS NULL, so the query naturally shrinks as rows get classified).
+    if (batch.rowCount < batchSize) break;
+  }
+  return { total, counts };
+}
+
+/**
  * @param {import('pg').ClientBase} client
  * @param {ReturnType<typeof parseArgs>} args
  */
@@ -396,6 +436,14 @@ async function runApply(client, args) {
   const r6 = await backfillStateRemoteDedup(client);
   say(`R6 state/remote backfill: ${r6.merged} open review item(s) auto-merged`);
   for (const d of r6.details) say(`  candidate #${d.candidate_id} -> root #${d.root_id} (queue #${d.queue_id})`);
+
+  // Noise classification backfill (spec R2.1: "recomputed on upsert and on bin/migrate.js backfill").
+  // Every existing listing row still missing a noise_class gets one now; classifyNoise() needs only the
+  // row's own stored fields, no search profile, so this is independent of (and safe to run regardless
+  // of) any particular profile.
+  const noiseBackfill = await backfillNoiseClass(client);
+  say(`noise_class backfill: ${noiseBackfill.total} row(s) classified`);
+  for (const cls of NOISE_CLASSES) say(`  ${cls}: ${noiseBackfill.counts[cls] ?? 0}`);
 
   // Conflict groups from the stored columns (covers rows backfilled in earlier runs too).
   const urlConf = await client.query(`

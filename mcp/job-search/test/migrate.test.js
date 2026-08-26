@@ -1,16 +1,18 @@
 // @ts-check
 /**
- * bin/migrate.js's renormalizeListings() (spec R3.2, decision 12) and backfillStateRemoteDedup()
- * (spec R6.3) against the real ic_context DB. Rows carry source `zz-test-migrate-<pid>` and company
- * `ZZ-TEST-MIGRATE-<pid>` and are deleted afterwards.
+ * bin/migrate.js's renormalizeListings() (spec R3.2, decision 12), backfillStateRemoteDedup()
+ * (spec R6.3), and backfillNoiseClass() (spec R2.1, independent review fix) against the isolated
+ * "_test" database bin/run-tests.js points PG_DSN at (see npm test). Rows carry source
+ * `zz-test-migrate-<pid>` and company `ZZ-TEST-MIGRATE-<pid>` and are deleted afterwards.
  */
 import { test, describe, before, after } from 'node:test';
 import assert from 'node:assert/strict';
 import pg from 'pg';
 import { pgConnectionConfig } from '../src/core/config.js';
 import { ensureAuxSchema } from '../src/core/schema.js';
-import { renormalizeListings, backfillStateRemoteDedup } from '../bin/migrate.js';
+import { renormalizeListings, backfillStateRemoteDedup, backfillNoiseClass } from '../bin/migrate.js';
 import { dedupHash } from '../src/core/normalize.js';
+import { NOISE_CLASSES } from '../src/core/noise.js';
 
 const SRC = `zz-test-migrate-${process.pid}`;
 const CO = `ZZ-TEST-MIGRATE-${process.pid}`;
@@ -36,7 +38,10 @@ async function insert(o = {}) {
 }
 
 async function cleanup() {
-  const ids = (await client.query('SELECT id FROM ic_job_listings WHERE source = $1', [SRC])).rows.map((r) => r.id);
+  // Matches on company too (not just source): backfillNoiseClass tests below deliberately use a real
+  // adapter name (e.g. 'greenhouse') as source to exercise the terminal "known adapter -> ok" branch,
+  // so source=SRC alone would miss them; CO is unique per test run (pid-scoped) either way.
+  const ids = (await client.query('SELECT id FROM ic_job_listings WHERE source = $1 OR company = $2', [SRC, CO])).rows.map((r) => r.id);
   if (ids.length === 0) return;
   await client.query('DELETE FROM ic_job_review_queue WHERE candidate_id = ANY($1::int[])', [ids]);
   await client.query('UPDATE ic_job_listings SET url_normalized = NULL, external_id = NULL, duplicate_of = NULL, repost_of = NULL WHERE id = ANY($1::int[])', [ids]);
@@ -118,5 +123,42 @@ describe('backfillStateRemoteDedup (spec R6.3)', () => {
     assert.ok(!details.some((d) => d.candidate_id === b));
     const queue = (await client.query('SELECT resolved_at FROM ic_job_review_queue WHERE candidate_id = $1', [b])).rows[0];
     assert.equal(queue.resolved_at, null, 'left open for a human');
+  });
+});
+
+describe('backfillNoiseClass (spec R2.1, independent review fix)', () => {
+  /**
+   * @param {{ title: string, company_norm?: string, url_normalized?: string|null, description?: string|null, salary_raw?: string|null }} o
+   */
+  async function insertUnclassified(o) {
+    const n = Math.floor(Math.random() * 1e9);
+    // source is a real, known adapter name ('greenhouse') so the terminal "known adapter -> ok" branch
+    // of classifyNoise's total classification is actually exercised here; external_id/url still carry
+    // the SRC test marker, and company (CO) is what cleanup() matches on for these rows.
+    const r = await client.query(
+      `INSERT INTO ic_job_listings (title, company, url, source, external_id, record_kind, company_norm, title_norm, location_norm, dedup_hash, url_normalized, description, salary_raw, noise_class, last_seen)
+       VALUES ($1,$2,$3,'greenhouse',$4,'listing',$5,lower($1),'legacy-unknown',md5($3),$6,$7,$8,NULL,now()) RETURNING id`,
+      [o.title, CO, `https://example.test/${SRC}/${n}`, `${SRC}:${n}`, o.company_norm ?? CO.toLowerCase(), o.url_normalized ?? null, o.description ?? null, o.salary_raw ?? null],
+    );
+    return Number(r.rows[0].id);
+  }
+
+  test('classifies every row whose noise_class is NULL, batched, and reports a per-class count', async () => {
+    const ok = await insertUnclassified({ title: 'Chief Technology Officer' });
+    const suspect = await insertUnclassified({ title: 'Virtual CTO' });
+    const already = await insert({ title: 'Already Classified' });
+    await client.query(`UPDATE ic_job_listings SET noise_class = 'ok' WHERE id = $1`, [already]);
+    // A small batchSize forces multiple batches even with only two pending rows, exercising the loop.
+    const { total, counts } = await backfillNoiseClass(client, { batchSize: 1 });
+    assert.ok(total >= 2, 'both pending rows were classified');
+    for (const cls of Object.keys(counts)) assert.ok(NOISE_CLASSES.includes(cls), `unexpected class ${cls}`);
+    const rows = (await client.query('SELECT id, noise_class FROM ic_job_listings WHERE id = ANY($1::int[])', [[ok, suspect, already]])).rows;
+    const byId = Object.fromEntries(rows.map((r) => [r.id, r.noise_class]));
+    assert.equal(byId[ok], 'ok');
+    assert.equal(byId[suspect], 'suspect');
+    assert.equal(byId[already], 'ok', 'a row already classified is left untouched, never re-queried or re-counted');
+    // Idempotent: a second run finds nothing left to classify.
+    const second = await backfillNoiseClass(client);
+    assert.equal(second.total, 0);
   });
 });

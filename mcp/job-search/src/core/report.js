@@ -175,18 +175,22 @@ export async function collectRuns(client, since) {
  * @param {number} limit
  */
 export async function collectLookAtThese(client, since, limit) {
+  // Strict allow-list, never NULL: an unclassified row (noise_class IS NULL -- should be rare once
+  // bin/migrate.js's backfill has run, but a row inserted by a code path outside normal scan/adoption
+  // could still land here) is NOT-ok by default (independent-review fix), same as any other non-ok
+  // class; it surfaces in collectSuspectAndUnclassified() instead, never silently in "Look at these".
   const top = await client.query(
     `SELECT id, title, company, location, remote_mode, salary_min, salary_max, prescore, source, url_normalized, url, company_norm, title_norm
      FROM ic_job_listings
      WHERE first_seen > $1 AND coalesce(record_kind,'listing') = 'listing' AND duplicate_of IS NULL
-       AND (noise_class IS NULL OR noise_class IN ('ok','ok_manual'))
+       AND noise_class IN ('ok','ok_manual')
      ORDER BY prescore DESC NULLS LAST, id DESC LIMIT $2`,
     [since, limit],
   );
   const excludedCount = await client.query(
     `SELECT count(*)::int AS n FROM ic_job_listings
      WHERE first_seen > $1 AND coalesce(record_kind,'listing') = 'listing' AND duplicate_of IS NULL
-       AND noise_class IS NOT NULL AND noise_class NOT IN ('ok','ok_manual')`,
+       AND (noise_class IS NULL OR noise_class NOT IN ('ok','ok_manual'))`,
     [since],
   );
   /** @type {Map<number, string[]>} */
@@ -196,7 +200,7 @@ export async function collectLookAtThese(client, since, limit) {
     const also = await client.query(
       `SELECT company_norm, title_norm, source FROM ic_job_listings
        WHERE first_seen > $1 AND coalesce(record_kind,'listing') = 'listing' AND duplicate_of IS NULL
-         AND noise_class IS NOT NULL AND noise_class NOT IN ('ok','ok_manual')
+         AND (noise_class IS NULL OR noise_class NOT IN ('ok','ok_manual'))
          AND (company_norm, title_norm) IN (SELECT * FROM unnest($2::text[], $3::text[]))`,
       [since, pairs.map((p) => p[0]), pairs.map((p) => p[1])],
     );
@@ -212,6 +216,28 @@ export async function collectLookAtThese(client, since, limit) {
     rows: top.rows.map((r) => ({ ...r, also_seen_via: siblings.get(r.id) ?? [] })),
     excludedCount: excludedCount.rows[0].n,
   };
+}
+
+/**
+ * Suspect / unclassified (decision 7 + independent-review fix): a short, bounded, visible list of rows
+ * that are noise_class='suspect' OR still NULL (unclassified) -- both are "not confirmed ok" and both
+ * are surfaced here with their class, rather than silently folded into "Look at these" or left
+ * invisible. This is the "separate short list" decision 7 calls for; NULL is included alongside
+ * 'suspect' per the independent review, since an unclassified row deserves the same visibility.
+ * @param {import('pg').ClientBase} client
+ * @param {Date} since
+ * @param {number} limit
+ */
+export async function collectSuspectAndUnclassified(client, since, limit) {
+  const r = await client.query(
+    `SELECT id, title, company, location, source, noise_class
+     FROM ic_job_listings
+     WHERE first_seen > $1 AND coalesce(record_kind,'listing') = 'listing' AND duplicate_of IS NULL
+       AND (noise_class = 'suspect' OR noise_class IS NULL)
+     ORDER BY id DESC LIMIT $2`,
+    [since, limit],
+  );
+  return r.rows.map((row) => ({ ...row, noise_class: row.noise_class ?? 'unclassified' }));
 }
 
 /**
@@ -272,6 +298,7 @@ export async function buildScanReport(client, opts = {}) {
   const runs = await collectRuns(client, effectiveSince ? since : null);
   const noScan = runs.length === 0 && isWeekdayInTz(now, timezone);
   const lookAtThese = await collectLookAtThese(client, since, topN);
+  const suspectUnclassified = await collectSuspectAndUnclassified(client, since, 10);
   const homeLocations = await collectHomeLocations(client, since, homeLocationNorms);
   const reviewQueue = await collectReviewQueueSummary(client);
   const disabledSources = await collectDisabledSources(client);
@@ -285,6 +312,7 @@ export async function buildScanReport(client, opts = {}) {
     noScan,
     worstStatus,
     lookAtThese,
+    suspectUnclassified,
     homeLocations,
     reviewQueue,
     disabledSources,
@@ -356,6 +384,10 @@ export function renderReportText(data, registry) {
     lines.push(`#${r.id} | ${r.title} | ${r.company} | ${r.location ?? 'n/a'} | ${salaryText(r)} | ps ${r.prescore ?? 0} | ${r.source}${also}${url ? ` | ${url}` : ''}`);
   }
   lines.push('');
+  lines.push(`== Suspect / unclassified (${data.suspectUnclassified.length}) ==`);
+  if (data.suspectUnclassified.length === 0) lines.push('(none)');
+  for (const r of data.suspectUnclassified) lines.push(`#${r.id} | ${r.title} | ${r.company} | ${r.location ?? 'n/a'} | ${r.source} | ${r.noise_class}`);
+  lines.push('');
   lines.push('== Houston / Texas ==');
   if (data.homeLocations.length === 0) lines.push('(none)');
   for (const r of data.homeLocations) {
@@ -406,6 +438,8 @@ export function renderReportHtml(data, registry) {
   parts.push(`<h3>Look at these (top ${data.lookAtThese.rows.length})</h3>`);
   if (data.lookAtThese.excludedCount) parts.push(`<p>(${data.lookAtThese.excludedCount} noise-classified row(s) excluded from this list; they are still in the database)</p>`);
   parts.push(data.lookAtThese.rows.length ? `<ul>${data.lookAtThese.rows.map((r) => rowLi(r, true)).join('')}</ul>` : '<p>(none)</p>');
+  parts.push(`<h3>Suspect / unclassified (${data.suspectUnclassified.length})</h3>`);
+  parts.push(data.suspectUnclassified.length ? `<ul>${data.suspectUnclassified.map((r) => `<li>#${r.id} ${esc(r.title)} at ${esc(r.company)}, ${esc(r.location ?? 'n/a')}, ${esc(r.source)}, ${esc(r.noise_class)}</li>`).join('')}</ul>` : '<p>(none)</p>');
   parts.push('<h3>Houston / Texas</h3>');
   parts.push(data.homeLocations.length ? `<ul>${data.homeLocations.map((r) => rowLi(r, false)).join('')}</ul>` : '<p>(none)</p>');
   parts.push(`<h3>Review queue: ${data.reviewQueue.total} open</h3>`);
@@ -453,6 +487,11 @@ export function renderReportMarkdown(data, registry) {
     const also = r.also_seen_via.length ? ` (also seen via ${r.also_seen_via.join(', ')})` : '';
     lines.push(`- #${r.id} ${r.title} at ${r.company}, ${r.location ?? 'n/a'}, ${salaryText(r)}, ps ${r.prescore ?? 0}, ${r.source}${also}${url ? ` (${url})` : ''}`);
   }
+  lines.push('');
+  lines.push(`## Suspect / unclassified (${data.suspectUnclassified.length})`);
+  lines.push('');
+  if (data.suspectUnclassified.length === 0) lines.push('(none)');
+  for (const r of data.suspectUnclassified) lines.push(`- #${r.id} ${r.title} at ${r.company}, ${r.location ?? 'n/a'}, ${r.source}, ${r.noise_class}`);
   lines.push('');
   lines.push('## Houston / Texas');
   lines.push('');
