@@ -7,6 +7,17 @@ import { showToast } from '../lib/toast.js';
 import { confirmButton } from '../components/confirm-button.js';
 import { skeleton, emptyState } from '../components/empty-state.js';
 import { on, off } from '../lib/bus.js';
+import { createListCursor } from '../lib/list-cursor.js';
+
+/** kbaction totality (independent review comment 5440498360, blocking finding 1). Review resolution is
+ * merge/separate/repost, not a stage-set, and has no digit/Job-detail-only shortcuts. */
+export const KEYBOARD_ACTIONS = Object.freeze({
+  'row-nav': 'handled',
+  'row-open': 'handled',
+  'row-stage': 'not-applicable',
+  digit: 'not-applicable',
+  shortcut: 'not-applicable',
+});
 
 /** @param {any} field @param {string[]} differs */
 function fieldCell(field, value, differs) {
@@ -15,6 +26,9 @@ function fieldCell(field, value, differs) {
 
 /** @param {HTMLElement} container */
 export async function render(container, params, app) {
+  const cursor = createListCursor();
+  /** @type {Map<string, number|null>} */
+  let candidateIdByQueueId = new Map();
   setChildren(container, [skeleton({ rows: 6 })]);
 
   async function load() {
@@ -34,7 +48,7 @@ export async function render(container, params, app) {
     const cards = rows.map((item) => {
       const candidate = item.candidate;
       const matches = item.matches ?? [];
-      return h('div', { className: 'review-card' }, [
+      return h('div', { className: 'review-card', dataset: { rowId: item.queue_id }, attrs: { tabindex: '0' } }, [
         h('div', { className: 'review-card__reason', text: `Reason: ${item.reason}` }),
         h('div', { className: 'review-card__candidate' }, [
           h('h3', { text: candidate ? candidate.title : 'candidate removed' }),
@@ -59,10 +73,35 @@ export async function render(container, params, app) {
       autoNote,
       rows.length === 0 ? emptyState({ message: 'No items pending review.' }) : h('div', { className: 'review-cards' }, cards),
     ]);
+    cursor.setRows([...container.querySelectorAll('.review-card')]);
+    candidateIdByQueueId = new Map(rows.map((item) => [String(item.queue_id), item.candidate?.id ?? null]));
+  }
+
+  /** @param {{ type: string, [k: string]: any }} action */
+  function onKbAction(action) {
+    switch (action.type) {
+      case 'row-nav':
+        cursor.move(action.dir);
+        return;
+      case 'row-open': {
+        const id = cursor.currentId();
+        const candidateId = id ? candidateIdByQueueId.get(id) : null;
+        if (candidateId) app.navigate('job-detail', { id: candidateId });
+        return;
+      }
+      default:
+        // row-stage / digit / shortcut: not applicable on Review (see KEYBOARD_ACTIONS).
+        return;
+    }
   }
 
   await load();
   const onChanged = () => load();
   on('dashboard:changed', onChanged);
-  return { name: 'review', refresh: load, teardown: () => off('dashboard:changed', onChanged) };
+  on('dashboard:kbaction', onKbAction);
+  return {
+    name: 'review',
+    refresh: load,
+    teardown: () => { off('dashboard:changed', onChanged); off('dashboard:kbaction', onKbAction); },
+  };
 }

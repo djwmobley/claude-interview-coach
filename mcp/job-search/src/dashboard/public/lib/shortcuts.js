@@ -6,11 +6,18 @@
  * `document.activeElement` classification, and wall-clock `Date.now()`; this module only reasons about
  * the already-classified event shape below.
  *
- * JUDGMENT CALL (documented in the PR body's blind spots): the plan names row-level single-key shortcuts
- * `j/k/Enter/m/s/p/a/x` for list views but never defines what `p`, `a`, and `x` individually do beyond
- * "row down/up". This reducer maps them to quick stage-set actions (m=maybe, s=shortlisted, a=applied,
- * p=passed, x=skip) as the closest reading of the plan's own stage vocabulary; a page is free to ignore
- * an action it does not support (e.g. these are inert outside Jobs/Pipeline/Follow-ups/Review/Runs).
+ * JUDGMENT CALL (documented in the PR body's blind spots and README): the plan names row-level
+ * single-key shortcuts `j/k/Enter/m/s/p/a/x` for list views but never defines what `p`, `a`, and `x`
+ * individually do beyond "row down/up". This reducer maps them to quick stage-set actions (m=maybe,
+ * s=shortlisted, a=applied, p=passed, x=skip) as the closest reading of the plan's own stage vocabulary.
+ * Every action this reducer can emit is wired to a real handler (or an explicit "not applicable on this
+ * page" entry) on every page the plan's keyboard map names: pages/{jobs,pipeline,followups,review,
+ * runs}.js each export a KEYBOARD_ACTIONS manifest and subscribe to `dashboard:kbaction`; see
+ * test/dashboard-public-kbaction-wiring.test.js for the totality check across those manifests.
+ *
+ * Bare `f` (Job detail's "detail 1-0/n/f", distinct from the `g f` chord to the Follow-ups page, and
+ * distinct from the row-level `f` used nowhere in ROW_ACTION_KEYS below) maps to a `shortcut` action
+ * named `add-followup`; `n` maps to `notes-focus`. Both are handled only on pages/job-detail.js.
  */
 
 /** @typedef {{ chordArmedUntil: number|null, helpOpen: boolean }} KbState */
@@ -70,6 +77,7 @@ export function reduceKeyboard(state, event) {
   if (event.key === 'Enter') return { state, action: { type: 'row-open' } };
   if (event.key === '/') return { state, action: { type: 'focus-search' } };
   if (event.key === 'n') return { state, action: { type: 'shortcut', name: 'notes-focus' } };
+  if (event.key === 'f') return { state, action: { type: 'shortcut', name: 'add-followup' } };
 
   if (Object.prototype.hasOwnProperty.call(ROW_ACTION_KEYS, event.key)) {
     return { state, action: { type: 'row-stage', status: ROW_ACTION_KEYS[event.key] } };

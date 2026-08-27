@@ -169,6 +169,10 @@ table { border-collapse: collapse; width: 100%; }
 .data-table th { text-align: left; font-size: 11px; text-transform: uppercase; letter-spacing: 0.03em; color: var(--muted-2); background: var(--surface2); padding: 6px 8px; border-bottom: 1px solid var(--border); }
 .data-table td { padding: 6px 8px; border-bottom: 1px solid var(--border); font-size: 12.5px; }
 .data-table tbody tr:hover { background: var(--hover); cursor: pointer; }
+/* j/k keyboard row-cursor (lib/list-cursor.js), independent of native :focus-visible so it stays visible
+   even in a browser context where the row's own .focus() call does not render a ring (kept anyway as a
+   second, redundant signal). Works identically on <tr> and row <div>s (pipeline/follow-ups/review). */
+.row-cursor { outline: 2px solid var(--accent); outline-offset: -2px; background: var(--hover); }
 .job-row__title { display: flex; align-items: center; gap: 4px; }
 .score { font-variant-numeric: tabular-nums; }
 .score--good { color: var(--green); }

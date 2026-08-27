@@ -88,6 +88,27 @@ describe('named conflict: bare j/k (row-nav) versus g j (navigate) are two diffe
     const { action } = reduceKeyboard(armed.state, ev('j', { now: 10 }));
     assert.deepEqual(action, { type: 'navigate', route: 'jobs' });
   });
+
+  test('bare f (Job detail add-followup) is a distinct sequence from g f (navigate to Follow-ups)', () => {
+    const bare = reduceKeyboard(initialKbState(), ev('f'));
+    assert.deepEqual(bare.action, { type: 'shortcut', name: 'add-followup' });
+
+    const armed = reduceKeyboard(initialKbState(), ev('g', { now: 0 }));
+    const chorded = reduceKeyboard(armed.state, ev('f', { now: 10 }));
+    assert.deepEqual(chorded.action, { type: 'navigate', route: 'followups' });
+  });
+});
+
+describe('Job-detail-only shortcuts: n (notes-focus) and f (add-followup)', () => {
+  test('n produces a notes-focus shortcut action', () => {
+    const { action } = reduceKeyboard(initialKbState(), ev('n'));
+    assert.deepEqual(action, { type: 'shortcut', name: 'notes-focus' });
+  });
+
+  test('f produces an add-followup shortcut action', () => {
+    const { action } = reduceKeyboard(initialKbState(), ev('f'));
+    assert.deepEqual(action, { type: 'shortcut', name: 'add-followup' });
+  });
 });
 
 describe('? overlay (rule 6)', () => {

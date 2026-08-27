@@ -18,6 +18,7 @@ export function jobRow(row, opts) {
   const scoreCls = `score score--${scoreBucket(row.prescore)}`;
   const tr = h('tr', {
     className: 'job-row',
+    dataset: { rowId: row.id },
     attrs: { tabindex: '0', role: 'row', 'aria-selected': String(opts.selected) },
     on: {
       click: (ev) => {

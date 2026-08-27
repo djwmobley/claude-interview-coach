@@ -7,7 +7,7 @@ import { h, setChildren, hLink } from '../lib/dom.js';
 import { getJson, postJson, putJson } from '../lib/api.js';
 import { handleOutcome } from '../lib/outcome.js';
 import { showToast, showUndoToast } from '../lib/toast.js';
-import { stageButtons } from '../components/stage-buttons.js';
+import { stageButtons, DIGIT_STAGE_ORDER } from '../components/stage-buttons.js';
 import { timeline } from '../components/timeline.js';
 import { documentChip, chipClassName } from '../components/chips.js';
 import { skeleton, emptyState } from '../components/empty-state.js';
@@ -16,12 +16,25 @@ import { on, off } from '../lib/bus.js';
 
 const NOTES_DEBOUNCE_MS = 800;
 
+/** kbaction totality (independent review comment 5440498360, blocking finding 1). Job detail is the one
+ * page the plan's "detail 1-0/n/f" shortcuts apply to; it has no row list, so row-nav/row-open/row-stage
+ * are not applicable here (they are handled by pages/{jobs,pipeline,followups,review,runs}.js instead). */
+export const KEYBOARD_ACTIONS = Object.freeze({
+  'row-nav': 'not-applicable',
+  'row-open': 'not-applicable',
+  'row-stage': 'not-applicable',
+  digit: 'handled',
+  shortcut: 'handled',
+});
+
 /** @param {HTMLElement} container @param {{id:number}} params */
 export async function render(container, params, app) {
   setChildren(container, [skeleton({ rows: 6 })]);
   let notesTimer = null;
   let pendingNotesValue = null;
   let listing = null;
+  /** @type {HTMLTextAreaElement|null} */
+  let notesAreaEl = null;
 
   async function flushNotes() {
     if (pendingNotesValue === null || !listing) return;
@@ -31,6 +44,59 @@ export async function render(container, params, app) {
     notesTimer = null;
     const outcome = handleOutcome(await putJson(`/api/listings/${listing.id}/notes`, { notes: value }));
     if (outcome.kind !== 'ok') showToast({ message: 'Notes failed to save.', tone: 'error' });
+  }
+
+  const setStage = async (status) => {
+    if (!listing) return;
+    const prevStatus = listing.status;
+    const out = handleOutcome(await postJson(`/api/listings/${listing.id}/status`, { status }));
+    if (out.kind === 'ok') {
+      showUndoToast({
+        message: `Stage set to ${status}.`,
+        onUndo: async () => { handleOutcome(await postJson(`/api/listings/${listing.id}/status`, { status: prevStatus ?? 'new' })); load(); },
+      });
+      load();
+    }
+  };
+
+  // 'f' (Job detail, distinct from the g-f chord to the Follow-ups page): quick-create a follow-up tied
+  // to this listing, matching the pragmatic prompt()-based pattern already used by pages/jobs.js's bulk
+  // stage-set (no full drawer form was in scope for this fix; a real, working action beats dead code).
+  async function quickAddFollowup() {
+    if (!listing) return;
+    const contact = prompt('Follow up with (contact name):');
+    if (!contact || !contact.trim()) return;
+    const daysRaw = prompt('Due in how many days?', '3');
+    const days = Number(daysRaw);
+    if (!Number.isFinite(days) || days < 0) { showToast({ message: 'Enter a whole number of days.', tone: 'error' }); return; }
+    const due_at = new Date(Date.now() + days * 86400000).toISOString();
+    const out = handleOutcome(await postJson('/api/followups', {
+      contact: contact.trim(), listing_id: listing.id, due_at, channel: 'email',
+      action_text: `Follow up on ${listing.title}`,
+    }));
+    if (out.kind === 'ok') { showToast({ message: 'Follow-up created.' }); load(); }
+  }
+
+  /** @param {{ type: string, [k: string]: any }} action */
+  function onKbAction(action) {
+    if (!listing) return;
+    const disabled = listing.duplicate_of != null;
+    switch (action.type) {
+      case 'digit': {
+        if (disabled) return;
+        const index = Number(action.digit) === 0 ? 9 : Number(action.digit) - 1;
+        const status = DIGIT_STAGE_ORDER[index];
+        if (status) setStage(status);
+        return;
+      }
+      case 'shortcut':
+        if (action.name === 'notes-focus') notesAreaEl?.focus();
+        else if (action.name === 'add-followup') quickAddFollowup();
+        return;
+      default:
+        // row-nav / row-open / row-stage: not applicable on Job detail (see KEYBOARD_ACTIONS).
+        return;
+    }
   }
 
   async function load() {
@@ -45,18 +111,6 @@ export async function render(container, params, app) {
     }
     listing = outcome.body.row;
     const disabled = listing.duplicate_of != null;
-
-    const setStage = async (status) => {
-      const prevStatus = listing.status;
-      const out = handleOutcome(await postJson(`/api/listings/${listing.id}/status`, { status }));
-      if (out.kind === 'ok') {
-        showUndoToast({
-          message: `Stage set to ${status}.`,
-          onUndo: async () => { handleOutcome(await postJson(`/api/listings/${listing.id}/status`, { status: prevStatus ?? 'new' })); load(); },
-        });
-        load();
-      }
-    };
 
     const descriptionPanel = h('details', { className: 'description-panel' }, [
       h('summary', { text: 'Description' }),
@@ -73,6 +127,7 @@ export async function render(container, params, app) {
         },
       },
     });
+    notesAreaEl = /** @type {HTMLTextAreaElement} */ (notesArea);
 
     const docs = outcome.body.documents ?? [];
     const suggestions = outcome.body.suggestions ?? [];
@@ -144,11 +199,12 @@ export async function render(container, params, app) {
   await load();
   const onChanged = () => load();
   on('dashboard:changed', onChanged);
+  on('dashboard:kbaction', onKbAction);
   return {
     name: 'job-detail',
     refresh: load,
     beforeLeave: () => { flushNotes(); },
-    teardown: () => off('dashboard:changed', onChanged),
+    teardown: () => { off('dashboard:changed', onChanged); off('dashboard:kbaction', onKbAction); },
   };
 }
 
