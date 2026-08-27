@@ -35,6 +35,44 @@ describe('followups core', () => {
     assert.throws(() => parseIsoDate('', 'due_at'), /required/);
   });
 
+  test('parseIsoDate: leap-year boundary for Feb 29', () => {
+    assert.throws(() => parseIsoDate('2027-02-29', 'due_at'), /not a valid date/, '2027 is not a leap year');
+    assert.equal(parseIsoDate('2028-02-29', 'due_at').getUTCDate(), 29, '2028 is a leap year');
+  });
+
+  test('parseIsoDate: out-of-range calendar components are all refused (month 00, day 00, day 32, month 13)', () => {
+    assert.throws(() => parseIsoDate('2027-00-15', 'due_at'), /not a valid date/);
+    assert.throws(() => parseIsoDate('2027-01-00', 'due_at'), /not a valid date/);
+    assert.throws(() => parseIsoDate('2027-01-32', 'due_at'), /not a valid date/);
+    assert.throws(() => parseIsoDate('2027-13-01', 'due_at'), /not a valid date/);
+  });
+
+  test('parseIsoDate: out-of-range time-of-day components are all refused (hour 24, minute 60, second 60)', () => {
+    assert.throws(() => parseIsoDate('2027-01-01T24:00:00', 'due_at'), /invalid time of day/);
+    assert.throws(() => parseIsoDate('2027-01-01T09:60:00', 'due_at'), /invalid time of day/);
+    assert.throws(() => parseIsoDate('2027-01-01T09:00:60', 'due_at'), /invalid time of day/);
+  });
+
+  test('parseIsoDate: the last valid instant of a day (23:59:59) is accepted', () => {
+    const d = parseIsoDate('2027-01-01T23:59:59', 'due_at');
+    assert.ok(d instanceof Date);
+    assert.ok(!Number.isNaN(d.getTime()));
+  });
+
+  test('parseIsoDate: known accepted gap -- an out-of-real-world-range UTC offset is not bounds-checked', () => {
+    // "-23:00" matches the shape regex and Date's own parser accepts it (no real timezone has ever used an
+    // offset beyond -12:00..+14:00), so this currently passes when a stricter check arguably should refuse
+    // it. Left unfixed deliberately: every caller of parseIsoDate in this codebase supplies either a bare
+    // YYYY-MM-DD (turned into local 09:00 here) or a datetime the dashboard/CLI itself generates with a
+    // real local offset -- no code path lets an operator type a raw offset string -- so bounding it would
+    // add validation surface (and a real risk of rejecting a legitimate exotic zone, e.g. +14:00 Kiribati
+    // or +05:45 Nepal, under time pressure) for an input nothing in this codebase can actually produce.
+    // If a caller is ever added that accepts a raw offset from outside this codebase, this assumption
+    // should be revisited.
+    const d = parseIsoDate('2027-01-01T09:00:00-23:00', 'due_at');
+    assert.ok(!Number.isNaN(d.getTime()));
+  });
+
   test('create validates channel, notify, contact, action, due_at; defaults notify to email', async () => {
     await assert.rejects(createFollowup(client, { contact: MARK, due_at: future, channel: 'fax', action: 'x' }), /channel/);
     await assert.rejects(createFollowup(client, { contact: MARK, due_at: future, channel: 'phone', action: 'x', notify: ['sms'] }), /notify/);
