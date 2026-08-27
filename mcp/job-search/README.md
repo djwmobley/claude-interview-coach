@@ -386,11 +386,11 @@ the report marker stay un-stamped).
 ## Dashboard
 
 A local, loopback-only HTTP server (`src/dashboard/`) so most day-to-day job-search
-actions (viewing the pipeline, running or cancelling a scan, previewing or sending
-the report, follow-ups, review, calendar) do not require a model in the loop. PR 2
-(this stage) ships the server, API, scan runner, SSE stream, seed script, and task
-registration script; the browsable front end lands in PR 3 -- for now `/` serves a
-one-page placeholder and every other page lives at `/api/*`.
+actions (viewing the pipeline, running or canceling a scan, previewing or sending
+the report, follow-ups, review, calendar) do not require a model in the loop. The
+server, API, scan runner, SSE stream, seed script, and task registration script
+shipped first; a plain HTML/CSS/JS front end (no build step) now serves from `/`
+and covers every page listed below.
 
 **Run it:**
 
@@ -488,6 +488,85 @@ whatever an external company's site returned before this project ever sees it.
 
 **Config lock:** no new config file; `DASHBOARD_PORT` lives in `.env`/`.env.example`
 only, same as every other environment override in this README.
+
+### Front end (`src/dashboard/public/`)
+
+Plain HTML, CSS, and ES modules, no build step and no external resources (fonts,
+CDN scripts, or stylesheets) -- everything the browser loads comes from this
+server, matching the CSP the guards already enforce. `lib/dom.js`'s `h()` (plus
+`hSvg()` for charts and `hSandboxedIframe()` for report/research HTML) is the only
+DOM construction path: every attribute name is checked against a closed allow
+list, `.textContent` is the only place untrusted listing text ever reaches the
+page, and a link's `href`/`src` is only ever written after the server's own
+`url_ok` flag and a client-side scheme re-check both agree the URL is `http:` or
+`https:`.
+
+**Pages:** Home (status tiles, run/cancel scan, scan progress, agenda, recent
+activity), Jobs (filterable table with bulk stage actions and 10 s Undo), Job
+detail (stage buttons, notes with 800 ms autosave, documents, follow-ups, history),
+Pipeline (grouped list by stage, not a kanban board), Follow-ups (Overdue/Today/
+This week/Later/Snoozed/Done), Review (candidate vs. matches with differing fields
+highlighted, Merge/Separate/Repost), Runs and Run detail, Reports and Report view
+(sandboxed iframe), Calendar (14-day agenda), Analytics (inline SVG charts, no
+chart library), Companies and Company detail.
+
+**Keyboard map** (disabled while an input/textarea/select or a content-editable
+element has focus, except `Escape`; modifier-held keys such as Ctrl/Cmd/Alt are
+never intercepted, so browser shortcuts always pass through):
+
+| Keys | Action |
+|---|---|
+| `g` then `h` / `j` / `p` / `f` / `r` | Go to Home / Jobs / Pipeline / Follow-ups / Review (the `g` prefix arms a 600 ms window) |
+| `/` | Focus the top bar search field |
+| `j` / `k` (no `g` prefix) | Move the focused row down / up in a list view |
+| `Enter` | Open the focused row |
+| `1`-`0` (Job detail) | Set stage: New, Maybe, Shortlisted, Applied, Interviewing, Offer, Accepted, Passed, Lost, Skip, in that order. `Dead` and `Review` are reachable only through the "More stages" control, never a bare digit |
+| `n` | Focus the notes field (Job detail) |
+| `?` | Toggle the keyboard shortcuts overlay; every key except `Escape`/`?` is swallowed while it is open |
+| `Escape` | Close the overlay, or blur the focused field |
+
+**Layout breakpoints**, watched live on resize, not just at initial load:
+
+- **1181px and up:** the full layout (198px rail, six-tile Home row, eight-column
+  Jobs table).
+- **900px to 1180px:** the rail collapses to 56px with icon-scale labels, the top
+  bar search field narrows, Home's tiles and scan-progress sources reflow to
+  3-by-2, body columns stack to one, and the Jobs table drops a column.
+- **Below 900px:** the entire page content is replaced with a single "widen the
+  window" notice -- nothing from the normal rail/top bar/body renders underneath
+  it. Widening back past 900px live-restores the normal layout without a reload.
+
+**Front-end blind spots** (in addition to "Dashboard blind spots" below; static
+analysis and `node:test` unit coverage cannot substitute for these):
+
+- A computed/bracket-shaped DOM sink (`el["inner" + "HTML"]`, `el[sinkNameVar]`)
+  would defeat every regex-based check in `test/dashboard-lint.test.js` by
+  construction; the lint test enumerates every named sink it can grep for, but
+  this class of evasion is a known, accepted gap of any static text scan, not
+  something this PR claims to close.
+- Real seeded/scanned data (long company names, long recruiter/via text, long
+  titles) has not been run through the fixed-width Jobs table or the collapsed
+  1100 breakpoint's narrower columns; the Playwright screenshots in this PR use
+  whatever fixture data was in the test database at capture time, not a
+  deliberately adversarial long-text fixture.
+- Contrast ratios of the `-dim` chip backgrounds against their paired foreground
+  colors (design reconciliation's own blind spot) were not measured against WCAG
+  AA; they were carried through from the design token mapping as given.
+- The SSE two-failure-then-poll fallback (`lib/sse.js`) and the notes-autosave
+  flush-on-navigate rule (`pages/job-detail.js`'s `beforeLeave` hook) are exercised
+  only by code review and manual reasoning about the state machine, not by an
+  automated browser test that forces a real dropped connection or a real
+  mid-debounce route change.
+- The "row down/up" `j`/`k` keyboard action and the `m`/`s`/`a`/`p`/`x` row-level
+  stage shortcuts are wired into the shared keyboard reducer but not into every
+  list page's DOM focus handling; the plan names these keys without specifying
+  what `p`/`a`/`x` individually do beyond "row down/up" (see the judgment call
+  recorded in `lib/shortcuts.js`), and only Job detail's digit shortcuts are fully
+  wired end to end.
+- No automated accessibility audit (screen reader pass, full color-blindness
+  simulation) was run; component states follow the design reconciliation's
+  written rules (focus rings, disabled tooltips, loading skeletons) but were not
+  independently audited.
 
 **Dashboard blind spots** (in addition to "Known blind spots" below; none of these
 is exercised by the test suite, which never touches the real Postgres database, a
