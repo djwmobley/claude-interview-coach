@@ -39,7 +39,7 @@ export async function render(container, params, app) {
       const chip = stageChip(row.status);
       const aging = agingChip(ageDays(row.first_seen));
       return h('div', { className: `pipeline-row ${row.record_kind === 'manual' ? 'pipeline-row--manual' : ''}`.trim() }, [
-        h('a', { className: 'pipeline-row__title', attrs: { href: `#/jobs/${row.id}` }, text: row.title ?? 'untitled' }),
+        h('a', { className: 'pipeline-row__title', hashHref: `#/jobs/${row.id}`, text: row.title ?? 'untitled' }),
         h('span', { className: 'pipeline-row__company', text: row.company ?? 'unknown company' }),
         row.record_kind === 'manual' && row.notes ? h('span', { className: 'pipeline-row__via', text: `via ${row.notes}` }) : null,
         h('span', { className: chipClassName(aging), text: aging.label }),

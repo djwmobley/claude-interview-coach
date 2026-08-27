@@ -303,7 +303,7 @@ textarea.notes-textarea { min-height: 100px; }
     padding: 8px 2px;
   }
   .topbar__search { max-width: 280px; }
-  .topbar__user { max-width: 32px; overflow: hidden; text-overflow: ellipsis; }
+  .topbar__user { max-width: 90px; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
   .tile-row { grid-template-columns: repeat(3, 1fr); grid-template-rows: repeat(2, 1fr); }
   .scan-progress__sources { grid-template-columns: repeat(3, 1fr); }
   .home-body, .job-detail-grid, .run-detail-grid, .reports-grid { grid-template-columns: 1fr; }

@@ -21,7 +21,7 @@ export async function render(container, params, app) {
   async function load() {
     const outcome = handleOutcome(await getJson(`/api/scans/${params.id}`), { silenceNotFound: true });
     if (outcome.kind === 'not_found') {
-      setChildren(container, [emptyState({ message: 'This run was not found.' }), h('a', { attrs: { href: '#/runs' }, text: 'Back to Runs' })]);
+      setChildren(container, [emptyState({ message: 'This run was not found.' }), h('a', { hashHref: '#/runs', text: 'Back to Runs' })]);
       return;
     }
     if (outcome.kind !== 'ok') {
@@ -43,7 +43,7 @@ export async function render(container, params, app) {
           const out = handleOutcome(await postJson(`/api/scans/${run.run_id}/cancel`, {}));
           if (out.kind === 'ok') { showToast({ message: out.body.note }); load(); }
         } }) : null,
-        h('a', { attrs: { href: `#/reports/${run.started_at.slice(0, 10)}` }, text: "View that day's report" }),
+        h('a', { hashHref: `#/reports/${run.started_at.slice(0, 10)}`, text: "View that day's report" }),
       ]),
       h('div', { className: 'run-detail-grid' }, [
         h('div', {}, [
@@ -56,7 +56,7 @@ export async function render(container, params, app) {
           h('h3', { text: `Items (${outcome.body.items.length})` }),
           outcome.body.items.length === 0 ? emptyState({ message: 'No items recorded for this run.' }) : h('ul', { className: 'run-items' }, outcome.body.items.map((it) => {
             const oc = runItemOutcomeChip(it.outcome);
-            return h('li', {}, [h('span', { className: chipClassName(oc), text: oc.label }), h('a', { attrs: { href: `#/jobs/${it.listing_id}` }, text: it.title })]);
+            return h('li', {}, [h('span', { className: chipClassName(oc), text: oc.label }), h('a', { hashHref: `#/jobs/${it.listing_id}`, text: it.title })]);
           })),
         ]),
       ]),

@@ -33,7 +33,7 @@ export async function render(container, params, app) {
           h('p', { className: 'reports-list__sent', text: outcome.body.last_report_sent_at ? `Last sent ${shortDate(outcome.body.last_report_sent_at)}.` : 'No report has been sent yet.' }),
           h('h3', { text: 'History' }),
           outcome.body.days.length === 0 ? emptyState({ message: 'No reports generated yet.' }) : h('ul', {}, outcome.body.days.map((day) => h('li', {}, [
-            h('a', { attrs: { href: `#/reports/${day}` }, text: day }),
+            h('a', { hashHref: `#/reports/${day}`, text: day }),
           ]))),
         ]),
       ]),

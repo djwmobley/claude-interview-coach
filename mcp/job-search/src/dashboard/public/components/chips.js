@@ -97,14 +97,22 @@ export function triggerBadge(trigger) {
   return table[trigger] ?? { label: trigger ?? 'unknown', fg: '--muted-2', bg: '--tag-bg', style: O };
 }
 
-/** @param {string} outcome */
+/**
+ * Run item outcome chip. CORRECTION to the design reconciliation's mapping (its `inserted`/`seen`/
+ * `review`/`noise` labels do not exist in the database): `ic_scan_run_items.outcome`'s actual CHECK
+ * constraint (sql/003_scan_runs.sql) is the closed set `new`, `update`, `cross_source_dup`, `repost`,
+ * `ambiguous`. Found while seeding fixture data for the Playwright screenshot pass; fixed here rather
+ * than shipping a chip table that can never match a real row.
+ * @param {string} outcome
+ */
 export function runItemOutcomeChip(outcome) {
   /** @type {Record<string, Chip>} */
   const table = {
-    inserted: { label: 'Inserted', fg: '--green', bg: '--green-dim', style: O },
-    seen: { label: 'Seen', fg: '--muted', bg: '--tag-bg', style: O },
-    review: { label: 'Review', fg: '--pink', bg: '--pink-dim', style: O },
-    noise: { label: 'Noise', fg: '--muted-2', bg: '--tag-bg', style: O },
+    new: { label: 'New', fg: '--green', bg: '--green-dim', style: O },
+    update: { label: 'Updated', fg: '--accent', bg: '--accent-dim', style: O },
+    cross_source_dup: { label: 'Duplicate', fg: '--purple', bg: '--purple-dim', style: O },
+    repost: { label: 'Repost', fg: '--yellow', bg: '--yellow-dim', style: O },
+    ambiguous: { label: 'Ambiguous', fg: '--pink', bg: '--pink-dim', style: O },
   };
   return table[outcome] ?? { label: outcome ?? 'Unknown', fg: '--muted-2', bg: '--tag-bg', style: O };
 }

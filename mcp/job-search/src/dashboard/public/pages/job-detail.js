@@ -36,7 +36,7 @@ export async function render(container, params, app) {
   async function load() {
     const outcome = handleOutcome(await getJson(`/api/listings/${params.id}`), { silenceNotFound: true });
     if (outcome.kind === 'not_found') {
-      setChildren(container, [emptyState({ message: 'This listing was not found.' }), h('a', { attrs: { href: '#/jobs' }, text: 'Back to Jobs' })]);
+      setChildren(container, [emptyState({ message: 'This listing was not found.' }), h('a', { hashHref: '#/jobs', text: 'Back to Jobs' })]);
       return;
     }
     if (outcome.kind !== 'ok') {

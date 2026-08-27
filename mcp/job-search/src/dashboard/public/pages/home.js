@@ -11,18 +11,20 @@ import { skeleton, emptyState } from '../components/empty-state.js';
 import { actorBadge, chipClassName, stageChip } from '../components/chips.js';
 import { shortDateTime } from '../lib/format.js';
 import { on, off } from '../lib/bus.js';
+import { fetchFollowupsInWindow } from '../lib/followups-window.js';
+import { setBanner } from '../lib/toast.js';
 
 /** @param {HTMLElement} container */
 export async function render(container, params, app) {
   setChildren(container, [skeleton({ rows: 6 })]);
 
   async function load() {
-    const [summaryOutcome, agendaOutcome] = await Promise.all([
+    const fromIso = new Date().toISOString();
+    const toIso = new Date(Date.now() + 7 * 86400000).toISOString();
+    const [summaryOutcome, agendaOutcome, followupRows] = await Promise.all([
       handleOutcome(await getJson('/api/summary')),
-      handleOutcome(await getJson('/api/calendar/agenda', {
-        from: new Date().toISOString(),
-        to: new Date(Date.now() + 7 * 86400000).toISOString(),
-      }), { silenceNotFound: true }),
+      handleOutcome(await getJson('/api/calendar/agenda', { from: fromIso, to: toIso }), { silenceNotFound: true }),
+      fetchFollowupsInWindow({ fromIso, toIso, getJson, handleOutcome }),
     ]);
     if (summaryOutcome.kind !== 'ok') {
       setChildren(container, [emptyState({ message: 'The summary could not be loaded right now.' })]);
@@ -33,15 +35,17 @@ export async function render(container, params, app) {
     const running = live.kind === 'ok' ? live.body.running : false;
     const liveRun = live.kind === 'ok' ? live.body.run : null;
 
-    const agendaItems = agendaOutcome.kind === 'ok'
-      ? [
-          ...(agendaOutcome.body.events ?? []).map((e) => ({ at: e.start ?? e.startIso ?? e.start_at, title: e.summary ?? 'Event', google: true, followup: false })),
-          ...(agendaOutcome.body.followups ?? []).map((f) => ({ at: f.due_at, title: `${f.action} with ${f.contact}`, google: false, followup: true, id: f.id })),
-        ].sort((a, b) => new Date(a.at).getTime() - new Date(b.at).getTime())
-      : [];
+    // Follow-ups always come from fetchFollowupsInWindow (independent of Google Calendar connectivity,
+    // see lib/followups-window.js); Google events come from the agenda endpoint only when connected.
+    const agendaItems = [
+      ...(agendaOutcome.kind === 'ok' ? (agendaOutcome.body.events ?? []).map((e) => ({ at: e.start ?? e.startIso ?? e.start_at, title: e.summary ?? 'Event', google: true, followup: false })) : []),
+      ...followupRows.map((f) => ({ at: f.due_at, title: `${f.action} with ${f.contact}`, google: false, followup: true, id: f.id })),
+    ].sort((a, b) => new Date(a.at).getTime() - new Date(b.at).getTime());
 
     if (agendaOutcome.kind === 'ok' && agendaOutcome.body.connected === false) {
-      import('../lib/toast.js').then(({ setBanner }) => setBanner('calendar-not-connected', { tone: 'warn', message: 'Google Calendar is not connected. Agenda shows follow-ups only.' }));
+      setBanner('calendar-not-connected', { tone: 'warn', message: 'Google Calendar is not connected. Agenda shows follow-ups only.' });
+    } else {
+      setBanner('calendar-not-connected', null);
     }
 
     const recentEvents = summary.recent_events ?? [];

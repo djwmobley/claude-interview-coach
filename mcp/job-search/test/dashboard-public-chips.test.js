@@ -10,7 +10,7 @@ import assert from 'node:assert/strict';
 import { PIPELINE_STATUSES } from '../src/core/statuses.js';
 import { EVENT_ACTORS } from '../src/core/events.js';
 import { DOCUMENT_KINDS } from '../src/core/documents.js';
-import { stageChip, actorBadge, documentChip, sourceChip, runStatusChip, chipClassName } from '../src/dashboard/public/components/chips.js';
+import { stageChip, actorBadge, documentChip, sourceChip, runStatusChip, runItemOutcomeChip, chipClassName } from '../src/dashboard/public/components/chips.js';
 
 function assertChipShape(chip, ctx) {
   assert.equal(typeof chip, 'object', ctx);
@@ -92,6 +92,22 @@ describe('runStatusChip(): the five DB CHECK statuses, the CANCELLED derivation,
     const chip = runStatusChip({ status: 'some-future-status' });
     assertChipShape(chip, 'unrecognized run status');
     assert.equal(chip.label, 'Unknown');
+  });
+});
+
+describe('runItemOutcomeChip(): the real ic_scan_run_items.outcome CHECK constraint values', () => {
+  test('every real outcome value (sql/003_scan_runs.sql) returns a defined chip', () => {
+    // Not imported from a core/*.js module: outcome is a DB-level CHECK constraint string, not exported
+    // as a JS constant anywhere in src/core/. This closed list is transcribed directly from
+    // sql/003_scan_runs.sql's CHECK clause, found to differ from the design doc's inserted/seen/review/
+    // noise labels while seeding fixture data for the Playwright screenshot pass.
+    for (const outcome of ['new', 'update', 'cross_source_dup', 'repost', 'ambiguous']) {
+      assertChipShape(runItemOutcomeChip(outcome), `outcome=${outcome}`);
+    }
+  });
+
+  test('an unrecognized outcome still returns a defined fallback, never undefined', () => {
+    assertChipShape(runItemOutcomeChip('some-future-outcome'), 'unrecognized outcome');
   });
 });
 

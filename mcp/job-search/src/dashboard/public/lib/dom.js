@@ -16,7 +16,7 @@ const SAFE_ATTR_NAMES = new Set([
   'class', 'id', 'type', 'name', 'placeholder', 'title', 'for', 'tabindex', 'role',
   'colspan', 'rowspan', 'min', 'max', 'step', 'pattern', 'disabled', 'readonly',
   'aria-label', 'aria-hidden', 'aria-expanded', 'aria-current', 'aria-live', 'aria-describedby',
-  'aria-selected', 'aria-checked', 'aria-controls', 'aria-haspopup', 'aria-disabled',
+  'aria-selected', 'aria-checked', 'aria-controls', 'aria-haspopup', 'aria-disabled', 'aria-pressed',
 ]);
 
 /** @param {string} name */
@@ -71,6 +71,10 @@ export function isLinkSafe(opts) {
  * @property {string|number} [value]
  * @property {string} [htmlFor] renders as the `for` attribute
  * @property {Record<string, string|number|boolean>} [attrs] additional safe-listed attributes by name
+ * @property {string} [hashHref] internal same-page navigation only: must match /^#(\/[^"]*)?$/, a hash
+ *   fragment this app itself constructed (via lib/router.js's buildHash() or a literal `#/...` string),
+ *   never a value derived from untrusted listing data. A caller reaching for an external/untrusted URL
+ *   must use `hLink()` instead, which requires the distinct `urlOk: true` guard.
  */
 
 /**
@@ -94,6 +98,10 @@ export function h(tag, attrs = {}, children = []) {
   if (attrs.disabled !== undefined) /** @type {any} */ (el).disabled = attrs.disabled;
   if (attrs.readOnly !== undefined) /** @type {any} */ (el).readOnly = attrs.readOnly;
   if (attrs.htmlFor !== undefined) el.setAttribute('for', String(attrs.htmlFor));
+  if (attrs.hashHref !== undefined) {
+    if (!/^#(\/[^"]*)?$/.test(attrs.hashHref)) throw new Error(`h(): hashHref must be an internal "#/..." fragment, got ${JSON.stringify(attrs.hashHref)}`);
+    el.setAttribute('href', attrs.hashHref);
+  }
   if (attrs.attrs) {
     for (const [name, value] of Object.entries(attrs.attrs)) {
       if (!isSafeAttrName(name)) throw new Error(`h(): unsafe attribute "${name}"`);

@@ -78,7 +78,7 @@ export async function render(container, params, app) {
 
     const section = (key, label) => h('section', { className: 'followup-section' }, [
       h('h2', { text: `${label} (${buckets[key].length})` }),
-      buckets[key].length === 0 ? emptyState({ message: `No follow-ups ${label.toLowerCase()}.` }) : buckets[key].map(renderRow),
+      ...(buckets[key].length === 0 ? [emptyState({ message: `No follow-ups ${label.toLowerCase()}.` })] : buckets[key].map(renderRow)),
     ]);
 
     setChildren(container, [
@@ -90,7 +90,7 @@ export async function render(container, params, app) {
       section('snoozed', 'Snoozed'),
       h('details', { className: 'followup-section' }, [
         h('summary', { text: `Done (${done.length})` }),
-        done.length === 0 ? emptyState({ message: 'No follow-ups completed yet.' }) : done.map(renderRow),
+        ...(done.length === 0 ? [emptyState({ message: 'No follow-ups completed yet.' })] : done.map(renderRow)),
       ]),
     ]);
   }

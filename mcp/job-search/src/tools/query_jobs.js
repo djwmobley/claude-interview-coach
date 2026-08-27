@@ -83,7 +83,16 @@ export function buildQuery(a) {
     fit: 'l.fit_score DESC NULLS LAST, l.id DESC',
     id: 'l.id DESC',
   }[/** @type {string} */ (a.sort) ?? 'posted'];
-  const sql = `SELECT l.id, l.title, l.company, l.location, l.remote_mode, l.posted_at, l.salary_min, l.salary_max, l.prescore, l.fit_score, l.status, l.source, l.noise_class,
+  // Dashboard-only extension (PR 2's plan line said "buildQuery (extended)"; the columns below were
+  // never actually added, discovered while wiring the PR 3 Jobs table against real data): url/
+  // url_normalized for the guarded link, first_seen/last_seen for the "first seen" column and the
+  // Pipeline page's aging chips, duplicate_of/record_kind for the DUP/Manual badges, company_norm/
+  // external_id for company-detail linking. compactRows()/formatRow() (src/core/compact.js) only ever
+  // project a fixed, unrelated set of fields into the MCP tool's own text output, so adding SELECT
+  // columns here is inert for every existing query_jobs MCP caller; only the dashboard route reads them.
+  const sql = `SELECT l.id, l.title, l.company, l.company_norm, l.location, l.remote_mode, l.posted_at, l.salary_min, l.salary_max,
+      l.prescore, l.fit_score, l.status, l.source, l.noise_class, l.url, l.url_normalized, l.external_id,
+      l.first_seen, l.last_seen, l.duplicate_of, l.record_kind, l.notes,
       count(*) OVER() AS total
     FROM ic_job_listings l${join}
     WHERE ${where.join(' AND ')}

@@ -108,7 +108,7 @@ function renderRail() {
       const active = currentRouteName === item.route;
       return h('a', {
         className: `rail__link ${active ? 'rail__link--active' : ''}`.trim(),
-        attrs: { href: buildHash(item.route), 'aria-current': active ? 'page' : undefined, title: item.label },
+        hashHref: buildHash(item.route), attrs: { 'aria-current': active ? 'page' : undefined, title: item.label },
         text: item.label,
       });
     }),

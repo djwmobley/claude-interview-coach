@@ -7,24 +7,31 @@ import { setBanner } from '../lib/toast.js';
 import { skeleton, emptyState } from '../components/empty-state.js';
 import { shortDateTime } from '../lib/format.js';
 import { on, off } from '../lib/bus.js';
+import { fetchFollowupsInWindow } from '../lib/followups-window.js';
 
 /** @param {HTMLElement} container */
 export async function render(container, params, app) {
   setChildren(container, [skeleton({ rows: 6 })]);
 
   async function load() {
-    const from = new Date();
-    const to = new Date(Date.now() + 14 * 86400000);
-    const outcome = handleOutcome(await getJson('/api/calendar/agenda', { from: from.toISOString(), to: to.toISOString() }));
+    const fromIso = new Date().toISOString();
+    const toIso = new Date(Date.now() + 14 * 86400000).toISOString();
+    const [outcome, followupRows] = await Promise.all([
+      handleOutcome(await getJson('/api/calendar/agenda', { from: fromIso, to: toIso })),
+      fetchFollowupsInWindow({ fromIso, toIso, getJson, handleOutcome }),
+    ]);
     if (outcome.kind !== 'ok') {
       setChildren(container, [emptyState({ message: 'The calendar could not be loaded right now.' })]);
       return;
     }
     setBanner('calendar-not-connected', outcome.body.connected === false ? { tone: 'warn', message: 'Google Calendar is not connected. Only follow-ups are shown.' } : null);
 
+    // Follow-ups always come from fetchFollowupsInWindow, independent of Google Calendar connectivity
+    // (see lib/followups-window.js for why the agenda endpoint's own embedded followups array is not
+    // trusted here).
     const items = [
       ...(outcome.body.events ?? []).map((e) => ({ at: e.start ?? e.startIso ?? e.start_at, title: e.summary ?? 'Event', google: true, followup: false })),
-      ...(outcome.body.followups ?? []).map((f) => ({ at: f.due_at, title: `${f.action} with ${f.contact}`, google: false, followup: true, id: f.id })),
+      ...followupRows.map((f) => ({ at: f.due_at, title: `${f.action} with ${f.contact}`, google: false, followup: true, id: f.id })),
     ].sort((a, b) => new Date(a.at).getTime() - new Date(b.at).getTime());
 
     const byDay = new Map();
