@@ -15,17 +15,51 @@ import path from 'node:path';
 import { formatDate } from './compact.js';
 import { formatFollowup, selectDue, unsnoozeDue } from './followups.js';
 import { repoRoot, DEFAULT_REPORT_HOME_MIN_PRESCORE } from './config.js';
+import { normalizeLocation } from './normalize.js';
+import { JobSearchError } from './errors.js';
 
 /** Directory the markdown report is written to (spec R1.3), relative to the repo root; covered by the existing `/output/` .gitignore entry. */
 export const REPORTS_DIR = path.join('output', 'reports');
 
 /**
+ * Wrap renderReportHtml()'s fragment in a minimal, self-contained "house CSS" page so the written
+ * .html sibling (dashboard PR 1) renders reasonably as a standalone static file -- the dashboard's
+ * report browser (PR 3) serves it inside a sandboxed iframe rather than re-rendering it.
+ * @param {string} bodyHtml renderReportHtml() output
+ * @param {string} dayKey YYYY-MM-DD
+ */
+export function wrapReportHtml(bodyHtml, dayKey) {
+  return [
+    '<!doctype html>',
+    '<html lang="en">',
+    '<head>',
+    '<meta charset="utf-8">',
+    '<meta name="viewport" content="width=device-width, initial-scale=1">',
+    `<title>Job scan report ${escapeHtml(dayKey)}</title>`,
+    '<style>',
+    'body{font-family:system-ui,-apple-system,"Segoe UI",Roboto,sans-serif;max-width:960px;margin:2rem auto;padding:0 1rem;line-height:1.5;color:#1a1a1a;background:#ffffff}',
+    'h2,h3{margin-top:1.75rem}',
+    'ul{padding-left:1.25rem}',
+    'a{color:#0b5fff}',
+    '</style>',
+    '</head>',
+    '<body>',
+    bodyHtml,
+    '</body>',
+    '</html>',
+    '',
+  ].join('\n');
+}
+
+/**
  * Write the markdown report to output/reports/YYYY-MM-DD-scan-report.md (spec R1.3), overwriting a
- * same-day file on a re-run.
+ * same-day file on a re-run. When `opts.html` is given (renderReportHtml()'s output for the same data),
+ * also writes a `.html` sibling wrapped in wrapReportHtml() -- a day written before this option existed
+ * has only the `.md` file, which the dashboard (PR 3) serves as plain text.
  * @param {string} markdown
  * @param {string} dayKey YYYY-MM-DD
- * @param {{ root?: string }} [opts]
- * @returns {string} the file path written
+ * @param {{ root?: string, html?: string }} [opts]
+ * @returns {string} the .md file path written
  */
 export function writeReportFile(markdown, dayKey, opts = {}) {
   const root = opts.root ?? repoRoot();
@@ -33,7 +67,64 @@ export function writeReportFile(markdown, dayKey, opts = {}) {
   fs.mkdirSync(dir, { recursive: true });
   const file = path.join(dir, `${dayKey}-scan-report.md`);
   fs.writeFileSync(file, markdown.endsWith('\n') ? markdown : markdown + '\n');
+  if (opts.html) {
+    const htmlFile = path.join(dir, `${dayKey}-scan-report.html`);
+    fs.writeFileSync(htmlFile, wrapReportHtml(opts.html, dayKey));
+  }
   return file;
+}
+
+/**
+ * Home locations (spec R1.2c "Houston / Texas") for a search profile, as location_norm values.
+ * Extracted from bin/remind.js and the scan_report tool (dashboard PR 1) so the dashboard's report
+ * routes resolve the identical set without a third copy.
+ * @param {import('pg').ClientBase} client
+ * @param {string} profileName
+ * @returns {Promise<string[]>}
+ */
+export async function homeLocationNormsFor(client, profileName) {
+  const r = await client.query('SELECT locations FROM ic_search_profiles WHERE name = $1', [profileName]);
+  const locations = /** @type {string[]} */ (r.rows[0]?.locations ?? []);
+  return [...new Set(locations.map((l) => normalizeLocation(l).location_norm).filter((n) => n && n !== 'absent'))];
+}
+
+/**
+ * Resolve the (now, sinceOverride) window a report should cover, from either a specific run_id or an
+ * explicit YYYY-MM-DD date in the report timezone, or neither. Extracted from the scan_report tool
+ * (dashboard PR 1) so the dashboard's report-preview route resolves the identical window.
+ *
+ * sinceOverride is `undefined` when neither `date` nor `run_id` was given: the caller should then omit
+ * `sinceOverride` from buildScanReport() entirely (not pass `undefined` as the key), so buildScanReport
+ * falls back to the DB marker (ic_report_state) rather than treating "no bound" as an explicit override.
+ * @param {import('pg').ClientBase} client
+ * @param {{ date?: string|null, run_id?: number|null, timezone: string }} opts
+ * @returns {Promise<{ now: Date, sinceOverride: Date|null|undefined }>}
+ */
+export async function resolveReportWindow(client, opts) {
+  const timezone = opts.timezone;
+  if (opts.run_id) {
+    const runRow = await client.query('SELECT id, started_at, finished_at FROM ic_scan_runs WHERE id = $1', [opts.run_id]);
+    if (runRow.rowCount === 0) throw new JobSearchError('NOT_FOUND', `run ${opts.run_id} not found`);
+    const row = runRow.rows[0];
+    const sinceOverride = new Date(new Date(row.started_at).getTime() - 1000);
+    const now = row.finished_at ? new Date(row.finished_at) : new Date();
+    return { now, sinceOverride };
+  }
+  if (opts.date) {
+    const startUtcGuess = new Date(`${opts.date}T00:00:00`);
+    // Resolve the requested calendar date's midnight in the report timezone precisely: adjust a UTC
+    // guess until dayKeyInTz(guess, timezone) matches the requested date (handles DST without a
+    // timezone-arithmetic library).
+    let start = startUtcGuess;
+    for (let i = 0; i < 30 && dayKeyInTz(start, timezone) !== opts.date; i++) {
+      start = new Date(start.getTime() + (dayKeyInTz(start, timezone) < opts.date ? 1 : -1) * 3600000);
+    }
+    const sinceOverride = new Date(start.getTime() - 1000);
+    const endOfDay = new Date(start.getTime() + 24 * 3600000);
+    const now = endOfDay.getTime() < Date.now() ? endOfDay : new Date();
+    return { now, sinceOverride };
+  }
+  return { now: new Date(), sinceOverride: undefined };
 }
 
 export const REPORT_STATUS_PRIORITY = Object.freeze({ failed: 3, partial: 2, locked: 1, running: 1, ok: 0 });

@@ -70,18 +70,37 @@ const OUTCOME_FOR_BRANCH = {
   '5-new': 'new',
 };
 
+// Behavior updated for dashboard PR 1 (pr1-spec-decisions.md): 'review' no longer demotes to 'new' (a
+// second arrival now joins the same open review via 'concurrent_review' instead), and an unrecognized
+// legacy status ('active', '', garbage) now routes to review with 'unrecognized_status' instead of
+// silently passing through as no-inheritance (null/null) -- a total classification never has a silent
+// no-op default branch. The full totality matrix below (pr1-spec-decisions.md section "Totality test
+// matrix") covers every PIPELINE_STATUSES member plus the five non-member/malformed inputs it names.
 describe('inheritStatus: stated total function', () => {
   const table = [
-    ['applied', 'review', 'reopened_applied'],
-    ['dead', 'review', 'reopened_dead'],
-    ['skip', 'review', 'reopened_skip'],
-    ['review', 'new', null],
-    ['shortlisted', 'shortlisted', null],
-    ['maybe', 'maybe', null],
+    // PIPELINE_STATUSES, in order
     ['new', 'new', null],
+    ['maybe', 'maybe', null],
+    ['shortlisted', 'shortlisted', null],
+    ['applied', 'review', 'reopened_applied'],
+    ['interviewing', 'review', 'reopened_interviewing'],
+    ['offer', 'review', 'reopened_offer'],
+    ['accepted', 'accepted', null],
+    ['passed', 'review', 'reopened_passed'],
+    ['lost', 'review', 'reopened_lost'],
+    ['skip', 'review', 'reopened_skip'],
+    ['dead', 'review', 'reopened_dead'],
+    ['review', 'review', 'concurrent_review'],
+    // null/undefined: untriaged, no inheritance
     [null, null, null],
     [undefined, null, null],
-    ['active', null, null],
+    // unrecognized after normalization: total classification's refuse/review default, never a silent no-op
+    ['', 'review', 'unrecognized_status'],
+    ['active', 'review', 'unrecognized_status'],
+    ['xyz123', 'review', 'unrecognized_status'],
+    // normalization: case and surrounding whitespace never change the branch
+    ['Applied', 'review', 'reopened_applied'],
+    ['applied ', 'review', 'reopened_applied'],
   ];
   for (const [input, status, reason] of table) {
     test(`${String(input)} -> ${String(status)} / ${String(reason)}`, () => {

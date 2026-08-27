@@ -9,10 +9,13 @@ import assert from 'node:assert/strict';
 import pg from 'pg';
 import { pgConnectionConfig } from '../src/core/config.js';
 import { ensureAuxSchema } from '../src/core/schema.js';
+import fs from 'node:fs';
+import os from 'node:os';
+import path from 'node:path';
 import {
   buildScanReport, buildReportSubject, renderReportText, renderReportHtml, renderReportMarkdown,
   dayKeyInTz, isWeekdayInTz, escapeHtml, urlPassesRegistry, getReportState, stampReportSent,
-  collectSuspectAndUnclassified,
+  collectSuspectAndUnclassified, resolveReportWindow, homeLocationNormsFor, writeReportFile, wrapReportHtml,
 } from '../src/core/report.js';
 import { tool as scanReport } from '../src/tools/scan_report.js';
 import { registryFrom } from '../src/core/urlguard.js';
@@ -317,5 +320,82 @@ describe('scan_report MCP tool (spec R1.4): never writes the marker', () => {
       withLoweredFloor.home_locations_count > withDefaultFloor.home_locations_count,
       `lowering reportHomeMinPrescore from 40 to 20 must surface the prescore-30 row: got ${withDefaultFloor.home_locations_count} at floor 40 and ${withLoweredFloor.home_locations_count} at floor 20`,
     );
+  });
+});
+
+describe('resolveReportWindow (dashboard PR 1: extracted from the scan_report tool)', () => {
+  test('run_id: sinceOverride is 1s before started_at, now is finished_at when present', async () => {
+    const ins = await client.query(
+      `INSERT INTO ic_scan_runs (profile, trigger, status, started_at, finished_at) VALUES ('zz-test-report-window', 'cli', 'ok', '2026-08-10T12:00:00Z', '2026-08-10T12:05:00Z') RETURNING id`,
+    );
+    const runId = Number(ins.rows[0].id);
+    try {
+      const { now, sinceOverride } = await resolveReportWindow(client, { run_id: runId, timezone: 'America/Chicago' });
+      assert.equal(now.toISOString(), '2026-08-10T12:05:00.000Z');
+      assert.equal(/** @type {Date} */ (sinceOverride).toISOString(), '2026-08-10T11:59:59.000Z');
+    } finally {
+      await client.query('DELETE FROM ic_scan_runs WHERE id = $1', [runId]);
+    }
+  });
+
+  test('run_id: NOT_FOUND for an unknown run', async () => {
+    await assert.rejects(resolveReportWindow(client, { run_id: 999999999, timezone: 'America/Chicago' }), /not found/);
+  });
+
+  test('date: resolves to that calendar date\'s midnight in the given timezone', async () => {
+    const { now, sinceOverride } = await resolveReportWindow(client, { date: '2026-08-10', timezone: 'America/Chicago' });
+    assert.equal(dayKeyInTz(/** @type {Date} */ (sinceOverride), 'America/Chicago'), '2026-08-09', 'sinceOverride sits 1s before midnight, so it reads as the prior day');
+    assert.ok(now.getTime() > /** @type {Date} */ (sinceOverride).getTime());
+  });
+
+  test('neither date nor run_id: sinceOverride is undefined so the caller falls back to the DB marker', async () => {
+    const { sinceOverride } = await resolveReportWindow(client, { timezone: 'America/Chicago' });
+    assert.equal(sinceOverride, undefined);
+  });
+});
+
+describe('homeLocationNormsFor (dashboard PR 1: extracted from remind.js and the scan_report tool)', () => {
+  test('exec-default seeds Houston/Dallas/Austin/US locations', async () => {
+    const norms = await homeLocationNormsFor(client, 'exec-default');
+    assert.ok(Array.isArray(norms));
+    assert.ok(norms.includes('houston-tx'));
+    assert.ok(norms.length > 0);
+  });
+
+  test('an unknown profile returns an empty array rather than throwing', async () => {
+    const norms = await homeLocationNormsFor(client, 'zz-test-no-such-profile');
+    assert.deepEqual(norms, []);
+  });
+});
+
+describe('writeReportFile / wrapReportHtml (dashboard PR 1)', () => {
+  /** @type {string} */
+  let root;
+  before(() => {
+    root = fs.mkdtempSync(path.join(os.tmpdir(), 'jobsearch-reportfile-'));
+  });
+  after(() => {
+    fs.rmSync(root, { recursive: true, force: true });
+  });
+
+  test('always writes the .md file; writes a .html sibling only when opts.html is given', () => {
+    const mdOnly = writeReportFile('# hello\n', '2026-08-10', { root });
+    assert.equal(mdOnly, path.join(root, 'output', 'reports', '2026-08-10-scan-report.md'));
+    assert.ok(fs.existsSync(mdOnly));
+    assert.ok(!fs.existsSync(path.join(root, 'output', 'reports', '2026-08-10-scan-report.html')), 'no .html sibling without opts.html (an older day, or a caller that never passed it)');
+
+    writeReportFile('# hello\n', '2026-08-11', { root, html: '<h2>hi</h2>' });
+    const htmlPath = path.join(root, 'output', 'reports', '2026-08-11-scan-report.html');
+    assert.ok(fs.existsSync(htmlPath));
+    const htmlText = fs.readFileSync(htmlPath, 'utf8');
+    assert.ok(htmlText.startsWith('<!doctype html>'));
+    assert.ok(htmlText.includes('<h2>hi</h2>'), 'wraps the renderReportHtml() fragment verbatim');
+    assert.ok(htmlText.includes('2026-08-11'), 'title/head mentions the day key');
+  });
+
+  test('wrapReportHtml escapes the dayKey in the title', () => {
+    const html = wrapReportHtml('<p>x</p>', '2026-08-10 <script>');
+    assert.ok(html.includes('&lt;script&gt;'));
+    assert.ok(!html.includes('<title>2026-08-10 <script>'));
   });
 });

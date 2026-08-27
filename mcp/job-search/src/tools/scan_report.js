@@ -6,10 +6,8 @@
  */
 import { z } from 'zod';
 import { untrusted } from './_shared.js';
-import { buildScanReport, buildReportSubject, renderReportText, dayKeyInTz } from '../core/report.js';
-import { normalizeLocation } from '../core/normalize.js';
+import { buildScanReport, buildReportSubject, renderReportText, resolveReportWindow, homeLocationNormsFor } from '../core/report.js';
 import { buildRegistry } from '../core/urlguard.js';
-import { JobSearchError } from '../core/errors.js';
 import { DEFAULT_REPORT_HOME_MIN_PRESCORE } from '../core/config.js';
 
 export const schema = {
@@ -30,37 +28,12 @@ export const tool = {
     const homeMinPrescore = config?.adapters.run.reportHomeMinPrescore ?? DEFAULT_REPORT_HOME_MIN_PRESCORE;
     const registry = config ? buildRegistry(config) : { entries: [], httpAllowedHosts: new Set() };
 
-    /** @type {Date} */
-    let now = new Date();
-    /** @type {Date|null} */
-    let sinceOverride = null;
-    if (a.run_id) {
-      const runRow = await deps.withClient((c) => c.query('SELECT id, started_at, finished_at FROM ic_scan_runs WHERE id = $1', [a.run_id]));
-      if (runRow.rowCount === 0) throw new JobSearchError('NOT_FOUND', `run ${a.run_id} not found`);
-      const row = runRow.rows[0];
-      sinceOverride = new Date(new Date(row.started_at).getTime() - 1000);
-      now = row.finished_at ? new Date(row.finished_at) : new Date();
-    } else if (a.date) {
-      const startUtcGuess = new Date(`${a.date}T00:00:00`);
-      // Resolve the requested calendar date's midnight in the report timezone precisely: adjust a UTC
-      // guess until dayKeyInTz(guess, timezone) matches the requested date (handles DST without a
-      // timezone-arithmetic library).
-      let start = startUtcGuess;
-      for (let i = 0; i < 30 && dayKeyInTz(start, timezone) !== a.date; i++) {
-        start = new Date(start.getTime() + (dayKeyInTz(start, timezone) < a.date ? 1 : -1) * 3600000);
-      }
-      sinceOverride = new Date(start.getTime() - 1000);
-      const endOfDay = new Date(start.getTime() + 24 * 3600000);
-      now = endOfDay.getTime() < Date.now() ? endOfDay : new Date();
-    }
-
-    const profileRow = await deps.withClient((c) => c.query('SELECT locations FROM ic_search_profiles WHERE name = $1', [a.profile]));
-    const locations = /** @type {string[]} */ (profileRow.rows[0]?.locations ?? []);
-    const homeLocationNorms = [...new Set(locations.map((l) => normalizeLocation(l).location_norm).filter((n) => n && n !== 'absent'))];
+    const { now, sinceOverride } = await deps.withClient((c) => resolveReportWindow(c, { date: a.date ?? null, run_id: a.run_id ?? null, timezone }));
+    const homeLocationNorms = await deps.withClient((c) => homeLocationNormsFor(c, a.profile));
 
     const report = await deps.withClient((c) => buildScanReport(c, {
       now, timezone, topN, homeMinPrescore, homeLocationNorms,
-      ...(sinceOverride !== null ? { sinceOverride } : {}),
+      ...(sinceOverride !== undefined ? { sinceOverride } : {}),
     }));
     const subject = buildReportSubject(report, {});
     const text = renderReportText(report, registry);

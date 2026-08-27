@@ -11,6 +11,11 @@
  * Postgres; `trigramSimilarity` here mirrors it for in-memory tests only.
  */
 import { isLocationEligible, titleTokenKey, isStateOnlyLocation, isRemoteLocation } from './normalize.js';
+import { STATUS_PRECEDENCE, REOPEN_REASONS } from './statuses.js';
+
+// STATUS_PRECEDENCE and REOPEN_REASONS now live in statuses.js (single source of truth, dashboard PR 1);
+// STATUS_PRECEDENCE is re-exported here so existing importers of dedup.js keep working unchanged.
+export { STATUS_PRECEDENCE };
 
 export const BRANCHES = Object.freeze([
   '0-confidential-update',
@@ -27,9 +32,6 @@ export const BRANCHES = Object.freeze([
 
 /** outcome values stored in ic_scan_run_items */
 export const OUTCOMES = Object.freeze({ update: 'update', new: 'new', cross_source_dup: 'cross_source_dup', repost: 'repost', ambiguous: 'ambiguous' });
-
-/** Target selection status precedence, best first (spec 3.2). */
-export const STATUS_PRECEDENCE = Object.freeze(['applied', 'shortlisted', 'review', 'maybe', 'new', 'skip', 'dead']);
 
 /**
  * @typedef {Object} ListingRow
@@ -105,26 +107,43 @@ const DEFAULTS = Object.freeze({ repostGapDays: 30, titleSimilarity: 0.55, compa
 // ---------------------------------------------------------------------------
 
 /**
- * Status inheritance, a stated total function (spec 3.2).
+ * Status inheritance, a stated total function (spec 3.2, pr1-spec-decisions.md). Every value is
+ * normalized (coerced to string, trimmed, lowercased) before the switch, so 'Applied' and 'applied '
+ * both land on the same branch as 'applied'. NULL/undefined stay untriaged without normalization: they
+ * are the absence of a status, not a status value to be coerced.
  * @param {string|null|undefined} status
  * @returns {Inheritance}
  */
 export function inheritStatus(status) {
   if (status === null || status === undefined) return { status: null, queueReason: null };
-  switch (status) {
+  const normalized = String(status).trim().toLowerCase();
+  switch (normalized) {
+    case 'new':
+    case 'maybe':
+    case 'shortlisted':
+      // Triage stages pass through unchanged, never queued.
+      return { status: normalized, queueReason: null };
     case 'applied':
+    case 'interviewing':
+    case 'offer':
     case 'dead':
     case 'skip':
-      return { status: 'review', queueReason: `reopened_${status}` };
+    case 'lost':
+    case 'passed':
+      // A repost/cross-source-dup/state-remote-dup match against a row already in one of these stages
+      // reopens it for human review rather than silently reactivating or silently staying closed.
+      return { status: 'review', queueReason: REOPEN_REASONS[normalized] };
+    case 'accepted':
+      // The current employer's role: a repost merges silently as also-posted, never queued.
+      return { status: 'accepted', queueReason: null };
     case 'review':
-      return { status: 'new', queueReason: null };
-    case 'shortlisted':
-    case 'maybe':
-    case 'new':
-      return { status, queueReason: null };
+      // A second arrival while a review item is still open joins the same review; it never demotes to new.
+      return { status: 'review', queueReason: 'concurrent_review' };
     default:
-      // Unknown legacy status text: treat like NULL (no inheritance) rather than guessing.
-      return { status: null, queueReason: null };
+      // Anything not in PIPELINE_STATUSES after normalization (empty string, legacy 'active', garbage):
+      // total classification's refuse/review default branch. The raw value is never interpolated into
+      // the reason string.
+      return { status: 'review', queueReason: 'unrecognized_status' };
   }
 }
 

@@ -17,6 +17,7 @@ import { z } from 'zod';
 import { inheritStatus } from '../core/dedup.js';
 import { JobSearchError } from '../core/errors.js';
 import { truncate, untrustedRows } from '../core/compact.js';
+import { recordEvent } from '../core/events.js';
 
 export const schema = {
   action: z.enum(['list', 'resolve']),
@@ -57,10 +58,12 @@ async function uniqueConflict(c, cand) {
 /**
  * Resolve one queue item. Runs inside the caller's transaction. Exported for tests.
  * @param {import('pg').ClientBase} c
- * @param {{ queueId: number, resolution: 'merge'|'separate'|'repost', targetId?: number|null, now?: Date, auto?: boolean }} r
+ * @param {{ queueId: number, resolution: 'merge'|'separate'|'repost', targetId?: number|null, now?: Date, auto?: boolean, actor?: 'dashboard'|'mcp'|'cli'|'migration'|'seed' }} r
+ *   actor defaults to 'mcp' (dashboard PR 2 passes 'dashboard' for its own mutating requests).
  */
 export async function resolveItem(c, r) {
   const now = r.now ?? new Date();
+  const actor = r.actor ?? 'mcp';
   const q = await c.query('SELECT id, candidate_id, matches, reason, resolved_at, status_at_create FROM ic_job_review_queue WHERE id = $1 FOR UPDATE', [r.queueId]);
   if (q.rowCount === 0) throw new JobSearchError('NOT_FOUND', `queue item ${r.queueId} not found`);
   const item = q.rows[0];
@@ -82,6 +85,9 @@ export async function resolveItem(c, r) {
     const newStatus = cand.status === 'review' ? null : cand.status;
     await c.query('UPDATE ic_job_listings SET status = $2 WHERE id = $1', [cand.id, newStatus]);
     await c.query(`UPDATE ic_job_review_queue SET resolution = 'separate', resolved_at = $2 WHERE id = $1`, [item.id, now]);
+    if (newStatus !== cand.status) {
+      await recordEvent(c, { listingId: cand.id, kind: 'status', fromStatus: cand.status ?? null, toStatus: newStatus, note: 'resolved:separate', actor, at: now });
+    }
     return { queue_id: item.id, resolution: 'separate', candidate_id: cand.id, status: newStatus, auto: Boolean(r.auto) };
   }
 
@@ -104,12 +110,14 @@ export async function resolveItem(c, r) {
     await c.query(`UPDATE ic_job_review_queue SET resolution = 'merge', resolved_at = $2 WHERE id = $1`, [item.id, now]);
     // Other open items for the same candidate are closed with the same resolution.
     await c.query(`UPDATE ic_job_review_queue SET resolution = 'merge', resolved_at = $2 WHERE candidate_id = $1 AND resolved_at IS NULL`, [cand.id, now]);
+    await recordEvent(c, { listingId: cand.id, kind: 'status', fromStatus: cand.status ?? null, toStatus: inh.status, note: `resolved:merge into #${root.id}`, actor, at: now });
     return { queue_id: item.id, resolution: 'merge', candidate_id: cand.id, root_id: root.id, status: inh.status };
   }
 
   // repost
   await c.query('UPDATE ic_job_listings SET repost_of = $2, status = $3 WHERE id = $1', [cand.id, root.id, inh.status]);
   await c.query(`UPDATE ic_job_review_queue SET resolution = 'repost', resolved_at = $2 WHERE id = $1`, [item.id, now]);
+  await recordEvent(c, { listingId: cand.id, kind: 'status', fromStatus: cand.status ?? null, toStatus: inh.status, note: `resolved:repost onto #${root.id}`, actor, at: now });
   if (inh.queueReason) {
     await c.query(
       `INSERT INTO ic_job_review_queue (run_id, candidate, candidate_id, matches, reason, status_at_create) VALUES (NULL, NULL, $1, $2::int[], $3, $4)`,

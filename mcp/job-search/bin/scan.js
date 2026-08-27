@@ -28,6 +28,9 @@ import { createLogger, dailyLogPath, pruneLogs } from '../src/core/logger.js';
 import { errFields } from '../src/core/errors.js';
 import { runScan } from '../src/core/scan-run.js';
 
+/** Closed list of valid --trigger values; default 'cli'. Anything else is a visible error (see main()). */
+export const SCAN_TRIGGERS = Object.freeze(['cli', 'dashboard']);
+
 /** @param {string[]} argv */
 export function parseArgs(argv) {
   const out = {
@@ -40,6 +43,7 @@ export function parseArgs(argv) {
     /** @type {string|null|undefined} */ json: undefined,
     launchChrome: false,
     acceptConfigChange: false,
+    /** @type {string} */ trigger: 'cli',
     help: false,
   };
   for (let i = 0; i < argv.length; i++) {
@@ -59,12 +63,13 @@ export function parseArgs(argv) {
       } else out.json = null;
     } else if (a === '--launch-chrome') out.launchChrome = true;
     else if (a === '--accept-config-change') out.acceptConfigChange = true;
+    else if (a === '--trigger') out.trigger = String(next() ?? 'cli');
     else if (a === '--help' || a === '-h') out.help = true;
   }
   return out;
 }
 
-const USAGE = 'usage: node bin/scan.js --profile exec-default [--sources a,b] [--days N] [--max-pages N] [--min-prescore N] [--dry-run] [--json [out]] [--launch-chrome] [--accept-config-change]';
+const USAGE = 'usage: node bin/scan.js --profile exec-default [--sources a,b] [--days N] [--max-pages N] [--min-prescore N] [--dry-run] [--trigger cli|dashboard] [--json [out]] [--launch-chrome] [--accept-config-change]';
 
 /**
  * Fixture transport for offline CLI tests: exact-prefix map of URL -> file.
@@ -92,9 +97,11 @@ export function fixtureTransport(mapFile) {
 }
 
 /**
+ * Whether a CDP endpoint answers. Exported (dashboard PR 1) so bin/dashboard.js's health check and
+ * tests can probe the scan Chrome without duplicating this fetch.
  * @param {string} cdpUrl
  */
-async function cdpReachable(cdpUrl) {
+export async function cdpReachable(cdpUrl) {
   try {
     const res = await fetch(new URL('/json/version', cdpUrl).toString(), { signal: AbortSignal.timeout(2000) });
     return res.ok;
@@ -144,6 +151,10 @@ async function main() {
   if (args.help) {
     console.log(USAGE);
     process.exit(0);
+  }
+  if (!SCAN_TRIGGERS.includes(/** @type {any} */ (args.trigger))) {
+    console.log(JSON.stringify({ ok: false, code: 'VALIDATION', message: `--trigger must be one of ${SCAN_TRIGGERS.join(', ')}, got "${args.trigger}"` }));
+    process.exit(1);
   }
   const env = getEnv();
   pruneLogs(env.JOBSEARCH_LOG_DIR, 'scan', 14);
@@ -204,7 +215,7 @@ async function main() {
     result = await runScan(
       { profile: args.profile, sources: args.sources, postedWithinDays: args.days, maxPages: args.maxPages, minPrescore: args.minPrescore, dryRun: args.dryRun, wait: true },
       deps,
-      { trigger: 'cli', signal: controller.signal, log, progress: (f) => log({ evt: 'progress', ...f }) },
+      { trigger: /** @type {'cli'|'dashboard'} */ (args.trigger), signal: controller.signal, log, progress: (f) => log({ evt: 'progress', ...f }) },
     );
     if (result.status === 'ok') code = 0;
     else if (result.status === 'partial' || result.status === 'locked') code = 2;

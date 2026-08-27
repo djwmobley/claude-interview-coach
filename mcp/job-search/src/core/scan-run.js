@@ -1,7 +1,7 @@
 // @ts-check
 /**
  * The scan run loop (spec sections 4, 5, 6). Shared by the search_jobs
- * tool (trigger 'mcp') and bin/scan.js (trigger 'cli').
+ * tool (trigger 'mcp'), bin/scan.js (trigger 'cli' or, from the dashboard, 'dashboard').
  *
  * Order of operations:
  *   1. validate sources against config + adapter registry
@@ -76,7 +76,7 @@ export const USER_AGENT = 'job-search-mcp/0.1 (interview-coach; read-only scanne
 
 /**
  * @typedef {Object} RunOpts
- * @property {'mcp'|'cli'} trigger
+ * @property {'mcp'|'cli'|'dashboard'} trigger
  * @property {(fields: Record<string, string|number|boolean|null>) => void} [progress]
  * @property {(fields: Record<string, string|number|boolean|null>) => void} [log]
  * @property {AbortSignal} [signal] external cancel (SIGINT)
