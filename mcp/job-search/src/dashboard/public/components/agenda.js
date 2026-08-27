@@ -4,15 +4,15 @@
  * `google`/`followup`/both badge; a row with neither is not renderable and never produced by the caller.
  */
 import { h } from '../lib/dom.js';
-import { shortDateTime } from '../lib/format.js';
+import { agendaTimeLabel } from '../lib/format.js';
 
-/** @param {{ items: Array<{ at: string, title: string, google: boolean, followup: boolean, id?: number }>, onDone?: (id:number)=>void, onSnooze?: (id:number)=>void }} opts */
+/** @param {{ items: Array<{ at: string, allDay?: boolean, title: string, google: boolean, followup: boolean, id?: number }>, onDone?: (id:number)=>void, onSnooze?: (id:number)=>void }} opts */
 export function agenda(opts) {
   if (opts.items.length === 0) {
     return h('p', { className: 'agenda__empty', text: 'Nothing on the agenda in this window.' });
   }
   return h('ul', { className: 'agenda' }, opts.items.map((item) => h('li', { className: 'agenda__row' }, [
-    h('span', { className: 'agenda__time', text: shortDateTime(item.at) }),
+    h('span', { className: 'agenda__time', text: agendaTimeLabel({ at: item.at, allDay: item.allDay ?? false }) }),
     h('span', { className: 'agenda__title', text: item.title }),
     item.google ? h('span', { className: 'badge badge--google', text: 'Google' }) : null,
     item.followup ? h('span', { className: 'badge badge--followup', text: 'Follow-up' }) : null,

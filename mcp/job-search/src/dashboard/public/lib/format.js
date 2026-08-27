@@ -143,3 +143,57 @@ export function formatPercent(frac) {
   if (frac === null || frac === undefined || Number.isNaN(Number(frac))) return 'not enough data yet';
   return `${Math.round(Number(frac) * 100)}%`;
 }
+
+/**
+ * Total normalizer for one Google Calendar-shaped `start` (or `end`) value, as returned in the `events`
+ * array of GET /api/calendar/agenda. The real Google Calendar API resource never carries a bare
+ * `startIso`/`start_at` field -- it is always `start: { dateTime, timeZone }` for a timed event or
+ * `start: { date }` for an all-day event (Calendar's own date field has no time-of-day at all). Earlier
+ * front-end code read `e.start ?? e.startIso ?? e.start_at`, none of which matched that real shape, which
+ * is why the Calendar page crashed blank against a live Google event: `e.start` is an object, so
+ * `new Date(object)` produced an Invalid Date that then broke on `.toISOString()` downstream.
+ *
+ * Every input maps to a branch here, never throws, and callers never need a try/catch:
+ * - a bare ISO string -> `{ at: <ISO>, allDay: false }` (kept for any caller that already has a flat
+ *   string, e.g. a follow-up's `due_at`)
+ * - `{ dateTime }` -> `{ at: <ISO>, allDay: false }`
+ * - `{ date }` (all-day) -> `{ at: <ISO>, allDay: true }`
+ * - `null`/`undefined` (no start at all) -> `{ at: null, allDay: false }`
+ * - anything else -- wrong type, an object with neither `dateTime` nor `date`, or a string/dateTime/date
+ *   value that fails to parse as a real date -- is the unknown/failure branch and returns `null`, so a
+ *   caller can filter it out of a rendered agenda rather than showing "Invalid Date" or crashing.
+ * @param {unknown} start
+ * @returns {{ at: string|null, allDay: boolean } | null}
+ */
+export function normalizeAgendaTime(start) {
+  if (start === null || start === undefined) return { at: null, allDay: false };
+  if (typeof start === 'string') {
+    const d = new Date(start);
+    return Number.isNaN(d.getTime()) ? null : { at: d.toISOString(), allDay: false };
+  }
+  if (typeof start === 'object' && !Array.isArray(start)) {
+    const obj = /** @type {Record<string, unknown>} */ (start);
+    if (typeof obj.dateTime === 'string') {
+      const d = new Date(obj.dateTime);
+      return Number.isNaN(d.getTime()) ? null : { at: d.toISOString(), allDay: false };
+    }
+    if (typeof obj.date === 'string') {
+      const d = new Date(obj.date);
+      return Number.isNaN(d.getTime()) ? null : { at: d.toISOString(), allDay: true };
+    }
+  }
+  return null;
+}
+
+/**
+ * Display label for one agenda item's time: the normal short datetime for a timed item, or the date
+ * plus a plain "all day" marker (no dash) for an all-day item. `at: null` (a normalized-but-empty start)
+ * falls back to the same "not set" placeholder `shortDateTime`/`shortDate` already use.
+ * @param {{ at: string|null, allDay: boolean }} normalized
+ */
+export function agendaTimeLabel(normalized) {
+  if (normalized.allDay) {
+    return normalized.at ? `${shortDate(normalized.at)}, all day` : 'not set';
+  }
+  return shortDateTime(normalized.at);
+}

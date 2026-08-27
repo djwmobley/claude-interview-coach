@@ -132,7 +132,16 @@ export function register(router, deps) {
     const r = await deps.withClient((c) => c.query(
       'SELECT name, keywords, phrases, exclude_terms, locations, remote, posted_within_days, max_pages, sources, rev, updated_at FROM ic_search_profiles ORDER BY name',
     ));
-    sendJson(ctx.res, 200, { ok: true, profiles: r.rows.map((p) => ({ ...p, rev: String(p.rev).slice(0, 12), updated_at: new Date(p.updated_at).toISOString() })) });
+    // The full universe of scannable source names (adapters.json's own keys, the same set resolveSources()
+    // in src/core/scan-run.js validates against), not any one profile's own `sources` column -- a profile's
+    // `sources` is usually `{}` (meaning "no restriction, use every configured adapter"), so it cannot
+    // double as the checkbox list the Run scan options drawer needs.
+    const sources = deps.config ? Object.keys(deps.config.adapters.adapters).sort() : [];
+    sendJson(ctx.res, 200, {
+      ok: true,
+      profiles: r.rows.map((p) => ({ ...p, rev: String(p.rev).slice(0, 12), updated_at: new Date(p.updated_at).toISOString() })),
+      sources,
+    });
   });
 
   router.register('GET', '/api/chrome', async (ctx) => {

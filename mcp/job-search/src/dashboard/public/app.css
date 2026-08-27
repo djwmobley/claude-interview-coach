@@ -74,9 +74,11 @@ table { border-collapse: collapse; width: 100%; }
 
 .rail__section { margin-bottom: 16px; }
 .rail__section-title { font-size: 10px; text-transform: uppercase; letter-spacing: 0.06em; color: var(--muted-2); padding: 4px 8px; }
-.rail__link { display: block; padding: 6px 8px; border-radius: 6px; color: var(--text); font-size: 13px; }
+.rail__link { display: flex; align-items: center; gap: 8px; padding: 6px 8px; border-radius: 6px; color: var(--text); font-size: 13px; }
 .rail__link:hover { background: var(--hover); filter: none; }
 .rail__link--active { background: var(--accent-dim); color: var(--accent); }
+.rail__icon { flex: none; fill: currentColor; }
+.rail__link-label { overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
 
 .topbar__left, .topbar__right { display: flex; align-items: center; gap: 12px; }
 .topbar__search { background: var(--surface2); border: 1px solid var(--border); border-radius: 6px; color: var(--text); padding: 6px 10px; width: 240px; }
@@ -253,6 +255,10 @@ textarea.notes-textarea { min-height: 100px; }
 .calendar-day-row { display: grid; grid-template-columns: 118px 1fr; gap: 8px; padding: 8px 0; border-bottom: 1px solid var(--border); }
 .calendar-item { display: flex; align-items: center; gap: 8px; padding: 3px 0; font-size: 12px; }
 .company-moment__date { color: var(--muted-2); font-size: 11px; margin-right: 8px; }
+.company-listings, .company-followups { list-style: none; margin: 0; padding: 0; }
+.company-listing, .company-followup { display: flex; align-items: center; gap: 8px; padding: 6px 0; border-bottom: 1px solid var(--border); font-size: 13px; }
+.company-listing__title { flex: 1; min-width: 0; }
+.company-listing__source, .company-listing__date, .company-followup__date { color: var(--muted-2); font-size: 11px; }
 
 /* ---------------------------------------------------------------------------------------------------
    Drawer / help overlay
@@ -268,6 +274,8 @@ textarea.notes-textarea { min-height: 100px; }
 .drawer__dedup { margin-top: 8px; }
 .drawer__dedup-note { color: var(--yellow); margin-bottom: 4px; }
 .field-error { color: var(--red); font-size: 11px; margin: 2px 0; }
+.drawer__checkbox-row { display: flex; align-items: center; gap: 6px; font-size: 12px; color: var(--text); margin-bottom: 6px; }
+.drawer__hint { color: var(--muted); font-size: 11px; }
 
 .help-overlay { position: fixed; inset: 0; margin: auto; width: 420px; height: fit-content; background: var(--surface); border: 1px solid var(--border); border-radius: 8px; padding: 16px; z-index: 950; }
 .help-overlay__key { font-family: "Cascadia Mono", Consolas, "SF Mono", monospace; color: var(--accent); padding-right: 12px; }
@@ -302,17 +310,17 @@ textarea.notes-textarea { min-height: 100px; }
    Breakpoints (pr3-spec-decisions.md section 11: numeric trigger is 1180px)
    --------------------------------------------------------------------------------------------------- */
 @media (max-width: 1180px) {
-  .app-shell { grid-template-columns: 56px 1fr; }
+  /* Design reconciliation's 1180px rule (pr3-spec-decisions.md section 11): the rail goes icon-only, with
+     each link's real label available only as a `title` tooltip (set in app.js's renderRail()), rather
+     than the old 9px-ellipsis rule that rendered illegible truncated label fragments at this width. */
+  .app-shell { grid-template-columns: 48px 1fr; }
   .rail { padding: 12px 4px; }
   .rail__section-title { display: none; }
   .rail__link {
-    font-size: 9px;
-    text-align: center;
-    white-space: nowrap;
-    overflow: hidden;
-    text-overflow: ellipsis;
+    justify-content: center;
     padding: 8px 2px;
   }
+  .rail__link-label { display: none; }
   .topbar__search { max-width: 280px; }
   .topbar__user { max-width: 90px; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
   .tile-row { grid-template-columns: repeat(3, 1fr); grid-template-rows: repeat(2, 1fr); }

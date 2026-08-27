@@ -9,12 +9,13 @@ import { scanProgressPanel } from '../components/scan-progress.js';
 import { agenda } from '../components/agenda.js';
 import { skeleton, emptyState } from '../components/empty-state.js';
 import { actorBadge, chipClassName, stageChip } from '../components/chips.js';
-import { shortDateTime } from '../lib/format.js';
+import { normalizeAgendaTime, shortDateTime } from '../lib/format.js';
 import { on, off } from '../lib/bus.js';
 import { fetchFollowupsInWindow } from '../lib/followups-window.js';
 import { setBanner } from '../lib/toast.js';
 import { openAddOpportunityDrawer } from '../components/add-opportunity-drawer.js';
 import { openNewFollowupDrawer } from '../components/new-followup-drawer.js';
+import { openRunScanDrawer } from '../components/run-scan-drawer.js';
 
 /** @param {HTMLElement} container */
 export async function render(container, params, app) {
@@ -39,9 +40,22 @@ export async function render(container, params, app) {
 
     // Follow-ups always come from fetchFollowupsInWindow (independent of Google Calendar connectivity,
     // see lib/followups-window.js); Google events come from the agenda endpoint only when connected.
+    //
+    // Each Google event's `start` is normalized through normalizeAgendaTime (a real Google Calendar
+    // resource carries `start: { dateTime }` or `start: { date }` for all-day, never a bare ISO field) --
+    // a malformed/unrecognized shape maps to `null` and is filtered out here rather than crashing the
+    // page; a well-formed item with no start at all (`at: null`) is also unplaceable on the agenda list
+    // and is filtered the same way.
     const agendaItems = [
-      ...(agendaOutcome.kind === 'ok' ? (agendaOutcome.body.events ?? []).map((e) => ({ at: e.start ?? e.startIso ?? e.start_at, title: e.summary ?? 'Event', google: true, followup: false })) : []),
-      ...followupRows.map((f) => ({ at: f.due_at, title: `${f.action} with ${f.contact}`, google: false, followup: true, id: f.id })),
+      ...(agendaOutcome.kind === 'ok'
+        ? (agendaOutcome.body.events ?? [])
+            .map((e) => {
+              const t = normalizeAgendaTime(e.start);
+              return t && t.at ? { at: t.at, allDay: t.allDay, title: e.summary ?? 'Event', google: true, followup: false } : null;
+            })
+            .filter((item) => item !== null)
+        : []),
+      ...followupRows.map((f) => ({ at: f.due_at, allDay: false, title: `${f.action} with ${f.contact}`, google: false, followup: true, id: f.id })),
     ].sort((a, b) => new Date(a.at).getTime() - new Date(b.at).getTime());
 
     if (agendaOutcome.kind === 'ok' && agendaOutcome.body.connected === false) {
@@ -58,10 +72,7 @@ export async function render(container, params, app) {
       actionBar({
         running,
         disabled: false,
-        onRunScan: async () => {
-          const outcome = handleOutcome(await postJson('/api/scans', {}));
-          if (outcome.kind === 'ok') showToast({ message: 'Scan started.' });
-        },
+        onRunScan: () => openRunScanDrawer({ onStarted: load }),
         onCancelScan: async () => {
           if (!liveRun) return;
           const outcome = handleOutcome(await postJson(`/api/scans/${liveRun.run_id}/cancel`, {}));

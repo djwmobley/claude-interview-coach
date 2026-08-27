@@ -10,6 +10,9 @@
 import { JobSearchError } from '../../core/errors.js';
 import { embedSafe } from '../../core/embed.js';
 import { listOutputFiles, tokenize, companyTokensFor } from '../../core/documents.js';
+import { normalizeCompany } from '../../core/normalize.js';
+import { buildRegistry } from '../../core/urlguard.js';
+import { urlPassesRegistry } from '../../core/report.js';
 import { sendJson } from '../http.js';
 
 const MISSING_RELATION = '42P01';
@@ -54,7 +57,58 @@ export function register(router, deps) {
     const companyTokens = companyTokensFor(companyText, deps.config?.companyAliases ?? {});
     const research = files.filter((f) => tokenize(`${f.dir}/${f.name}`).some((tok) => companyTokens.has(tok)));
 
-    sendJson(ctx.res, 200, { ok: true, company: companyText, moments: moments.value, research, warnings: [moments.warning].filter(Boolean) });
+    // `companyText` can arrive either already normalized (the company-detail page passes company_norm as
+    // `company`) or as a raw company name (the `listing_id` lookup branch above reads the raw `company`
+    // column). normalizeCompany() is applied either way so both call shapes resolve to the same
+    // company_norm for the listings/follow-ups lookup below.
+    const companyNorm = normalizeCompany(companyText, { aliases: deps.config?.companyAliases ?? {} }).company_norm;
+    const listingsResult = companyNorm
+      ? await deps.withClient((c) => c.query(
+          `SELECT id, title, status, source, first_seen, url, url_normalized
+           FROM ic_job_listings
+           WHERE company_norm = $1 AND coalesce(record_kind,'listing') = 'listing' AND duplicate_of IS NULL
+           ORDER BY first_seen DESC NULLS LAST, id DESC
+           LIMIT 100`,
+          [companyNorm],
+        ))
+      : { rows: [] };
+    const registry = deps.config ? buildRegistry(deps.config) : { entries: [], httpAllowedHosts: new Set() };
+    const listings = listingsResult.rows.map((row) => {
+      const url = row.url_normalized ?? row.url ?? null;
+      return {
+        id: row.id,
+        title: row.title,
+        status: row.status,
+        source: row.source,
+        first_seen: row.first_seen ? new Date(row.first_seen).toISOString() : null,
+        url,
+        url_ok: urlPassesRegistry(url, registry),
+      };
+    });
+
+    // Follow-ups scoped to this company's listings via one SQL call with ANY($1), rather than one
+    // listFollowups(...) round trip per listing -- a company page can have dozens of listings, and this
+    // keeps the route to a fixed two queries regardless of how many.
+    const listingIds = listings.map((l) => l.id);
+    const followupsResult = listingIds.length
+      ? await deps.withClient((c) => c.query(
+          `SELECT id, contact, org, listing_id, due_at, channel, action, status
+           FROM ic_followups
+           WHERE listing_id = ANY($1::int[]) AND status IN ('open','snoozed')
+           ORDER BY coalesce(snoozed_until, due_at) ASC, id ASC`,
+          [listingIds],
+        ))
+      : { rows: [] };
+
+    sendJson(ctx.res, 200, {
+      ok: true,
+      company: companyText,
+      moments: moments.value,
+      research,
+      listings,
+      followups: followupsResult.rows,
+      warnings: [moments.warning].filter(Boolean),
+    });
   });
 
   router.register('GET', '/api/memory/answers', async (ctx) => {
