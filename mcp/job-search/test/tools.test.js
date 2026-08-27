@@ -17,6 +17,7 @@ import { tool as profiles } from '../src/tools/profiles.js';
 import { tool as scans } from '../src/tools/scans.js';
 import { wrapHandler } from '../src/tools/_shared.js';
 import { untrustedRows } from '../src/core/compact.js';
+import { listEvents } from '../src/core/events.js';
 
 // Derived from untrustedRows() itself rather than duplicated string literals,
 // so a delimiter-text change would only need to happen in one place.
@@ -197,6 +198,12 @@ describe('mark_jobs propagation rules', () => {
     const rowB = (await client.query('SELECT status, fit_score, marked_at FROM ic_job_listings WHERE id=$1', [b])).rows[0];
     assert.equal(rowB.status, 'shortlisted');
     assert.equal(rowB.marked_at, null, 'propagation is not an explicit mark');
+    // dashboard PR 1: one status event, one note event, one fit event recorded for A's explicit mark.
+    const eventsA = await listEvents(client, a, { limit: 20 });
+    assert.equal(eventsA.filter((e) => e.kind === 'status' && e.from_status === 'review' && e.to_status === 'shortlisted').length, 1);
+    assert.equal(eventsA.filter((e) => e.kind === 'note' && e.note === 'good fit').length, 1);
+    assert.equal(eventsA.filter((e) => e.kind === 'fit' && e.note === '70').length, 1);
+    assert.ok(eventsA.every((e) => e.actor === 'mcp'), 'mark_jobs defaults event actor to mcp');
     const qrow = (await client.query('SELECT resolution, resolved_at FROM ic_job_review_queue WHERE id=$1', [q.rows[0].id])).rows[0];
     assert.equal(qrow.resolution, 'separate');
     assert.ok(qrow.resolved_at);
@@ -214,6 +221,11 @@ describe('mark_jobs propagation rules', () => {
     await markJobs.handler({ items: [{ id: b, status: 'applied' }] }, deps);
     const r3 = /** @type {any} */ (await markJobs.handler({ items: [{ id: a, status: 'applied', fit_score: 90 }], propagateTo: [b] }, deps));
     assert.equal(r3.results[1].applied, true);
+    // Re-marking A with its already-current status writes no second status event, but the fit change
+    // (70 -> 90) does write one fit event: no-op fields never inflate the history.
+    const eventsA2 = await listEvents(client, a, { limit: 20 });
+    assert.equal(eventsA2.filter((e) => e.kind === 'status' && e.to_status === 'applied').length, 1, 'status event written once for the applied transition, not again on re-mark');
+    assert.equal(eventsA2.filter((e) => e.kind === 'fit' && e.note === '90').length, 1);
     // Notes cannot exceed 600 (zod) and ids not in the table fail atomically.
     await assert.rejects(markJobs.handler({ items: [{ id: a, status: 'maybe' }, { id: 999999999, status: 'maybe' }] }, deps), /not found/);
     assert.equal((await client.query('SELECT status FROM ic_job_listings WHERE id=$1', [a])).rows[0].status, 'applied', 'rolled back');
@@ -237,6 +249,8 @@ describe('review merge / separate / repost', () => {
     assert.equal(rows.find((z) => z.id === x).duplicate_of, root);
     assert.equal(rows.find((z) => z.id === y).duplicate_of, root, 'child re-pointed to the new root, not chained through x');
     assert.equal(rows.find((z) => z.id === x).status, 'shortlisted', 'inherited from root');
+    const xEvents = await listEvents(client, x, { limit: 10 });
+    assert.ok(xEvents.some((e) => e.kind === 'status' && e.to_status === 'shortlisted' && e.actor === 'mcp' && String(e.note).includes('merge')));
     // Merging into a target that is itself a duplicate resolves to its root.
     const z = await insert({ title: 'Z', status: 'review' });
     const q2 = await client.query(`INSERT INTO ic_job_review_queue (candidate_id, matches, reason, status_at_create) VALUES ($1, '{}', 'x', 'review') RETURNING id`, [z]);
