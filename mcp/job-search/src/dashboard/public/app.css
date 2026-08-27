@@ -261,6 +261,13 @@ textarea.notes-textarea { min-height: 100px; }
 .drawer__panel { background: var(--surface); border: 1px solid var(--border); border-radius: 8px; padding: 16px; width: 420px; max-width: 90vw; max-height: 80vh; overflow: auto; }
 .drawer__header { display: flex; justify-content: space-between; align-items: center; margin-bottom: 12px; }
 .drawer__close { background: none; border: 1px solid var(--border); border-radius: 4px; color: var(--text); cursor: pointer; }
+.drawer__field { display: flex; flex-direction: column; gap: 4px; margin-bottom: 10px; font-size: 11px; color: var(--muted); }
+.drawer__actions { display: flex; gap: 8px; margin-top: 12px; }
+.drawer__errors { margin-bottom: 8px; }
+.drawer__context { color: var(--muted); font-size: 12px; margin-bottom: 10px; }
+.drawer__dedup { margin-top: 8px; }
+.drawer__dedup-note { color: var(--yellow); margin-bottom: 4px; }
+.field-error { color: var(--red); font-size: 11px; margin: 2px 0; }
 
 .help-overlay { position: fixed; inset: 0; margin: auto; width: 420px; height: fit-content; background: var(--surface); border: 1px solid var(--border); border-radius: 8px; padding: 16px; z-index: 950; }
 .help-overlay__key { font-family: "Cascadia Mono", Consolas, "SF Mono", monospace; color: var(--accent); padding-right: 12px; }

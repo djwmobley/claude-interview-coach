@@ -16,7 +16,7 @@ const SAFE_ATTR_NAMES = new Set([
   'class', 'id', 'type', 'name', 'placeholder', 'title', 'for', 'tabindex', 'role',
   'colspan', 'rowspan', 'min', 'max', 'step', 'pattern', 'disabled', 'readonly',
   'aria-label', 'aria-hidden', 'aria-expanded', 'aria-current', 'aria-live', 'aria-describedby',
-  'aria-selected', 'aria-checked', 'aria-controls', 'aria-haspopup', 'aria-disabled', 'aria-pressed',
+  'aria-selected', 'aria-checked', 'aria-controls', 'aria-haspopup', 'aria-disabled', 'aria-pressed', 'aria-modal',
 ]);
 
 /** @param {string} name */

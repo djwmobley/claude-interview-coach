@@ -9,6 +9,8 @@ import { filterBar, filterStateToQuery } from '../components/filter-bar.js';
 import { skeleton, emptyState } from '../components/empty-state.js';
 import { on, off } from '../lib/bus.js';
 import { createListCursor } from '../lib/list-cursor.js';
+import { DIGIT_STAGE_ORDER } from '../components/stage-buttons.js';
+import { stageChip } from '../components/chips.js';
 
 const COLUMNS = ['', 'Title', 'Company', 'Source', 'Stage', 'Score', 'First seen', 'Location'];
 
@@ -54,12 +56,14 @@ export async function render(container, params, app) {
       return;
     }
     const rows = outcome.body.rows;
+    const bulkStageSelect = h('select', { className: 'drawer__input' }, DIGIT_STAGE_ORDER.map((s) => h('option', { value: s, text: stageChip(s).label })));
     setChildren(container, [
       h('h1', { className: 'page-title', text: 'Jobs' }),
       filterBar({ state: filterState, onChange: (patch) => { filterState = { ...filterState, ...patch }; load(); } }),
       selected.size > 0 ? h('div', { className: 'bulk-bar' }, [
         h('span', { text: `${selected.size} selected` }),
-        h('button', { className: 'btn btn--small', text: 'Set stage', on: { click: () => bulkSetStage([...selected]) } }),
+        bulkStageSelect,
+        h('button', { className: 'btn btn--small', text: 'Apply', on: { click: () => bulkSetStage([...selected], /** @type {HTMLSelectElement} */ (bulkStageSelect).value) } }),
       ]) : null,
       rows.length === 0
         ? emptyState({ message: 'No jobs match the current filters.', hint: 'Try widening the location or first-seen window.' })
@@ -75,9 +79,7 @@ export async function render(container, params, app) {
     cursor.setRows([...container.querySelectorAll('.job-row')]);
   }
 
-  async function bulkSetStage(ids) {
-    const status = prompt('Set stage to (new, maybe, shortlisted, applied, interviewing, offer, accepted, passed, lost, skip):');
-    if (!status) return;
+  async function bulkSetStage(ids, status) {
     const outcome = handleOutcome(await postJson('/api/listings/bulk-status', { ids, status }));
     if (outcome.kind === 'ok') {
       showToast({ message: `Updated ${ids.length} listings.` });

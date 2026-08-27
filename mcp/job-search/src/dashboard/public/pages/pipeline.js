@@ -9,6 +9,7 @@ import { stageChip, chipClassName, agingChip } from '../components/chips.js';
 import { ageDays } from '../lib/format.js';
 import { on, off } from '../lib/bus.js';
 import { createListCursor } from '../lib/list-cursor.js';
+import { openAddOpportunityDrawer } from '../components/add-opportunity-drawer.js';
 
 const ACTIVE_GROUPS = Object.freeze(['review', 'new', 'maybe', 'shortlisted', 'applied', 'interviewing', 'offer']);
 const OUTCOME_GROUPS = Object.freeze(['accepted', 'passed', 'lost', 'dead']);
@@ -81,6 +82,7 @@ export async function render(container, params, app) {
 
     setChildren(container, [
       h('h1', { className: 'page-title', text: 'Pipeline' }),
+      h('button', { className: 'btn btn--primary', text: 'Add opportunity', on: { click: () => openAddOpportunityDrawer(app) } }),
       h('div', { className: 'pipeline-legend' }, [
         h('span', { text: 'Aging:' }),
         h('span', { className: chipClassName(agingChip(0)), text: 'Under 7 days' }),

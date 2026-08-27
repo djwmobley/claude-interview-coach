@@ -13,6 +13,8 @@ import { shortDateTime } from '../lib/format.js';
 import { on, off } from '../lib/bus.js';
 import { fetchFollowupsInWindow } from '../lib/followups-window.js';
 import { setBanner } from '../lib/toast.js';
+import { openAddOpportunityDrawer } from '../components/add-opportunity-drawer.js';
+import { openNewFollowupDrawer } from '../components/new-followup-drawer.js';
 
 /** @param {HTMLElement} container */
 export async function render(container, params, app) {
@@ -70,8 +72,8 @@ export async function render(container, params, app) {
           const outcome = handleOutcome(await postJson('/api/report/send', { dryRun: false }));
           if (outcome.kind === 'ok') showToast({ message: 'Report sent.' });
         },
-        onAddOpportunity: () => { app.navigate('pipeline'); },
-        onNewFollowup: () => { app.navigate('followups'); },
+        onAddOpportunity: () => openAddOpportunityDrawer(app),
+        onNewFollowup: () => openNewFollowupDrawer({ onCreated: load }),
       }),
       h('h2', { className: 'section-title', text: 'Scan progress' }),
       scanProgressPanel({ run: liveRun }),

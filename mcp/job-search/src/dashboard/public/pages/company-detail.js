@@ -27,7 +27,7 @@ export async function render(container, params, app) {
     const openAddMoment = () => {
       const questionInput = h('input', { className: 'drawer__input', attrs: { type: 'text', placeholder: 'Question' } });
       const responseInput = h('textarea', { className: 'drawer__input', attrs: { placeholder: 'Response' } });
-      const overlay = drawer({
+      const { el, close } = drawer({
         title: 'Add moment',
         body: [
           h('label', {}, [h('span', { text: 'Question' }), questionInput]),
@@ -38,13 +38,12 @@ export async function render(container, params, app) {
               const response = /** @type {HTMLTextAreaElement} */ (responseInput).value.trim();
               if (!question || !response) { showToast({ message: 'Question and response are required.', tone: 'error' }); return; }
               const out = handleOutcome(await postJson(`/api/companies/${encodeURIComponent(params.norm)}/moments`, { question, response }));
-              if (out.kind === 'ok') { showToast({ message: 'Moment saved.' }); overlay.remove(); load(); }
+              if (out.kind === 'ok') { showToast({ message: 'Moment saved.' }); close(); load(); }
             },
           } }),
         ],
-        onClose: () => overlay.remove(),
       });
-      document.body.appendChild(overlay);
+      document.body.appendChild(el);
     };
 
     setChildren(container, [

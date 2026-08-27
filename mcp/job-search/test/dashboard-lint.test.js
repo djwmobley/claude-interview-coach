@@ -177,6 +177,24 @@ describe('public/: total classification of DOM-writing operations (pr3-spec-deci
     }
   });
 
+  // Independent review comment on PR #6 (second re-review): a native window.prompt() flow is reachable
+  // by any automation that can dispatch a keydown/click, exactly like a real drawer, so it is not a
+  // usable substitute for the plan's required drawer pattern -- and it is banned outright here, not just
+  // discouraged, so a future shortcut cannot silently reintroduce one instead of using
+  // components/drawer.js. Negative lookbehind avoids matching `confirmButton(`/`confirm-button.js`,
+  // which are unrelated identifiers that happen to contain the substring "confirm".
+  test('no window.prompt/confirm/alert (or bare prompt/confirm/alert calls) anywhere in public/', () => {
+    const PROMPT_RE = /(?<![.\w])(?:window\.)?prompt\(/;
+    const CONFIRM_RE = /(?<![.\w])(?:window\.)?confirm\(/;
+    const ALERT_RE = /(?<![.\w])(?:window\.)?alert\(/;
+    for (const f of publicFiles) {
+      const text = fs.readFileSync(f, 'utf8');
+      assert.equal(PROMPT_RE.test(text), false, `${f}: window.prompt(/prompt(`);
+      assert.equal(CONFIRM_RE.test(text), false, `${f}: window.confirm(/confirm(`);
+      assert.equal(ALERT_RE.test(text), false, `${f}: window.alert(/alert(`);
+    }
+  });
+
   test('no javascript: scheme string literal in public/', () => {
     for (const f of publicFiles) {
       const text = fs.readFileSync(f, 'utf8');

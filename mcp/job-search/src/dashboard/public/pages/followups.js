@@ -14,6 +14,7 @@ import { confirmButton } from '../components/confirm-button.js';
 import { shortDateTime } from '../lib/format.js';
 import { on, off } from '../lib/bus.js';
 import { createListCursor } from '../lib/list-cursor.js';
+import { openNewFollowupDrawer } from '../components/new-followup-drawer.js';
 
 const MAX_PAGES = 8;
 
@@ -109,6 +110,7 @@ export async function render(container, params, app) {
 
     setChildren(container, [
       h('h1', { className: 'page-title', text: 'Follow-ups' }),
+      h('button', { className: 'btn btn--primary', text: 'New follow-up', on: { click: () => openNewFollowupDrawer({ onCreated: load }) } }),
       visibleBuckets,
       h('details', { className: 'followup-section' }, [
         h('summary', { text: `Done (${done.length})` }),

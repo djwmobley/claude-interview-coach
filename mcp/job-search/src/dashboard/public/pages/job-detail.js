@@ -13,6 +13,7 @@ import { documentChip, chipClassName } from '../components/chips.js';
 import { skeleton, emptyState } from '../components/empty-state.js';
 import { salaryRange, shortDate } from '../lib/format.js';
 import { on, off } from '../lib/bus.js';
+import { openNewFollowupDrawer } from '../components/new-followup-drawer.js';
 
 const NOTES_DEBOUNCE_MS = 800;
 
@@ -46,6 +47,23 @@ export async function render(container, params, app) {
     if (outcome.kind !== 'ok') showToast({ message: 'Notes failed to save.', tone: 'error' });
   }
 
+  // 'f' (Job detail, distinct from the g-f chord to the Follow-ups page) and the inline offer after
+  // setting a listing to `applied` (plan line 99: "applied offers a follow-up in 5/10 days inline") both
+  // open the same components/new-followup-drawer.js, pre-filled with this listing, rather than a native
+  // dialog: a drawer is a normal DOM form, keyboard-trapped and Escape-closeable, and reachable the same
+  // way whether opened by mouse or by keyboard, closing the automation-reachability gap a native dialog
+  // based flow had (see the independent review's second re-review, comment on PR #6).
+  function openFollowupDrawer(dueInDays) {
+    if (!listing) return;
+    openNewFollowupDrawer({
+      listingId: listing.id,
+      listingLabel: `${listing.title} at ${listing.company ?? 'unknown company'}`,
+      dueInDays,
+      actionText: `Follow up on ${listing.title}`,
+      onCreated: load,
+    });
+  }
+
   const setStage = async (status) => {
     if (!listing) return;
     const prevStatus = listing.status;
@@ -55,27 +73,13 @@ export async function render(container, params, app) {
         message: `Stage set to ${status}.`,
         onUndo: async () => { handleOutcome(await postJson(`/api/listings/${listing.id}/status`, { status: prevStatus ?? 'new' })); load(); },
       });
+      // Plan line 99: setting a listing to `applied` offers a follow-up in 5/10 days inline. The New
+      // follow-up drawer already lets the due date be adjusted (5 is the pre-filled default; 10 is one
+      // edit away), so opening it directly satisfies the offer without a separate preset-choice UI.
+      if (status === 'applied') openFollowupDrawer(5);
       load();
     }
   };
-
-  // 'f' (Job detail, distinct from the g-f chord to the Follow-ups page): quick-create a follow-up tied
-  // to this listing, matching the pragmatic prompt()-based pattern already used by pages/jobs.js's bulk
-  // stage-set (no full drawer form was in scope for this fix; a real, working action beats dead code).
-  async function quickAddFollowup() {
-    if (!listing) return;
-    const contact = prompt('Follow up with (contact name):');
-    if (!contact || !contact.trim()) return;
-    const daysRaw = prompt('Due in how many days?', '3');
-    const days = Number(daysRaw);
-    if (!Number.isFinite(days) || days < 0) { showToast({ message: 'Enter a whole number of days.', tone: 'error' }); return; }
-    const due_at = new Date(Date.now() + days * 86400000).toISOString();
-    const out = handleOutcome(await postJson('/api/followups', {
-      contact: contact.trim(), listing_id: listing.id, due_at, channel: 'email',
-      action_text: `Follow up on ${listing.title}`,
-    }));
-    if (out.kind === 'ok') { showToast({ message: 'Follow-up created.' }); load(); }
-  }
 
   /** @param {{ type: string, [k: string]: any }} action */
   function onKbAction(action) {
@@ -91,7 +95,7 @@ export async function render(container, params, app) {
       }
       case 'shortcut':
         if (action.name === 'notes-focus') notesAreaEl?.focus();
-        else if (action.name === 'add-followup') quickAddFollowup();
+        else if (action.name === 'add-followup') openFollowupDrawer(3);
         return;
       default:
         // row-nav / row-open / row-stage: not applicable on Job detail (see KEYBOARD_ACTIONS).
@@ -159,8 +163,11 @@ export async function render(container, params, app) {
     const followups = outcome.body.followups ?? [];
     const followupsPanel = h('div', { className: 'followups-panel' }, [
       h('h3', { text: 'Follow-ups' }),
+      // Contact name was previously omitted entirely (found while wiring the New follow-up drawer's
+      // Playwright verification: a follow-up list showing due date and action but never who it is with
+      // is a real content gap, not just a missing test hook).
       followups.length === 0 ? emptyState({ message: 'No follow-ups for this listing.' }) : h('ul', {}, followups.map((f) => h('li', {}, [
-        h('span', { text: `${f.due_at ? shortDate(f.due_at) : 'not set'}: ${f.action}` }),
+        h('span', { text: `${f.due_at ? shortDate(f.due_at) : 'not set'}: ${f.contact}${f.org ? ` (${f.org})` : ''}, ${f.action}` }),
       ]))),
     ]);
 
