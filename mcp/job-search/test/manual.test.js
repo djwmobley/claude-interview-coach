@@ -41,7 +41,7 @@ describe('createManualListing', () => {
   });
 
   test('creates a new row via the real dedup path, noise_class ok_manual, notes/fit forced NULL, created then status events', async () => {
-    const out = await createManualListing(client, { title: 'CTO', company: CO, location: 'Houston, TX', status: 'interviewing', via: 'Nina Guthrie' });
+    const out = await createManualListing(client, { title: 'CTO', company: CO, location: 'Houston, TX', status: 'interviewing', via: 'Maren Holloway' });
     assert.equal(out.created, true);
     assert.ok(out.id);
     const row = (await client.query('SELECT status, notes, fit_score, noise_class, source, external_id, record_kind FROM ic_job_listings WHERE id = $1', [out.id])).rows[0];
@@ -55,7 +55,7 @@ describe('createManualListing', () => {
     const events = await listEvents(client, out.id, { limit: 10 });
     const created = events.find((e) => e.kind === 'created');
     assert.ok(created);
-    assert.equal(created.note, 'via Nina Guthrie');
+    assert.equal(created.note, 'via Maren Holloway');
     const status = events.find((e) => e.kind === 'status');
     assert.ok(status);
     assert.equal(status.to_status, 'interviewing');

@@ -36,7 +36,7 @@ Management · Team Development & Culture
 EXPERIENCE
 
 Chief Technology Officer
-Immunotec | Houston, TX | 2023 – 2026
+VitalCore | Houston, TX | 2023 – 2026
 Global health and wellness company with operations across 20 countries; $8M+ annual technology budget
 
 · Took over a failing vendor-led e-commerce rebuild carrying over $1M in sunk
@@ -79,7 +79,7 @@ Global health and wellness company with operations across 20 countries; $8M+ ann
 
 
 Chief Technology Officer
-IM Academy | Somers, NY | 2022 – 2023
+Beacon Trading Academy | Somers, NY | 2022 – 2023
 Financial education platform; technology cost reduction and infrastructure modernization
 
 · Cut over $1M in annual technology costs by replacing the training platform
@@ -97,7 +97,7 @@ Financial education platform; technology cost reduction and infrastructure moder
 
 
 Vice President of Technology and Chief of Staff to CTO
-Monat Global | Miami, FL | 2020 – 2022
+Lumaire Global | Miami, FL | 2020 – 2022
 Hyper-growth beauty and wellness company; strategic and operational lead to the CTO
 
 · Governed the SAP S/4HANA platform upgrade with a $20M+ technology budget;
@@ -127,7 +127,7 @@ Hyper-growth beauty and wellness company; strategic and operational lead to the 
 
 
 Director of Global Systems
-Norwex | Coppell, TX | 2014 – 2020
+Verdalux | Coppell, TX | 2014 – 2020
 Global eco products company; greenfield commerce platform build and international expansion
 
 · Built a greenfield e-commerce platform covering storefront, order

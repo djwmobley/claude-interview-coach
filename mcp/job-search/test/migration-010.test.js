@@ -18,6 +18,11 @@
  * bin/seed-opportunities.js wrote a spurious backfill event onto every one of that run's freshly seeded,
  * freshly marked rows, in addition to each row's own real status event, because a dashboard/MCP server
  * had started up (re-running ensureAuxSchema -> the old backfill) between the two seed runs.
+ *
+ * The event-derived guard alone is still not enough: it is derived from the CURRENT contents of
+ * ic_job_events, so deleting a listing's status event re-opens its eligibility even after this migration
+ * has already run once. The ic_job_migrations ledger closes that gap by recording that this migration's
+ * backfill logic has executed, independent of anything that happens afterward to ic_job_events.
  */
 import { test, describe, before, after } from 'node:test';
 import assert from 'node:assert/strict';
@@ -31,6 +36,7 @@ import { applyMark } from '../src/tools/mark_jobs.js';
 const HERE = path.dirname(fileURLToPath(import.meta.url));
 const SQL = fs.readFileSync(path.join(HERE, '..', 'sql', '010_status_event_backfill.sql'), 'utf8');
 const CO = `ZZ-TEST-MIG010-${process.pid}`;
+const LEDGER_NAME = '010_status_event_backfill';
 /** @type {pg.Client} */
 let client;
 
@@ -53,18 +59,36 @@ async function cleanup() {
   await client.query('DELETE FROM ic_job_listings WHERE id = ANY($1::int[])', [ids]);
 }
 
+/**
+ * Deletes the ic_job_migrations ledger row for this migration, so the next `client.query(SQL)` call
+ * exercises the first-application path again instead of being short-circuited by the ledger. bootstrap
+ * (bin/bootstrap-test-db.js) already applied this migration once, and every prior test in this file that
+ * applies SQL re-writes the ledger row -- so any test that itself needs a genuine first-application must
+ * call this first.
+ */
+async function resetLedger() {
+  await client.query(`DELETE FROM ic_job_migrations WHERE name = $1`, [LEDGER_NAME]);
+}
+
 before(async () => {
   client = new pg.Client(pgConnectionConfig());
   await client.connect();
   await cleanup();
+  // Guard defensively: bootstrap already created this table via an earlier apply of this same SQL file,
+  // but do not assume that -- this table's existence is this migration's own responsibility.
+  await client.query(`CREATE TABLE IF NOT EXISTS ic_job_migrations (name text PRIMARY KEY, applied_at timestamptz NOT NULL DEFAULT now())`);
+  await resetLedger();
 });
 after(async () => {
   await cleanup();
+  // Deliberately do NOT delete the ledger row here -- leave the database in the "applied" state bootstrap
+  // left it in. The last test in this file re-applies SQL and so re-writes the ledger row regardless.
   await client.end();
 });
 
 describe('sql/010_status_event_backfill.sql', () => {
   test('a genuinely legacy row (marked_at set, no status event at all) gets exactly one backfilled status event, idempotent on re-apply', async () => {
+    await resetLedger();
     const markedAt = new Date('2026-05-01T00:00:00Z');
     const id = await insertListing({ status: 'shortlisted', marked_at: markedAt });
     await client.query(SQL);
@@ -83,7 +107,9 @@ describe('sql/010_status_event_backfill.sql', () => {
   // 009/010 first ran. The corrected guard ("no status event of any kind") must never add a second,
   // synthetic event here, no matter how many times the migration is re-applied -- unlike the old
   // note-text guard, which would have matched this row every time and kept stamping a spurious one.
+  // Ledger reset here so this exercises the event-derived guard itself, not just the ledger block.
   test('a row with a real status event already recorded via applyMark gets no synthetic backfill event, even on repeated application', async () => {
+    await resetLedger();
     const id = await insertListing({ status: 'new' });
     const mark = await applyMark(client, { id, status: 'shortlisted' }, { explicit: true, now: new Date(), actor: 'dashboard' });
     assert.equal(mark.applied, true);
@@ -95,7 +121,7 @@ describe('sql/010_status_event_backfill.sql', () => {
 
     const after1 = await client.query(`SELECT count(*)::int AS n, array_agg(actor) AS actors FROM ic_job_events WHERE listing_id = $1 AND kind = 'status'`, [id]);
     assert.equal(after1.rows[0].n, 1, 'exactly one status event after two migration applications, not three');
-    assert.deepEqual(after1.rows[0].actors, ['dashboard'], 'the surviving event is still applyMark\'s real one, not a migration-actor duplicate');
+    assert.deepEqual(after1.rows[0].actors, ['dashboard'], "the surviving event is still applyMark's real one, not a migration-actor duplicate");
   });
 
   test('marked_at with status IS NULL gets no synthetic event (total classification: status IS NOT NULL is required)', async () => {
@@ -115,5 +141,40 @@ describe('sql/010_status_event_backfill.sql', () => {
   test('applying the whole file twice in a row raises no error (full-file idempotence)', async () => {
     await client.query(SQL);
     await client.query(SQL);
+  });
+
+  // The blind spot this migration closes: an event-derived guard alone (NOT EXISTS status event) is
+  // insufficient because deleting the event re-opens eligibility. The ic_job_migrations ledger must
+  // block a second backfill even after the migration's own output has been deleted out from under it.
+  test('deleting a backfilled status event does not re-open eligibility -- the ic_job_migrations ledger blocks a second backfill', async () => {
+    await resetLedger();
+    const markedAt = new Date('2026-05-01T00:00:00Z');
+    const id = await insertListing({ status: 'shortlisted', marked_at: markedAt });
+
+    await client.query(SQL);
+    const firstPass = await client.query(`SELECT count(*)::int AS n FROM ic_job_events WHERE listing_id = $1 AND kind = 'status'`, [id]);
+    assert.equal(firstPass.rows[0].n, 1, 'sanity: the first application backfilled exactly one status event');
+
+    await client.query(`DELETE FROM ic_job_events WHERE listing_id = $1 AND kind = 'status'`, [id]);
+    const afterDelete = await client.query(`SELECT count(*)::int AS n FROM ic_job_events WHERE listing_id = $1 AND kind = 'status'`, [id]);
+    assert.equal(afterDelete.rows[0].n, 0, 'sanity: the event is genuinely gone, so the event-derived guard alone would re-qualify this row');
+
+    await client.query(SQL);
+    const afterReapply = await client.query(`SELECT count(*)::int AS n FROM ic_job_events WHERE listing_id = $1 AND kind = 'status'`, [id]);
+    assert.equal(afterReapply.rows[0].n, 0, 'the ledger blocks re-backfill even though the event-derived guard alone would have allowed it');
+
+    const ledger = await client.query(`SELECT name FROM ic_job_migrations WHERE name = $1`, [LEDGER_NAME]);
+    assert.equal(ledger.rowCount, 1, 'the ledger row for this migration exists');
+  });
+
+  test('the ledger row is written even when this application inserts zero status events', async () => {
+    await resetLedger();
+    const ledgerBefore = await client.query(`SELECT count(*)::int AS n FROM ic_job_migrations WHERE name = $1`, [LEDGER_NAME]);
+    assert.equal(ledgerBefore.rows[0].n, 0, 'sanity: ledger row absent before this application');
+
+    await client.query(SQL);
+
+    const ledgerAfter = await client.query(`SELECT name FROM ic_job_migrations WHERE name = $1`, [LEDGER_NAME]);
+    assert.equal(ledgerAfter.rowCount, 1, 'the ledger row is written unconditionally, independent of whether any status events were inserted');
   });
 });

@@ -20,7 +20,7 @@ const EN = '\u2013';
 /** A temp repo root with tools/, data/project-index.md, and fixtures we mutate. */
 let root = '';
 const style = loadStyleConfig();
-const companies = ['Advisicon', 'Immunotec', 'IM Academy', 'Monat Global', 'Norwex', 'Jenkon'];
+const companies = ['Northwind Advisory', 'VitalCore', 'Beacon Trading Academy', 'Lumaire Global', 'Verdalux', 'Jenkon'];
 
 /** @param {string} name @param {string} text */
 function fixture(name, text) {
@@ -56,8 +56,8 @@ after(() => {
 const clean = () => fs.readFileSync(CLEAN, 'utf8').replace(/\r\n/g, '\n');
 
 describe('render_doc preflight', () => {
-  test('clean resume passes every applicable check (Advisicon omitted by explicit approval)', () => {
-    const r = preflight({ kind: 'resume', source: 'fx/clean.md', outName: 'Jordan Reyes - CTO', allowMissing: ['Advisicon'] }, { root, style });
+  test('clean resume passes every applicable check (Northwind Advisory omitted by explicit approval)', () => {
+    const r = preflight({ kind: 'resume', source: 'fx/clean.md', outName: 'Jordan Reyes - CTO', allowMissing: ['Northwind Advisory'] }, { root, style });
     const fails = r.checks.filter((c) => c.result === 'fail');
     assert.deepEqual(fails, [], JSON.stringify(fails));
     assert.equal(r.ok, true);
@@ -69,7 +69,7 @@ describe('render_doc preflight', () => {
     const r = preflight({ kind: 'resume', source: 'fx/clean.md', outName: 'Jordan Reyes - CTO' }, { root, style });
     const c = failing(r.checks, 'role_inclusion');
     assert.equal(c.result, 'fail');
-    assert.match(String(c.detail), /Advisicon/);
+    assert.match(String(c.detail), /Northwind Advisory/);
     assert.equal(r.ok, false);
   });
 
@@ -82,7 +82,7 @@ describe('render_doc preflight', () => {
 
   test('em-dash anywhere fails with line numbers', () => {
     const src = fixture('em.md', clean().replace('Technology executive', `Technology executive ${EM} yes`));
-    const r = preflight({ kind: 'resume', source: src, outName: 'N', allowMissing: ['Advisicon'] }, { root, style });
+    const r = preflight({ kind: 'resume', source: src, outName: 'N', allowMissing: ['Northwind Advisory'] }, { root, style });
     const c = failing(r.checks, 'em_dash');
     assert.equal(c.result, 'fail');
     assert.deepEqual(c.lines, [8]);
@@ -90,7 +90,7 @@ describe('render_doc preflight', () => {
 
   test('en-dash outside a Year - Year range fails; the company line range passes', () => {
     const src = fixture('en.md', clean().replace('board level', `board ${EN} level`));
-    const r = preflight({ kind: 'resume', source: src, outName: 'N', allowMissing: ['Advisicon'] }, { root, style });
+    const r = preflight({ kind: 'resume', source: src, outName: 'N', allowMissing: ['Northwind Advisory'] }, { root, style });
     const c = failing(r.checks, 'en_dash');
     assert.equal(c.result, 'fail');
     assert.equal(c.lines.length, 1);
@@ -98,17 +98,17 @@ describe('render_doc preflight', () => {
 
   test('scare quotes: a single quoted word fails; a quoted phrase does not', () => {
     const bad = fixture('sq.md', clean().replace('board level', 'board "alignment" level'));
-    const r = preflight({ kind: 'resume', source: bad, outName: 'N', allowMissing: ['Advisicon'] }, { root, style });
+    const r = preflight({ kind: 'resume', source: bad, outName: 'N', allowMissing: ['Northwind Advisory'] }, { root, style });
     assert.equal(failing(r.checks, 'scare_quotes').result, 'fail');
     const curly = fixture('sq2.md', clean().replace('board level', 'board \u201Coverseeing\u201D level'));
-    assert.equal(failing(preflight({ kind: 'resume', source: curly, outName: 'N', allowMissing: ['Advisicon'] }, { root, style }).checks, 'scare_quotes').result, 'fail');
+    assert.equal(failing(preflight({ kind: 'resume', source: curly, outName: 'N', allowMissing: ['Northwind Advisory'] }, { root, style }).checks, 'scare_quotes').result, 'fail');
     const phrase = fixture('sq3.md', clean().replace('board level', 'board "two words" level'));
-    assert.equal(failing(preflight({ kind: 'resume', source: phrase, outName: 'N', allowMissing: ['Advisicon'] }, { root, style }).checks, 'scare_quotes').result, 'pass');
+    assert.equal(failing(preflight({ kind: 'resume', source: phrase, outName: 'N', allowMissing: ['Northwind Advisory'] }, { root, style }).checks, 'scare_quotes').result, 'pass');
   });
 
   test('buzzwords from config fail with the word named', () => {
     const src = fixture('bz.md', clean().replace('Took over', 'Spearheaded and leveraged'));
-    const c = failing(preflight({ kind: 'resume', source: src, outName: 'N', allowMissing: ['Advisicon'] }, { root, style }).checks, 'buzzwords');
+    const c = failing(preflight({ kind: 'resume', source: src, outName: 'N', allowMissing: ['Northwind Advisory'] }, { root, style }).checks, 'buzzwords');
     assert.equal(c.result, 'fail');
     assert.match(String(c.detail), /spearheaded/);
     assert.match(String(c.detail), /leveraged/);
@@ -116,7 +116,7 @@ describe('render_doc preflight', () => {
 
   test('problem-comparison reframe fails', () => {
     const src = fixture('pc.md', clean().replace('Technology executive', 'This is not a technology problem. It is a leadership problem. Technology executive'));
-    const c = failing(preflight({ kind: 'resume', source: src, outName: 'N', allowMissing: ['Advisicon'] }, { root, style }).checks, 'problem_comparison');
+    const c = failing(preflight({ kind: 'resume', source: src, outName: 'N', allowMissing: ['Northwind Advisory'] }, { root, style }).checks, 'problem_comparison');
     assert.equal(c.result, 'fail');
     assert.deepEqual(c.lines, [8]);
   });
@@ -126,13 +126,13 @@ describe('render_doc preflight', () => {
       ['name-hash', (t) => t.replace(/^Jordan Reyes/, '# Jordan Reyes'), /name line/],
       ['summary-heading', (t) => t.replace('Technology executive', '## Summary\nTechnology executive'), /block 1/],
       ['dash-bullets', (t) => t.replace('· Took over', '- Took over'), /middle dot/],
-      ['title-comma', (t) => t.replace('Chief Technology Officer\nImmunotec', 'Chief Technology Officer, Global\nImmunotec'), /commas in role titles/],
+      ['title-comma', (t) => t.replace('Chief Technology Officer\nVitalCore', 'Chief Technology Officer, Global\nVitalCore'), /commas in role titles/],
       ['table', (t) => t.replace('EXPERIENCE', 'EXPERIENCE\n| a | b |\n|---|---|'), /tables/],
       ['no-tagline-pipes', (t) => t.replace('Chief Technology Officer | AI & Digital Transformation | Global Commerce & Payments', 'Chief Technology Officer'), /tagline/],
     ];
     for (const [name, mutate, re] of cases) {
       const src = fixture(`st-${name}.md`, /** @type {(t: string) => string} */ (mutate)(clean()));
-      const c = failing(preflight({ kind: 'resume', source: src, outName: 'N', allowMissing: ['Advisicon'] }, { root, style }).checks, 'resume_structure');
+      const c = failing(preflight({ kind: 'resume', source: src, outName: 'N', allowMissing: ['Northwind Advisory'] }, { root, style }).checks, 'resume_structure');
       assert.equal(c.result, 'fail', name);
       assert.match(String(c.detail), re, name);
       assert.ok(c.lines.length > 0, name);
@@ -141,19 +141,19 @@ describe('render_doc preflight', () => {
 
   test('PMP wording: Lapsed or a variant fails; exact string passes; N/A when absent', () => {
     const lapsed = fixture('pmp1.md', clean().replace('PMP (Expired 2017), Project Management Institute', 'PMP (Lapsed 2017), Project Management Institute'));
-    assert.equal(failing(preflight({ kind: 'resume', source: lapsed, outName: 'N', allowMissing: ['Advisicon'] }, { root, style }).checks, 'pmp_wording').result, 'fail');
+    assert.equal(failing(preflight({ kind: 'resume', source: lapsed, outName: 'N', allowMissing: ['Northwind Advisory'] }, { root, style }).checks, 'pmp_wording').result, 'fail');
     const variant = fixture('pmp2.md', clean().replace('PMP (Expired 2017), Project Management Institute', 'PMP, Project Management Institute (expired)'));
-    assert.equal(failing(preflight({ kind: 'resume', source: variant, outName: 'N', allowMissing: ['Advisicon'] }, { root, style }).checks, 'pmp_wording').result, 'fail');
+    assert.equal(failing(preflight({ kind: 'resume', source: variant, outName: 'N', allowMissing: ['Northwind Advisory'] }, { root, style }).checks, 'pmp_wording').result, 'fail');
     const none = fixture('pmp3.md', 'Hello\nno cert here\n');
     assert.equal(failing(preflight({ kind: 'cheatsheet', source: none }, { root, style }).checks, 'pmp_wording').result, 'not-applicable');
   });
 
   test('Jenkon title: comma form fails; PMO form fails; correct passes', () => {
     const comma = fixture('jk1.md', clean().replace('Director of Program Management\nJenkon', 'Director, Program Management Office\nJenkon'));
-    const c = failing(preflight({ kind: 'resume', source: comma, outName: 'N', allowMissing: ['Advisicon'] }, { root, style }).checks, 'jenkon_title');
+    const c = failing(preflight({ kind: 'resume', source: comma, outName: 'N', allowMissing: ['Northwind Advisory'] }, { root, style }).checks, 'jenkon_title');
     assert.equal(c.result, 'fail');
     const pmo = fixture('jk2.md', clean().replace('Director of Program Management\nJenkon', 'Director of PMO\nJenkon'));
-    assert.equal(failing(preflight({ kind: 'resume', source: pmo, outName: 'N', allowMissing: ['Advisicon'] }, { root, style }).checks, 'jenkon_title').result, 'fail');
+    assert.equal(failing(preflight({ kind: 'resume', source: pmo, outName: 'N', allowMissing: ['Northwind Advisory'] }, { root, style }).checks, 'jenkon_title').result, 'fail');
   });
 
   test('output naming: outName required for outward kinds; datestamps refused; cheatsheet may default', () => {
@@ -188,7 +188,7 @@ describe('render_doc preflight', () => {
 describe('render_doc rendering', () => {
   test('checkOnly returns checks without touching the converter', async () => {
     let called = 0;
-    const r = await renderDoc({ kind: 'resume', source: 'fx/clean.md', outName: 'Jordan Reyes - CTO', checkOnly: true, allowMissing: ['Advisicon'] }, { root, style, execFile: /** @type {any} */ (async () => { called++; }) });
+    const r = await renderDoc({ kind: 'resume', source: 'fx/clean.md', outName: 'Jordan Reyes - CTO', checkOnly: true, allowMissing: ['Northwind Advisory'] }, { root, style, execFile: /** @type {any} */ (async () => { called++; }) });
     assert.equal(r.ok, true);
     assert.equal(called, 0);
     assert.equal(r.output_path, undefined);
@@ -210,7 +210,7 @@ describe('render_doc rendering', () => {
       fs.writeFileSync(args[2], Buffer.alloc(1234));
       return { stdout: '', stderr: '' };
     };
-    const r = await renderDoc({ kind: 'resume', source: 'fx/clean.md', outName: 'Jordan Reyes - CTO', allowMissing: ['Advisicon'] }, { root, style, execFile: /** @type {any} */ (exec) });
+    const r = await renderDoc({ kind: 'resume', source: 'fx/clean.md', outName: 'Jordan Reyes - CTO', allowMissing: ['Northwind Advisory'] }, { root, style, execFile: /** @type {any} */ (exec) });
     assert.equal(r.ok, true, JSON.stringify(r));
     assert.equal(r.bytes, 1234);
     assert.equal(r.output_path, path.join('output', 'resumes', 'Jordan Reyes - CTO.docx'));
@@ -220,9 +220,9 @@ describe('render_doc rendering', () => {
     assert.ok(calls[0].args[0].endsWith('md_to_docx.py'));
     assert.ok(path.isAbsolute(calls[0].args[1]) && path.isAbsolute(calls[0].args[2]));
     // Second render without force refuses to overwrite.
-    const again = await renderDoc({ kind: 'resume', source: 'fx/clean.md', outName: 'Jordan Reyes - CTO', allowMissing: ['Advisicon'] }, { root, style, execFile: /** @type {any} */ (exec) });
+    const again = await renderDoc({ kind: 'resume', source: 'fx/clean.md', outName: 'Jordan Reyes - CTO', allowMissing: ['Northwind Advisory'] }, { root, style, execFile: /** @type {any} */ (exec) });
     assert.equal(again.code, 'EXISTS');
-    const forced = await renderDoc({ kind: 'resume', source: 'fx/clean.md', outName: 'Jordan Reyes - CTO', allowMissing: ['Advisicon'], force: true }, { root, style, execFile: /** @type {any} */ (exec) });
+    const forced = await renderDoc({ kind: 'resume', source: 'fx/clean.md', outName: 'Jordan Reyes - CTO', allowMissing: ['Northwind Advisory'], force: true }, { root, style, execFile: /** @type {any} */ (exec) });
     assert.equal(forced.ok, true);
   });
 

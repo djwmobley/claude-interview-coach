@@ -16,7 +16,7 @@ export const schema = {
   listing_id: z.number().int().positive().optional(),
   due_at: z.string().max(30).optional().describe('ISO date or datetime'),
   channel: z.enum(CHANNELS).optional(),
-  action_text: z.string().max(400).optional().describe('what to do, e.g. "phone 469-404-8664 if still silent"'),
+  action_text: z.string().max(400).optional().describe('what to do, e.g. "phone 555-010-4242 if still silent"'),
   notify: z.array(z.enum(NOTIFY)).max(2).optional().describe("default ['email']; add 'calendar' for a 30-min event with a 60-min popup"),
   snoozed_until: z.string().max(30).optional(),
   status: z.array(z.enum(STATUSES)).max(4).optional().describe('list filter; default open+snoozed'),

@@ -22,8 +22,22 @@
 -- from createManualListing, applyMark, a scan-run status change, an earlier run of this very migration,
 -- or anything else -- is never eligible for a synthetic backfill again, no matter how many times this
 -- file is applied.
+--
+-- That event-derived guard is still not sufficient by itself, though: it is derived from the CURRENT
+-- contents of ic_job_events, not from whether this migration has ever actually run. If a listing's
+-- status event (synthetic or real) is later deleted for any reason, the row once again has "no status
+-- event of any kind" and would re-qualify for a fresh synthetic backfill the next time
+-- `node bin/migrate.js apply` runs, even though the backfill already happened once. A one-time migration
+-- must not re-open its own eligibility just because someone deleted downstream data. The ic_job_migrations
+-- ledger below records that this migration's backfill logic has already executed, independent of what
+-- happens afterward to the rows it touched, so a later deletion of events can never re-trigger it.
 
 BEGIN;
+
+CREATE TABLE IF NOT EXISTS ic_job_migrations (
+  name text PRIMARY KEY,
+  applied_at timestamptz NOT NULL DEFAULT now()
+);
 
 INSERT INTO ic_job_events (listing_id, kind, from_status, to_status, note, actor, at)
 SELECT id, 'status', NULL, status, 'backfilled from marked_at by migration 010', 'migration', marked_at
@@ -34,6 +48,12 @@ WHERE status IS NOT NULL
   AND NOT EXISTS (
     SELECT 1 FROM ic_job_events e
     WHERE e.listing_id = ic_job_listings.id AND e.kind = 'status'
+  )
+  AND NOT EXISTS (
+    SELECT 1 FROM ic_job_migrations WHERE name = '010_status_event_backfill'
   );
+
+INSERT INTO ic_job_migrations (name) VALUES ('010_status_event_backfill')
+ON CONFLICT (name) DO NOTHING;
 
 COMMIT;

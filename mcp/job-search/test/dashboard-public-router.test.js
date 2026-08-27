@@ -48,7 +48,7 @@ describe('parseHash(): section 3 total classification', () => {
   });
 
   test(':norm is opaque but must be non-empty post-decode and must not contain a raw or %2F-encoded slash', () => {
-    assert.deepEqual(parseHash('#/companies/advisicon'), { kind: 'ok', route: 'company-detail', params: { norm: 'advisicon' } });
+    assert.deepEqual(parseHash('#/companies/northwind'), { kind: 'ok', route: 'company-detail', params: { norm: 'northwind' } });
     // A trailing slash is dropped by rule 1's empty-segment filter before shape matching runs, so
     // "#/companies/" is a 1-segment hash that matches the static "companies" list route, not an empty
     // :norm on the detail route -- this is rule 1's own stated effect ("defeats traversal... must not be
