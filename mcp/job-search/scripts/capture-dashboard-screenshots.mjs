@@ -239,6 +239,66 @@ async function main() {
       process.stdout.write(`  no visible focus ring on: ${noRing.map((s) => s.tag).join(', ')}\n`);
       consoleErrors.push({ viewport: '1440x960', route: 'home (keyboard walk)', text: `${noRing.length} focusable control(s) had no visible focus ring: ${noRing.map((s) => s.tag).join(', ')}` });
     }
+
+    // Row-level / detail-level kbaction interaction pass (independent review comment 5440498360,
+    // blocking finding 1 and its own stated blind spot: the original screenshot pass never actually
+    // exercised j/k/Enter/digit/quick-stage shortcuts, only a Tab-focus walk on Home). Real key presses
+    // via Playwright, real DOM/CSS class assertions, real API calls to confirm server-side effect.
+    const kbCheck = { failures: [] };
+    const interactPage = await browser.newPage({ viewport: { width: 1440, height: 960 } });
+    interactPage.on('pageerror', (err) => kbCheck.failures.push(`pageerror during kbaction pass: ${err.message}`));
+
+    // 1) Jobs: bare j cursors the first row (visible .row-cursor class); Enter opens it (hash changes to
+    // #/jobs/<id>).
+    await interactPage.goto(`http://127.0.0.1:${port}/#/jobs`, { waitUntil: 'networkidle' });
+    await interactPage.waitForTimeout(300);
+    await interactPage.keyboard.press('j');
+    await interactPage.waitForTimeout(100);
+    const cursoredAfterJ = await interactPage.evaluate(() => Boolean(document.querySelector('.job-row.row-cursor')));
+    if (!cursoredAfterJ) kbCheck.failures.push('Jobs: pressing j did not add .row-cursor to any row');
+    await interactPage.keyboard.press('Enter');
+    await interactPage.waitForTimeout(300);
+    const hashAfterEnter = await interactPage.evaluate(() => location.hash);
+    if (!/^#\/jobs\/\d+$/.test(hashAfterEnter)) kbCheck.failures.push(`Jobs: pressing Enter after j did not navigate to a job-detail hash (got "${hashAfterEnter}")`);
+
+    // 2) Job detail: digit 3 sets stage to Shortlisted (button gains stage-btn--active + correct label);
+    // n focuses the notes textarea.
+    await interactPage.goto(`http://127.0.0.1:${port}/#/jobs/${ids.listingId}`, { waitUntil: 'networkidle' });
+    await interactPage.waitForTimeout(300);
+    await interactPage.keyboard.press('3');
+    await interactPage.waitForTimeout(400);
+    const shortlistedActive = await interactPage.evaluate(() => {
+      const btn = document.querySelector('.stage-btn--active .stage-btn__label');
+      return btn ? btn.textContent : null;
+    });
+    if (shortlistedActive !== 'Shortlisted') kbCheck.failures.push(`Job detail: pressing 3 did not activate the Shortlisted stage button (active label was "${shortlistedActive}")`);
+    await interactPage.keyboard.press('n');
+    await interactPage.waitForTimeout(100);
+    const notesFocused = await interactPage.evaluate(() => document.activeElement?.classList.contains('notes-textarea') ?? false);
+    if (!notesFocused) kbCheck.failures.push('Job detail: pressing n did not focus the notes textarea');
+
+    // 3) Pipeline: j cursors the first active-group row; m quick-sets it to Maybe, surfacing the undo toast.
+    await interactPage.goto(`http://127.0.0.1:${port}/#/pipeline`, { waitUntil: 'networkidle' });
+    await interactPage.waitForTimeout(300);
+    await interactPage.keyboard.press('j');
+    await interactPage.waitForTimeout(100);
+    const pipelineCursored = await interactPage.evaluate(() => Boolean(document.querySelector('.pipeline-active-groups .row-cursor')));
+    if (!pipelineCursored) kbCheck.failures.push('Pipeline: pressing j did not add .row-cursor to any active-group row');
+    else {
+      await interactPage.keyboard.press('m');
+      await interactPage.waitForTimeout(400);
+      const undoToastShown = await interactPage.evaluate(() => Boolean(document.querySelector('.toast--undo')));
+      if (!undoToastShown) kbCheck.failures.push('Pipeline: pressing m after j did not surface the undo toast (stage-set likely did not fire)');
+    }
+
+    await interactPage.close();
+    if (kbCheck.failures.length > 0) {
+      process.stdout.write(`\nkbaction interaction pass: ${kbCheck.failures.length} failure(s):\n`);
+      for (const f of kbCheck.failures) process.stdout.write(`  ${f}\n`);
+      for (const f of kbCheck.failures) consoleErrors.push({ viewport: '1440x960', route: 'kbaction interaction pass', text: f });
+    } else {
+      process.stdout.write('\nkbaction interaction pass: all row-nav/row-open/digit/notes-focus/row-stage checks passed.\n');
+    }
   } finally {
     await browser.close();
     await app.close();

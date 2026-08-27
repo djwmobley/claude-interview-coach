@@ -518,10 +518,12 @@ never intercepted, so browser shortcuts always pass through):
 |---|---|
 | `g` then `h` / `j` / `p` / `f` / `r` | Go to Home / Jobs / Pipeline / Follow-ups / Review (the `g` prefix arms a 600 ms window) |
 | `/` | Focus the top bar search field |
-| `j` / `k` (no `g` prefix) | Move the focused row down / up in a list view |
-| `Enter` | Open the focused row |
+| `j` / `k` (no `g` prefix) | Move a row cursor down / up, on Jobs, Pipeline, Follow-ups, Review, and Runs |
+| `Enter` | Open the cursored row (Jobs/Pipeline: Job detail; Follow-ups/Review: the linked listing's Job detail, when one exists; Runs: Run detail) |
+| `m` / `s` / `a` / `p` / `x` | Quick stage-set the cursored row to Maybe / Shortlisted / Applied / Passed / Skip, on Jobs and Pipeline only (Follow-ups/Review/Runs rows have no pipeline stage) |
 | `1`-`0` (Job detail) | Set stage: New, Maybe, Shortlisted, Applied, Interviewing, Offer, Accepted, Passed, Lost, Skip, in that order. `Dead` and `Review` are reachable only through the "More stages" control, never a bare digit |
-| `n` | Focus the notes field (Job detail) |
+| `n` (Job detail) | Focus the notes field |
+| `f` (Job detail, no `g` prefix) | Quick-create a follow-up tied to this listing (prompts for contact and days until due) |
 | `?` | Toggle the keyboard shortcuts overlay; every key except `Escape`/`?` is swallowed while it is open |
 | `Escape` | Close the overlay, or blur the focused field |
 
@@ -557,12 +559,21 @@ analysis and `node:test` unit coverage cannot substitute for these):
   only by code review and manual reasoning about the state machine, not by an
   automated browser test that forces a real dropped connection or a real
   mid-debounce route change.
-- The "row down/up" `j`/`k` keyboard action and the `m`/`s`/`a`/`p`/`x` row-level
-  stage shortcuts are wired into the shared keyboard reducer but not into every
-  list page's DOM focus handling; the plan names these keys without specifying
+- The plan names `m`/`s`/`a`/`p`/`x` as row-level shortcuts without specifying
   what `p`/`a`/`x` individually do beyond "row down/up" (see the judgment call
-  recorded in `lib/shortcuts.js`), and only Job detail's digit shortcuts are fully
-  wired end to end.
+  recorded in `lib/shortcuts.js`): they are wired as quick stage-set actions on
+  Jobs and Pipeline (the only two list pages with a pipeline stage), and marked
+  not-applicable everywhere else via each page's exported `KEYBOARD_ACTIONS`
+  manifest (see `test/dashboard-public-kbaction-wiring.test.js` for the totality
+  check across those manifests, and `scripts/capture-dashboard-screenshots.mjs`'s
+  kbaction interaction pass for a real, driven-by-Playwright confirmation that
+  `j` cursors a row, `Enter` opens it, a Job-detail digit sets the matching
+  stage, `n` focuses notes, and `m` quick-sets a Pipeline row's stage). Not
+  covered by either: `k` (up), `s`/`a`/`p`/`x` individually beyond `m`, the
+  Follow-ups/Review "open the linked listing" path, and the Runs row-open path;
+  these share the same code path as the ones that were checked (`lib/list-
+  cursor.js`'s single `move()`/`current()` implementation) but were not each
+  individually driven through Playwright.
 - No automated accessibility audit (screen reader pass, full color-blindness
   simulation) was run; component states follow the design reconciliation's
   written rules (focus rings, disabled tooltips, loading skeletons) but were not
