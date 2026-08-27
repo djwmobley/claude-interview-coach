@@ -81,7 +81,11 @@ export function register(router, deps, streamHub) {
     const [events, documents, followups, openReview, duplicates, alsoPosted, runSightings] = await deps.withClient((c) => Promise.all([
       listEvents(c, id, { limit: 50 }),
       listDocuments(c, id),
-      listFollowups(c, { limit: 25 }).then((r2) => r2.rows.filter((f) => f.listing_id === id)),
+      // Scoped in SQL via listingId (not an in-memory filter after a system-wide LIMIT) so a listing's own
+      // follow-ups are never dropped just because other listings have more open/snoozed rows due sooner.
+      // Status stays open+snoozed, matching this route's prior default; done/cancelled are intentionally
+      // excluded here (see PR body).
+      listFollowups(c, { listingId: id, limit: 100 }).then((r2) => r2.rows),
       c.query('SELECT id, reason, matches, created_at FROM ic_job_review_queue WHERE candidate_id = $1 AND resolved_at IS NULL', [id]),
       c.query('SELECT id, title, company, source, status FROM ic_job_listings WHERE duplicate_of = $1', [id]),
       c.query('SELECT id, source, location FROM ic_job_listings WHERE duplicate_of = $1 OR repost_of = $1', [id]),

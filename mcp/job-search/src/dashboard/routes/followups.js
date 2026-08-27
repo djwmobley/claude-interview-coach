@@ -21,9 +21,11 @@ export function register(router, deps, streamHub) {
     const q = ctx.query;
     const status = q.status ? String(q.status).split(',').map((s) => s.trim()).filter(Boolean) : undefined;
     const listingId = q.listing_id ? Number(q.listing_id) : undefined;
-    const result = await deps.withClient((c) => listFollowups(c, { status, limit: 25, offset: q.offset ? Number(q.offset) : 0 }));
+    // listingId is pushed into the SQL WHERE clause (not an in-memory filter after LIMIT 25), so a
+    // listing's own follow-ups are never dropped just because more than 25 other follow-ups are due
+    // sooner system-wide. `total` now reflects the listing-scoped count too, matching `rows`.
+    const result = await deps.withClient((c) => listFollowups(c, { status, listingId, limit: listingId ? 100 : 25, offset: q.offset ? Number(q.offset) : 0 }));
     let rows = result.rows;
-    if (listingId) rows = rows.filter((r) => r.listing_id === listingId);
     if (q.from) rows = rows.filter((r) => new Date(r.due_at).getTime() >= new Date(String(q.from)).getTime());
     if (q.to) rows = rows.filter((r) => new Date(r.due_at).getTime() <= new Date(String(q.to)).getTime());
     sendJson(ctx.res, 200, { ok: true, total: result.total, rows });
