@@ -11,9 +11,8 @@ import { selectDue, unsnoozeDue, stampReminded, formatFollowup } from './followu
 import { googleHttp, gmailSend, buildRfc2822, buildRfc2822Multipart, readTokenFile, tokenInfo } from './google.js';
 import { errFields, JobSearchError } from './errors.js';
 import { loadConfig, DEFAULT_REPORT_HOME_MIN_PRESCORE } from './config.js';
-import { normalizeLocation } from './normalize.js';
 import { buildRegistry } from './urlguard.js';
-import { buildScanReport, buildReportSubject, renderReportText, renderReportHtml, renderReportMarkdown, writeReportFile, stampReportSent, escapeHtml } from './report.js';
+import { buildScanReport, buildReportSubject, renderReportText, renderReportHtml, renderReportMarkdown, writeReportFile, stampReportSent, escapeHtml, homeLocationNormsFor } from './report.js';
 
 /**
  * One line per item, plain text.
@@ -52,16 +51,8 @@ export function buildDigestHtml(rows, now) {
   return parts.join('\n');
 }
 
-/**
- * Home locations (spec R1.2c "Houston / Texas") for a search profile, as location_norm values.
- * @param {import('pg').ClientBase} client
- * @param {string} profileName
- */
-async function homeLocationNormsFor(client, profileName) {
-  const r = await client.query('SELECT locations FROM ic_search_profiles WHERE name = $1', [profileName]);
-  const locations = /** @type {string[]} */ (r.rows[0]?.locations ?? []);
-  return [...new Set(locations.map((l) => normalizeLocation(l).location_norm).filter((n) => n && n !== 'absent'))];
-}
+// homeLocationNormsFor moved to report.js (dashboard PR 1, extracted for the dashboard's own report
+// routes); imported above.
 
 /**
  * @param {{
@@ -126,7 +117,7 @@ export async function runRemind(opts) {
   let reportFile = null;
   if (!opts.skipReportFile) {
     try {
-      reportFile = writeReportFile(markdown, report.dayKey, opts.writeReportFileRoot ? { root: opts.writeReportFileRoot } : {});
+      reportFile = writeReportFile(markdown, report.dayKey, { ...(opts.writeReportFileRoot ? { root: opts.writeReportFileRoot } : {}), html: reportHtml });
     } catch (err) {
       say({ evt: 'remind_report_file_failed', ...errFields(err) });
     }
