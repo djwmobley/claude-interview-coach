@@ -12,9 +12,8 @@ import { getEnv, loadConfig } from './core/config.js';
 import { withClient, closePool } from './core/db.js';
 import { log } from './core/logger.js';
 import { errFields } from './core/errors.js';
-import { ensureAuxSchema } from './core/schema.js';
-import { seedExecDefault } from './core/profile-seed.js';
-import { googleHttp, calendarInsertEvent, calendarDeleteEvent } from './core/google.js';
+import { makeCalendarProvider } from './core/calendar-provider.js';
+import { startupDb } from './core/startup.js';
 import { wrapHandler, defaultDeps } from './tools/_shared.js';
 import { fetchDetailForRow } from './core/scan-run.js';
 import { tool as searchJobs } from './tools/search_jobs.js';
@@ -32,42 +31,6 @@ export const SERVER_INFO = Object.freeze({ name: 'job-search', version: '0.1.0' 
 
 /** Registration order is the tools/list order. */
 export const TOOLS = Object.freeze([searchJobs, queryJobs, getJob, markJobs, profiles, scans, review, renderDoc, followups, scanReport]);
-
-/**
- * Lazy calendar deps: token loaded on first use, access token cached until
- * shortly before expiry. Returns null (with a logged warning) when the token
- * file is missing or lacks the calendar scope, so followups still work.
- * @param {import('./core/config.js').Env} env
- */
-export function makeCalendarProvider(env) {
-  /** @type {{ deps: import('./core/google.js').HttpDeps, until: number }|null} */
-  let cached = null;
-  return async () => {
-    const now = Date.now();
-    if (cached && cached.until > now) return wrap(cached.deps);
-    if (!env.GOOGLE_TOKEN_FILE) {
-      log.warn({ evt: 'google_token_unavailable', err_code: 'VALIDATION', err_message: 'GOOGLE_TOKEN_FILE is not set; add it to mcp/job-search/.env' });
-      return null;
-    }
-    try {
-      const g = await googleHttp({ tokenFile: env.GOOGLE_TOKEN_FILE, need: { calendar: true } });
-      const exp = g.expiry ? Date.parse(g.expiry) : now + 30 * 60000;
-      cached = { deps: g.deps, until: Math.min(exp - 60000, now + 50 * 60000) };
-      log.info({ evt: 'google_token_ok', calendar_ok: g.info.calendar_ok, expiry: g.expiry });
-      return wrap(g.deps);
-    } catch (err) {
-      log.warn({ evt: 'google_token_unavailable', ...errFields(err) });
-      return null;
-    }
-  };
-  /** @param {import('./core/google.js').HttpDeps} deps */
-  function wrap(deps) {
-    return {
-      insertEvent: (/** @type {any} */ ev) => calendarInsertEvent(deps, ev),
-      deleteEvent: (/** @type {string} */ id) => calendarDeleteEvent(deps, id),
-    };
-  }
-}
 
 /**
  * Build the McpServer with all nine tools registered.
@@ -91,18 +54,10 @@ export function buildServer(overrides = {}) {
   return { server, deps };
 }
 
-/** Best-effort startup DB work: aux schema, profile seed. DB down is logged, not fatal. */
-export async function startupDb() {
-  try {
-    await withClient(async (c) => {
-      const applied = await ensureAuxSchema(c);
-      const seed = await seedExecDefault(c);
-      log.info({ evt: 'startup_db', aux_applied: applied.length, profile_seeded: seed.seeded, profile_from: seed.from });
-    });
-  } catch (err) {
-    log.warn({ evt: 'startup_db_failed', ...errFields(err) });
-  }
-}
+// startupDb and makeCalendarProvider live in ./core/startup.js and ./core/calendar-provider.js
+// (dashboard PR 1: bin/dashboard.js reuses both without importing this file or
+// ./core/stdout-hygiene.js); re-exported here so existing importers of server.js keep working unchanged.
+export { startupDb, makeCalendarProvider };
 
 export async function main() {
   const { server } = buildServer();

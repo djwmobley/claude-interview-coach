@@ -23,7 +23,17 @@ export const SCOPE_CALENDAR_FULL = 'https://www.googleapis.com/auth/calendar';
 
 export const GMAIL_SEND_URL = 'https://gmail.googleapis.com/gmail/v1/users/me/messages/send';
 export const GMAIL_MESSAGES_URL = 'https://gmail.googleapis.com/gmail/v1/users/me/messages';
-export const CALENDAR_EVENTS_URL = 'https://www.googleapis.com/calendar/v3/calendars/primary/events';
+
+/** Base for every calendar events endpoint; a specific calendar's events URL is built from this. */
+export const CALENDAR_BASE_URL = 'https://www.googleapis.com/calendar/v3/calendars';
+
+/** @param {string} calendarId */
+export function calendarEventsUrl(calendarId) {
+  return `${CALENDAR_BASE_URL}/${encodeURIComponent(calendarId)}/events`;
+}
+
+/** Kept for existing callers (calendarInsertEvent/calendarDeleteEvent default to the primary calendar). */
+export const CALENDAR_EVENTS_URL = calendarEventsUrl('primary');
 
 /**
  * @typedef {Object} TokenFile
@@ -283,6 +293,46 @@ export async function calendarInsertEvent(deps, ev) {
   await requireOk(res, 'calendar insert');
   const j = await res.json();
   return String(j.id ?? '');
+}
+
+/**
+ * List events on a calendar within a window, paging through `nextPageToken` until either the API stops
+ * returning one or `maxResults` events have been collected (spec: dashboard 14-day agenda).
+ * `singleEvents=true&orderBy=startTime` so a recurring event expands into its individual instances in
+ * chronological order rather than one master event with no date.
+ * @param {HttpDeps} deps
+ * @param {{ timeMin: string, timeMax: string, maxResults?: number, calendarId?: string }} opts
+ * @returns {Promise<Array<Record<string, unknown>>>}
+ */
+export async function calendarListEvents(deps, opts) {
+  const calendarId = opts.calendarId ?? 'primary';
+  const maxResults = opts.maxResults ?? 250;
+  const url = calendarEventsUrl(calendarId);
+  /** @type {Array<Record<string, unknown>>} */
+  const items = [];
+  /** @type {string|undefined} */
+  let pageToken;
+  do {
+    const params = new URLSearchParams({
+      timeMin: opts.timeMin,
+      timeMax: opts.timeMax,
+      singleEvents: 'true',
+      orderBy: 'startTime',
+      maxResults: String(Math.max(1, Math.min(250, maxResults - items.length))),
+    });
+    if (pageToken) params.set('pageToken', pageToken);
+    const res = await deps.fetch(`${url}?${params.toString()}`, {
+      headers: { Authorization: `Bearer ${deps.accessToken}` },
+    });
+    await requireOk(res, 'calendar list');
+    const j = await res.json();
+    for (const item of Array.isArray(j.items) ? j.items : []) {
+      items.push(item);
+      if (items.length >= maxResults) break;
+    }
+    pageToken = items.length < maxResults ? j.nextPageToken : undefined;
+  } while (pageToken);
+  return items;
 }
 
 /**

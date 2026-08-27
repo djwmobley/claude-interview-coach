@@ -14,7 +14,7 @@ import { pgConnectionConfig } from '../src/core/config.js';
 import { ensureAuxSchema } from '../src/core/schema.js';
 import { createFollowup, snoozeFollowup, stampReminded } from '../src/core/followups.js';
 import { runRemind, buildDigest } from '../src/core/remind.js';
-import { readTokenFile, tokenInfo, assertScopes, buildRfc2822, base64url, gmailSend, calendarInsertEvent, calendarDeleteEvent, expiryMs, SCOPE_GMAIL_SEND, SCOPE_GMAIL_READONLY, SCOPE_GMAIL_MODIFY, GMAIL_SEND_URL } from '../src/core/google.js';
+import { readTokenFile, tokenInfo, assertScopes, buildRfc2822, base64url, gmailSend, calendarInsertEvent, calendarDeleteEvent, calendarListEvents, expiryMs, SCOPE_GMAIL_SEND, SCOPE_GMAIL_READONLY, SCOPE_GMAIL_MODIFY, GMAIL_SEND_URL } from '../src/core/google.js';
 
 const MARK = `ZZ-TEST-RM-${process.pid}`;
 /** @type {pg.Client} */
@@ -271,5 +271,46 @@ describe('google.js helpers (synthetic token file, fake values)', () => {
     await assert.rejects(gmailSend({ fetch: /** @type {any} */ (bad.f), accessToken: 'T' }, 'raw'), /HTTP 403/);
     const gone = fetchStub(404);
     await calendarDeleteEvent({ fetch: /** @type {any} */ (gone.f), accessToken: 'T' }, 'e1');
+  });
+
+  test('calendarListEvents pages through nextPageToken and stops at maxResults (dashboard PR 1)', async () => {
+    /** @type {any[]} */
+    const calls = [];
+    const pages = [
+      { items: [{ id: 'a' }, { id: 'b' }], nextPageToken: 'p2' },
+      { items: [{ id: 'c' }, { id: 'd' }], nextPageToken: 'p3' },
+      { items: [{ id: 'e' }], nextPageToken: undefined },
+    ];
+    const f = async (/** @type {string} */ url) => {
+      calls.push(url);
+      return { ok: true, status: 200, json: async () => pages[calls.length - 1] };
+    };
+    const items = await calendarListEvents({ fetch: /** @type {any} */ (f), accessToken: 'T' }, { timeMin: '2026-08-26T00:00:00Z', timeMax: '2026-09-09T00:00:00Z' });
+    assert.equal(items.length, 5);
+    assert.deepEqual(items.map((i) => /** @type {any} */ (i).id), ['a', 'b', 'c', 'd', 'e']);
+    assert.equal(calls.length, 3);
+    assert.ok(calls[0].includes('singleEvents=true') && calls[0].includes('orderBy=startTime'));
+    assert.ok(!calls[0].includes('pageToken'));
+    assert.ok(calls[1].includes('pageToken=p2'));
+    assert.ok(calls[2].includes('pageToken=p3'));
+
+    // maxResults stops paging early even though the server would still return a nextPageToken.
+    const calls2 = /** @type {string[]} */ ([]);
+    const f2 = async (/** @type {string} */ url) => {
+      calls2.push(url);
+      return { ok: true, status: 200, json: async () => ({ items: [{ id: 'x' }, { id: 'y' }, { id: 'z' }], nextPageToken: 'more' }) };
+    };
+    const capped = await calendarListEvents({ fetch: /** @type {any} */ (f2), accessToken: 'T' }, { timeMin: 'a', timeMax: 'b', maxResults: 2 });
+    assert.equal(capped.length, 2);
+    assert.equal(calls2.length, 1, 'never fetches a second page once maxResults is already met');
+
+    // calendarId defaults to primary but is overridable and URL-encoded.
+    const calls3 = /** @type {string[]} */ ([]);
+    const f3 = async (/** @type {string} */ url) => {
+      calls3.push(url);
+      return { ok: true, status: 200, json: async () => ({ items: [] }) };
+    };
+    await calendarListEvents({ fetch: /** @type {any} */ (f3), accessToken: 'T' }, { timeMin: 'a', timeMax: 'b', calendarId: 'work@example.com' });
+    assert.ok(calls3[0].startsWith('https://www.googleapis.com/calendar/v3/calendars/work%40example.com/events?'));
   });
 });
