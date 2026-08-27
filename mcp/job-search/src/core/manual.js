@@ -41,6 +41,12 @@ function slugify(s) {
  * @property {string|null} [via] recruiter/referral name; recorded on the 'created' event's note, never
  *   silently dropped even though there is no dedicated column for it.
  * @property {string} [profile] search profile to prescore against; default 'exec-default'.
+ * @property {string} [key] stable identifier for the external_id (dashboard PR 2's bin/seed-opportunities.js):
+ *   when given, external_id becomes `manual:<slugified key>` verbatim, with no random suffix, so a caller
+ *   that first looks up that exact external_id (as the seed script does) gets a deterministic id back.
+ *   Re-running the same entry never risks a second createManualListing call colliding with the unique
+ *   (source, external_id) index -- the caller is expected to check for an existing row by that id first
+ *   and call applyMark on it instead of calling this function again for the same key.
  */
 
 /**
@@ -70,8 +76,13 @@ export async function createManualListing(client, input, opts = {}) {
   // job-board URL dedups exactly like a scanned row from that board would. Only fabricate an id when the
   // URL was absent, unparseable, or residual.
   if (!rec.external_id) {
-    const slug = slugify(`${company}-${title}`) || 'entry';
-    rec.external_id = `manual:${slug}-${Math.random().toString(36).slice(2, 8)}`;
+    if (input.key) {
+      const slug = slugify(input.key) || 'entry';
+      rec.external_id = `manual:${slug}`;
+    } else {
+      const slug = slugify(`${company}-${title}`) || 'entry';
+      rec.external_id = `manual:${slug}-${Math.random().toString(36).slice(2, 8)}`;
+    }
   }
 
   const lookups = makePgLookups(client);

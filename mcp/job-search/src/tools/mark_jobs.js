@@ -14,7 +14,7 @@
  *     with reason propagation_conflict instead.
  */
 import { z } from 'zod';
-import { embedSafe, embeddingText } from '../core/embed.js';
+import { reembedRows } from '../core/reembed.js';
 import { enqueueReview } from '../core/upsert.js';
 import { JobSearchError } from '../core/errors.js';
 import { recordEvent } from '../core/events.js';
@@ -37,7 +37,10 @@ export const schema = {
 /**
  * Apply one mark inside the caller's transaction. Exported for tests.
  * @param {import('pg').ClientBase} c
- * @param {{ id: number, status?: string, fit_score?: number, notes?: string }} item
+ * @param {{ id: number, status?: string, fit_score?: number, notes?: string, statusNote?: string }} item
+ *   statusNote (dashboard PR 2's POST /listings/:id/status {status, note}): text recorded on the status
+ *   event itself, separate from the persistent `notes` column -- passing a status change annotation here
+ *   never also writes a `note` event, so a status change with a `note` still writes exactly one event.
  * @param {{ now: Date, explicit: boolean, propagatedFrom?: number, actor?: 'dashboard'|'mcp'|'cli'|'migration'|'seed', runId?: number|null }} ctx
  *   actor defaults to 'mcp' (dashboard PR 2 passes 'dashboard' for its own mutating requests).
  * @returns {Promise<{ id: number, applied: boolean, routed_to_review: boolean, resolved_queue: number[], reembed: boolean }>}
@@ -80,7 +83,7 @@ export async function applyMark(c, item, ctx) {
   // 'status' event, never one per intermediate branch above -- the propagation-conflict path above
   // returns before reaching here, so this and that path are mutually exclusive per call.
   if (item.status !== undefined && item.status !== row.status) {
-    await recordEvent(c, { listingId: item.id, kind: 'status', fromStatus: row.status ?? null, toStatus: item.status, actor, runId: ctx.runId ?? null });
+    await recordEvent(c, { listingId: item.id, kind: 'status', fromStatus: row.status ?? null, toStatus: item.status, note: item.statusNote ?? null, actor, runId: ctx.runId ?? null });
   }
   if (item.notes !== undefined && item.notes !== (row.notes ?? '')) {
     await recordEvent(c, { listingId: item.id, kind: 'note', note: item.notes, actor, runId: ctx.runId ?? null });
@@ -128,19 +131,7 @@ export const tool = {
     });
     // Re-embed rows whose notes changed (best effort; Ollama down leaves the old vector).
     const toEmbed = results.filter((r) => r.reembed).map((r) => r.id);
-    let unembedded = 0;
-    if (toEmbed.length) {
-      const rows = await deps.withClient((c) => c.query('SELECT id, title, company, notes FROM ic_job_listings WHERE id = ANY($1::int[])', [toEmbed]));
-      const texts = rows.rows.map((r) => embeddingText(r));
-      const e = await embedSafe(texts, { ollamaUrl: deps.env.OLLAMA_URL, model: deps.env.OLLAMA_MODEL, fetch: deps.fetch });
-      unembedded = e.unembedded;
-      await deps.withClient(async (c) => {
-        for (let i = 0; i < rows.rows.length; i++) {
-          if (e.literals[i]) await c.query('UPDATE ic_job_listings SET embedding = $2::vector WHERE id = $1', [rows.rows[i].id, e.literals[i]]);
-        }
-      });
-    }
-    const warnings = unembedded ? [`${unembedded} rows not re-embedded (embedding service unavailable)`] : [];
+    const { warnings } = await reembedRows(deps, toEmbed);
     return { ok: true, results, warnings };
   },
 };

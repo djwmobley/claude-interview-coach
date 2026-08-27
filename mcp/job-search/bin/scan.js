@@ -44,6 +44,7 @@ export function parseArgs(argv) {
     launchChrome: false,
     acceptConfigChange: false,
     /** @type {string} */ trigger: 'cli',
+    /** @type {string|undefined} */ runMarker: undefined,
     help: false,
   };
   for (let i = 0; i < argv.length; i++) {
@@ -64,12 +65,26 @@ export function parseArgs(argv) {
     } else if (a === '--launch-chrome') out.launchChrome = true;
     else if (a === '--accept-config-change') out.acceptConfigChange = true;
     else if (a === '--trigger') out.trigger = String(next() ?? 'cli');
+    else if (a === '--run-marker') out.runMarker = String(next() ?? '');
     else if (a === '--help' || a === '-h') out.help = true;
   }
   return out;
 }
 
-const USAGE = 'usage: node bin/scan.js --profile exec-default [--sources a,b] [--days N] [--max-pages N] [--min-prescore N] [--dry-run] [--trigger cli|dashboard] [--json [out]] [--launch-chrome] [--accept-config-change]';
+const USAGE = 'usage: node bin/scan.js --profile exec-default [--sources a,b] [--days N] [--max-pages N] [--min-prescore N] [--dry-run] [--trigger cli|dashboard] [--run-marker path] [--json [out]] [--launch-chrome] [--accept-config-change]';
+
+/**
+ * Write `{"run_id": N}` to `markerFile` (dashboard PR 2, pr2-spec-decisions.md "Scan runner"): the
+ * dashboard correlates its spawned child to a run by this file's appearance, never by timing. Written
+ * synchronously from runScan's onRunStarted hook, i.e. immediately after the ic_scan_runs INSERT
+ * returns and before any network activity for this run begins.
+ * @param {string} markerFile
+ * @param {number} runId
+ */
+export function writeRunMarker(markerFile, runId) {
+  fs.mkdirSync(path.dirname(markerFile), { recursive: true });
+  fs.writeFileSync(markerFile, JSON.stringify({ run_id: runId }));
+}
 
 /**
  * Fixture transport for offline CLI tests: exact-prefix map of URL -> file.
@@ -215,7 +230,13 @@ async function main() {
     result = await runScan(
       { profile: args.profile, sources: args.sources, postedWithinDays: args.days, maxPages: args.maxPages, minPrescore: args.minPrescore, dryRun: args.dryRun, wait: true },
       deps,
-      { trigger: /** @type {'cli'|'dashboard'} */ (args.trigger), signal: controller.signal, log, progress: (f) => log({ evt: 'progress', ...f }) },
+      {
+        trigger: /** @type {'cli'|'dashboard'} */ (args.trigger),
+        signal: controller.signal,
+        log,
+        progress: (f) => log({ evt: 'progress', ...f }),
+        ...(args.runMarker ? { onRunStarted: (runId) => writeRunMarker(/** @type {string} */ (args.runMarker), runId) } : {}),
+      },
     );
     if (result.status === 'ok') code = 0;
     else if (result.status === 'partial' || result.status === 'locked') code = 2;

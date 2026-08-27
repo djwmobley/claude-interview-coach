@@ -8,6 +8,7 @@ import { z } from 'zod';
 import { compactRows, capResponse, MAX_ROWS, MAX_RESPONSE_CHARS, untrustedRows, ROWS_WRAP_OVERHEAD_CHARS } from '../core/compact.js';
 import { normalizeLocation } from '../core/normalize.js';
 import { NOISE_CLASSES } from '../core/config.js';
+import { STATUS_GROUPS } from '../core/statuses.js';
 
 export const SORTS = Object.freeze(['posted', 'seen', 'prescore', 'fit', 'id']);
 export const OUTCOMES = Object.freeze(['new', 'update', 'cross_source_dup', 'repost', 'ambiguous']);
@@ -55,6 +56,12 @@ export function buildQuery(a) {
   }
   if (a.q && a.q.trim()) where.push(`(l.tsv @@ plainto_tsquery('english', ${add(a.q.trim())}) OR l.title ILIKE ${add('%' + a.q.trim() + '%')})`);
   if (a.status && a.status.length) where.push(`l.status = ANY(${add(a.status)}::text[])`);
+  // Dashboard-only extensions (PR 2, not part of the MCP tool's zod schema above): `untriaged` narrows to
+  // the NULL-status pseudo-group; `group` narrows to one named group from src/core/statuses.js. Both are
+  // plain fields on the args object the dashboard route builds itself, never routed through this tool's
+  // zod validation.
+  if (a.untriaged) where.push('l.status IS NULL');
+  else if (a.group && Object.prototype.hasOwnProperty.call(STATUS_GROUPS, a.group)) where.push(`l.status = ANY(${add(STATUS_GROUPS[a.group])}::text[])`);
   if (a.unscored) where.push('l.fit_score IS NULL');
   if (a.noiseClass && a.noiseClass.length) where.push(`l.noise_class = ANY(${add(a.noiseClass)}::text[])`);
   if (a.source && a.source.length) where.push(`l.source = ANY(${add(a.source)}::text[])`);

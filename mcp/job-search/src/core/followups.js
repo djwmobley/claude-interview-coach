@@ -206,6 +206,55 @@ export async function cancelFollowup(client, id, opts = {}) {
 }
 
 /**
+ * General field edit (dashboard PR 2, "New follow-up" and follow-up edit drawer). Refuses editing a
+ * `done`/`cancelled` row (create a new one instead, same rule createFollowup/completeFollowup already
+ * apply). Every field is optional; only the fields present in `patch` are validated and written, so a
+ * caller sending `{due_at}` alone never has to resend the rest of the row.
+ * @param {import('pg').ClientBase} client
+ * @param {number} id
+ * @param {{ contact?: string, org?: string|null, due_at?: string, channel?: string, action?: string, notify?: string[] }} patch
+ * @returns {Promise<{ row: FollowupRow, warnings: string[] }>}
+ */
+export async function updateFollowup(client, id, patch) {
+  const row = await getFollowup(client, id);
+  if (!row) throw new JobSearchError('NOT_FOUND', `followup ${id} not found`);
+  if (row.status === 'done' || row.status === 'cancelled') throw new JobSearchError('VALIDATION', `followup ${id} is ${row.status}; cannot edit`);
+  /** @type {string[]} */
+  const sets = [];
+  /** @type {unknown[]} */
+  const params = [id];
+  const set = (/** @type {string} */ col, /** @type {unknown} */ v) => {
+    params.push(v);
+    sets.push(`${col} = $${params.length}`);
+  };
+  if (patch.contact !== undefined) {
+    const c = String(patch.contact).trim();
+    if (!c) throw new JobSearchError('VALIDATION', 'contact cannot be empty');
+    set('contact', c);
+  }
+  if (patch.org !== undefined) set('org', patch.org ? String(patch.org).trim() : null);
+  if (patch.due_at !== undefined) set('due_at', parseIsoDate(patch.due_at, 'due_at'));
+  if (patch.channel !== undefined) {
+    if (!CHANNELS.includes(patch.channel)) throw new JobSearchError('VALIDATION', `channel must be one of ${CHANNELS.join(', ')}`);
+    set('channel', patch.channel);
+  }
+  if (patch.action !== undefined) {
+    const a = String(patch.action).trim();
+    if (!a) throw new JobSearchError('VALIDATION', 'action_text cannot be empty');
+    set('action', a);
+  }
+  if (patch.notify !== undefined) {
+    const notify = [...new Set(patch.notify)];
+    for (const n of notify) if (!NOTIFY.includes(n)) throw new JobSearchError('VALIDATION', `notify values must be one of ${NOTIFY.join(', ')}`);
+    set('notify', notify);
+  }
+  if (sets.length === 0) return { row, warnings: [] };
+  sets.push('updated_at = now()');
+  const r = await client.query(`UPDATE ic_followups SET ${sets.join(', ')} WHERE id = $1 RETURNING ${COLS}`, params);
+  return { row: r.rows[0], warnings: [] };
+}
+
+/**
  * @param {import('pg').ClientBase} client
  * @param {number} id
  * @param {string} snoozedUntil ISO

@@ -81,6 +81,10 @@ export const USER_AGENT = 'job-search-mcp/0.1 (interview-coach; read-only scanne
  * @property {(fields: Record<string, string|number|boolean|null>) => void} [log]
  * @property {AbortSignal} [signal] external cancel (SIGINT)
  * @property {Date} [now]
+ * @property {(runId: number) => void} [onRunStarted] fired synchronously right after the ic_scan_runs
+ *   INSERT returns (dashboard PR 2's marker-file correlation: bin/scan.js's `--run-marker` writes the
+ *   run id to a file from this callback, before any further work happens, so the dashboard never
+ *   correlates a spawn by timing).
  */
 
 /**
@@ -200,6 +204,13 @@ export async function runScan(args, deps, opts) {
       [profile.name, profile.rev, opts.trigger, dryRun, config.hash],
     );
     const runId = Number(ins.rows[0].id);
+    if (opts.onRunStarted) {
+      try {
+        opts.onRunStarted(runId);
+      } catch (err) {
+        log({ evt: 'on_run_started_failed', run_id: runId, ...errFields(err) });
+      }
+    }
     log({ evt: 'run_started', run_id: runId, profile: profile.name, trigger: opts.trigger, dry_run: dryRun, sources: sources.map((s) => s.name).join(',') });
 
     const execute = () => executeRun({ client, runId, profile, sources, config, env, args, deps, opts, log, progress, now, connectSession });
