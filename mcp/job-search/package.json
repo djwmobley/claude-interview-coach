@@ -16,7 +16,11 @@
     "start": "node src/server.js",
     "scan": "node bin/scan.js",
     "remind": "node bin/remind.js",
-    "config-lock": "node bin/config-lock.js"
+    "config-lock": "node bin/config-lock.js",
+    "dashboard": "node bin/dashboard.js",
+    "dashboard:open": "node bin/dashboard.js --open",
+    "dashboard:register": "powershell -File scripts/register-dashboard-task.ps1",
+    "seed-opportunities": "node bin/seed-opportunities.js"
   },
   "dependencies": {
     "@cfworker/json-schema": "^4.1.1",
