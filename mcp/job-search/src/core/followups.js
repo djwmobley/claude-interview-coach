@@ -46,8 +46,33 @@ const COLS = 'id, contact, org, listing_id, due_at, channel, action, notify, sta
 export function parseIsoDate(v, field) {
   if (typeof v !== 'string' || !v.trim()) throw new JobSearchError('VALIDATION', `${field} is required (ISO date)`);
   const s = v.trim();
-  if (!/^\d{4}-\d{2}-\d{2}(T\d{2}:\d{2}(:\d{2}(\.\d+)?)?(Z|[+-]\d{2}:?\d{2})?)?$/.test(s)) {
+  const m = /^(\d{4})-(\d{2})-(\d{2})(?:T(\d{2}):(\d{2})(?::(\d{2})(?:\.\d+)?)?(?:Z|[+-]\d{2}:?\d{2})?)?$/.exec(s);
+  if (!m) {
     throw new JobSearchError('VALIDATION', `${field} must be an ISO date like 2026-08-27 or 2026-08-27T09:00-05:00`);
+  }
+  const [, yStr, moStr, dStr, hStr, minStr, secStr] = m;
+  const year = Number(yStr);
+  const month = Number(moStr);
+  const day = Number(dStr);
+  // Calendar-validity check, independent of timezone (the shape regex above only checks digit format, so
+  // "2026-02-30" would otherwise pass through to Date's own lenient parser, which silently rolls it over
+  // into March instead of refusing it -- adversary-pass finding). Date.UTC normalizes an out-of-range
+  // month or day by rolling into the next/previous period; comparing the round trip catches every such
+  // case (Feb 30, month 00, month 13+, day 00, day 32+) without hardcoding days-per-month or leap years.
+  const ref = new Date(Date.UTC(year, month - 1, day));
+  if (ref.getUTCFullYear() !== year || ref.getUTCMonth() !== month - 1 || ref.getUTCDate() !== day) {
+    // Same wording as the NaN check below (both mean "not a valid date" to a caller): a calendar-impossible
+    // day (Feb 30) and an out-of-range digit shape are both refused for the same reason, from the caller's
+    // point of view, so they carry one consistent message rather than two that only differ by mechanism.
+    throw new JobSearchError('VALIDATION', `${field} is not a valid date`);
+  }
+  if (hStr !== undefined) {
+    const hour = Number(hStr);
+    const minute = Number(minStr);
+    const second = secStr !== undefined ? Number(secStr) : 0;
+    if (hour > 23 || minute > 59 || second > 59) {
+      throw new JobSearchError('VALIDATION', `${field} has an invalid time of day`);
+    }
   }
   const d = /^\d{4}-\d{2}-\d{2}$/.test(s) ? new Date(`${s}T09:00:00`) : new Date(s);
   if (Number.isNaN(d.getTime())) throw new JobSearchError('VALIDATION', `${field} is not a valid date`);

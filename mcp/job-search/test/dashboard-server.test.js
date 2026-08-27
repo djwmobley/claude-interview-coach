@@ -14,7 +14,7 @@ import fs from 'node:fs';
 import os from 'node:os';
 import path from 'node:path';
 import pg from 'pg';
-import { pgConnectionConfig } from '../src/core/config.js';
+import { pgConnectionConfig, loadConfig } from '../src/core/config.js';
 import { ensureAuxSchema } from '../src/core/schema.js';
 import { withClient, closePool } from '../src/core/db.js';
 import { createDashboardServer } from '../src/dashboard/server.js';
@@ -79,7 +79,11 @@ before(async () => {
   calendarState = { provider: null };
   const deps = {
     withClient,
-    config: null,
+    // Loaded for real (rather than a hand-built stub): several routes read nested fields like
+    // config.adapters.run.timezone without full optional-chaining past the first hop, so a partial stub
+    // risks a TypeError in routes this file's other tests already exercise. The repo's real config/*.json
+    // is what config-lock validates against anyway, so loading it here is also the more realistic test.
+    config: loadConfig(),
     env: {
       OLLAMA_URL: 'http://127.0.0.1:1', OLLAMA_MODEL: 'test-model',
       GOOGLE_TOKEN_FILE: '', REMINDER_TO: '',
@@ -379,6 +383,110 @@ describe('follow-ups', () => {
     const r = await req('POST', `/api/followups/${create.json.row.id}/reply`, { body: { note: 'got a reply' } });
     assert.equal(r.status, 200);
     assert.ok(r.json.warnings.length > 0);
+  });
+
+  test('PUT edits due date and action text', async () => {
+    const create = await req('POST', '/api/followups', { body: { contact: `${CO} Edit`, due_at: '2027-01-01', channel: 'email', action_text: 'original text' } });
+    const r = await req('PUT', `/api/followups/${create.json.row.id}`, { body: { due_at: '2027-03-15', action_text: 'updated text' } });
+    assert.equal(r.status, 200);
+    assert.equal(r.json.row.action, 'updated text');
+    assert.equal(new Date(r.json.row.due_at).toISOString().slice(0, 10), '2027-03-15');
+  });
+
+  test('PUT with an invalid body (an unrecognized channel) is refused with 400', async () => {
+    const create = await req('POST', '/api/followups', { body: { contact: `${CO} EditBad`, due_at: '2027-01-01', channel: 'email', action_text: 'x' } });
+    const r = await req('PUT', `/api/followups/${create.json.row.id}`, { body: { channel: 'carrier-pigeon' } });
+    assert.equal(r.status, 400);
+  });
+
+  test('PUT on an unknown id is NOT_FOUND', async () => {
+    const r = await req('PUT', '/api/followups/999999999', { body: { action_text: 'x' } });
+    assert.equal(r.status, 404);
+  });
+
+  test('editing a follow-up writes no event on its linked listing (not implemented by this PR)', async () => {
+    const listing = await req('POST', '/api/listings', { body: { title: 'Followup Event Test', company: `${CO} FollowupEvent`, status: 'new' } });
+    const create = await req('POST', '/api/followups', { body: { contact: `${CO} EditEvent`, listing_id: listing.json.id, due_at: '2027-01-01', channel: 'email', action_text: 'x' } });
+    const before2 = (await req('GET', `/api/listings/${listing.json.id}`)).json.events.length;
+    const r = await req('PUT', `/api/followups/${create.json.row.id}`, { body: { action_text: 'edited' } });
+    assert.equal(r.status, 200);
+    const after2 = (await req('GET', `/api/listings/${listing.json.id}`)).json.events;
+    // Documents current behavior rather than asserting a design goal: follow-up create/complete/cancel/
+    // snooze/reply also never write a 'followup'-kind event today (only 'reply' writes anything, and only
+    // on the reply action) -- adding one for edit alone, without the rest of the lifecycle, would be an
+    // inconsistent half-step, so this PR leaves it as a documented gap rather than a silent scope change.
+    assert.equal(after2.length, before2);
+    assert.ok(!after2.some((e) => e.kind === 'followup'));
+  });
+
+  test('a due date in the past is accepted on edit (a deliberate correction, not treated as invalid)', async () => {
+    const create = await req('POST', '/api/followups', { body: { contact: `${CO} PastEdit`, due_at: '2027-01-01', channel: 'email', action_text: 'x' } });
+    const r = await req('PUT', `/api/followups/${create.json.row.id}`, { body: { due_at: '2020-01-01' } });
+    assert.equal(r.status, 200);
+  });
+
+  test('adversarial: an impossible calendar date (Feb 30) matches the ISO shape check but is refused, not silently rolled into March', async () => {
+    const create = await req('POST', '/api/followups', { body: { contact: `${CO} BadCalendarDate`, due_at: '2027-01-01', channel: 'email', action_text: 'x' } });
+    const r = await req('PUT', `/api/followups/${create.json.row.id}`, { body: { due_at: '2027-02-30' } });
+    assert.equal(r.status, 400);
+  });
+});
+
+describe('sources enable', () => {
+  // Must be real config/adapters.json keys: the route validates against deps.config.adapters.adapters,
+  // loaded for real in this file's before() (see the comment there).
+  const KNOWN_SOURCE = 'greenhouse';
+  const OTHER_KNOWN_SOURCE = 'dayforce';
+
+  after(async () => {
+    await verifyClient.query('DELETE FROM ic_source_state WHERE source ILIKE $1 OR source = $2', [`${KNOWN_SOURCE}%`, OTHER_KNOWN_SOURCE]);
+  });
+
+  test('an unknown source name is refused with 404 and never creates a row', async () => {
+    const r = await req('POST', '/api/sources/not-a-real-source/enable');
+    assert.equal(r.status, 404);
+    const row = await verifyClient.query('SELECT 1 FROM ic_source_state WHERE source = $1', ['not-a-real-source']);
+    assert.equal(row.rowCount, 0);
+  });
+
+  test('a source that is not currently disabled is a visible no-op, not a silent write', async () => {
+    await verifyClient.query('DELETE FROM ic_source_state WHERE source = $1', [OTHER_KNOWN_SOURCE]);
+    const r = await req('POST', `/api/sources/${OTHER_KNOWN_SOURCE}/enable`);
+    assert.equal(r.status, 200);
+    assert.equal(r.json.already_enabled, true);
+    const row = await verifyClient.query('SELECT 1 FROM ic_source_state WHERE source = $1', [OTHER_KNOWN_SOURCE]);
+    assert.equal(row.rowCount, 0);
+  });
+
+  test('re-enabling an actually disabled source resets it and reports already_enabled:false', async () => {
+    await verifyClient.query(
+      `INSERT INTO ic_source_state (source, consecutive_walls, disabled_until, manual_disable) VALUES ($1, 3, NULL, true)
+       ON CONFLICT (source) DO UPDATE SET consecutive_walls = 3, disabled_until = NULL, manual_disable = true`,
+      [KNOWN_SOURCE],
+    );
+    const r = await req('POST', `/api/sources/${KNOWN_SOURCE}/enable`);
+    assert.equal(r.status, 200);
+    assert.equal(r.json.source, KNOWN_SOURCE);
+    assert.equal(r.json.already_enabled, false);
+    const row = (await verifyClient.query('SELECT manual_disable, disabled_until, consecutive_walls FROM ic_source_state WHERE source = $1', [KNOWN_SOURCE])).rows[0];
+    assert.equal(row.manual_disable, false);
+    assert.equal(row.disabled_until, null);
+    assert.equal(row.consecutive_walls, 0);
+  });
+
+  test('adversarial: a differently-cased source name normalizes onto the same canonical row a scan run reads, never a second dead row', async () => {
+    await verifyClient.query('DELETE FROM ic_source_state WHERE source ILIKE $1', [`${KNOWN_SOURCE}%`]);
+    await verifyClient.query(
+      `INSERT INTO ic_source_state (source, consecutive_walls, disabled_until, manual_disable) VALUES ($1, 1, NULL, true)`,
+      [KNOWN_SOURCE],
+    );
+    const r = await req('POST', `/api/sources/${KNOWN_SOURCE.toUpperCase()}/enable`);
+    assert.equal(r.status, 200);
+    assert.equal(r.json.source, KNOWN_SOURCE);
+    const rows = await verifyClient.query('SELECT source, manual_disable FROM ic_source_state WHERE source ILIKE $1', [`${KNOWN_SOURCE}%`]);
+    assert.equal(rows.rowCount, 1);
+    assert.equal(rows.rows[0].source, KNOWN_SOURCE);
+    assert.equal(rows.rows[0].manual_disable, false);
   });
 });
 

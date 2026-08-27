@@ -98,15 +98,34 @@ export function register(router, deps) {
   }, { allowEmptyBody: true });
 
   router.register('POST', '/api/sources/:name/enable', async (ctx) => {
-    const name = ctx.params.name;
-    if (!name) throw new JobSearchError('VALIDATION', 'source name is required');
+    const raw = ctx.params.name;
+    if (!raw) throw new JobSearchError('VALIDATION', 'source name is required');
+    // Normalized the same way scan-run.js's resolveSources() normalizes a caller-supplied source name
+    // (trim + lowercase) before it is ever used as a lookup or storage key: ic_source_state's rows are
+    // always keyed by the adapter's canonical lowercase name (recordWall/recordClean/sourceEnabled all
+    // call with s.name from a resolved adapter, never a caller's raw casing), so enabling "Greenhouse"
+    // must land on the same row a scan run reads as "greenhouse" -- storing the raw casing verbatim
+    // would silently create a second, dead row that never affects a real scan.
+    const name = raw.trim().toLowerCase();
+    if (deps.config) {
+      const known = new Set(Object.keys(deps.config.adapters.adapters));
+      if (!known.has(name)) throw new JobSearchError('NOT_FOUND', `unknown source: ${name}`, { hint: `known: ${[...known].join(', ')}` });
+    }
+    const existing = await deps.withClient((c) => c.query('SELECT manual_disable, disabled_until FROM ic_source_state WHERE source = $1', [name]));
+    const row = existing.rows[0];
+    const isDisabled = Boolean(row) && (row.manual_disable || (row.disabled_until && new Date(row.disabled_until).getTime() > Date.now()));
+    if (!isDisabled) {
+      // Visible no-op (never a silent 200 that looks identical to an actual reset): a source with no row,
+      // or a row that is not currently disabled, has nothing to re-enable.
+      return sendJson(ctx.res, 200, { ok: true, source: name, enabled: true, already_enabled: true });
+    }
     const r = await deps.withClient((c) => c.query(
       `INSERT INTO ic_source_state (source, consecutive_walls, disabled_until, manual_disable) VALUES ($1, 0, NULL, false)
        ON CONFLICT (source) DO UPDATE SET consecutive_walls = 0, disabled_until = NULL, manual_disable = false, last_wall_at = ic_source_state.last_wall_at
        RETURNING source`,
       [name],
     ));
-    sendJson(ctx.res, 200, { ok: true, source: r.rows[0].source, enabled: true });
+    sendJson(ctx.res, 200, { ok: true, source: r.rows[0].source, enabled: true, already_enabled: false });
   }, { allowEmptyBody: true });
 
   router.register('GET', '/api/profiles', async (ctx) => {
