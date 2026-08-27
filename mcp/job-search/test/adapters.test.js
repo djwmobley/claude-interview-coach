@@ -381,7 +381,7 @@ describe('linkedin (fake capability)', () => {
     ctx.maxPages = 5;
     const r = await drain(linkedin, ctx);
     for (const l of r.listings) assertRawShape(l);
-    const cto = r.listings.find((l) => l.company === 'Mercy Ships');
+    const cto = r.listings.find((l) => l.company === 'Harbor Relief Foundation');
     assert.ok(cto);
     assert.equal(cto.location, 'Houston, TX');
     assert.equal(cto.remoteMode, 'hybrid');

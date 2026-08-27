@@ -100,12 +100,12 @@ describe('followups core', () => {
     await assert.rejects(createFollowup(client, { contact: MARK, due_at: future, channel: 'phone', action: '' }), /action_text/);
     await assert.rejects(createFollowup(client, { contact: MARK, due_at: 'next week', channel: 'phone', action: 'x' }), /ISO date/);
     await assert.rejects(createFollowup(client, { contact: MARK, due_at: future, channel: 'phone', action: 'x', listing_id: 999999999 }), /not found/);
-    const { row, warnings } = await createFollowup(client, { contact: `${MARK} Nina`, org: 'East 57th', due_at: '2026-08-27', channel: 'phone', action: 'phone 469-404-8664, no third email' });
+    const { row, warnings } = await createFollowup(client, { contact: `${MARK} Maren`, org: 'East 57th', due_at: '2026-08-27', channel: 'phone', action: 'phone 555-010-4242, no third email' });
     assert.deepEqual(row.notify, ['email']);
     assert.equal(row.status, 'open');
     assert.deepEqual(warnings, []);
     const line = formatFollowup(row);
-    assert.match(line, new RegExp(`^#${row.id} \\| ${MARK} Nina \\| East 57th \\| phone \\| due 2026-08-27 \\| open \\| phone 469-404-8664, no third email$`));
+    assert.match(line, new RegExp(`^#${row.id} \\| ${MARK} Maren \\| East 57th \\| phone \\| due 2026-08-27 \\| open \\| phone 555-010-4242, no third email$`));
   });
 
   test('list default filter is open+snoozed ordered by due; complete/snooze/cancel transitions', async () => {

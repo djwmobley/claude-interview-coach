@@ -88,11 +88,11 @@ describe('resolveOutputPath: ordered classification, one case per reason', () =>
   });
 
   test('success: canonical relPath rebuilt from on-disk casing', () => {
-    fs.writeFileSync(path.join(root, 'resumes', '20260803-Powerhouse-CIO.docx'), 'x');
-    const r = resolveOutputPath(root, 'resumes/20260803-Powerhouse-CIO.docx');
+    fs.writeFileSync(path.join(root, 'resumes', '20260803-Brightline Energy-CIO.docx'), 'x');
+    const r = resolveOutputPath(root, 'resumes/20260803-Brightline Energy-CIO.docx');
     assert.equal(r.ok, true);
     if (r.ok) {
-      assert.equal(r.relPath, 'resumes/20260803-Powerhouse-CIO.docx');
+      assert.equal(r.relPath, 'resumes/20260803-Brightline Energy-CIO.docx');
       assert.ok(fs.existsSync(r.absPath));
     }
   });
@@ -127,18 +127,18 @@ describe('resolveOutputPath: ordered classification, one case per reason', () =>
 describe('listOutputFiles', () => {
   test('depth 1, skips ~$ lock files and non-allowed extensions, parses both date shapes and human names', () => {
     fs.mkdirSync(path.join(root, 'markdown'), { recursive: true });
-    fs.writeFileSync(path.join(root, 'markdown', '20260803-powerhouse-cio.md'), 'x');
+    fs.writeFileSync(path.join(root, 'markdown', '20260803-brightline-cio.md'), 'x');
     fs.writeFileSync(path.join(root, 'markdown', '2026-08-13-e57-cto.md'), 'x');
     fs.writeFileSync(path.join(root, 'markdown', 'Damian Mobley - CTO.md'), 'x');
-    fs.writeFileSync(path.join(root, 'markdown', '~$20260803-powerhouse-cio.md'), 'lock file');
+    fs.writeFileSync(path.join(root, 'markdown', '~$20260803-brightline-cio.md'), 'lock file');
     fs.writeFileSync(path.join(root, 'markdown', 'notes.txt.bak'), 'x');
     const files = listOutputFiles(root).filter((f) => f.dir === 'markdown');
     const byName = Object.fromEntries(files.map((f) => [f.name, f]));
-    assert.ok(!byName['~$20260803-powerhouse-cio.md'], 'lock file skipped');
+    assert.ok(!byName['~$20260803-brightline-cio.md'], 'lock file skipped');
     assert.ok(!byName['notes.txt.bak'], 'disallowed extension skipped');
-    assert.equal(byName['20260803-powerhouse-cio.md'].date, '2026-08-03');
-    assert.equal(byName['20260803-powerhouse-cio.md'].slug, 'powerhouse-cio');
-    assert.equal(byName['20260803-powerhouse-cio.md'].humanName, false);
+    assert.equal(byName['20260803-brightline-cio.md'].date, '2026-08-03');
+    assert.equal(byName['20260803-brightline-cio.md'].slug, 'brightline-cio');
+    assert.equal(byName['20260803-brightline-cio.md'].humanName, false);
     assert.equal(byName['2026-08-13-e57-cto.md'].date, '2026-08-13');
     assert.equal(byName['2026-08-13-e57-cto.md'].slug, 'e57-cto');
     assert.equal(byName['Damian Mobley - CTO.md'].date, null);
@@ -155,21 +155,21 @@ describe('listOutputFiles', () => {
 
 describe('tokenize / companyTokensFor / titleTokensFor', () => {
   test('tokenize lowercases, splits on non-alnum, keeps digit+letter runs together', () => {
-    assert.deepEqual(tokenize('E57 / Mercy Ships'), ['e57', 'mercy', 'ships']);
+    assert.deepEqual(tokenize('E57 / Harbor Relief Foundation'), ['e57', 'harbor', 'relief', 'foundation']);
     assert.deepEqual(tokenize(''), []);
   });
 
   test('companyTokensFor segments on / & and, drops DOC_STOPWORDS, no length floor', () => {
-    const toks = companyTokensFor('powerhouse', {});
-    assert.ok(toks.has('powerhouse'));
+    const toks = companyTokensFor('brightline', {});
+    assert.ok(toks.has('brightline'));
     const slashed = companyTokensFor('jpmorgan chase & co', {});
     assert.ok(slashed.has('jpmorgan') && slashed.has('chase'), '"&" splits into segments before tokenizing');
-    const withStopword = companyTokensFor('the powerhouse group corp', {});
-    assert.ok(withStopword.has('powerhouse'));
+    const withStopword = companyTokensFor('the brightline group corp', {});
+    assert.ok(withStopword.has('brightline'));
     assert.ok(!withStopword.has('the') && !withStopword.has('group') && !withStopword.has('corp'), 'DOC_STOPWORDS dropped');
     const e57 = companyTokensFor('e57', {});
     assert.ok(e57.has('e57'), 'no length floor: a 3-char token like e57 counts');
-    const withAlias = companyTokensFor('mercy ships', { 'east 57th': 'mercy ships' });
+    const withAlias = companyTokensFor('harbor relief foundation', { 'east 57th': 'harbor relief foundation' });
     assert.ok(withAlias.has('east') && withAlias.has('57th'), 'alias tokens folded in when they map to the same company_norm');
   });
 
@@ -188,23 +188,23 @@ describe('tokenize / companyTokensFor / titleTokensFor', () => {
 
 describe('suggestDocuments: candidacy threshold and total order', () => {
   // titleTokensFor('Chief Information Officer') = {'information'} ('chief'/'officer' are DOC_STOPWORDS).
-  const listing = { title: 'Chief Information Officer', company_norm: 'powerhouse', first_seen_at: '2026-08-01T00:00:00Z' };
+  const listing = { title: 'Chief Information Officer', company_norm: 'brightline', first_seen_at: '2026-08-01T00:00:00Z' };
   /** @param {any} o */
   const file = (o) => ({ dir: 'resumes', ext: '.docx', kind: 'resume', date: null, slug: '', humanName: false, ...o });
 
   test('company-only overlap of 1 is never enough; title-only overlap is never enough', () => {
-    assert.deepEqual(suggestDocuments(listing, [file({ name: 'powerhouse-notes.docx', relPath: 'resumes/powerhouse-notes.docx' })]), []);
+    assert.deepEqual(suggestDocuments(listing, [file({ name: 'brightline-notes.docx', relPath: 'resumes/brightline-notes.docx' })]), []);
     assert.deepEqual(suggestDocuments(listing, [file({ name: 'information-notes.docx', relPath: 'resumes/information-notes.docx' })]), []);
   });
 
   test('companyHits >= 1 and companyHits + titleHits >= 2 makes a candidate, scored correctly', () => {
     const files = [
-      file({ name: '20260801-powerhouse-information.docx', relPath: 'resumes/20260801-powerhouse-information.docx', date: '2026-08-01' }),
-      file({ name: 'powerhouse-notes.docx', relPath: 'resumes/powerhouse-notes.docx' }), // companyHits 1, titleHits 0: excluded
+      file({ name: '20260801-brightline-information.docx', relPath: 'resumes/20260801-brightline-information.docx', date: '2026-08-01' }),
+      file({ name: 'brightline-notes.docx', relPath: 'resumes/brightline-notes.docx' }), // companyHits 1, titleHits 0: excluded
       file({ name: 'unrelated.docx', relPath: 'resumes/unrelated.docx' }), // excluded entirely
     ];
     const out = suggestDocuments(listing, files);
-    assert.deepEqual(out.map((r) => r.file), ['resumes/20260801-powerhouse-information.docx']);
+    assert.deepEqual(out.map((r) => r.file), ['resumes/20260801-brightline-information.docx']);
     assert.equal(out[0].companyHits, 1);
     assert.equal(out[0].titleHits, 1);
     assert.equal(out[0].score, 2);
@@ -212,33 +212,33 @@ describe('suggestDocuments: candidacy threshold and total order', () => {
 
   test('total order: date distance to first_seen_at breaks a tie in score and titleHits', () => {
     const files = [
-      file({ name: '20260601-powerhouse-information.md', relPath: 'markdown/20260601-powerhouse-information.md', dir: 'markdown', ext: '.md', kind: 'markdown', date: '2026-06-01' }), // 61 days away
-      file({ name: '20260801-powerhouse-information.docx', relPath: 'resumes/20260801-powerhouse-information.docx', date: '2026-08-01' }), // 0 days away
+      file({ name: '20260601-brightline-information.md', relPath: 'markdown/20260601-brightline-information.md', dir: 'markdown', ext: '.md', kind: 'markdown', date: '2026-06-01' }), // 61 days away
+      file({ name: '20260801-brightline-information.docx', relPath: 'resumes/20260801-brightline-information.docx', date: '2026-08-01' }), // 0 days away
     ];
     const out = suggestDocuments(listing, files);
-    assert.deepEqual(out.map((r) => r.file), ['resumes/20260801-powerhouse-information.docx', 'markdown/20260601-powerhouse-information.md']);
+    assert.deepEqual(out.map((r) => r.file), ['resumes/20260801-brightline-information.docx', 'markdown/20260601-brightline-information.md']);
   });
 
   test('total order: undated files sort after every dated file', () => {
     const files = [
-      file({ name: 'powerhouse-information-undated.docx', relPath: 'resumes/powerhouse-information-undated.docx', date: null }),
-      file({ name: '20260101-powerhouse-information.docx', relPath: 'resumes/20260101-powerhouse-information.docx', date: '2026-01-01' }),
+      file({ name: 'brightline-information-undated.docx', relPath: 'resumes/brightline-information-undated.docx', date: null }),
+      file({ name: '20260101-brightline-information.docx', relPath: 'resumes/20260101-brightline-information.docx', date: '2026-01-01' }),
     ];
     const out = suggestDocuments(listing, files);
-    assert.deepEqual(out.map((r) => r.file), ['resumes/20260101-powerhouse-information.docx', 'resumes/powerhouse-information-undated.docx']);
+    assert.deepEqual(out.map((r) => r.file), ['resumes/20260101-brightline-information.docx', 'resumes/brightline-information-undated.docx']);
   });
 
   test('total order: kind priority (resume before coverletter) beats relPath, relPath asc is the final tiebreak', () => {
     const files = [
-      file({ name: 'zzz-powerhouse-information.docx', relPath: 'coverletters/zzz-powerhouse-information.docx', dir: 'coverletters', kind: 'coverletter' }),
-      file({ name: 'zzz-powerhouse-information.docx', relPath: 'resumes/zzz-powerhouse-information.docx' }),
-      file({ name: 'aaa-powerhouse-information.docx', relPath: 'resumes/aaa-powerhouse-information.docx' }),
+      file({ name: 'zzz-brightline-information.docx', relPath: 'coverletters/zzz-brightline-information.docx', dir: 'coverletters', kind: 'coverletter' }),
+      file({ name: 'zzz-brightline-information.docx', relPath: 'resumes/zzz-brightline-information.docx' }),
+      file({ name: 'aaa-brightline-information.docx', relPath: 'resumes/aaa-brightline-information.docx' }),
     ];
     const out = suggestDocuments(listing, files);
     assert.deepEqual(out.map((r) => r.file), [
-      'resumes/aaa-powerhouse-information.docx',
-      'resumes/zzz-powerhouse-information.docx',
-      'coverletters/zzz-powerhouse-information.docx',
+      'resumes/aaa-brightline-information.docx',
+      'resumes/zzz-brightline-information.docx',
+      'coverletters/zzz-brightline-information.docx',
     ]);
   });
 

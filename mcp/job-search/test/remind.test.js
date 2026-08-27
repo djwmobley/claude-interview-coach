@@ -199,10 +199,10 @@ describe('remind digest selection and sending', () => {
   test('digest body format: one line per item', () => {
     const now = new Date('2026-08-26T12:00:00Z');
     const d = buildDigest(/** @type {any} */ ([
-      { id: 7, contact: 'Nina Guthrie', org: 'East 57th', channel: 'phone', due_at: new Date('2026-08-27T09:00:00Z'), status: 'open', action: 'phone 469-404-8664, no third email' },
+      { id: 7, contact: 'Maren Holloway', org: 'East 57th', channel: 'phone', due_at: new Date('2026-08-27T09:00:00Z'), status: 'open', action: 'phone 555-010-4242, no third email' },
     ]), now);
     assert.equal(d.subject, 'Follow-ups due: 1');
-    assert.ok(d.body.includes('- #7 | Nina Guthrie | East 57th | phone | due 2026-08-27 | open | phone 469-404-8664, no third email'));
+    assert.ok(d.body.includes('- #7 | Maren Holloway | East 57th | phone | due 2026-08-27 | open | phone 555-010-4242, no third email'));
   });
 });
 

@@ -49,8 +49,8 @@ describe('normalizeUrl: the five live host shapes from the DB', () => {
     assert.equal(r.source, 'dice');
   });
   test('Oracle HCM', () => {
-    const r = normalizeUrl('https://jpmc.fa.oraclecloud.com/hcmUI/CandidateExperience/en/sites/CX_1001/job/210710939', OPTS);
-    assert.equal(r.external_id, 'oracle:jpmc.fa.oraclecloud.com/210710939');
+    const r = normalizeUrl('https://meridianfin.fa.oraclecloud.com/hcmUI/CandidateExperience/en/sites/CX_1001/job/210710939', OPTS);
+    assert.equal(r.external_id, 'oracle:meridianfin.fa.oraclecloud.com/210710939');
     assert.equal(r.source, 'oracle');
     assert.equal(r.kind, 'canonical');
   });
@@ -523,7 +523,7 @@ describe('normalizeListing and normalizeLegacyRow', () => {
     assert.equal(r.company_norm, 'x');
   });
   test('legacy row: empty URL is NULL, location legacy-unknown, source by host', () => {
-    const a = normalizeLegacyRow({ id: 10, title: 'Executive Director, Marketing', company: 'JPMorgan Chase (Chase Auto)', url: '' }, OPTS);
+    const a = normalizeLegacyRow({ id: 10, title: 'Executive Director, Marketing', company: 'Meridian Financial (Meridian Auto)', url: '' }, OPTS);
     assert.equal(a.url_normalized, null);
     assert.equal(a.external_id, null);
     assert.equal(a.source, 'manual');

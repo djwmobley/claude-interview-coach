@@ -12,10 +12,10 @@ describe('compact caps', () => {
 
   test('row renders in the documented shape', () => {
     const line = formatRow({
-      id: 412, title: 'CTO', company: 'Mercy Ships', location: 'Houston, TX', remote_mode: 'hybrid',
+      id: 412, title: 'CTO', company: 'Harbor Relief Foundation', location: 'Houston, TX', remote_mode: 'hybrid',
       posted_at: '2026-08-21', salary_min: 250000, salary_max: 300000, prescore: 72, status: 'new', source: 'linkedin',
     });
-    assert.equal(line, '#412 | CTO | Mercy Ships | Houston, TX (hybrid) | 2026-08-21 | $250-300k | ps 72 | new | linkedin');
+    assert.equal(line, '#412 | CTO | Harbor Relief Foundation | Houston, TX (hybrid) | 2026-08-21 | $250-300k | ps 72 | new | linkedin');
   });
 
   test('unscored rows say unscored; fit shown when present', () => {

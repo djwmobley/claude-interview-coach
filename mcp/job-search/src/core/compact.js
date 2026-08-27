@@ -3,7 +3,7 @@
  * Compact rendering for MCP tool responses (spec section 5 caps).
  *
  *   MAX_ROWS 25, LINE_CHARS 120, MAX_RESPONSE_CHARS 6000.
- *   Row: `#412 | CTO | Mercy Ships | Houston, TX (hybrid) | 2026-08-21 | $250-300k | ps 72 | new | linkedin`
+ *   Row: `#412 | CTO | Harbor Relief Foundation | Houston, TX (hybrid) | 2026-08-21 | $250-300k | ps 72 | new | linkedin`
  *   Dry-run rows render `#dry:N` and the response carries a warning.
  */
 
