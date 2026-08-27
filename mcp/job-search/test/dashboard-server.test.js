@@ -608,6 +608,28 @@ describe('report', () => {
     assert.equal(r.status, 200);
     assert.ok(Array.isArray(r.json.days));
   });
+
+  // pr3-spec-decisions.md section 9 item 3 / section 6 item 3: the HTML-serving preview variant so the
+  // front end's sandboxed iframe can src= it directly, carrying the same sandbox CSP applySandboxHtmlHeaders
+  // gives a saved report file through GET /api/documents/file, and never touching ic_report_state.
+  test('preview.html responds with rendered HTML under the sandbox CSP and never advances ic_report_state', async () => {
+    const before = (await verifyClient.query('SELECT last_report_sent_at FROM ic_report_state WHERE id = true')).rows[0].last_report_sent_at;
+    const r = await req('GET', '/api/report/preview.html');
+    assert.equal(r.status, 200);
+    assert.equal(r.headers.get('content-type'), 'text/html; charset=utf-8');
+    assert.equal(r.headers.get('content-security-policy'), "sandbox; default-src 'none'");
+    assert.ok(r.text.length > 0);
+    assert.equal(/^\s*\{/.test(r.text), false, 'response body must be HTML, not a JSON envelope');
+    const after = (await verifyClient.query('SELECT last_report_sent_at FROM ic_report_state WHERE id = true')).rows[0].last_report_sent_at;
+    assert.deepEqual(before, after);
+  });
+
+  test('preview.html accepts the same date/run_id/profile params as the JSON preview route', async () => {
+    const today = new Date().toISOString().slice(0, 10);
+    const r = await req('GET', `/api/report/preview.html?date=${today}&profile=exec-default`);
+    assert.equal(r.status, 200);
+    assert.equal(r.headers.get('content-type'), 'text/html; charset=utf-8');
+  });
 });
 
 describe('calendar', () => {
