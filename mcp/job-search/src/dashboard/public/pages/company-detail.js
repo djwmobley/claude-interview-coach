@@ -9,7 +9,8 @@ import { handleOutcome } from '../lib/outcome.js';
 import { showToast } from '../lib/toast.js';
 import { drawer } from '../components/drawer.js';
 import { skeleton, emptyState } from '../components/empty-state.js';
-import { shortDate } from '../lib/format.js';
+import { chipClassName, stageChip } from '../components/chips.js';
+import { shortDate, shortDateTime, sourceLabel } from '../lib/format.js';
 
 /** @param {HTMLElement} container @param {{norm:string}} params */
 export async function render(container, params, app) {
@@ -23,6 +24,8 @@ export async function render(container, params, app) {
     }
     const moments = outcome.body.moments ?? [];
     const research = outcome.body.research ?? [];
+    const listings = outcome.body.listings ?? [];
+    const followups = outcome.body.followups ?? [];
 
     const openAddMoment = () => {
       const questionInput = h('input', { className: 'drawer__input', attrs: { type: 'text', placeholder: 'Question' } });
@@ -49,6 +52,21 @@ export async function render(container, params, app) {
     setChildren(container, [
       h('h1', { className: 'page-title', text: outcome.body.company }),
       h('button', { className: 'btn', text: 'Add moment', on: { click: openAddMoment } }),
+      h('h2', { className: 'section-title', text: 'Listings' }),
+      listings.length === 0 ? emptyState({ message: 'No listings recorded for this company yet.' }) : h('ul', { className: 'company-listings' }, listings.map((l) => h('li', { className: 'company-listing' }, [
+        h('a', { className: 'company-listing__title', hashHref: `#/jobs/${l.id}`, text: l.title ?? 'untitled' }),
+        h('span', { className: chipClassName(stageChip(l.status)), text: stageChip(l.status).label }),
+        h('span', { className: 'company-listing__source', text: sourceLabel(l.source) }),
+        h('span', { className: 'company-listing__date', text: shortDate(l.first_seen) }),
+      ]))),
+      h('h2', { className: 'section-title', text: 'Follow-ups' }),
+      followups.length === 0 ? emptyState({ message: 'No open follow-ups for this company.' }) : h('ul', { className: 'company-followups' }, followups.map((f) => h('li', { className: 'company-followup' }, [
+        h('span', { className: 'company-followup__date', text: shortDateTime(f.due_at) }),
+        h('span', { text: `${f.action} with ${f.contact}` }),
+        f.listing_id != null ? h('a', { hashHref: `#/jobs/${f.listing_id}`, text: 'View listing' }) : null,
+        h('button', { className: 'btn btn--small', text: 'Done', on: { click: async () => { handleOutcome(await postJson(`/api/followups/${f.id}/complete`, {})); load(); } } }),
+        h('button', { className: 'btn btn--small', text: 'Snooze', on: { click: async () => { handleOutcome(await postJson(`/api/followups/${f.id}/snooze`, { snoozed_until: new Date(Date.now() + 86400000).toISOString() })); load(); } } }),
+      ]))),
       h('h2', { className: 'section-title', text: 'Session moments' }),
       moments.length === 0 ? emptyState({ message: 'No session moments recorded for this company yet.' }) : h('ul', {}, moments.map((m) => h('li', {}, [
         h('span', { className: 'company-moment__date', text: shortDate(m.session_date) }),

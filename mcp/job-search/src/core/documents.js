@@ -284,14 +284,20 @@ export async function linkDocument(client, outputRoot, input) {
   if (!resolved.ok) throw new JobSearchError('VALIDATION', `cannot link document: ${resolved.reason}`, { details: { reason: resolved.reason } });
   if (!DOCUMENT_KINDS.includes(input.kind)) throw new JobSearchError('VALIDATION', `document kind must be one of ${DOCUMENT_KINDS.join(', ')}`);
   const actor = input.actor ?? 'mcp';
+  // `xmax = 0` is the standard upsert idiom for "this RETURNING row came from the INSERT branch, not the
+  // ON CONFLICT DO UPDATE branch" (a freshly inserted row has no prior deleting transaction id). Only the
+  // insert branch records a document event, so re-linking the same (listing, rel_path) pair -- e.g. a
+  // repeated seed run -- never accumulates duplicate audit events for a call that changed nothing new.
   const r = await client.query(
     `INSERT INTO ic_job_documents (listing_id, kind, rel_path, label, actor) VALUES ($1,$2,$3,$4,$5)
      ON CONFLICT (listing_id, rel_path) DO UPDATE SET kind = EXCLUDED.kind, label = EXCLUDED.label
-     RETURNING ${DOC_COLS}`,
+     RETURNING ${DOC_COLS}, (xmax = 0) AS inserted`,
     [input.listingId, input.kind, resolved.relPath, input.label ?? null, actor],
   );
-  const row = r.rows[0];
-  await recordEvent(client, { listingId: input.listingId, kind: 'document', note: `linked ${resolved.relPath}`, actor });
+  const { inserted, ...row } = r.rows[0];
+  if (inserted) {
+    await recordEvent(client, { listingId: input.listingId, kind: 'document', note: `linked ${resolved.relPath}`, actor });
+  }
   return row;
 }
 

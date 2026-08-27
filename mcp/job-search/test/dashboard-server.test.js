@@ -690,6 +690,65 @@ describe('memory and companies', () => {
     assert.equal(r.status, 200);
     assert.ok(r.json.rows.some((row) => String(row.company).includes(CO)));
   });
+
+  test('company memory includes that company_norm\'s listings and their open follow-ups (defect 2)', async () => {
+    const company = `${CO} Memory Corp`;
+    const created = await req('POST', '/api/listings', { body: { title: 'Head of Memory', company, status: 'applied' } });
+    assert.equal(created.status, 201);
+    const listingId = created.json.id;
+
+    const followup = await req('POST', '/api/followups', {
+      body: { contact: `${CO} Memory Contact`, listing_id: listingId, due_at: '2027-03-01', channel: 'email', action_text: 'check in' },
+    });
+    assert.equal(followup.status, 201);
+
+    // A resolved (row that company_norm normalizes to) query, not the raw display string: fetch the row
+    // back to read the exact company_norm the server computed, then request by that norm the same way
+    // pages/company-detail.js does (params.norm), to prove the route resolves both call shapes.
+    const norm = (await verifyClient.query('SELECT company_norm FROM ic_job_listings WHERE id = $1', [listingId])).rows[0].company_norm;
+
+    const r = await req('GET', `/api/memory/company?company=${encodeURIComponent(norm)}`);
+    assert.equal(r.status, 200);
+    assert.ok(Array.isArray(r.json.listings));
+    assert.ok(Array.isArray(r.json.followups));
+    const listingRow = r.json.listings.find((l) => l.id === listingId);
+    assert.ok(listingRow, 'the listing just created must appear under its company_norm');
+    assert.equal(listingRow.title, 'Head of Memory');
+    assert.equal(listingRow.status, 'applied');
+    assert.equal(listingRow.source, 'manual');
+    assert.ok('url_ok' in listingRow);
+    const followupRow = r.json.followups.find((f) => f.listing_id === listingId);
+    assert.ok(followupRow, 'the open follow-up on that listing must appear');
+    assert.equal(followupRow.action, 'check in');
+    assert.equal(followupRow.status, 'open');
+  });
+
+  test('company memory omits done/cancelled follow-ups and listings from other companies', async () => {
+    const company = `${CO} Memory Scope`;
+    const created = await req('POST', '/api/listings', { body: { title: 'Scope Test', company, status: 'new' } });
+    const listingId = created.json.id;
+    const followup = await req('POST', '/api/followups', {
+      body: { contact: `${CO} Scope Contact`, listing_id: listingId, due_at: '2027-03-02', channel: 'email', action_text: 'done already' },
+    });
+    await req('POST', `/api/followups/${followup.json.row.id}/complete`, {});
+
+    const norm = (await verifyClient.query('SELECT company_norm FROM ic_job_listings WHERE id = $1', [listingId])).rows[0].company_norm;
+    const r = await req('GET', `/api/memory/company?company=${encodeURIComponent(norm)}`);
+    assert.equal(r.status, 200);
+    assert.equal(r.json.listings.length, 1, 'only this one company_norm\'s listing, not other test-fixture companies');
+    assert.equal(r.json.followups.length, 0, 'a completed follow-up must not appear in the open/snoozed list');
+  });
+});
+
+describe('profiles: sources list for the Run scan options drawer (defect 4)', () => {
+  test('GET /api/profiles reports the full configured source list, not any one profile\'s own (usually empty) sources column', async () => {
+    const r = await req('GET', '/api/profiles');
+    assert.equal(r.status, 200);
+    assert.ok(Array.isArray(r.json.sources));
+    assert.ok(r.json.sources.includes('greenhouse'));
+    assert.ok(r.json.sources.includes('lever'));
+    assert.ok(Array.isArray(r.json.profiles));
+  });
 });
 
 describe('analytics', () => {

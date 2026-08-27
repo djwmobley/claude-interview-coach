@@ -3,7 +3,11 @@
  * sql/009_pipeline_events_documents.sql (dashboard PR 1) against the isolated test DB. bin/run-tests.js
  * already applied this migration once during bootstrap (bin/bootstrap-test-db.js's MIGRATIONS list); this
  * file re-applies the same file's text directly to prove idempotence, and exercises the legacy 'active'
- * remap and marked_at backfill passes end to end. Rows carry company `ZZ-TEST-MIG009-<pid>`.
+ * remap end to end. Rows carry company `ZZ-TEST-MIG009-<pid>`.
+ *
+ * The marked_at status-event backfill that used to live in this file was split out to
+ * sql/010_status_event_backfill.sql (defect 7 fix) -- see test/migration-010.test.js for its coverage,
+ * including the corrected "no status event of any kind" guard this file's old version did not have.
  */
 import { test, describe, before, after } from 'node:test';
 import assert from 'node:assert/strict';
@@ -86,20 +90,6 @@ describe('sql/009_pipeline_events_documents.sql', () => {
     await client.query(SQL);
     const again = await client.query(`SELECT count(*)::int AS n FROM ic_job_events WHERE listing_id = $1 AND kind = 'migrated'`, [id]);
     assert.equal(again.rows[0].n, 1, 'idempotent: exactly one migrated event after two applications');
-  });
-
-  test('marked_at rows get exactly one backfilled status event, idempotent on re-apply', async () => {
-    const markedAt = new Date('2026-05-01T00:00:00Z');
-    const id = await insertListing({ status: 'shortlisted', marked_at: markedAt });
-    await client.query(SQL);
-    const events = await client.query(`SELECT to_status, actor, at FROM ic_job_events WHERE listing_id = $1 AND kind = 'status' AND note = 'backfilled from marked_at by migration 009'`, [id]);
-    assert.equal(events.rowCount, 1);
-    assert.equal(events.rows[0].to_status, 'shortlisted');
-    assert.equal(events.rows[0].actor, 'migration');
-    assert.equal(new Date(events.rows[0].at).toISOString(), markedAt.toISOString());
-    await client.query(SQL);
-    const again = await client.query(`SELECT count(*)::int AS n FROM ic_job_events WHERE listing_id = $1 AND kind = 'status' AND note = 'backfilled from marked_at by migration 009'`, [id]);
-    assert.equal(again.rows[0].n, 1, 'idempotent: exactly one backfilled event after two applications');
   });
 
   test('a row with neither a legacy active status nor marked_at gets no synthetic event', async () => {

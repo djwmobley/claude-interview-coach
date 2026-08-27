@@ -12,7 +12,9 @@ import { createListCursor } from '../lib/list-cursor.js';
 import { DIGIT_STAGE_ORDER } from '../components/stage-buttons.js';
 import { stageChip } from '../components/chips.js';
 
-const COLUMNS = ['', 'Title', 'Company', 'Source', 'Stage', 'Score', 'First seen', 'Location'];
+// 'Location' carries the same `job-row__location` class as its body cells (components/job-row.js) so
+// app.css's 1180px breakpoint rule can hide the header alongside the cells it labels, not just the cells.
+const COLUMNS = ['', 'Title', 'Company', 'Source', 'Stage', 'Score', 'First seen', { text: 'Location', className: 'job-row__location' }];
 
 /**
  * Total classification of every action lib/shortcuts.js's reducer can emit, so a totality test can

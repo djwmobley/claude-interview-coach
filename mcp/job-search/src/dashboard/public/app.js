@@ -17,6 +17,7 @@ import { handleOutcome } from './lib/outcome.js';
 import { createSseClient } from './lib/sse.js';
 import { initialKbState, reduceKeyboard, CHORD_WINDOW_MS } from './lib/shortcuts.js';
 import { scanPill } from './components/scan-progress.js';
+import { railIcon } from './components/rail-icons.js';
 import { emit } from './lib/bus.js';
 
 /** Section 11: the layout breakpoint's numeric trigger is 1180px (the section title "1100" is informal). */
@@ -107,11 +108,13 @@ function renderRail() {
     h('div', { className: 'rail__section-title', text: section.title }),
     ...section.items.map((item) => {
       const active = currentRouteName === item.route;
+      // The `title` attribute is the tooltip shown once app.css's 1180px breakpoint hides
+      // `.rail__link-label` and the link goes icon-only, per defect 5: illegible truncated 9px labels are
+      // replaced by a single legible icon, never by a shrunken/truncated copy of the same text.
       return h('a', {
         className: `rail__link ${active ? 'rail__link--active' : ''}`.trim(),
         hashHref: buildHash(item.route), attrs: { 'aria-current': active ? 'page' : undefined, title: item.label },
-        text: item.label,
-      });
+      }, [railIcon(item.route), h('span', { className: 'rail__link-label', text: item.label })]);
     }),
   ]));
   setChildren(railEl, sections);

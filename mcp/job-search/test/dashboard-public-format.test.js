@@ -2,7 +2,7 @@
 /** Pure formatting function tests (pr3-spec-decisions.md section 12 item 2). No DOM required. */
 import { test, describe } from 'node:test';
 import assert from 'node:assert/strict';
-import { relativeTime, ageDays, agingBucket, scoreBucket, shortDate, salaryRange, formatMoney, pluralize, truncate, sourceLabel, formatPercent } from '../src/dashboard/public/lib/format.js';
+import { relativeTime, ageDays, agingBucket, scoreBucket, shortDate, shortDateTime, salaryRange, formatMoney, pluralize, truncate, sourceLabel, formatPercent, normalizeAgendaTime, agendaTimeLabel } from '../src/dashboard/public/lib/format.js';
 
 describe('relativeTime', () => {
   test('fixed-input cases', () => {
@@ -93,5 +93,54 @@ describe('formatPercent', () => {
     assert.equal(formatPercent(undefined), 'not enough data yet');
     assert.equal(formatPercent(0.5), '50%');
     assert.equal(formatPercent(1), '100%');
+  });
+});
+
+describe('normalizeAgendaTime: total classification of a Google Calendar `start`/`end` value', () => {
+  test('bare ISO string', () => {
+    assert.deepEqual(normalizeAgendaTime('2026-08-27T09:00:00Z'), { at: '2026-08-27T09:00:00.000Z', allDay: false });
+  });
+
+  test('{ dateTime } (real Google Calendar timed-event shape)', () => {
+    assert.deepEqual(
+      normalizeAgendaTime({ dateTime: '2026-08-27T09:00:00-05:00', timeZone: 'America/Chicago' }),
+      { at: '2026-08-27T14:00:00.000Z', allDay: false },
+    );
+  });
+
+  test('{ date } (real Google Calendar all-day-event shape)', () => {
+    assert.deepEqual(normalizeAgendaTime({ date: '2026-08-27' }), { at: '2026-08-27T00:00:00.000Z', allDay: true });
+  });
+
+  test('null/undefined: a well-formed item with no start at all', () => {
+    assert.deepEqual(normalizeAgendaTime(null), { at: null, allDay: false });
+    assert.deepEqual(normalizeAgendaTime(undefined), { at: null, allDay: false });
+  });
+
+  test('anything else maps to null and never throws', () => {
+    assert.equal(normalizeAgendaTime(42), null);
+    assert.equal(normalizeAgendaTime(true), null);
+    assert.equal(normalizeAgendaTime([]), null);
+    assert.equal(normalizeAgendaTime({}), null, 'object with neither dateTime nor date');
+    assert.equal(normalizeAgendaTime({ foo: 'bar' }), null);
+    assert.equal(normalizeAgendaTime('not a date'), null, 'unparseable bare string');
+    assert.equal(normalizeAgendaTime({ dateTime: 'not a date' }), null, 'unparseable dateTime');
+    assert.equal(normalizeAgendaTime({ date: 'not a date' }), null, 'unparseable date');
+    assert.equal(normalizeAgendaTime({ dateTime: 123 }), null, 'dateTime not a string');
+  });
+});
+
+describe('agendaTimeLabel', () => {
+  test('timed item uses shortDateTime', () => {
+    assert.equal(agendaTimeLabel({ at: '2026-08-27T14:00:00.000Z', allDay: false }), shortDateTime('2026-08-27T14:00:00.000Z'));
+  });
+
+  test('all-day item shows a date plus a plain "all day" marker', () => {
+    assert.equal(agendaTimeLabel({ at: '2026-08-27T00:00:00.000Z', allDay: true }), `${shortDate('2026-08-27T00:00:00.000Z')}, all day`);
+  });
+
+  test('at: null falls back to the fixed placeholder for both branches', () => {
+    assert.equal(agendaTimeLabel({ at: null, allDay: false }), 'not set');
+    assert.equal(agendaTimeLabel({ at: null, allDay: true }), 'not set');
   });
 });

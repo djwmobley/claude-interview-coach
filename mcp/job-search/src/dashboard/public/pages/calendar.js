@@ -5,7 +5,7 @@ import { getJson, postJson } from '../lib/api.js';
 import { handleOutcome } from '../lib/outcome.js';
 import { setBanner } from '../lib/toast.js';
 import { skeleton, emptyState } from '../components/empty-state.js';
-import { shortDateTime } from '../lib/format.js';
+import { agendaTimeLabel, normalizeAgendaTime } from '../lib/format.js';
 import { on, off } from '../lib/bus.js';
 import { fetchFollowupsInWindow } from '../lib/followups-window.js';
 
@@ -29,9 +29,20 @@ export async function render(container, params, app) {
     // Follow-ups always come from fetchFollowupsInWindow, independent of Google Calendar connectivity
     // (see lib/followups-window.js for why the agenda endpoint's own embedded followups array is not
     // trusted here).
+    //
+    // Each Google event's `start` is normalized through normalizeAgendaTime (a real Google Calendar
+    // resource carries `start: { dateTime }` or `start: { date }` for all-day, never a bare ISO field) --
+    // a malformed/unrecognized shape maps to `null` and is filtered out here rather than crashing the
+    // page; a well-formed item with no start at all (`at: null`) is also unplaceable on a day grid and is
+    // filtered the same way.
     const items = [
-      ...(outcome.body.events ?? []).map((e) => ({ at: e.start ?? e.startIso ?? e.start_at, title: e.summary ?? 'Event', google: true, followup: false })),
-      ...followupRows.map((f) => ({ at: f.due_at, title: `${f.action} with ${f.contact}`, google: false, followup: true, id: f.id })),
+      ...(outcome.body.events ?? [])
+        .map((e) => {
+          const t = normalizeAgendaTime(e.start);
+          return t && t.at ? { at: t.at, allDay: t.allDay, title: e.summary ?? 'Event', google: true, followup: false } : null;
+        })
+        .filter((item) => item !== null),
+      ...followupRows.map((f) => ({ at: f.due_at, allDay: false, title: `${f.action} with ${f.contact}`, google: false, followup: true, id: f.id })),
     ].sort((a, b) => new Date(a.at).getTime() - new Date(b.at).getTime());
 
     const byDay = new Map();
@@ -44,7 +55,7 @@ export async function render(container, params, app) {
     const rows = [...byDay.entries()].map(([day, dayItems]) => h('div', { className: 'calendar-day-row' }, [
       h('div', { className: 'calendar-day-row__date', text: day }),
       h('div', { className: 'calendar-day-row__items' }, dayItems.map((item) => h('div', { className: 'calendar-item' }, [
-        h('span', { text: shortDateTime(item.at) }),
+        h('span', { text: agendaTimeLabel(item) }),
         h('span', { text: item.title }),
         item.google ? h('span', { className: 'badge badge--google', text: 'Google' }) : null,
         item.followup ? h('span', { className: 'badge badge--followup', text: 'Follow-up' }) : null,

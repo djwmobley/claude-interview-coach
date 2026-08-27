@@ -297,4 +297,21 @@ describe('linkDocument / unlinkDocument / listDocuments (real test DB)', () => {
     assert.equal((await listDocuments(client, listingId)).length, 0);
     await assert.rejects(unlinkDocument(client, { id: 999999999 }), /not found/);
   });
+
+  test('linkDocument records exactly one document event when the same (listing, rel_path) is linked twice (repeated seed runs do not accumulate audit noise)', async () => {
+    fs.writeFileSync(path.join(root, 'resumes', 'link-twice.docx'), 'x');
+    await client.query(`DELETE FROM ic_job_documents WHERE listing_id = $1 AND rel_path = 'resumes/link-twice.docx'`, [listingId]);
+    await client.query(`DELETE FROM ic_job_events WHERE listing_id = $1 AND kind = 'document' AND note LIKE '%link-twice%'`, [listingId]);
+
+    const first = await linkDocument(client, root, { listingId, relPath: 'resumes/link-twice.docx', kind: 'resume', label: 'v1' });
+    const second = await linkDocument(client, root, { listingId, relPath: 'resumes/link-twice.docx', kind: 'resume', label: 'v2' });
+    assert.equal(second.id, first.id);
+    assert.equal(second.label, 'v2', 'the update branch still applies, it just does not record a second event');
+
+    const events = await client.query(
+      `SELECT id FROM ic_job_events WHERE listing_id = $1 AND kind = 'document' AND note LIKE '%link-twice%'`,
+      [listingId],
+    );
+    assert.equal(events.rows.length, 1, 'exactly one document event across insert + update, not two');
+  });
 });

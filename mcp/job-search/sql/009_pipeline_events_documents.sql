@@ -1,9 +1,17 @@
 -- 009: pipeline event log, linked documents, dashboard scan trigger, and the legacy 'active' status
 -- remap (dashboard PR 1, plan section "Data model changes" plus pr1-spec-decisions.md). Idempotent:
--- every statement is safe to run twice, including the two data-migration passes near the bottom, which
--- are guarded by NOT EXISTS checks keyed on a fixed note string rather than a one-time flag, so a
--- second `node bin/migrate.js` run (or the test-db bootstrap's own re-apply-for-idempotence pass) adds
--- nothing.
+-- every statement is safe to run twice, including the legacy 'active' remap near the bottom, which is
+-- guarded by a NOT EXISTS check keyed on a fixed note string rather than a one-time flag, so a second
+-- `node bin/migrate.js` run (or the test-db bootstrap's own re-apply-for-idempotence pass) adds nothing.
+--
+-- This file is safe to run on EVERY server/dashboard startup (src/core/startup.js's ensureAuxSchema()
+-- does exactly that) because every statement here, including the legacy 'active' remap, is either pure
+-- schema DDL or self-limiting against a fixed legacy value that a healthy row can never carry going
+-- forward. The marked_at status-event backfill that originally lived at the bottom of this file was NOT
+-- self-limiting that way -- see sql/010_status_event_backfill.sql, split out for exactly that reason
+-- (defect 7 fix): it must only ever run from a deliberate `node bin/migrate.js apply`, never from
+-- ensureAuxSchema, so it never fires again on every ordinary dashboard/MCP startup against rows that were
+-- created (and legitimately marked) long after this migration first applied.
 
 BEGIN;
 
@@ -94,22 +102,5 @@ WHERE status = 'active'
   );
 
 UPDATE ic_job_listings SET status = 'applied' WHERE status = 'active' AND coalesce(record_kind, 'listing') = 'listing';
-
--- ---------------------------------------------------------------------------------------------------
--- Backfill one 'status' event per row that was ever explicitly marked (marked_at IS NOT NULL, set by
--- sql/007's mark_meta) but predates the event log, so its current status is not invisible in the
--- history timeline. Guarded by the same note-text pattern: a re-run finds every marked_at row already
--- has this exact backfill event and inserts nothing further.
--- ---------------------------------------------------------------------------------------------------
-
-INSERT INTO ic_job_events (listing_id, kind, from_status, to_status, note, actor, at)
-SELECT id, 'status', NULL, status, 'backfilled from marked_at by migration 009', 'migration', marked_at
-FROM ic_job_listings
-WHERE marked_at IS NOT NULL
-  AND coalesce(record_kind, 'listing') = 'listing'
-  AND NOT EXISTS (
-    SELECT 1 FROM ic_job_events e
-    WHERE e.listing_id = ic_job_listings.id AND e.kind = 'status' AND e.note = 'backfilled from marked_at by migration 009'
-  );
 
 COMMIT;
