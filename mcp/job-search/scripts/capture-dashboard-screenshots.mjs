@@ -212,6 +212,33 @@ async function main() {
       }
       await page.close();
     }
+
+    // Keyboard walk / focus ring check (design reconciliation "Verification" item 4): Tab through Home
+    // end to end and confirm a visible focus ring (the shared :focus-visible rule) actually appears on
+    // each focusable control, not just that the CSS rule exists in the stylesheet.
+    const kbPage = await browser.newPage({ viewport: { width: 1440, height: 960 } });
+    await kbPage.goto(`http://127.0.0.1:${port}/#/`, { waitUntil: 'networkidle' });
+    await kbPage.waitForTimeout(300);
+    /** @type {Array<{ tag: string, outlineWidth: string, outlineStyle: string }>} */
+    const focusSamples = [];
+    for (let i = 0; i < 10; i++) {
+      await kbPage.keyboard.press('Tab');
+      const sample = await kbPage.evaluate(() => {
+        const el = document.activeElement;
+        if (!el || el === document.body) return null;
+        const cs = getComputedStyle(el);
+        return { tag: el.tagName.toLowerCase(), outlineWidth: cs.outlineWidth, outlineStyle: cs.outlineStyle };
+      });
+      if (sample) focusSamples.push(sample);
+    }
+    await kbPage.screenshot({ path: path.join(SCREENSHOT_DIR, 'keyboard-focus-walk.png') });
+    await kbPage.close();
+    const noRing = focusSamples.filter((s) => s.outlineStyle === 'none' || s.outlineWidth === '0px');
+    process.stdout.write(`\nkeyboard walk: ${focusSamples.length} focusable control(s) tabbed through, ${focusSamples.length - noRing.length} showed a visible outline.\n`);
+    if (noRing.length > 0) {
+      process.stdout.write(`  no visible focus ring on: ${noRing.map((s) => s.tag).join(', ')}\n`);
+      consoleErrors.push({ viewport: '1440x960', route: 'home (keyboard walk)', text: `${noRing.length} focusable control(s) had no visible focus ring: ${noRing.map((s) => s.tag).join(', ')}` });
+    }
   } finally {
     await browser.close();
     await app.close();
