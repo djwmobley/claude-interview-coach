@@ -11,7 +11,37 @@ import { buildRegistry } from '../../core/urlguard.js';
 import { runRemind } from '../../core/remind.js';
 import { connectDedicated } from '../../core/db.js';
 import { DEFAULT_REPORT_HOME_MIN_PRESCORE } from '../../core/config.js';
-import { sendJson } from '../http.js';
+import { sendJson, applySandboxHtmlHeaders } from '../http.js';
+
+/**
+ * Shared preview build, used by both the JSON preview route and the HTML-serving variant added for
+ * pr3-spec-decisions.md section 9 item 3 / section 6 item 3 (the sandboxed-iframe front end needs an
+ * endpoint that responds with the rendered HTML directly, carrying the sandbox CSP, rather than a JSON
+ * string field with nowhere safe to render it). Never touches ic_report_state, same rule as the original.
+ * @param {import('../server.js').DashboardDeps} deps
+ * @param {Record<string,string>} q
+ */
+async function buildPreview(deps, q) {
+  const config = deps.config;
+  const timezone = config?.adapters.run.timezone ?? 'America/Chicago';
+  const topN = config?.adapters.run.reportTopN ?? 10;
+  const homeMinPrescore = config?.adapters.run.reportHomeMinPrescore ?? DEFAULT_REPORT_HOME_MIN_PRESCORE;
+  const registry = config ? buildRegistry(config) : { entries: [], httpAllowedHosts: new Set() };
+  const profile = q.profile || 'exec-default';
+  const runId = q.run_id ? Number(q.run_id) : null;
+  const date = q.date || null;
+
+  const { now, sinceOverride } = await deps.withClient((c) => resolveReportWindow(c, { date, run_id: runId, timezone }));
+  const homeLocationNorms = await deps.withClient((c) => homeLocationNormsFor(c, profile));
+  const report = await deps.withClient((c) => buildScanReport(c, {
+    now, timezone, topN, homeMinPrescore, homeLocationNorms,
+    ...(sinceOverride !== undefined ? { sinceOverride } : {}),
+  }));
+  const subject = buildReportSubject(report, {});
+  const text = renderReportText(report, registry);
+  const html = renderReportHtml(report, registry);
+  return { subject, report, text, html };
+}
 
 /**
  * @param {ReturnType<typeof import('../router.js').createRouter>} router
@@ -19,25 +49,7 @@ import { sendJson } from '../http.js';
  */
 export function register(router, deps) {
   router.register('GET', '/api/report/preview', async (ctx) => {
-    const q = ctx.query;
-    const config = deps.config;
-    const timezone = config?.adapters.run.timezone ?? 'America/Chicago';
-    const topN = config?.adapters.run.reportTopN ?? 10;
-    const homeMinPrescore = config?.adapters.run.reportHomeMinPrescore ?? DEFAULT_REPORT_HOME_MIN_PRESCORE;
-    const registry = config ? buildRegistry(config) : { entries: [], httpAllowedHosts: new Set() };
-    const profile = q.profile || 'exec-default';
-    const runId = q.run_id ? Number(q.run_id) : null;
-    const date = q.date || null;
-
-    const { now, sinceOverride } = await deps.withClient((c) => resolveReportWindow(c, { date, run_id: runId, timezone }));
-    const homeLocationNorms = await deps.withClient((c) => homeLocationNormsFor(c, profile));
-    const report = await deps.withClient((c) => buildScanReport(c, {
-      now, timezone, topN, homeMinPrescore, homeLocationNorms,
-      ...(sinceOverride !== undefined ? { sinceOverride } : {}),
-    }));
-    const subject = buildReportSubject(report, {});
-    const text = renderReportText(report, registry);
-    const html = renderReportHtml(report, registry);
+    const { subject, report, text, html } = await buildPreview(deps, ctx.query);
     sendJson(ctx.res, 200, {
       ok: true,
       subject,
@@ -51,6 +63,17 @@ export function register(router, deps) {
       text,
       html,
     });
+  });
+
+  // HTML-serving variant (pr3-spec-decisions.md section 9 item 3): same params, same pipeline, but
+  // responds with the rendered HTML directly under the sandbox CSP so the front end's iframe can `src=`
+  // it, exactly like GET /api/documents/file already does for a saved report file.
+  router.register('GET', '/api/report/preview.html', async (ctx) => {
+    const { html } = await buildPreview(deps, ctx.query);
+    applySandboxHtmlHeaders(ctx.res);
+    ctx.res.setHeader('Content-Type', 'text/html; charset=utf-8');
+    ctx.res.statusCode = 200;
+    ctx.res.end(html);
   });
 
   router.register('POST', '/api/report/send', async (ctx) => {
