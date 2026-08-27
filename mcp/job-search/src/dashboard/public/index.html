@@ -4,12 +4,20 @@
 <meta charset="utf-8">
 <meta name="viewport" content="width=device-width, initial-scale=1">
 <title>Job search dashboard</title>
+<link rel="icon" href="data:image/svg+xml,%3Csvg xmlns='http://www.w3.org/2000/svg' viewBox='0 0 16 16'%3E%3Crect width='16' height='16' rx='3' fill='%2358a6ff'/%3E%3C/svg%3E">
+<link rel="stylesheet" href="/app.css">
 </head>
 <body>
-<main>
-<h1>Job search dashboard</h1>
-<p>The dashboard front end arrives in PR 3.</p>
-<p>The API is live under <code>/api/*</code>; try <a href="/api/health">/api/health</a> or <a href="/api/summary">/api/summary</a>.</p>
-</main>
+<div id="app-shell" class="app-shell">
+  <nav id="rail" class="rail" aria-label="Primary"></nav>
+  <div class="app-main">
+    <header id="topbar" class="topbar"></header>
+    <div id="banners" class="banner-stack" aria-live="polite"></div>
+    <main id="content" class="content" tabindex="-1"></main>
+  </div>
+</div>
+<div id="toast-root" class="toast-root" aria-live="polite"></div>
+<div id="help-overlay-root"></div>
+<script type="module" src="/app.js"></script>
 </body>
 </html>
