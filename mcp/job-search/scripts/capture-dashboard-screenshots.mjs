@@ -291,6 +291,137 @@ async function main() {
       if (!undoToastShown) kbCheck.failures.push('Pipeline: pressing m after j did not surface the undo toast (stage-set likely did not fire)');
     }
 
+    // Drawer pass (independent review's second re-review of PR #6: "extend the Playwright capture to
+    // open each drawer from Home, from its page, and (follow-up) from Job detail f, submit one, and
+    // assert the created row appears"). A drawer is a normal DOM form, so this drives it exactly like a
+    // person would: click the opening button, fill real inputs, click submit, read the resulting page.
+    async function fillByPlaceholder(placeholder, value) {
+      await interactPage.locator(`.drawer__panel [placeholder="${placeholder}"]`).fill(value);
+    }
+    /** Poll a page-side condition instead of a fixed sleep, since a route's async render (dynamic
+     * import + fetch + re-render) has no fixed duration. Returns whether it became true within timeoutMs. */
+    async function waitForCondition(fn, timeoutMs = 5000) {
+      try {
+        await interactPage.waitForFunction(fn, { timeout: timeoutMs });
+        return true;
+      } catch {
+        return false;
+      }
+    }
+
+    // 1) Add opportunity from Home's action bar.
+    await interactPage.goto(`http://127.0.0.1:${port}/#/`, { waitUntil: 'networkidle' });
+    await interactPage.waitForTimeout(300);
+    await interactPage.click('text=Add opportunity');
+    const homeDrawerAppeared = await interactPage.waitForSelector('.drawer__panel', { timeout: 3000 }).then(() => true).catch(() => false);
+    if (!homeDrawerAppeared) kbCheck.failures.push('Add opportunity (from Home): the drawer did not appear after clicking the action-bar button');
+    await fillByPlaceholder('Role title', 'Fixture Role From Home Drawer');
+    await fillByPlaceholder('Company', 'Fixture Co Home');
+    await interactPage.click('.drawer__panel button.btn--primary');
+    const homeDrawerOk = await waitForCondition(() => /^#\/jobs\/\d+$/.test(location.hash) && document.querySelector('.page-title')?.textContent === 'Fixture Role From Home Drawer');
+    if (!homeDrawerOk) {
+      const homeDrawerHash = await interactPage.evaluate(() => location.hash);
+      const homeDrawerTitleShown = await interactPage.evaluate(() => document.querySelector('.page-title')?.textContent ?? '');
+      kbCheck.failures.push(`Add opportunity (from Home): expected navigation to the new listing's Job detail with its title shown; got hash "${homeDrawerHash}", title "${homeDrawerTitleShown}"`);
+    }
+
+    // 2) Add opportunity from Pipeline's own button.
+    await interactPage.goto(`http://127.0.0.1:${port}/#/pipeline`, { waitUntil: 'networkidle' });
+    await interactPage.waitForTimeout(300);
+    await interactPage.click('text=Add opportunity');
+    await interactPage.waitForSelector('.drawer__panel', { timeout: 2000 }).catch(() => {});
+    await fillByPlaceholder('Role title', 'Fixture Role From Pipeline Drawer');
+    await fillByPlaceholder('Company', 'Fixture Co Pipeline');
+    await interactPage.click('.drawer__panel button.btn--primary');
+    const pipelineDrawerOk = await waitForCondition(() => document.querySelector('.page-title')?.textContent === 'Fixture Role From Pipeline Drawer');
+    if (!pipelineDrawerOk) {
+      const pipelineDrawerTitleShown = await interactPage.evaluate(() => document.querySelector('.page-title')?.textContent ?? '');
+      kbCheck.failures.push(`Add opportunity (from Pipeline): expected navigation to the new listing's Job detail; got title "${pipelineDrawerTitleShown}"`);
+    }
+
+    // 3) Add opportunity dedup: submitting the same title/company again hits 409 and shows the inline
+    // "Create anyway" second step instead of an error toast.
+    await interactPage.goto(`http://127.0.0.1:${port}/#/pipeline`, { waitUntil: 'networkidle' });
+    await interactPage.waitForTimeout(300);
+    await interactPage.click('text=Add opportunity');
+    await interactPage.waitForSelector('.drawer__panel', { timeout: 2000 }).catch(() => {});
+    await fillByPlaceholder('Role title', 'Fixture Role From Pipeline Drawer');
+    await fillByPlaceholder('Company', 'Fixture Co Pipeline');
+    await interactPage.click('.drawer__panel button.btn--primary');
+    const dedupHintShown = await waitForCondition(() => Boolean(document.querySelector('.drawer__dedup-note')), 3000);
+    if (!dedupHintShown) kbCheck.failures.push('Add opportunity: resubmitting an identical title/company did not show the dedup hint (expected a 409 DUPLICATE_CANDIDATE branch)');
+    else {
+      await interactPage.click('text=Create anyway');
+      const forcedOk = await waitForCondition(() => document.querySelector('.page-title')?.textContent === 'Fixture Role From Pipeline Drawer');
+      if (!forcedOk) {
+        const forcedTitleShown = await interactPage.evaluate(() => document.querySelector('.page-title')?.textContent ?? '');
+        kbCheck.failures.push(`Add opportunity: "Create anyway" did not create the duplicate and navigate to it; got title "${forcedTitleShown}"`);
+      }
+    }
+
+    // 4) New follow-up from Follow-ups' own button.
+    await interactPage.goto(`http://127.0.0.1:${port}/#/followups`, { waitUntil: 'networkidle' });
+    await interactPage.waitForTimeout(300);
+    await interactPage.click('text=New follow-up');
+    await interactPage.waitForSelector('.drawer__panel', { timeout: 2000 }).catch(() => {});
+    await fillByPlaceholder('Contact name', 'Fixture Contact Followups');
+    await fillByPlaceholder('What to do', 'Fixture follow-up action');
+    await interactPage.click('.drawer__panel button.btn--primary');
+    const followupRowShown = await waitForCondition(() => document.body.textContent?.includes('Fixture Contact Followups') ?? false);
+    if (!followupRowShown) kbCheck.failures.push('New follow-up (from Follow-ups): the created follow-up does not appear in the list after submit');
+
+    // 5) New follow-up from Home's action bar.
+    await interactPage.goto(`http://127.0.0.1:${port}/#/`, { waitUntil: 'networkidle' });
+    await interactPage.waitForTimeout(300);
+    await interactPage.click('text=New follow-up');
+    await interactPage.waitForSelector('.drawer__panel', { timeout: 2000 }).catch(() => {});
+    await fillByPlaceholder('Contact name', 'Fixture Contact Home');
+    await fillByPlaceholder('What to do', 'Fixture follow-up from Home');
+    await interactPage.click('.drawer__panel button.btn--primary');
+    const homeAgendaShowsFollowup = await waitForCondition(() => document.body.textContent?.includes('Fixture Contact Home') ?? false);
+    if (!homeAgendaShowsFollowup) kbCheck.failures.push('New follow-up (from Home): the created follow-up does not appear on the agenda after submit');
+
+    // 6) Job detail's f key opens the New follow-up drawer pre-filled with the listing, and Escape
+    // aborts without creating anything (plan requirement: "Cancel/Esc aborts without creating anything").
+    await interactPage.goto(`http://127.0.0.1:${port}/#/jobs/${ids.listingId}`, { waitUntil: 'networkidle' });
+    await interactPage.waitForTimeout(300);
+    await interactPage.keyboard.press('f');
+    await interactPage.waitForSelector('.drawer__panel', { timeout: 2000 }).catch(() => {});
+    const prefilledContext = await interactPage.evaluate(() => document.querySelector('.drawer__context')?.textContent ?? '');
+    if (!prefilledContext.includes('Director of Platform Engineering')) kbCheck.failures.push(`Job detail f: drawer did not show the listing context (got "${prefilledContext}")`);
+    await interactPage.keyboard.press('Escape');
+    await interactPage.waitForTimeout(200);
+    const drawerGoneAfterEscape = await interactPage.evaluate(() => !document.querySelector('.drawer__panel'));
+    if (!drawerGoneAfterEscape) kbCheck.failures.push('Job detail f: Escape did not close the drawer');
+    // Confirm nothing was created by the aborted attempt: the followups panel should not show a new row
+    // (this listing's only follow-up is the one seeded in the fixture data, "Sample Recruiter").
+    await interactPage.reload({ waitUntil: 'networkidle' });
+    await interactPage.waitForTimeout(300);
+    const followupCountAfterEscape = await interactPage.evaluate(() => document.querySelectorAll('.followups-panel li').length);
+    if (followupCountAfterEscape !== 1) kbCheck.failures.push(`Job detail f: Escape-then-reload shows ${followupCountAfterEscape} follow-up(s), expected exactly the 1 seeded one (aborting must not create anything)`);
+    // Now actually submit it, pre-filled contact left blank by design (only listing context/action are
+    // pre-filled), fill contact and submit, confirm it lands in the follow-ups panel.
+    await interactPage.keyboard.press('f');
+    const secondDrawerAppeared = await interactPage.waitForSelector('.drawer__panel', { timeout: 2000 }).then(() => true).catch(() => false);
+    if (!secondDrawerAppeared) {
+      kbCheck.failures.push('Job detail f: the drawer did not reappear after a second f press (post-reload)');
+    } else {
+      await fillByPlaceholder('Contact name', 'Fixture Contact JobDetail');
+      await interactPage.click('.drawer__panel button.btn--primary');
+      const jobDetailFollowupShown = await waitForCondition(() => document.body.textContent?.includes('Fixture Contact JobDetail') ?? false);
+      if (!jobDetailFollowupShown) kbCheck.failures.push('Job detail f: submitting the drawer did not add the follow-up to this listing\'s panel');
+    }
+
+    // 7) applied stage offers a follow-up inline (plan line 99): setting a listing to applied opens the
+    // New follow-up drawer pre-filled, due in 5 days by default.
+    await interactPage.goto(`http://127.0.0.1:${port}/#/jobs/${ids.listingId}`, { waitUntil: 'networkidle' });
+    await interactPage.waitForTimeout(300);
+    await interactPage.click('.stage-buttons__grid button:has-text("Applied")');
+    await interactPage.waitForSelector('.drawer__panel', { timeout: 2000 }).catch(() => {});
+    const appliedDrawerShown = await interactPage.evaluate(() => Boolean(document.querySelector('.drawer__panel')));
+    if (!appliedDrawerShown) kbCheck.failures.push('Job detail: setting stage to Applied did not open the inline follow-up offer');
+    else await interactPage.keyboard.press('Escape');
+
     await interactPage.close();
     if (kbCheck.failures.length > 0) {
       process.stdout.write(`\nkbaction interaction pass: ${kbCheck.failures.length} failure(s):\n`);
