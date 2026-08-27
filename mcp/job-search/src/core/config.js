@@ -88,6 +88,9 @@ export function ensureDotenv() {
  * @property {string} GOOGLE_TOKEN_FILE
  * @property {string} REMINDER_TO
  * @property {string} LOG_LEVEL
+ * @property {string|undefined} DASHBOARD_PORT raw string from .env/process.env; bin/dashboard.js
+ *   validates and falls back to its own default (7311) -- getEnv() does not itself validate or default
+ *   this one, since resolvePort()'s fallback-with-warning behavior needs the raw, possibly-invalid value.
  */
 
 /**
@@ -114,6 +117,7 @@ export function getEnv() {
     GOOGLE_TOKEN_FILE: e.GOOGLE_TOKEN_FILE || '',
     REMINDER_TO: e.REMINDER_TO || '',
     LOG_LEVEL: e.LOG_LEVEL || 'info',
+    DASHBOARD_PORT: e.DASHBOARD_PORT || undefined,
   };
 }
 

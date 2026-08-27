@@ -23,18 +23,24 @@ mcp/job-search/
   config/             adapters.json ats-boards.json exec-boards.json company-aliases.json
                       alert-senders.json noise-rules.json noise-fixtures.json style-checks.json
   config.lock.json    sha256 of the six scan config files; unattended runs refuse a mismatch
-  sql/                001-008 migrations (each BEGIN/COMMIT, idempotent) + unique_indexes.sql (conditional)
+  sql/                001-009 migrations (each BEGIN/COMMIT, idempotent) + unique_indexes.sql (conditional)
   bin/                scan.js  migrate.js  backfill-embeddings.js  config-lock.js  remind.js
+                      dashboard.js  seed-opportunities.js
+  seed/               opportunities.example.json (synthetic; the real file is gitignored under data/)
+  scripts/            register-dashboard-task.ps1
   src/server.js       MCP server (stdout carries JSON-RPC frames only)
   src/tools/          search_jobs query_jobs get_job mark_jobs profiles scans review render_doc
                       followups scan_report
   src/core/           config db logger errors normalize dedup upsert prescore noise compact embed
                       urlguard budget ratelimit scheduler scan-run google followups remind report render schema
+                      statuses events manual documents calendar-provider startup reembed
+  src/dashboard/      http router server stream scan-runner calendar-cache task-names
+                      next-scheduled-scan routes/*.js public/index.html (front end lands in PR 3)
   src/browser/        session (the only playwright import) capability extractors wall
   src/adapters/       index base greenhouse lever workday dayforce indeed linkedin exec-generic
   test/               node --test (fixtures under test/fixtures/)
-  logs/               gitignored
-  output/reports/     gitignored; daily scan-report markdown (YYYY-MM-DD-scan-report.md)
+  logs/               gitignored; scan/remind/dashboard-YYYY-MM-DD.log
+  output/reports/     gitignored; daily scan-report markdown and HTML (YYYY-MM-DD-scan-report.{md,html})
 ```
 
 ## Setup
@@ -318,7 +324,7 @@ $t.RandomDelay = "PT45M"
 Register-ScheduledTask -TaskName "job-search scan" -Action $a -Trigger $t -RunLevel Limited
 
 $a2 = New-ScheduledTaskAction -Execute "node" -Argument "mcp\job-search\bin\remind.js" -WorkingDirectory $root
-$t2 = New-ScheduledTaskTrigger -Weekly -DaysOfWeek Monday,Tuesday,Wednesday,Thursday,Friday -At 07:00
+$t2 = New-ScheduledTaskTrigger -Weekly -DaysOfWeek Monday,Tuesday,Wednesday,Thursday,Friday -At 08:00
 Register-ScheduledTask -TaskName "job-search remind" -Action $a2 -Trigger $t2 -RunLevel Limited
 ```
 
@@ -376,6 +382,137 @@ marker.
 
 Exit codes: `0` sent or nothing to report, `1` auth or send failure (rows and
 the report marker stay un-stamped).
+
+## Dashboard
+
+A local, loopback-only HTTP server (`src/dashboard/`) so most day-to-day job-search
+actions (viewing the pipeline, running or cancelling a scan, previewing or sending
+the report, follow-ups, review, calendar) do not require a model in the loop. PR 2
+(this stage) ships the server, API, scan runner, SSE stream, seed script, and task
+registration script; the browsable front end lands in PR 3 -- for now `/` serves a
+one-page placeholder and every other page lives at `/api/*`.
+
+**Run it:**
+
+```
+npm run dashboard          # node bin/dashboard.js
+npm run dashboard:open     # same, plus opens the URL in the default browser
+```
+
+Prints `http://127.0.0.1:7311/` (or whatever port is configured) once it is
+listening. `http://localhost:7311` may resolve to `::1` on some resolvers; the URL
+this process prints and binds always uses the literal `127.0.0.1` address.
+
+**Port:** `DASHBOARD_PORT` in `.env`, default `7311`. Must be an integer
+1024-65535 or the dashboard falls back to `7311` with a logged warning and a
+`banner` entry in `GET /api/health`'s response. Only one instance runs at a time:
+on `EADDRINUSE` the new process probes `GET /api/health` on that port and exits 0
+(not an error) if a dashboard already answers there, exits 1 with a log line
+naming the port and what answered otherwise.
+
+**Task registration** (start automatically at logon):
+
+```
+npm run dashboard:register   # writes/updates the "job-search dashboard" scheduled task
+Start-ScheduledTask -TaskName "job-search dashboard"
+```
+
+`scripts/register-dashboard-task.ps1` only writes the task definition; running
+`Start-ScheduledTask` (and confirming it stays up across a reboot or log off/on) is
+a separate, deliberate step for the operator, not something this repository does on
+your behalf. `-ExecutionTimeLimit 0` (unlimited; Task Scheduler's 72-hour default
+would otherwise kill a long-running server), `-MultipleInstances IgnoreNew`,
+`RestartCount 3`. Unregister with `powershell -File
+scripts/register-dashboard-task.ps1 -Unregister`.
+
+**Seed file** (outside opportunities that never came from a scan -- a recruiter
+call, a role already known before this repo tracked it):
+
+```
+node bin/seed-opportunities.js --dry-run
+node bin/seed-opportunities.js
+node bin/seed-opportunities.js --file path\to\file.json
+```
+
+Default path is `data/job-search/opportunities.json`, under the gitignored `data/`
+directory -- not committed, and not created by this repository. See
+`seed/opportunities.example.json` for the entry shape with synthetic company and
+contact names: `key` (stable id; a re-run with the same key updates the same row
+instead of creating a duplicate), `title`, `company`, `url?`, `status`, `notes?`,
+`contact?`, `via?`, `match_listing_id?` (attach to an existing scanned row instead
+of creating a manual one), `events?` (replayed with `actor:'seed'` and the given
+`at`), `followup?` (`{link_id}` to attach an existing follow-up, or full fields to
+create one), `documents?` (relative `output/` paths; a missing file warns, it never
+fails the entry). Prints one JSON line per entry so a partial failure is visible
+without aborting the rest of the file.
+
+**What each dashboard action does** (server-side; see the front end in PR 3 for the
+buttons that call these):
+
+- **Run scan / Cancel scan**: `POST /api/scans` spawns `bin/scan.js --trigger
+  dashboard --run-marker <path> --json <file>` as a **detached** process --
+  restarting or stopping the dashboard never kills a running scan. The dashboard
+  correlates the spawn to a run by that marker file's appearance, never by timing;
+  see `src/dashboard/scan-runner.js`. `POST /api/scans/:id/cancel` flips the run
+  row (same mechanism the `scans` MCP tool uses) and, only when this dashboard
+  process itself spawned that run, arms a `taskkill /T /F` backstop 45 seconds
+  later if it is still not finished -- a run this dashboard did not spawn (CLI,
+  MCP, or a dashboard restart that lost the pid) gets the DB flip only, and the
+  response's `forced_kill_available` tells the caller which applies.
+- **Preview / Send report**: `GET /api/report/preview` calls the exact same
+  `buildScanReport`/`resolveReportWindow` functions the `scan_report` MCP tool
+  uses and **never** touches `ic_report_state`; `POST /api/report/send` runs
+  `runRemind` on its own dedicated connection (never the pooled one, so a slow
+  Gmail call cannot starve other requests).
+- **Stage changes, notes, follow-ups, review resolution, manual opportunities,
+  document links**: reuse `applyMark`, `createManualListing`, `resolveItem`,
+  `core/followups.js`, and `core/documents.js` exactly as the MCP tools do, with
+  `actor:'dashboard'` on every event so the history timeline and the MCP's own
+  `listEvents` show who made a change.
+
+**Live updates**: `GET /api/stream` is a Server-Sent Events endpoint (one process-
+wide timer set, capped at 16 concurrent connections, `503` beyond that): `run`
+every 2 s while a scan is live, `changed {kind}` within 10 s of any
+`ic_job_events`/`ic_followups` row appearing (from the dashboard, the MCP, or the
+CLI), and a `ping` every 25 s. The front end (PR 3) falls back to 5 s polling of
+`/api/summary` after two SSE failures.
+
+**Security standing constraint (iframe sandbox):** stored report and research HTML
+is served through `GET /api/documents/file` with `Content-Security-Policy:
+sandbox; default-src 'none'` and is rendered only inside a sandboxed `<iframe
+sandbox>` with no `allow-*` tokens by the front end. **`allow-scripts` and
+`allow-same-origin` are never added to that iframe together** -- that combination
+lets a sandboxed page escape the sandbox via its own srcdoc; this holds regardless
+of how trusted the HTML source looks, since a scan-derived research page embeds
+whatever an external company's site returned before this project ever sees it.
+
+**Config lock:** no new config file; `DASHBOARD_PORT` lives in `.env`/`.env.example`
+only, same as every other environment override in this README.
+
+**Dashboard blind spots** (in addition to "Known blind spots" below; none of these
+is exercised by the test suite, which never touches the real Postgres database, a
+real browser, or a real Task Scheduler task):
+
+- Never run against the real `ic_context` database or a real browser session; SSE,
+  the guard rules, and every route are exercised only against the isolated test
+  database with stubbed calendar/scan-runner dependencies.
+- Windows `taskkill /T /F` tree-kill semantics against a real, running scan
+  (including its attached Chrome pages) are untested; the 45 s backstop's
+  behavior against a wedged child process is unverified.
+- `schtasks /query` XML/CSV parsing (`GET /api/summary`'s "next scheduled scan") is
+  tested only against canned output fixtures; real output shape can vary by
+  Windows locale, PowerShell version, and whether the "job-search scan" task has
+  ever actually been registered with the exact trigger shape this parser expects.
+- The Google Calendar provider is stubbed in every test; a real OAuth grant,
+  real Calendar API pagination, and real event CRUD are unverified end to end.
+- `bin/seed-opportunities.js` is tested against a synthetic fixture DB and the
+  example JSON only; it has never been run against a real, populated
+  `ic_context` database or the real (gitignored) `data/job-search/opportunities.json`.
+- The scan-runner's LOCKED-vs-SCAN_START_FAILED classification depends on
+  `bin/scan.js` exiting with code 2 specifically for a lock conflict before ever
+  writing the marker file; this is correct by construction (a locked run never
+  reaches the `ic_scan_runs` INSERT that the marker follows) but has not been
+  exercised against a real second in-flight scan process.
 
 ## Document rendering (`render_doc`)
 

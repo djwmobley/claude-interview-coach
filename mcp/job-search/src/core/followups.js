@@ -46,8 +46,33 @@ const COLS = 'id, contact, org, listing_id, due_at, channel, action, notify, sta
 export function parseIsoDate(v, field) {
   if (typeof v !== 'string' || !v.trim()) throw new JobSearchError('VALIDATION', `${field} is required (ISO date)`);
   const s = v.trim();
-  if (!/^\d{4}-\d{2}-\d{2}(T\d{2}:\d{2}(:\d{2}(\.\d+)?)?(Z|[+-]\d{2}:?\d{2})?)?$/.test(s)) {
+  const m = /^(\d{4})-(\d{2})-(\d{2})(?:T(\d{2}):(\d{2})(?::(\d{2})(?:\.\d+)?)?(?:Z|[+-]\d{2}:?\d{2})?)?$/.exec(s);
+  if (!m) {
     throw new JobSearchError('VALIDATION', `${field} must be an ISO date like 2026-08-27 or 2026-08-27T09:00-05:00`);
+  }
+  const [, yStr, moStr, dStr, hStr, minStr, secStr] = m;
+  const year = Number(yStr);
+  const month = Number(moStr);
+  const day = Number(dStr);
+  // Calendar-validity check, independent of timezone (the shape regex above only checks digit format, so
+  // "2026-02-30" would otherwise pass through to Date's own lenient parser, which silently rolls it over
+  // into March instead of refusing it -- adversary-pass finding). Date.UTC normalizes an out-of-range
+  // month or day by rolling into the next/previous period; comparing the round trip catches every such
+  // case (Feb 30, month 00, month 13+, day 00, day 32+) without hardcoding days-per-month or leap years.
+  const ref = new Date(Date.UTC(year, month - 1, day));
+  if (ref.getUTCFullYear() !== year || ref.getUTCMonth() !== month - 1 || ref.getUTCDate() !== day) {
+    // Same wording as the NaN check below (both mean "not a valid date" to a caller): a calendar-impossible
+    // day (Feb 30) and an out-of-range digit shape are both refused for the same reason, from the caller's
+    // point of view, so they carry one consistent message rather than two that only differ by mechanism.
+    throw new JobSearchError('VALIDATION', `${field} is not a valid date`);
+  }
+  if (hStr !== undefined) {
+    const hour = Number(hStr);
+    const minute = Number(minStr);
+    const second = secStr !== undefined ? Number(secStr) : 0;
+    if (hour > 23 || minute > 59 || second > 59) {
+      throw new JobSearchError('VALIDATION', `${field} has an invalid time of day`);
+    }
   }
   const d = /^\d{4}-\d{2}-\d{2}$/.test(s) ? new Date(`${s}T09:00:00`) : new Date(s);
   if (Number.isNaN(d.getTime())) throw new JobSearchError('VALIDATION', `${field} is not a valid date`);
@@ -203,6 +228,55 @@ export async function cancelFollowup(client, id, opts = {}) {
   await dropCalendar(client, row, opts.calendar, warnings);
   const r = await client.query(`UPDATE ic_followups SET status = 'cancelled', updated_at = now() WHERE id = $1 RETURNING ${COLS}`, [id]);
   return { row: r.rows[0], warnings };
+}
+
+/**
+ * General field edit (dashboard PR 2, "New follow-up" and follow-up edit drawer). Refuses editing a
+ * `done`/`cancelled` row (create a new one instead, same rule createFollowup/completeFollowup already
+ * apply). Every field is optional; only the fields present in `patch` are validated and written, so a
+ * caller sending `{due_at}` alone never has to resend the rest of the row.
+ * @param {import('pg').ClientBase} client
+ * @param {number} id
+ * @param {{ contact?: string, org?: string|null, due_at?: string, channel?: string, action?: string, notify?: string[] }} patch
+ * @returns {Promise<{ row: FollowupRow, warnings: string[] }>}
+ */
+export async function updateFollowup(client, id, patch) {
+  const row = await getFollowup(client, id);
+  if (!row) throw new JobSearchError('NOT_FOUND', `followup ${id} not found`);
+  if (row.status === 'done' || row.status === 'cancelled') throw new JobSearchError('VALIDATION', `followup ${id} is ${row.status}; cannot edit`);
+  /** @type {string[]} */
+  const sets = [];
+  /** @type {unknown[]} */
+  const params = [id];
+  const set = (/** @type {string} */ col, /** @type {unknown} */ v) => {
+    params.push(v);
+    sets.push(`${col} = $${params.length}`);
+  };
+  if (patch.contact !== undefined) {
+    const c = String(patch.contact).trim();
+    if (!c) throw new JobSearchError('VALIDATION', 'contact cannot be empty');
+    set('contact', c);
+  }
+  if (patch.org !== undefined) set('org', patch.org ? String(patch.org).trim() : null);
+  if (patch.due_at !== undefined) set('due_at', parseIsoDate(patch.due_at, 'due_at'));
+  if (patch.channel !== undefined) {
+    if (!CHANNELS.includes(patch.channel)) throw new JobSearchError('VALIDATION', `channel must be one of ${CHANNELS.join(', ')}`);
+    set('channel', patch.channel);
+  }
+  if (patch.action !== undefined) {
+    const a = String(patch.action).trim();
+    if (!a) throw new JobSearchError('VALIDATION', 'action_text cannot be empty');
+    set('action', a);
+  }
+  if (patch.notify !== undefined) {
+    const notify = [...new Set(patch.notify)];
+    for (const n of notify) if (!NOTIFY.includes(n)) throw new JobSearchError('VALIDATION', `notify values must be one of ${NOTIFY.join(', ')}`);
+    set('notify', notify);
+  }
+  if (sets.length === 0) return { row, warnings: [] };
+  sets.push('updated_at = now()');
+  const r = await client.query(`UPDATE ic_followups SET ${sets.join(', ')} WHERE id = $1 RETURNING ${COLS}`, params);
+  return { row: r.rows[0], warnings: [] };
 }
 
 /**

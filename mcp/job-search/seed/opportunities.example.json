@@ -1,0 +1,59 @@
+[
+  {
+    "key": "example-current-employer",
+    "title": "VP of Technology",
+    "company": "Northfield Data Systems",
+    "status": "accepted",
+    "notes": "Example entry: current employer, kept accepted.",
+    "events": [
+      { "at": "2026-01-05T09:00:00-06:00", "to_status": "interviewing", "note": "panel" },
+      { "at": "2026-01-20T09:00:00-06:00", "to_status": "accepted", "note": "offer accepted" }
+    ]
+  },
+  {
+    "key": "example-interviewing-via-recruiter",
+    "title": "Chief Technology Officer",
+    "company": "Bellcrest Health Group",
+    "via": "Example Search Partners, Jamie Rowan",
+    "status": "interviewing",
+    "notes": "Example entry: active recruiter-sourced pursuit, follow-up attached.",
+    "events": [
+      { "at": "2026-02-01T09:00:00-06:00", "to_status": "applied", "note": "referral submitted" },
+      { "at": "2026-02-10T09:00:00-06:00", "to_status": "interviewing", "note": "screened" }
+    ],
+    "followup": {
+      "contact": "Jamie Rowan",
+      "org": "Example Search Partners",
+      "due_at": "2026-03-01",
+      "channel": "phone",
+      "action": "phone Jamie Rowan if still silent",
+      "notify": ["email"]
+    }
+  },
+  {
+    "key": "example-lost-role",
+    "title": "VP IT Enterprise Applications",
+    "company": "Cascade Retail Holdings",
+    "status": "lost",
+    "notes": "Example entry: applied, interviewed, then the role closed.",
+    "events": [
+      { "at": "2026-01-10T09:00:00-06:00", "to_status": "applied", "note": "applied via referral" },
+      { "at": "2026-01-24T09:00:00-06:00", "to_status": "interviewing", "note": "round 1" },
+      { "at": "2026-02-15T09:00:00-06:00", "to_status": "lost", "note": "role closed" }
+    ],
+    "documents": [
+      "markdown/example-cascade-retail-vp-it.md"
+    ]
+  },
+  {
+    "key": "example-consulting-engagement",
+    "title": "AI Assessment Consulting",
+    "company": "Example Consulting Partners / Client Co",
+    "status": "lost",
+    "notes": "Example entry: short consulting engagement that did not continue.",
+    "events": [
+      { "at": "2026-01-15T09:00:00-06:00", "to_status": "applied", "note": "engagement call" },
+      { "at": "2026-02-01T09:00:00-06:00", "to_status": "lost", "note": "engagement did not continue" }
+    ]
+  }
+]
