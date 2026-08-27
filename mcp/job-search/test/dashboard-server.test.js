@@ -430,6 +430,41 @@ describe('follow-ups', () => {
     const r = await req('PUT', `/api/followups/${create.json.row.id}`, { body: { due_at: '2027-02-30' } });
     assert.equal(r.status, 400);
   });
+
+  test('GET /api/listings/:id still returns its own follow-up when 30 other open follow-ups are due sooner system-wide', async () => {
+    const listing = await req('POST', '/api/listings', { body: { title: 'Followup Truncation Test', company: `${CO} Truncation`, status: 'new' } });
+    const targetId = listing.json.id;
+    // 30 unlinked, earlier-due follow-ups: sorted ahead of the target's own follow-up by the SQL
+    // ORDER BY due_at ASC the route relies on. Before the fix these alone exceeded the route's old
+    // hard-coded LIMIT 25, so the target listing's own follow-up never made it into the truncated
+    // system-wide page that was then filtered by listing_id in memory.
+    for (let i = 0; i < 30; i += 1) {
+      const dueAt = new Date(Date.UTC(2026, 5, 1 + i)).toISOString().slice(0, 10);
+      const r = await req('POST', '/api/followups', { body: { contact: `${CO} Noise ${i}`, due_at: dueAt, channel: 'email', action_text: 'noise' } });
+      assert.equal(r.status, 201);
+    }
+    const target = await req('POST', '/api/followups', { body: { contact: `${CO} Target`, listing_id: targetId, due_at: '2027-06-01', channel: 'email', action_text: 'target follow-up' } });
+    assert.equal(target.status, 201);
+    const detail = await req('GET', `/api/listings/${targetId}`);
+    assert.equal(detail.status, 200);
+    assert.ok(detail.json.followups.some((f) => f.id === target.json.row.id), 'the listing detail follow-ups list includes its own follow-up despite 30 earlier-due follow-ups elsewhere');
+  });
+
+  test('GET /api/followups?listing_id scopes in SQL too, for the same reason', async () => {
+    const listing = await req('POST', '/api/listings', { body: { title: 'Followup Query Truncation Test', company: `${CO} QueryTruncation`, status: 'new' } });
+    const targetId = listing.json.id;
+    for (let i = 0; i < 30; i += 1) {
+      const dueAt = new Date(Date.UTC(2026, 6, 1 + i)).toISOString().slice(0, 10);
+      const r = await req('POST', '/api/followups', { body: { contact: `${CO} QNoise ${i}`, due_at: dueAt, channel: 'email', action_text: 'noise' } });
+      assert.equal(r.status, 201);
+    }
+    const target = await req('POST', '/api/followups', { body: { contact: `${CO} QTarget`, listing_id: targetId, due_at: '2027-07-01', channel: 'email', action_text: 'target follow-up' } });
+    assert.equal(target.status, 201);
+    const listed = await req('GET', `/api/followups?listing_id=${targetId}`);
+    assert.equal(listed.status, 200);
+    assert.ok(listed.json.rows.some((f) => f.id === target.json.row.id), 'the listing-scoped follow-ups list includes its own follow-up despite 30 earlier-due follow-ups elsewhere');
+    assert.equal(listed.json.total, 1);
+  });
 });
 
 describe('sources enable', () => {

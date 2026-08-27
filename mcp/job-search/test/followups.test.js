@@ -14,13 +14,33 @@ const MARK = `ZZ-TEST-FU-${process.pid}`;
 /** @type {pg.Client} */
 let client;
 
+async function cleanupListings() {
+  const ids = (await client.query('SELECT id FROM ic_job_listings WHERE company = $1', [MARK])).rows.map((r) => r.id);
+  if (ids.length === 0) return;
+  await client.query('DELETE FROM ic_followups WHERE listing_id = ANY($1::int[])', [ids]);
+  await client.query('DELETE FROM ic_job_listings WHERE id = ANY($1::int[])', [ids]);
+}
+
+/** Inserts a minimal listing row (FK target for createFollowup's listing_id) tagged with company MARK. */
+async function insertListing() {
+  const n = Math.floor(Math.random() * 1e9);
+  const r = await client.query(
+    `INSERT INTO ic_job_listings (title, company, source, external_id, record_kind, company_norm, title_norm, location_norm, dedup_hash, last_seen)
+     VALUES ('Followups Listing Test', $1, $2, $3, 'listing', 'followups listing test co', 'followups listing test', 'legacy-unknown', $4, now()) RETURNING id`,
+    [MARK, `zz-test-fu-listing-${process.pid}`, `zz-test-fu-listing-${process.pid}:${n}`, `zz-fu-hash-${n}`],
+  );
+  return Number(r.rows[0].id);
+}
+
 before(async () => {
   client = new pg.Client(pgConnectionConfig());
   await client.connect();
   await client.query('DELETE FROM ic_followups WHERE contact LIKE $1', ['ZZ-TEST-%']);
+  await cleanupListings();
 });
 after(async () => {
   await client.query('DELETE FROM ic_followups WHERE contact LIKE $1', ['ZZ-TEST-%']);
+  await cleanupListings();
   await client.end();
 });
 
@@ -112,6 +132,32 @@ describe('followups core', () => {
     await assert.rejects(completeFollowup(client, a.id), /cancelled/);
     await assert.rejects(completeFollowup(client, 999999999), /not found/);
     await assert.rejects(listFollowups(client, { status: ['bogus'] }), /status must be/);
+  });
+
+  test('listFollowups: listingId option filters in SQL, not as a post-query in-memory filter, and raises the cap to 100', async () => {
+    const listingId = await insertListing();
+    const otherId = await insertListing();
+    // 30 noise rows on a different listing, all due before the target row, so they sort ahead of it
+    // under the default ORDER BY due_at. The old hard-coded LIMIT 25 on the un-scoped query would have
+    // dropped the target row entirely once a caller filtered the result set by listing_id afterward.
+    for (let i = 0; i < 30; i += 1) {
+      const dueAt = new Date(Date.UTC(2026, 5, 1 + i)).toISOString().slice(0, 10);
+      await createFollowup(client, { contact: `${MARK} Noise ${i}`, listing_id: otherId, due_at: dueAt, channel: 'email', action: 'noise' });
+    }
+    const target = (await createFollowup(client, { contact: `${MARK} Target`, listing_id: listingId, due_at: '2027-06-01', channel: 'email', action: 'target' })).row;
+    const scoped = await listFollowups(client, { listingId, limit: 100 });
+    assert.ok(scoped.rows.some((r) => r.id === target.id), 'target listing follow-up returned despite 30 earlier-due rows on another listing');
+    assert.ok(scoped.rows.every((r) => r.listing_id === listingId), 'only rows for the requested listing are returned');
+    assert.equal(scoped.total, 1);
+    // the cap is still enforced -- listingId does not bypass the hard max of 100
+    const capped = await listFollowups(client, { listingId: otherId, limit: 9999 });
+    assert.ok(capped.rows.length <= 100);
+    assert.equal(capped.total, 30);
+    // These 30 open rows would otherwise sit at the front of every *un-scoped* system-wide listFollowups
+    // call for the rest of this file (e.g. the "followups tool wrapper" test's plain `list`), so remove
+    // them immediately rather than waiting for the file's closing after() hook.
+    await client.query('DELETE FROM ic_followups WHERE contact LIKE $1', [`${MARK} Noise %`]);
+    await client.query('DELETE FROM ic_followups WHERE id = $1', [target.id]);
   });
 
   test('snoozed rows whose snoozed_until passed flip back to open and enter the due set', async () => {

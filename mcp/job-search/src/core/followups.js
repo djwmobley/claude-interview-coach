@@ -151,20 +151,29 @@ export async function createFollowup(client, input, opts = {}) {
 }
 
 /**
+ * `listingId`, when present, is pushed into the SQL WHERE clause (not applied as an in-memory filter
+ * after the LIMIT) -- a caller scoping to one listing's follow-ups must see all of that listing's rows,
+ * not just whichever ones happened to land inside the system-wide page. The hard cap on `limit` is raised
+ * to 100 (from 25) for this reason: a per-listing caller may legitimately need more than the system-wide
+ * digest page size.
  * @param {import('pg').ClientBase} client
- * @param {{ status?: string[], limit?: number, offset?: number, contact?: string }} [f]
+ * @param {{ status?: string[], limit?: number, offset?: number, contact?: string, listingId?: number }} [f]
  * @returns {Promise<{ rows: FollowupRow[], total: number }>}
  */
 export async function listFollowups(client, f = {}) {
   const statuses = f.status && f.status.length > 0 ? f.status : ['open', 'snoozed'];
   for (const s of statuses) if (!STATUSES.includes(s)) throw new JobSearchError('VALIDATION', `status must be one of ${STATUSES.join(', ')}`);
-  const limit = Math.max(1, Math.min(25, f.limit ?? 25));
+  const limit = Math.max(1, Math.min(100, f.limit ?? 25));
   const offset = Math.max(0, f.offset ?? 0);
   const params = /** @type {unknown[]} */ ([statuses]);
   let where = 'status = ANY($1::text[])';
   if (f.contact) {
     params.push(`%${f.contact}%`);
     where += ` AND contact ILIKE $${params.length}`;
+  }
+  if (f.listingId != null) {
+    params.push(f.listingId);
+    where += ` AND listing_id = $${params.length}`;
   }
   const total = await client.query(`SELECT count(*)::int AS n FROM ic_followups WHERE ${where}`, params);
   params.push(limit, offset);
