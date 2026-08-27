@@ -30,3 +30,4 @@ nul
 **/.env
 mcp/job-search/logs/
 mcp/job-search/node_modules/
+mcp/job-search/test/screenshots/
