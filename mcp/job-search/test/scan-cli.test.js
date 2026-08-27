@@ -13,7 +13,7 @@ import path from 'node:path';
 import { spawn } from 'node:child_process';
 import { fileURLToPath } from 'node:url';
 import { newClient, upsertTestProfile, cleanupScan, CONFIG_DIR } from './helpers/scan-fixtures.js';
-import { parseArgs, launchChrome } from '../bin/scan.js';
+import { parseArgs, launchChrome, cdpReachable } from '../bin/scan.js';
 import { computeConfigHash } from '../src/core/config.js';
 
 const HERE = path.dirname(fileURLToPath(import.meta.url));
@@ -78,6 +78,13 @@ describe('scan.js CLI', () => {
     assert.equal(a.launchChrome, true);
     assert.equal(a.acceptConfigChange, true);
     assert.equal(parseArgs(['--json', 'out.json']).json, 'out.json');
+    assert.equal(parseArgs([]).trigger, 'cli', 'default trigger is cli (dashboard PR 1)');
+    assert.equal(parseArgs(['--trigger', 'dashboard']).trigger, 'dashboard');
+  });
+
+  test('cdpReachable is exported and reports false for an unreachable port (dashboard PR 1)', async () => {
+    assert.equal(typeof cdpReachable, 'function');
+    assert.equal(await cdpReachable('http://127.0.0.1:1'), false);
   });
 
   test('refuses --launch-chrome on port 9222 and on a non-loopback host', async () => {
@@ -120,6 +127,43 @@ describe('scan.js CLI', () => {
       const full = JSON.parse(fs.readFileSync(jsonOut, 'utf8'));
       assert.equal(full.run_id, summary.run_id);
       assert.ok(Array.isArray(full.rows));
+    } finally {
+      fs.unlinkSync(lockPath);
+    }
+  });
+
+  test('--trigger dashboard: closed list accepted, stored on the run row (dashboard PR 1)', async () => {
+    const lockPath = writeTestLock();
+    let r;
+    try {
+      for (let i = 0; i < 60; i++) {
+        r = await runCli(['--profile', PROFILE, '--dry-run', '--sources', 'greenhouse', '--trigger', 'dashboard'], { JOBSEARCH_CONFIG_LOCK: lockPath });
+        const summary = JSON.parse(r.out.trim().split('\n').pop() ?? '{}');
+        if (summary.status !== 'locked') break;
+        await new Promise((res) => setTimeout(res, 500));
+      }
+      assert.ok(r);
+      const summary = JSON.parse(r.out.trim().split('\n').pop() ?? '{}');
+      assert.equal(r.code, 0, `stdout=${r.out} stderr=${r.err}`);
+      const row = await client.query('SELECT trigger FROM ic_scan_runs WHERE id = $1', [summary.run_id]);
+      assert.equal(row.rows[0].trigger, 'dashboard');
+    } finally {
+      fs.unlinkSync(lockPath);
+    }
+  });
+
+  test('--trigger outside the closed list is a visible VALIDATION error, exit 1, no run row created', async () => {
+    const lockPath = writeTestLock();
+    try {
+      const before = await client.query(`SELECT count(*)::int AS n FROM ic_scan_runs WHERE profile = $1`, [PROFILE]);
+      const r = await runCli(['--profile', PROFILE, '--dry-run', '--sources', 'greenhouse', '--trigger', 'bogus'], { JOBSEARCH_CONFIG_LOCK: lockPath });
+      assert.equal(r.code, 1, `stdout=${r.out} stderr=${r.err}`);
+      const summary = JSON.parse(r.out.trim());
+      assert.equal(summary.ok, false);
+      assert.equal(summary.code, 'VALIDATION');
+      assert.match(summary.message, /--trigger must be one of cli, dashboard/);
+      const after = await client.query(`SELECT count(*)::int AS n FROM ic_scan_runs WHERE profile = $1`, [PROFILE]);
+      assert.equal(after.rows[0].n, before.rows[0].n, 'no run row created for a rejected --trigger');
     } finally {
       fs.unlinkSync(lockPath);
     }
