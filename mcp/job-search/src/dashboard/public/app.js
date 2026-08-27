@@ -4,9 +4,10 @@
  * (pr3-spec-decisions.md sections 3, 5, 8, 11). This is the single entry point loaded by index.html.
  *
  * JUDGMENT CALL, flagged in the PR body: no API response in this server carries a "user block" string
- * (checked GET /api/health and GET /api/summary in full). The plan's design mock hardcodes
- * "Damian Mobley, CTO at Advisicon", which the copy rules explicitly forbid shipping as a literal. This
- * constant is the one place that placeholder lives; it never uses a real name.
+ * (checked GET /api/health and GET /api/summary in full). The plan's design mock hardcodes a real
+ * person's name and job title, which the copy rules explicitly forbid shipping as a literal, including
+ * in a source comment (public/ ships unbundled, so comments reach the browser verbatim). This constant
+ * is the one place a header placeholder lives; it never uses a real name.
  */
 import { h, setChildren } from './lib/dom.js';
 import { parseHash, buildHash } from './lib/router.js';
