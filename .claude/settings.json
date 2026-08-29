@@ -23,7 +23,7 @@
         "hooks": [
           {
             "type": "command",
-            "command": "bash hooks/session-memory-query.sh",
+            "command": "bash \"$CLAUDE_PROJECT_DIR/hooks/session-memory-query.sh\"",
             "timeout": 15000
           }
         ]
@@ -35,7 +35,7 @@
         "hooks": [
           {
             "type": "command",
-            "command": "bash hooks/session-voice-check.sh",
+            "command": "bash \"$CLAUDE_PROJECT_DIR/hooks/session-voice-check.sh\"",
             "timeout": 10000
           }
         ]
