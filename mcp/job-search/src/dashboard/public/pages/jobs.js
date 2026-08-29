@@ -6,15 +6,72 @@ import { showToast, showUndoToast } from '../lib/toast.js';
 import { dataTable } from '../components/data-table.js';
 import { jobRow } from '../components/job-row.js';
 import { filterBar, filterStateToQuery } from '../components/filter-bar.js';
+import { openFilterModal } from '../components/filter-modal.js';
 import { skeleton, emptyState } from '../components/empty-state.js';
 import { on, off } from '../lib/bus.js';
 import { createListCursor } from '../lib/list-cursor.js';
 import { DIGIT_STAGE_ORDER } from '../components/stage-buttons.js';
 import { stageChip } from '../components/chips.js';
 
-// 'Location' carries the same `job-row__location` class as its body cells (components/job-row.js) so
-// app.css's 1180px breakpoint rule can hide the header alongside the cells it labels, not just the cells.
-const COLUMNS = ['', 'Title', 'Company', 'Source', 'Stage', 'Score', 'First seen', { text: 'Location', className: 'job-row__location' }];
+/**
+ * Mirror of src/tools/query_jobs.js's SORTS. public/ code cannot import that module directly: it pulls
+ * in the 'zod' package via a bare specifier, which only resolves under Node/bundler module resolution,
+ * never in a browser loading this file as a plain ES module. test/query-jobs-sort.test.js cross-checks
+ * this mirror (and every sortKey used in COLUMNS below) against the real SORTS array, so drift between
+ * the two is a test failure, not a silent runtime mismatch.
+ */
+export const SORTS = Object.freeze(['posted', 'seen', 'prescore', 'fit', 'id']);
+
+const SORT_STORAGE_KEY = 'jobs.sort.v1';
+
+/** @param {unknown} s */
+function validateSort(s) {
+  return typeof s === 'string' && SORTS.includes(s) ? s : 'posted';
+}
+/** @param {unknown} d */
+function validateDir(d) {
+  return d === 'asc' ? 'asc' : 'desc';
+}
+
+/** Restored localStorage state is re-validated through the SAME classification the server uses (unknown
+ * sort -> 'posted', anything but exactly 'asc' -> 'desc'), never trusted as-is: a stale value from a
+ * previous version of this page (or a hand-edited localStorage entry) must never reach the query params
+ * unchecked. */
+function loadSortState() {
+  try {
+    const raw = localStorage.getItem(SORT_STORAGE_KEY);
+    if (!raw) return { sort: 'posted', dir: 'desc' };
+    const parsed = JSON.parse(raw);
+    return { sort: validateSort(parsed?.sort), dir: validateDir(parsed?.dir) };
+  } catch {
+    // localStorage unavailable/blocked, or a corrupt JSON value: fall back to the default, same as a
+    // first-ever visit. Never throws out to the caller.
+    return { sort: 'posted', dir: 'desc' };
+  }
+}
+
+/** @param {{ sort: string, dir: 'asc'|'desc' }} state */
+function saveSortState(state) {
+  try {
+    localStorage.setItem(SORT_STORAGE_KEY, JSON.stringify({ sort: state.sort, dir: state.dir }));
+  } catch {
+    // Private browsing, blocked site data, or a full quota: sorting still works for this page load via
+    // in-memory state, it simply will not survive a reload. Never throws out to the caller.
+  }
+}
+
+// 'Location' and 'Fit' carry the same classes as their body cells (components/job-row.js) so app.css's
+// 1180px breakpoint rule can hide each header alongside the cells it labels, not just the cells.
+// `sortKey` values are string literals matching SORTS above (not this same array by reference, since a
+// column's sortKey is also read directly by pages/jobs.js's own tests via COLUMNS -- see
+// test/query-jobs-sort.test.js).
+export const COLUMNS = Object.freeze([
+  '', 'Title', 'Company', 'Source', 'Stage',
+  { text: 'Prescore', sortKey: 'prescore' },
+  { text: 'Fit', sortKey: 'fit', className: 'job-row__fit' },
+  'First seen',
+  { text: 'Location', className: 'job-row__location' },
+]);
 
 /**
  * Total classification of every action lib/shortcuts.js's reducer can emit, so a totality test can
@@ -33,8 +90,13 @@ export const KEYBOARD_ACTIONS = Object.freeze({
 /** @param {HTMLElement} container */
 export async function render(container, params, app) {
   let filterState = { hideDuplicates: true };
+  let sortState = loadSortState();
   const selected = new Set();
   const cursor = createListCursor();
+  // The running union of every `row.source` value seen in any /api/listings response this page has
+  // loaded, across every filter combination applied so far this session -- the Filter modal's Source
+  // checkbox options (see filter-modal.js's own doc comment for why this is not a dedicated endpoint).
+  const seenSources = new Set();
   setChildren(container, [skeleton({ rows: 8 })]);
 
   async function setStageOnRow(id, status) {
@@ -50,18 +112,36 @@ export async function render(container, params, app) {
     }
   }
 
+  /** @param {string} sortKey */
+  function onSort(sortKey) {
+    sortState = sortState.sort === sortKey
+      ? { sort: sortKey, dir: sortState.dir === 'asc' ? 'desc' : 'asc' }
+      : { sort: sortKey, dir: 'desc' };
+    saveSortState(sortState);
+    load();
+  }
+
   async function load() {
-    const query = filterStateToQuery(filterState);
+    const query = { ...filterStateToQuery(filterState), sort: sortState.sort, dir: sortState.dir };
     const outcome = handleOutcome(await getJson('/api/listings', query));
     if (outcome.kind !== 'ok') {
       setChildren(container, [emptyState({ message: 'Jobs could not be loaded right now.' })]);
       return;
     }
     const rows = outcome.body.rows;
+    for (const row of rows) if (row.source) seenSources.add(row.source);
     const bulkStageSelect = h('select', { className: 'drawer__input' }, DIGIT_STAGE_ORDER.map((s) => h('option', { value: s, text: stageChip(s).label })));
     setChildren(container, [
       h('h1', { className: 'page-title', text: 'Jobs' }),
-      filterBar({ state: filterState, onChange: (patch) => { filterState = { ...filterState, ...patch }; load(); } }),
+      filterBar({
+        state: filterState,
+        onChange: (patch) => { filterState = { ...filterState, ...patch }; load(); },
+        onOpenFilters: () => openFilterModal({
+          state: filterState,
+          sourceOptions: [...seenSources].sort(),
+          onApply: (next) => { filterState = next; load(); },
+        }),
+      }),
       selected.size > 0 ? h('div', { className: 'bulk-bar' }, [
         h('span', { text: `${selected.size} selected` }),
         bulkStageSelect,
@@ -71,6 +151,9 @@ export async function render(container, params, app) {
         ? emptyState({ message: 'No jobs match the current filters.', hint: 'Try widening the location or first-seen window.' })
         : dataTable({
             columns: COLUMNS,
+            sort: sortState.sort,
+            dir: sortState.dir,
+            onSort,
             rows: rows.map((row) => jobRow(row, {
               selected: selected.has(row.id),
               onToggleSelect: (id) => { if (selected.has(id)) selected.delete(id); else selected.add(id); load(); },

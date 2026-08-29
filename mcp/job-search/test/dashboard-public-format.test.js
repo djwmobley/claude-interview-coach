@@ -2,7 +2,7 @@
 /** Pure formatting function tests (pr3-spec-decisions.md section 12 item 2). No DOM required. */
 import { test, describe } from 'node:test';
 import assert from 'node:assert/strict';
-import { relativeTime, ageDays, agingBucket, scoreBucket, shortDate, shortDateTime, salaryRange, formatMoney, pluralize, truncate, sourceLabel, formatPercent, normalizeAgendaTime, agendaTimeLabel } from '../src/dashboard/public/lib/format.js';
+import { relativeTime, ageDays, agingBucket, scoreBucket, fitBucket, shortDate, shortDateTime, salaryRange, formatMoney, pluralize, truncate, sourceLabel, formatPercent, normalizeAgendaTime, agendaTimeLabel } from '../src/dashboard/public/lib/format.js';
 
 describe('relativeTime', () => {
   test('fixed-input cases', () => {
@@ -45,6 +45,26 @@ describe('scoreBucket', () => {
     assert.equal(scoreBucket(84), 'ok');
     assert.equal(scoreBucket(85), 'good');
     assert.equal(scoreBucket(100), 'good');
+  });
+});
+
+describe('fitBucket: same thresholds as scoreBucket, but missing maps to its own neutral bucket', () => {
+  test('missing/NaN maps to "not-scored", never "low"', () => {
+    assert.equal(fitBucket(null), 'not-scored');
+    assert.equal(fitBucket(undefined), 'not-scored');
+    assert.equal(fitBucket(Number.NaN), 'not-scored');
+  });
+
+  test('thresholds match scoreBucket exactly once a real score is present', () => {
+    assert.equal(fitBucket(69), 'low');
+    assert.equal(fitBucket(70), 'ok');
+    assert.equal(fitBucket(84), 'ok');
+    assert.equal(fitBucket(85), 'good');
+    assert.equal(fitBucket(100), 'good');
+  });
+
+  test('a real 0 score is "low", not "not-scored" (0 is a score, not an absence)', () => {
+    assert.equal(fitBucket(0), 'low');
   });
 });
 

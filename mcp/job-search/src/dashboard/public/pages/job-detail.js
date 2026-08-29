@@ -179,6 +179,8 @@ export async function render(container, params, app) {
       duplicates.length ? h('ul', {}, duplicates.map((d) => h('li', { text: `${d.title} at ${d.company} (#${d.id})` }))) : null,
     ]) : null;
 
+    const prescoreBreakdownCard = prescoreBreakdownPanel(outcome.body.prescore_breakdown, listing);
+
     setChildren(container, [
       h('div', { className: 'job-detail-header' }, [
         h('h1', { className: 'page-title', text: listing.title }),
@@ -196,6 +198,7 @@ export async function render(container, params, app) {
         ]),
         h('div', { className: 'job-detail-side' }, [
           dedupCard,
+          prescoreBreakdownCard,
           h('h3', { text: 'History' }),
           timeline({ events: outcome.body.events ?? [] }),
         ]),
@@ -213,6 +216,52 @@ export async function render(container, params, app) {
     beforeLeave: () => { flushNotes(); },
     teardown: () => { off('dashboard:changed', onChanged); off('dashboard:kbaction', onKbAction); },
   };
+}
+
+/** Human labels for src/core/prescore.js's prescoreParts() keys, in display order. */
+const PRESCORE_PART_LABELS = Object.freeze([
+  ['seniority', 'Seniority'],
+  ['junior', 'Junior-title penalty'],
+  ['titleKeywords', 'Title keywords'],
+  ['descKeywords', 'Description keywords'],
+  ['exclusions', 'Exclusions'],
+  ['location', 'Location fit'],
+  ['salary', 'Salary band'],
+]);
+
+/**
+ * Renders GET /api/listings/:id's `prescore_breakdown` (src/dashboard/routes/listings.js's
+ * computePrescoreBreakdown): the `available: false` branch shows the stored prescore plus why a live
+ * recompute was not possible; the `available: true` branch shows every named part, the pre-clamp sum
+ * (with a "floored at 0" note when that sum went negative), the noise multiplier, the recomputed
+ * prescore, and -- only when it differs from the value stored at scan time -- a staleness note.
+ * @param {any} breakdown @param {any} listing
+ */
+function prescoreBreakdownPanel(breakdown, listing) {
+  if (!breakdown) return null;
+  if (!breakdown.available) {
+    const reasonText = breakdown.reason === 'profile_missing'
+      ? 'the search profile used at scan time no longer exists'
+      : (breakdown.reason ?? 'unavailable');
+    return h('div', { className: 'prescore-breakdown' }, [
+      h('h3', { text: 'Prescore breakdown' }),
+      h('p', { text: `Not available: ${reasonText}.` }),
+      h('p', { text: `Stored prescore: ${listing.prescore ?? 'not scored'}.` }),
+    ]);
+  }
+  return h('div', { className: 'prescore-breakdown' }, [
+    h('h3', { text: 'Prescore breakdown' }),
+    h('ul', {}, PRESCORE_PART_LABELS.map(([key, label]) => {
+      const value = breakdown.parts[key] ?? 0;
+      return h('li', { text: `${label}: ${value >= 0 ? '+' : ''}${value}` });
+    })),
+    h('p', { text: `Sum before clamping: ${breakdown.sum}${breakdown.sum < 0 ? ' (floored at 0)' : ''}` }),
+    h('p', { text: `Noise multiplier (${breakdown.noise_class ?? 'unknown'}): x${breakdown.multiplier}` }),
+    h('p', { text: `Recomputed prescore: ${breakdown.recomputed_prescore}` }),
+    breakdown.stale
+      ? h('p', { className: 'prescore-breakdown__stale', text: `This differs from the value stored at scan time (stored ${breakdown.stored_prescore_raw}).` })
+      : null,
+  ]);
 }
 
 /** @param {string} relPath */

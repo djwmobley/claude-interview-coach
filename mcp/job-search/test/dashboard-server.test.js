@@ -318,6 +318,54 @@ describe('listings', () => {
   });
 });
 
+describe('prescore breakdown (GET /api/listings/:id)', () => {
+  test('a listing with no search_profile recorded returns { available: false, reason: "profile_missing" }', async () => {
+    // Manually-created listings never carry a search_profile (src/core/manual.js never sets one) -- this
+    // exercises that real, common case directly, no raw SQL needed to arrange it.
+    const created = await req('POST', '/api/listings', { body: { title: 'No Profile', company: `${CO} Breakdown`, status: 'new' } });
+    const detail = await req('GET', `/api/listings/${created.json.id}`);
+    assert.equal(detail.status, 200);
+    assert.deepEqual(detail.json.prescore_breakdown, { available: false, reason: 'profile_missing' });
+  });
+
+  test('a search_profile naming a row no longer in ic_search_profiles also returns profile_missing (renamed/deleted since scan time)', async () => {
+    const created = await req('POST', '/api/listings', { body: { title: 'Deleted Profile', company: `${CO} Breakdown`, status: 'new' } });
+    await verifyClient.query('UPDATE ic_job_listings SET search_profile = $2 WHERE id = $1', [created.json.id, `zz-nonexistent-${process.pid}`]);
+    const detail = await req('GET', `/api/listings/${created.json.id}`);
+    assert.deepEqual(detail.json.prescore_breakdown, { available: false, reason: 'profile_missing' });
+  });
+
+  test('an existing search_profile recomputes the full breakdown, including staleness when it differs from the stored value', async () => {
+    const profileName = `zz-test-breakdown-${process.pid}`;
+    await verifyClient.query(
+      `INSERT INTO ic_search_profiles (name, keywords, phrases, exclude_terms, locations, remote, posted_within_days, max_pages, sources, rev)
+       VALUES ($1, '{cto}', '{}', '{}', '{}', 'any', 7, 3, '{}', 'zz-rev')
+       ON CONFLICT (name) DO UPDATE SET keywords = EXCLUDED.keywords`,
+      [profileName],
+    );
+    const created = await req('POST', '/api/listings', { body: { title: 'Chief Technology Officer', company: `${CO} Breakdown`, status: 'new' } });
+    // Force a stored prescore_raw that will not match the live recompute, so `stale` is deterministically
+    // true; also set noise_class to a known multiplier so recomputed_prescore is checkable.
+    await verifyClient.query(
+      'UPDATE ic_job_listings SET search_profile = $2, noise_class = $3, prescore_raw = $4 WHERE id = $1',
+      [created.json.id, profileName, 'ok', 999],
+    );
+    const detail = await req('GET', `/api/listings/${created.json.id}`);
+    assert.equal(detail.status, 200);
+    const b = detail.json.prescore_breakdown;
+    assert.equal(b.available, true);
+    assert.equal(typeof b.parts, 'object');
+    assert.equal(typeof b.sum, 'number');
+    assert.equal(typeof b.raw, 'number');
+    assert.equal(b.noise_class, 'ok');
+    assert.equal(b.multiplier, 1);
+    assert.equal(b.recomputed_prescore, b.raw, 'ok noise class has a 1x multiplier');
+    assert.equal(b.stored_prescore_raw, 999);
+    assert.equal(b.stale, true, 'recomputed raw (a real prescore for a CTO title) differs from the forced stored 999');
+    await verifyClient.query('DELETE FROM ic_search_profiles WHERE name = $1', [profileName]);
+  });
+});
+
 describe('documents', () => {
   /** @type {number} */
   let listingId;
