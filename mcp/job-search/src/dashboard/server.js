@@ -21,6 +21,7 @@ import { register as registerCalendar } from './routes/calendar.js';
 import { register as registerDocuments } from './routes/documents.js';
 import { register as registerMemory } from './routes/memory.js';
 import { register as registerAnalytics } from './routes/analytics.js';
+import { register as registerSources } from './routes/sources.js';
 
 /**
  * @typedef {Object} RouteContext
@@ -213,6 +214,7 @@ export function createDashboardServer(deps, opts = {}) {
   registerDocuments(router, deps);
   registerMemory(router, deps);
   registerAnalytics(router, deps);
+  registerSources(router, deps);
   registerStreamRoute(router, streamHub);
 
   const httpServer = http.createServer((req, res) => {

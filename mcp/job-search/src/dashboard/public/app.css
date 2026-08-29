@@ -220,6 +220,18 @@ table { border-collapse: collapse; width: 100%; }
 .filter-modal__hint { grid-column: 1 / -1; color: var(--muted); font-size: 11px; margin: 2px 0 0; }
 .filter-modal__hint:empty { display: none; }
 
+/* Filters modal sections (dashboard UX slice 3): each logical group (Status, Source, Noise class,
+   Criteria, Options) is its own bordered card with a cyan accent stripe -- the "little color" from
+   feedback on the flat PR #12 layout, kept restrained to a left-border stripe plus the section title's
+   text color rather than a colored background or heading fill. */
+.filter-modal__section { background: var(--surface2); border: 1px solid var(--border); border-left: 3px solid var(--cyan); border-radius: 6px; padding: 10px 12px; margin-bottom: 10px; }
+.filter-modal__section:last-of-type { margin-bottom: 0; }
+.filter-modal__section-title { font-size: 11px; text-transform: uppercase; letter-spacing: 0.06em; color: var(--cyan); margin: 0 0 8px; }
+/* Criteria section's four fields (Remote mode, Posted after, Minimum prescore, Minimum fit) as a
+   2-column grid instead of stacking one per row, so the modal reads wider and shorter. */
+.filter-modal__fields { display: grid; grid-template-columns: 1fr 1fr; gap: 8px 12px; }
+.filter-modal__fields .drawer__field { margin-bottom: 0; }
+
 .notes-textarea, .drawer__input { width: 100%; background: var(--surface2); border: 1px solid var(--border); border-radius: 6px; color: var(--text); padding: 8px; min-height: 32px; }
 textarea.notes-textarea { min-height: 100px; }
 
@@ -301,10 +313,14 @@ textarea.notes-textarea { min-height: 100px; }
    --------------------------------------------------------------------------------------------------- */
 .drawer-overlay { position: fixed; inset: 0; background: rgba(0, 0, 0, 0.5); display: flex; align-items: center; justify-content: center; z-index: 900; }
 .drawer__panel { background: var(--surface); border: 1px solid var(--border); border-radius: 8px; padding: 16px; width: 420px; max-width: 90vw; max-height: 80vh; overflow: auto; }
+/* Wider variant for modals with more than one section stacked (currently only the Filters modal, via
+   drawer.js's optional `panelClass`): the default 420px reads cramped once Criteria's fields move into a
+   2-column grid. */
+.drawer__panel--wide { width: 560px; }
 .drawer__header { display: flex; justify-content: space-between; align-items: center; margin-bottom: 12px; }
 .drawer__close { background: none; border: 1px solid var(--border); border-radius: 4px; color: var(--text); cursor: pointer; }
 .drawer__field { display: flex; flex-direction: column; gap: 4px; margin-bottom: 10px; font-size: 11px; color: var(--muted); }
-.drawer__actions { display: flex; gap: 8px; margin-top: 12px; }
+.drawer__actions { display: flex; justify-content: flex-end; gap: 8px; margin-top: 12px; }
 .drawer__errors { margin-bottom: 8px; }
 .drawer__context { color: var(--muted); font-size: 12px; margin-bottom: 10px; }
 .drawer__dedup { margin-top: 8px; }
@@ -312,8 +328,6 @@ textarea.notes-textarea { min-height: 100px; }
 .field-error { color: var(--red); font-size: 11px; margin: 2px 0; }
 .drawer__checkbox-row { display: flex; align-items: center; gap: 6px; font-size: 12px; color: var(--text); margin-bottom: 6px; }
 .drawer__hint { color: var(--muted); font-size: 11px; }
-.drawer__panel h3 { font-size: 12px; text-transform: uppercase; letter-spacing: 0.04em; color: var(--muted); margin: 12px 0 6px; }
-.drawer__panel h3:first-child { margin-top: 0; }
 
 .help-overlay { position: fixed; inset: 0; margin: auto; width: 420px; height: fit-content; background: var(--surface); border: 1px solid var(--border); border-radius: 8px; padding: 16px; z-index: 950; }
 .help-overlay__key { font-family: "Cascadia Mono", Consolas, "SF Mono", monospace; color: var(--accent); padding-right: 12px; }
