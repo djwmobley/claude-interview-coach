@@ -285,6 +285,37 @@ describe('listings', () => {
     assert.equal(r.status, 200);
     assert.equal(r.json.results.length, 2);
   });
+
+  test('GET /api/listings honors sort=prescore&dir=asc (dashboard-only extension)', async () => {
+    const low = await req('POST', '/api/listings', { body: { title: 'Low Prescore', company: `${CO} Sort`, status: 'new' } });
+    const high = await req('POST', '/api/listings', { body: { title: 'Chief Technology Officer High Prescore', company: `${CO} Sort`, status: 'new' } });
+    await verifyClient.query('UPDATE ic_job_listings SET prescore = 10 WHERE id = $1', [low.json.id]);
+    await verifyClient.query('UPDATE ic_job_listings SET prescore = 90 WHERE id = $1', [high.json.id]);
+    // `q` (full-text, matched against a tsv covering title+company+location+description) scopes this
+    // query down to just these two rows: `CO` is unique per test-process pid, so no other test's
+    // title/company text can plausibly also contain "<CO> Sort".
+    const qParam = `q=${encodeURIComponent(`${CO} Sort`)}`;
+    const asc = await req('GET', `/api/listings?${qParam}&sort=prescore&dir=asc&limit=200`);
+    const ids = asc.json.rows.filter((r2) => [low.json.id, high.json.id].includes(r2.id)).map((r2) => r2.id);
+    assert.deepEqual(ids, [low.json.id, high.json.id], 'ascending prescore: low id first');
+    const desc = await req('GET', `/api/listings?${qParam}&sort=prescore&dir=desc&limit=200`);
+    const idsDesc = desc.json.rows.filter((r2) => [low.json.id, high.json.id].includes(r2.id)).map((r2) => r2.id);
+    assert.deepEqual(idsDesc, [high.json.id, low.json.id], 'descending prescore: high id first');
+  });
+
+  test('GET /api/listings with a garbage sort value does not crash (latent-crash fix, real HTTP round trip)', async () => {
+    const r = await req('GET', '/api/listings?sort=not-a-real-sort&limit=1');
+    assert.equal(r.status, 200);
+  });
+
+  test('GET /api/listings with untriaged=1 plus a status filter ORs them together (three-way combination fix, real HTTP round trip)', async () => {
+    const untriagedRow = await req('POST', '/api/listings', { body: { title: 'Untriaged Combo', company: `${CO} Combo`, status: null } });
+    const shortlistedRow = await req('POST', '/api/listings', { body: { title: 'Shortlisted Combo', company: `${CO} Combo`, status: 'shortlisted' } });
+    const combined = await req('GET', `/api/listings?untriaged=1&status=shortlisted&limit=200`);
+    const ids = combined.json.rows.map((r2) => r2.id);
+    assert.ok(ids.includes(untriagedRow.json.id), 'untriaged row present via the OR arm');
+    assert.ok(ids.includes(shortlistedRow.json.id), 'shortlisted row present via the ANY(array) arm');
+  });
 });
 
 describe('documents', () => {
