@@ -12,12 +12,17 @@
  * (the same pattern chips.js and test/dashboard-chips.test.js already use for statuses/actors/kinds).
  *
  * Source options are NOT a fixed closed list: `sourceOptions` is passed in by the caller (pages/jobs.js),
- * which accumulates the running union of `row.source` values seen across every /api/listings response
- * this session. Documented blind spot: a source that has never yet appeared in a loaded page of rows
- * (because every visible row so far predates it, or the current filters exclude every row carrying it)
- * will not have a checkbox until a row bearing it has been fetched at least once. Wiring a dedicated
- * distinct-sources endpoint was considered and rejected for this slice: no such endpoint exists today
- * (see PR body's decisions section), and adding one is out of scope here.
+ * which now unions two things: the real distinct-source list from `GET /api/sources` (every non-null
+ * `source` value actually present in ic_job_listings today) and the running union of `row.source` values
+ * seen across every /api/listings response this session. Documented blind spot: a source that was added
+ * to a row AFTER pages/jobs.js's last `/api/sources` fetch (page load, or the last time this modal was
+ * opened) and has not yet appeared in a loaded page of /api/listings rows either will not have a checkbox
+ * until one of those two refreshes happens again. If `/api/sources` itself fails (network error, DB
+ * down), the modal silently falls back to the session-only union, same as before this endpoint existed.
+ *
+ * Modal body layout: each logical group of controls is wrapped in a `.filter-modal__section` (a bordered,
+ * lightly accented card) with its own `.filter-modal__section-title` heading, rather than a single long
+ * unstructured column -- see app.css's "Filters modal" block for the section/accent styling.
  */
 import { h } from '../lib/dom.js';
 import { drawer } from './drawer.js';
@@ -79,6 +84,18 @@ function checkboxGroup(opts) {
 }
 
 /**
+ * One visually separated card within the modal body: a heading plus its own controls, so the modal reads
+ * as distinct groups (Status, Source, Noise class, Criteria, Options) instead of one long column.
+ * @param {string} title @param {Array<Node|string|null|undefined|false>} children
+ */
+function filterSection(title, children) {
+  return h('section', { className: 'filter-modal__section' }, [
+    h('h3', { className: 'filter-modal__section-title', text: title }),
+    ...children,
+  ]);
+}
+
+/**
  * @param {{ state: any, sourceOptions: string[], onApply: (next: any) => void }} opts
  */
 export function openFilterModal(opts) {
@@ -131,37 +148,47 @@ export function openFilterModal(opts) {
 
   const { el, close } = drawer({
     title: 'Filters',
+    panelClass: 'drawer__panel--wide',
     body: [
-      h('h3', { text: 'Status' }),
-      checkboxGroup({
-        options: FILTER_MODAL_STATUSES,
-        selected: draft.status,
-        onChange: (next) => { draft = { ...draft, status: next }; },
-        labelFor: (s) => stageChip(s).label,
-      }),
-      h('label', { className: 'drawer__field filter-bar__checkbox' }, [untriagedCheckbox, h('span', { text: 'Untriaged (never triaged)' })]),
-      h('h3', { text: 'Source' }),
-      opts.sourceOptions.length === 0
-        ? h('p', { className: 'filter-modal__hint', text: 'No sources seen yet in the loaded rows.' })
-        : checkboxGroup({
-            options: opts.sourceOptions,
-            selected: draft.source,
-            onChange: (next) => { draft = { ...draft, source: next }; },
-            labelFor: (s) => sourceLabel(s),
-          }),
-      h('h3', { text: 'Noise class' }),
-      checkboxGroup({
-        options: FILTER_MODAL_NOISE_CLASSES,
-        selected: draft.noiseClass,
-        onChange: (next) => { draft = { ...draft, noiseClass: next }; },
-        labelFor: (c) => NOISE_LABELS[c] ?? c,
-      }),
-      h('label', { className: 'drawer__field' }, [h('span', { text: 'Remote mode' }), remoteSelect]),
-      h('label', { className: 'drawer__field' }, [h('span', { text: 'Posted after (exact date)' }), postedAfterInput]),
-      h('label', { className: 'drawer__field' }, [h('span', { text: 'Minimum prescore' }), minPrescoreInput]),
-      h('label', { className: 'drawer__field' }, [h('span', { text: 'Minimum fit' }), minFitInput]),
-      h('label', { className: 'drawer__field filter-bar__checkbox' }, [unscoredCheckbox, h('span', { text: 'Unscored only (no fit score yet)' })]),
-      h('label', { className: 'drawer__field filter-bar__checkbox' }, [includeExpiredCheckbox, h('span', { text: 'Include expired listings' })]),
+      filterSection('Status', [
+        checkboxGroup({
+          options: FILTER_MODAL_STATUSES,
+          selected: draft.status,
+          onChange: (next) => { draft = { ...draft, status: next }; },
+          labelFor: (s) => stageChip(s).label,
+        }),
+        h('label', { className: 'drawer__field filter-bar__checkbox' }, [untriagedCheckbox, h('span', { text: 'Untriaged (never triaged)' })]),
+      ]),
+      filterSection('Source', [
+        opts.sourceOptions.length === 0
+          ? h('p', { className: 'filter-modal__hint', text: 'No sources seen yet in the loaded rows.' })
+          : checkboxGroup({
+              options: opts.sourceOptions,
+              selected: draft.source,
+              onChange: (next) => { draft = { ...draft, source: next }; },
+              labelFor: (s) => sourceLabel(s),
+            }),
+      ]),
+      filterSection('Noise class', [
+        checkboxGroup({
+          options: FILTER_MODAL_NOISE_CLASSES,
+          selected: draft.noiseClass,
+          onChange: (next) => { draft = { ...draft, noiseClass: next }; },
+          labelFor: (c) => NOISE_LABELS[c] ?? c,
+        }),
+      ]),
+      filterSection('Criteria', [
+        h('div', { className: 'filter-modal__fields' }, [
+          h('label', { className: 'drawer__field' }, [h('span', { text: 'Remote mode' }), remoteSelect]),
+          h('label', { className: 'drawer__field' }, [h('span', { text: 'Posted after (exact date)' }), postedAfterInput]),
+          h('label', { className: 'drawer__field' }, [h('span', { text: 'Minimum prescore' }), minPrescoreInput]),
+          h('label', { className: 'drawer__field' }, [h('span', { text: 'Minimum fit' }), minFitInput]),
+        ]),
+      ]),
+      filterSection('Options', [
+        h('label', { className: 'drawer__field filter-bar__checkbox' }, [unscoredCheckbox, h('span', { text: 'Unscored only (no fit score yet)' })]),
+        h('label', { className: 'drawer__field filter-bar__checkbox' }, [includeExpiredCheckbox, h('span', { text: 'Include expired listings' })]),
+      ]),
       h('div', { className: 'drawer__actions' }, [
         h('button', { className: 'btn btn--primary', text: 'Apply', on: { click: () => { opts.onApply(draft); close(); } } }),
         h('button', { className: 'btn', text: 'Clear', on: {

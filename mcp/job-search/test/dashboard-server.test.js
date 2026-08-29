@@ -318,6 +318,25 @@ describe('listings', () => {
   });
 });
 
+describe('sources (GET /api/sources, dashboard UX slice 3)', () => {
+  test('returns the distinct non-null source values as a sorted, deduplicated array, and reflects a source set moments ago', async () => {
+    const created = await req('POST', '/api/listings', { body: { title: 'Sources Endpoint Fixture', company: `${CO} Sources`, status: 'new' } });
+    // POST /api/listings always creates with source='manual' (src/core/manual.js); UPDATE it directly to
+    // a fabricated, pid-unique value so this test proves the endpoint reads live DB state rather than
+    // some cached/configured list (that distinction is exactly why this endpoint exists -- see
+    // src/dashboard/routes/sources.js's own header comment for how it differs from GET /api/profiles).
+    const fixtureSource = `zz-test-src-${process.pid}`;
+    await verifyClient.query('UPDATE ic_job_listings SET source = $1 WHERE id = $2', [fixtureSource, created.json.id]);
+    const r = await req('GET', '/api/sources');
+    assert.equal(r.status, 200);
+    assert.ok(Array.isArray(r.json.sources));
+    assert.ok(r.json.sources.includes(fixtureSource), 'a source value set just now on a real row appears in the list');
+    assert.deepEqual(r.json.sources, [...r.json.sources].sort(), 'sources come back sorted ascending');
+    assert.equal(new Set(r.json.sources).size, r.json.sources.length, 'no duplicate source values');
+    assert.ok(!r.json.sources.includes(null), 'no null entry for rows with a NULL source');
+  });
+});
+
 describe('prescore breakdown (GET /api/listings/:id)', () => {
   test('a listing with no search_profile recorded returns { available: false, reason: "profile_missing" }', async () => {
     // Manually-created listings never carry a search_profile (src/core/manual.js never sets one) -- this

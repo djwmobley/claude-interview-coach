@@ -74,6 +74,19 @@ export const COLUMNS = Object.freeze([
 ]);
 
 /**
+ * Pure merge of the two source lists the Jobs page keeps: the server's current distinct-source list
+ * (`/api/sources`) and this session's own running union of `row.source` values seen in loaded
+ * /api/listings rows (see filter-modal.js's own doc comment for when each one matters, and why neither
+ * alone is sufficient). Deduplicated, sorted ascending -- exported as a plain module-level function
+ * (no document/window access) so it is directly unit-testable, same pattern as SORTS/COLUMNS above.
+ * @param {Iterable<string>} apiSources @param {Iterable<string>} seenSources
+ * @returns {string[]}
+ */
+export function unionSourceOptions(apiSources, seenSources) {
+  return [...new Set([...apiSources, ...seenSources])].sort();
+}
+
+/**
  * Total classification of every action lib/shortcuts.js's reducer can emit, so a totality test can
  * assert no action is silently unhandled (independent review comment 5440498360, blocking finding 1).
  * 'handled' means this page's onKbAction switch has a real case for it; 'not-applicable' is an explicit,
@@ -94,10 +107,28 @@ export async function render(container, params, app) {
   const selected = new Set();
   const cursor = createListCursor();
   // The running union of every `row.source` value seen in any /api/listings response this page has
-  // loaded, across every filter combination applied so far this session -- the Filter modal's Source
-  // checkbox options (see filter-modal.js's own doc comment for why this is not a dedicated endpoint).
+  // loaded, across every filter combination applied so far this session -- kept as a fallback alongside
+  // apiSources below (see filter-modal.js's own doc comment for when each one matters).
   const seenSources = new Set();
+  // The real distinct-source list from GET /api/sources, refreshed on page load and again each time the
+  // Filters modal opens. Starts empty (not yet fetched) rather than undefined, so sourceOptionsUnion()
+  // below never needs a null check.
+  let apiSources = [];
   setChildren(container, [skeleton({ rows: 8 })]);
+
+  /** Refresh apiSources from the server; a failed fetch leaves the last-known list (or the initial empty
+   * array) in place rather than clearing it, so a transient network error never regresses the modal's
+   * Source options to fewer entries than it already had this session. */
+  async function refreshSourceOptions() {
+    const outcome = handleOutcome(await getJson('/api/sources'), { silenceNotFound: true });
+    if (outcome.kind === 'ok' && Array.isArray(outcome.body.sources)) apiSources = outcome.body.sources;
+  }
+
+  /** Union of the server's current distinct-source list and this session's own accumulated union, deduped
+   * and sorted -- the Filter modal's Source checkbox options. */
+  function sourceOptionsUnion() {
+    return unionSourceOptions(apiSources, seenSources);
+  }
 
   async function setStageOnRow(id, status) {
     const rowOutcome = handleOutcome(await getJson(`/api/listings/${id}`), { silenceNotFound: true });
@@ -136,11 +167,16 @@ export async function render(container, params, app) {
       filterBar({
         state: filterState,
         onChange: (patch) => { filterState = { ...filterState, ...patch }; load(); },
-        onOpenFilters: () => openFilterModal({
-          state: filterState,
-          sourceOptions: [...seenSources].sort(),
-          onApply: (next) => { filterState = next; load(); },
-        }),
+        onOpenFilters: async () => {
+          // Cheap refresh each time the modal opens: a source added to a row since page load (or since
+          // the last time this modal was opened) should not require a full page reload to show up.
+          await refreshSourceOptions();
+          openFilterModal({
+            state: filterState,
+            sourceOptions: sourceOptionsUnion(),
+            onApply: (next) => { filterState = next; load(); },
+          });
+        },
       }),
       selected.size > 0 ? h('div', { className: 'bulk-bar' }, [
         h('span', { text: `${selected.size} selected` }),
@@ -196,6 +232,9 @@ export async function render(container, params, app) {
   }
 
   await load();
+  // Fire-and-forget: apiSources only needs to be populated by the time the Filters modal is first
+  // opened, not before the page's own rows render, so this never blocks initial paint.
+  refreshSourceOptions();
   const onChanged = () => load();
   on('dashboard:changed', onChanged);
   on('dashboard:kbaction', onKbAction);

@@ -13,7 +13,7 @@ function focusableEls(panel) {
 }
 
 /**
- * @param {{ title: string, body: Node[], onClose?: () => void }} opts
+ * @param {{ title: string, body: Node[], onClose?: () => void, panelClass?: string }} opts
  * @returns {{ el: HTMLElement, close: () => void }}
  */
 export function drawer(opts) {
@@ -23,7 +23,11 @@ export function drawer(opts) {
   /** @type {() => void} */
   let close = () => {};
 
-  const panel = h('div', { className: 'drawer__panel', attrs: { role: 'dialog', 'aria-label': opts.title, 'aria-modal': 'true' } }, [
+  // `panelClass` is an optional extra class alongside the base `drawer__panel` (e.g. the Filters modal's
+  // `drawer__panel--wide`, since that modal now carries five sections instead of one flat column). Every
+  // other drawer caller omits it and gets the same single-class panel as before this option existed.
+  const panelClassName = opts.panelClass ? `drawer__panel ${opts.panelClass}` : 'drawer__panel';
+  const panel = h('div', { className: panelClassName, attrs: { role: 'dialog', 'aria-label': opts.title, 'aria-modal': 'true' } }, [
     h('div', { className: 'drawer__header' }, [
       h('h2', { className: 'drawer__title', text: opts.title }),
       h('button', { className: 'drawer__close', attrs: { type: 'button', 'aria-label': 'Close' }, text: 'Close', on: { click: () => close() } }),
