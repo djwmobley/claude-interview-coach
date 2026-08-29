@@ -24,6 +24,8 @@ import sys
 from docx import Document
 from docx.shared import Pt, Inches, RGBColor
 from docx.enum.text import WD_ALIGN_PARAGRAPH
+from docx.oxml import OxmlElement
+from docx.oxml.ns import qn
 
 NAVY  = RGBColor(0x0D, 0x21, 0x37)
 BLUE  = RGBColor(0x1A, 0x3A, 0x5C)
@@ -32,10 +34,23 @@ BLACK = RGBColor(0x1A, 0x1A, 0x1A)
 
 MARGIN_IN  = 1.0
 NAME_PT    = 16
-CONTACT_PT = 9
+CONTACT_PT = 10
 META_PT    = 10
 BODY_PT    = 11
 SPACE_PT   = 6
+
+
+def set_eastasia_cs_font(style, font_name="Calibri"):
+    """python-docx's Font.name setter only sets w:rFonts ascii/hAnsi; without
+    eastAsia/cs, a non-Latin character in body text falls back to Word's
+    theme font instead of Calibri."""
+    rPr = style.element.get_or_add_rPr()
+    rFonts = rPr.find(qn("w:rFonts"))
+    if rFonts is None:
+        rFonts = OxmlElement("w:rFonts")
+        rPr.insert(0, rFonts)
+    rFonts.set(qn("w:eastAsia"), font_name)
+    rFonts.set(qn("w:cs"), font_name)
 
 
 def run(para, text, size=BODY_PT, bold=False, color=BLACK):
@@ -147,6 +162,7 @@ def convert(txt_path, docx_path):
     normal = doc.styles["Normal"]
     normal.font.name = "Calibri"
     normal.font.size = Pt(BODY_PT)
+    set_eastasia_cs_font(normal)
 
     # Name
     para(doc, s["name"], size=NAME_PT, bold=True, color=NAVY,
@@ -160,8 +176,6 @@ def convert(txt_path, docx_path):
     p = doc.add_paragraph()
     p.paragraph_format.space_before = Pt(2)
     p.paragraph_format.space_after  = Pt(10)
-    from docx.oxml import OxmlElement
-    from docx.oxml.ns import qn
     pPr  = p._p.get_or_add_pPr()
     pBdr = OxmlElement("w:pBdr")
     bot  = OxmlElement("w:bottom")

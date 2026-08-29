@@ -17,7 +17,11 @@ Within experience blocks:
   Description line -> company context  (follows a pipe line, no |)
   · Bullet         -> experience bullet (continuation lines start with 2+ spaces)
 
-Target: 2 pages maximum. Adjust spacing/sizes here if overflowing.
+Page count is not tuned to a fixed cap: 2 pages is the target, 3 is
+acceptable. Content is never cut to fit a page count. Job blocks never split
+across a page boundary; a trailing section with no bullets of its own (e.g.
+CERTIFICATIONS right after EDUCATION) stays on the same page as the section
+before it, regardless of section name (see PageState / add_section_heading).
 """
 
 import re
@@ -35,18 +39,14 @@ GREY  = RGBColor(0x55, 0x55, 0x55)   # contact line, company descriptions
 BLACK = RGBColor(0x1A, 0x1A, 0x1A)   # body text
 
 # ── Size / spacing constants (tune here to control page count) ────────────────
-# All sizes below NAME_PT must stay within 1pt of each other (ATS compliance).
-# Current range: 9–10pt. NAME_PT is the sole exception (title treatment).
+# Every size below NAME_PT is 10pt (a single uniform body size, ATS-safe).
+# NAME_PT is the sole exception, used as a title treatment for the name.
 NAME_PT         = 18
 TAGLINE_PT      = 10
-CONTACT_PT      = 9
+CONTACT_PT      = 10
 SECTION_HDR_PT  = 10
 ROLE_PT         = 10
-COMPANY_PT      = 9
-DESC_PT         = 9
-BODY_PT         = 9
-BULLET_PT       = 9
-COMPETENCY_PT   = 9
+BODY_PT         = 10
 
 MARGIN_IN       = 0.65   # all four sides
 
@@ -57,12 +57,31 @@ DESC_AFTER      = 3      # pt after company description (before first bullet)
 BULLET_SPACE    = 0.5    # pt before/after each bullet
 
 
+# ── Pagination state ──────────────────────────────────────────────────────────
+
+class PageState:
+    """Tracks whether the keep-together chain running through section content
+    should be released at the next section heading (spec amendment A4: a
+    positional rule, not a heading-name allow-list). A section that adds no
+    bullets of its own (e.g. CERTIFICATIONS immediately after EDUCATION)
+    never releases the chain, so it stays on the same page as the section
+    before it -- regardless of what either section is named. A section that
+    does add bullets (e.g. EXPERIENCE) always releases the chain at its own
+    end, so the next section is free to start a new page.
+    """
+
+    def __init__(self):
+        self.seen_heading = False
+        self.bullets_since_heading = 0
+
+
 # ── Low-level helpers ─────────────────────────────────────────────────────────
 
 def run(para, text, size=BODY_PT, bold=False, italic=False, color=BLACK):
     r = para.add_run(text)
-    r.font.name      = "Calibri"
-    r.font.size      = Pt(size)
+    r.font.name = "Calibri"
+    if size != BODY_PT:
+        r.font.size = Pt(size)
     r.font.bold      = bold
     r.font.italic    = italic
     r.font.color.rgb = color
@@ -75,20 +94,18 @@ def spacing(para, before=0, after=0):
 
 
 def keep_with_next(para):
-    para._p.get_or_add_pPr().append(OxmlElement("w:keepNext"))
+    para.paragraph_format.keep_with_next = True
 
 
 def keep_together(para):
-    para._p.get_or_add_pPr().append(OxmlElement("w:keepLines"))
+    para.paragraph_format.keep_together = True
 
 
 def close_block(doc):
-    """Remove keep_with_next from the last paragraph, closing the current job block."""
+    """Release keep_with_next from the last paragraph, closing the current keep-together chain."""
     if not doc.paragraphs:
         return
-    pPr = doc.paragraphs[-1]._p.get_or_add_pPr()
-    for el in list(pPr.findall(qn("w:keepNext"))):
-        pPr.remove(el)
+    doc.paragraphs[-1].paragraph_format.keep_with_next = None
 
 
 def bottom_border(para, color="0D2137", size="8"):
@@ -105,6 +122,31 @@ def bottom_border(para, color="0D2137", size="8"):
 
 def thin_rule(para):
     bottom_border(para, color="CCCCCC", size="4")
+
+
+def strip_contextual_spacing(style):
+    """Remove w:contextualSpacing from a style's pPr, if present. Word treats
+    contextualSpacing as "collapse spacing between paragraphs of this style",
+    which would otherwise override BULLET_SPACE between adjacent bullets."""
+    pPr = style.element.find(qn("w:pPr"))
+    if pPr is None:
+        return
+    cs = pPr.find(qn("w:contextualSpacing"))
+    if cs is not None:
+        pPr.remove(cs)
+
+
+def set_eastasia_cs_font(style, font_name="Calibri"):
+    """python-docx's Font.name setter only sets w:rFonts ascii/hAnsi; without
+    eastAsia/cs, a non-Latin character in body text falls back to Word's
+    theme font instead of Calibri."""
+    rPr = style.element.get_or_add_rPr()
+    rFonts = rPr.find(qn("w:rFonts"))
+    if rFonts is None:
+        rFonts = OxmlElement("w:rFonts")
+        rPr.insert(0, rFonts)
+    rFonts.set(qn("w:eastAsia"), font_name)
+    rFonts.set(qn("w:cs"), font_name)
 
 
 # ── Pre-processing ────────────────────────────────────────────────────────────
@@ -140,8 +182,16 @@ def add_divider(doc):
     thin_rule(p)
 
 
-def add_section_heading(doc, text):
-    close_block(doc)
+def add_section_heading(doc, text, state):
+    # A4: only release the previous keep-together chain if at least one
+    # bullet was rendered since the previous heading, or there was no
+    # previous heading at all. A short trailing section with no bullets of
+    # its own (CERTIFICATIONS after EDUCATION) never releases the chain.
+    if not state.seen_heading or state.bullets_since_heading > 0:
+        close_block(doc)
+    state.seen_heading = True
+    state.bullets_since_heading = 0
+
     p = doc.add_paragraph()
     spacing(p, before=8, after=2)
     run(p, text.upper(), size=SECTION_HDR_PT, bold=True, color=NAVY)
@@ -154,20 +204,20 @@ def render_header(doc, lines):
     if not non_blank:
         return
 
-    # Name — centered
+    # Name: centered
     p = doc.add_paragraph()
     p.alignment = WD_ALIGN_PARAGRAPH.CENTER
     spacing(p, before=0, after=1)
     run(p, non_blank[0], size=NAME_PT, bold=True, color=NAVY)
 
-    # Contact — centered
+    # Contact: centered
     if len(non_blank) > 1:
         p = doc.add_paragraph()
         p.alignment = WD_ALIGN_PARAGRAPH.CENTER
         spacing(p, before=0, after=3)
         run(p, non_blank[1], size=CONTACT_PT, color=GREY)
 
-    # Tagline — centered
+    # Tagline: centered
     if len(non_blank) > 2:
         p = doc.add_paragraph()
         p.alignment = WD_ALIGN_PARAGRAPH.CENTER
@@ -175,8 +225,8 @@ def render_header(doc, lines):
         run(p, non_blank[2], size=TAGLINE_PT, color=BLUE)
 
 
-def render_summary(doc, lines):
-    add_section_heading(doc, "Professional Summary")
+def render_summary(doc, lines, state):
+    add_section_heading(doc, "Professional Summary", state)
     para_lines = []
     for line in lines:
         stripped = line.rstrip()
@@ -194,13 +244,13 @@ def render_summary(doc, lines):
         run(p, " ".join(para_lines), size=BODY_PT)
 
 
-def render_competencies(doc, lines):
-    add_section_heading(doc, "Core Competencies")
+def render_competencies(doc, lines, state):
+    add_section_heading(doc, "Core Competencies", state)
     text = " ".join(l.strip() for l in lines if l.strip())
     if text:
         p = doc.add_paragraph()
         spacing(p, before=2, after=2)
-        run(p, text, size=COMPETENCY_PT, color=BLACK)
+        run(p, text, size=BODY_PT, color=BLACK)
 
 
 def add_role_title(doc, text):
@@ -216,26 +266,25 @@ def add_company_line(doc, text):
     p = doc.add_paragraph()
     spacing(p, before=0, after=0)
     keep_with_next(p)
-    run(p, parts[0], size=COMPANY_PT, bold=True, color=NAVY)
+    run(p, parts[0], size=BODY_PT, bold=True, color=NAVY)
     for part in parts[1:]:
-        run(p, "  |  " + part, size=COMPANY_PT, color=BLACK)
+        run(p, "  |  " + part, size=BODY_PT, color=BLACK)
 
 
 def add_company_description(doc, text):
     p = doc.add_paragraph()
     spacing(p, before=0, after=DESC_AFTER)
     keep_with_next(p)
-    run(p, text, size=DESC_PT, italic=True, color=GREY)
+    run(p, text, size=BODY_PT, italic=True, color=GREY)
 
 
-def add_bullet(doc, text):
-    p = doc.add_paragraph()
+def add_bullet(doc, text, state):
+    p = doc.add_paragraph(style="List Bullet")
     spacing(p, before=BULLET_SPACE, after=BULLET_SPACE)
-    p.paragraph_format.left_indent       = Inches(0.2)
-    p.paragraph_format.first_line_indent = Inches(-0.15)
     keep_together(p)
     keep_with_next(p)   # chains bullet into block; closed by next role/heading
-    run(p, "\u00b7  " + text.lstrip("\u00b7").strip(), size=BULLET_PT)
+    run(p, text.lstrip("·").strip(), size=BODY_PT)
+    state.bullets_since_heading += 1
 
 
 def add_plain(doc, text):
@@ -244,7 +293,7 @@ def add_plain(doc, text):
     run(p, text, size=BODY_PT)
 
 
-def render_body(doc, lines):
+def render_body(doc, lines, state):
     indexed = [(i, lines[i].rstrip()) for i in range(len(lines))]
 
     def next_non_blank(i):
@@ -264,14 +313,14 @@ def render_body(doc, lines):
         if not text:
             continue
 
-        # Section heading — ALL CAPS, letters/spaces only
+        # Section heading: ALL CAPS, letters/spaces only
         if text == text.upper() and re.fullmatch(r"[A-Z\s]+", text) and len(text) > 3:
-            add_section_heading(doc, text)
+            add_section_heading(doc, text, state)
             continue
 
         # Bullet
-        if text.startswith("\u00b7"):
-            add_bullet(doc, text)
+        if text.startswith("·"):
+            add_bullet(doc, text, state)
             continue
 
         # Company / pipe line
@@ -279,12 +328,12 @@ def render_body(doc, lines):
             add_company_line(doc, text)
             continue
 
-        # Role title — no pipe, but next non-blank has pipe
+        # Role title: no pipe, but next non-blank has pipe
         if "|" in next_non_blank(i):
             add_role_title(doc, text)
             continue
 
-        # Company description — previous non-blank had pipe
+        # Company description: previous non-blank had pipe
         if "|" in prev_non_blank(i):
             add_company_description(doc, text)
             continue
@@ -297,6 +346,7 @@ def render_body(doc, lines):
 
 def convert(md_path, docx_path):
     doc = Document()
+    state = PageState()
 
     for section in doc.sections:
         section.top_margin    = Inches(MARGIN_IN)
@@ -307,6 +357,9 @@ def convert(md_path, docx_path):
     normal = doc.styles["Normal"]
     normal.font.name = "Calibri"
     normal.font.size = Pt(BODY_PT)
+    set_eastasia_cs_font(normal)
+
+    strip_contextual_spacing(doc.styles["List Bullet"])
 
     with open(md_path, encoding="utf-8") as f:
         raw = f.readlines()
@@ -320,16 +373,17 @@ def convert(md_path, docx_path):
     add_divider(doc)
 
     if len(blocks) > 1:
-        render_summary(doc, blocks[1])
+        render_summary(doc, blocks[1], state)
     add_divider(doc)
 
     if len(blocks) > 2:
-        render_competencies(doc, blocks[2])
+        render_competencies(doc, blocks[2], state)
     add_divider(doc)
 
     for block in blocks[3:]:
-        render_body(doc, block)
+        render_body(doc, block, state)
 
+    close_block(doc)
     doc.save(docx_path)
     print(f"DOCX written to {docx_path}")
 

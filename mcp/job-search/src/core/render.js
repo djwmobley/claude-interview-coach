@@ -193,6 +193,89 @@ const COMPANY_LINE_BAD_DASH = /^[^|]+\|[^|]+\|\s*\d{4}\s*(?:-|\u2014|to)\s*(\d{4
 /** Windows reserved device names cannot be file names. */
 const RESERVED_NAME = /^(con|prn|aux|nul|com[1-9]|lpt[1-9])$/i;
 
+// ---------------------------------------------------------------------------
+// Body-line classification helpers (spec amendments A1, A2, A3, A5)
+// ---------------------------------------------------------------------------
+
+const BULLET_CHAR = '\u00b7';
+/** Openers that are legitimately content, not a mistyped bullet glyph. */
+const BULLET_OK_OPENERS = new Set(['$', '(', '"', "'", '\u00a3', '\u20ac']);
+
+/**
+ * A1: total classification of a body line by its first non-space character.
+ * Every character maps to a branch: the middle dot is a bullet (and must be
+ * followed by exactly one space), any other punctuation/symbol opener is a
+ * mistyped bullet attempt (unless it is one of the content-legitimate
+ * openers), and anything else is not a bullet at all. This replaces an
+ * allow-list of known-bad bullet characters (`-`, `*`) so an unlisted glyph
+ * (`\u2022`, `\u2023`, `\u25e6`, `\u2043`, `\u2219`, ...) still fails instead
+ * of silently rendering as a plain paragraph.
+ * @param {string} line
+ * @returns {{ kind: 'none' } | { kind: 'ok' } | { kind: 'bad-space' } | { kind: 'bad-char', char: string }}
+ */
+function classifyBulletOpener(line) {
+  const trimmed = line.trim();
+  if (!trimmed) return { kind: 'none' };
+  const first = trimmed[0];
+  if (first === BULLET_CHAR) {
+    return /^\u00b7 \S/.test(trimmed) ? { kind: 'ok' } : { kind: 'bad-space' };
+  }
+  if (/[\p{P}\p{S}]/u.test(first) && !BULLET_OK_OPENERS.has(first)) {
+    return { kind: 'bad-char', char: first };
+  }
+  return { kind: 'none' };
+}
+
+/** A5: md_to_docx.py's join_continuations only merges lines starting with two or more literal ASCII spaces (`line.startswith("  ")`). */
+const WHITESPACE_LEAD = /^[\t \u00a0]/;
+const VALID_CONTINUATION = /^ {2,}\S/;
+
+/**
+ * A3: mirrors md_to_docx.py's render_body() section-heading test byte for
+ * byte (`text == text.upper() and re.fullmatch(r"[A-Z\s]+", text) and
+ * len(text) > 3`). Exported so drift between the two is visible; keep this
+ * in sync with tools/md_to_docx.py's heading branch.
+ */
+export const ALL_CAPS_HEADING = /^[A-Z\s]+$/;
+
+/** @param {string} line */
+function isCompanyLine(line) {
+  return COMPANY_LINE.test(line) || COMPANY_LINE_BAD_DASH.test(line);
+}
+
+/**
+ * A3: a description line is one with no pipe and no bullet whose previous
+ * non-blank line is a company line, matched against the strict COMPANY_LINE
+ * / COMPANY_LINE_BAD_DASH regexes (not "any line containing a pipe", which
+ * is how md_to_docx.py itself decides it). The stricter regex is used
+ * deliberately: the EDUCATION shape (a degree line with a pipe but no year
+ * range, then a `School | Year` line with only one pipe) never matches
+ * COMPANY_LINE, so a trailing note such as "Completed while employed
+ * full-time" is never misread as a job description sitting in front of the
+ * next section heading.
+ * @param {string[]} lines @param {number} idx
+ */
+function isDescriptionLine(lines, idx) {
+  const text = (lines[idx] ?? '').trim();
+  if (!text || text.includes('|') || text.startsWith(BULLET_CHAR)) return false;
+  const pIdx = prevNonBlankIndex(lines, idx);
+  return pIdx >= 0 && isCompanyLine(lines[pIdx]);
+}
+
+/** @param {string[]} lines @param {number} i */
+function nextNonBlankIndex(lines, i) {
+  let j = i + 1;
+  while (j < lines.length && !lines[j].trim()) j++;
+  return j;
+}
+
+/** @param {string[]} lines @param {number} i */
+function prevNonBlankIndex(lines, i) {
+  let k = i - 1;
+  while (k >= 0 && !lines[k].trim()) k--;
+  return k;
+}
+
 /**
  * Resume structure for md_to_docx.py (spec 12a).
  * @param {string[]} lines
@@ -237,10 +320,26 @@ export function checkResumeStructure(lines) {
         hits.push(n);
         problems.push('body uses ALL CAPS labels, not # headings');
       }
-      if (/^\s*[-*]\s+/.test(l)) {
+
+      // A1: total classification of the bullet opener character.
+      const opener = classifyBulletOpener(l);
+      if (opener.kind === 'bad-space') {
         hits.push(n);
-        problems.push('bullets must use the middle dot, not - or *');
+        problems.push('bullet must be the middle dot followed by one space');
+      } else if (opener.kind === 'bad-char') {
+        hits.push(n);
+        problems.push(`bullets must use the middle dot, not ${opener.char}`);
       }
+
+      // A5: a whitespace-led line is only ever a continuation line; it must
+      // be indented with two or more literal ASCII spaces to be merged by
+      // md_to_docx.py's join_continuations, or it renders as a stray plain
+      // paragraph.
+      if (WHITESPACE_LEAD.test(l) && l.trim() !== '' && !VALID_CONTINUATION.test(l)) {
+        hits.push(n);
+        problems.push('continuation lines must be indented with two or more ASCII spaces');
+      }
+
       if (/^\s*\|/.test(l) || /\|\s*-{3,}\s*\|/.test(l)) {
         hits.push(n);
         problems.push('tables are not allowed');
@@ -262,6 +361,36 @@ export function checkResumeStructure(lines) {
         } else if (title.includes(',')) {
           hits.push(b.start + i);
           problems.push('no commas in role titles');
+        }
+
+        // A2: the line after a company line must either be a bullet (no
+        // description) or contain no pipe. A pipe-shaped, non-company line
+        // here would render as a second company line in md_to_docx.py.
+        const descIdx = nextNonBlankIndex(b.lines, i);
+        if (descIdx < b.lines.length) {
+          const descLine = b.lines[descIdx];
+          const descTrim = descLine.trim();
+          if (!descTrim.startsWith(BULLET_CHAR) && descTrim.includes('|') && !isCompanyLine(descLine)) {
+            hits.push(b.start + descIdx + 1);
+            problems.push('description line after a company line must not contain |');
+          }
+        }
+      }
+
+      // A3: an all-caps line inside a job renders as a section heading in
+      // md_to_docx.py and splits the job block in two. ALL_CAPS_HEADING
+      // mirrors the Python classifier; the adjacency test below approximates
+      // "inside a job" as either sitting between a company/description line
+      // and the bullets, or being directly followed by a bullet.
+      const trimmedLine = l.trim();
+      if (ALL_CAPS_HEADING.test(trimmedLine) && trimmedLine.length > 3) {
+        const pIdx = prevNonBlankIndex(b.lines, i);
+        const prevIsCompanyOrDescription = pIdx >= 0 && (isCompanyLine(b.lines[pIdx]) || isDescriptionLine(b.lines, pIdx));
+        const headingNextIdx = nextNonBlankIndex(b.lines, i);
+        const nextIsBullet = headingNextIdx < b.lines.length && b.lines[headingNextIdx].trim().startsWith(BULLET_CHAR);
+        if (prevIsCompanyOrDescription || nextIsBullet) {
+          hits.push(n);
+          problems.push('all-caps line inside a job renders as a section heading and splits the job');
         }
       }
     });

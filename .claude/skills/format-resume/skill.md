@@ -18,8 +18,8 @@ You enforce the following rules without exception:
 - No tables, no text boxes, no headers, no footers, no images
 - No content in Word's header or footer regions: name and contact go in the body
 - Job blocks never span page boundaries: each job either fits on the current page or moves entirely to the next
-- **2 pages maximum**: if the output exceeds 2 pages, reduce spacing and font sizes using the constants at the top of `tools/md_to_docx.py` until it fits; do not remove content
-- Minimize blank space at the bottom of page 1 by tightening spacing proportionally before reducing font sizes
+- EDUCATION and CERTIFICATIONS stay together on the same page whenever nothing has intervened to release the keep-together chain
+- **Page count is not tuned.** Target 2 pages, 3 is acceptable. Never cut content to fit, and never edit the size or spacing constants in `tools/md_to_docx.py` from this skill
 
 ## Arguments
 
@@ -50,8 +50,7 @@ The tool returns `checks[]` covering: em-dash, en-dash outside `Year – Year` r
 
 In addition, report (warnings only, the tool does not check these):
 
-1. **Continuation lines**: lines indented with 2+ spaces join their parent bullet. If any are missing the 2-space indent, warn that they may render as broken lines.
-2. **Page estimate**: count total lines to estimate whether the output is likely to exceed 2 pages. Flag if at risk.
+1. **Continuation lines**: lines indented with 2+ literal ASCII spaces join their parent bullet. If any are missing that indent, warn that they may render as a stray plain paragraph.
 
 ### Step 3: Generate DOCX
 
@@ -84,26 +83,13 @@ Generated:
 
 Pre-flight:
   render_doc checks: [all pass | list of fails with lines]
-  Warnings: [continuation-line or page-estimate notes, or "None"]
+  Warnings: [continuation-line notes, or "None"]
 
 Formatting rules applied:
   · Single column, Calibri throughout
   · Dark navy headings only, one accent color
   · Bold on role titles and company names only
   · Job blocks kept together, no splits across pages
-  · 2-page maximum enforced
+  · EDUCATION and CERTIFICATIONS kept together
+  · Page count not tuned: 2 pages target, 3 acceptable
 ```
-
-### Step 6: Tuning (if output exceeds 2 pages)
-
-If the script output or user feedback indicates the document exceeds 2 pages, open `tools/md_to_docx.py` and reduce the spacing/size constants in this order (stop as soon as it fits):
-
-1. `BULLET_SPACE`: reduce from current value toward 0
-2. `DESC_AFTER`: reduce from current value toward 1
-3. `ROLE_BEFORE`: reduce from current value toward 4
-4. `BODY_PT` / `BULLET_PT`: reduce by 0.5pt increments, minimum 8.5pt
-5. `MARGIN_IN`: reduce by 0.05" increments, minimum 0.55"
-
-Never reduce `NAME_PT` below 16 or `SECTION_HDR_PT` below 9.5. Never remove bullets or content to fit the page limit, spacing and size only.
-
-After each adjustment, re-run the script and check again.

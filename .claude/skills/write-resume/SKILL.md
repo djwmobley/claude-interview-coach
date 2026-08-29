@@ -106,16 +106,17 @@ respect them:
 
 - **Heading centered:** Name, contact line, and tagline are center-aligned.
 - **Consistent font:** Calibri throughout: no font variation.
-- **Font sizes within 1pt of each other** (except the name, which is 18pt as a
-  title treatment). All body/role/section text runs 9–10pt. Do not add markup
-  that would create a different size range.
-- **Two pages maximum.** If the draft exceeds two pages, reduce bullets: cut
-  from older or less-relevant roles first, never from the most recent role.
-  Write 2–3 bullets for roles that are present for timeline continuity rather
-  than core story.
-- **Jobs do not split across pages.** The converter uses keepWithNext chaining
-  to hold each job block together. If a single job has many bullets and risks
-  splitting, reduce its bullet count before accepting the draft.
+- **Body text is 10pt; the name is 18pt** as a title treatment. Do not add
+  markup that would create a different size range.
+- **Bullets render as real Word list items** (List Bullet style), not a
+  typed middle-dot glyph inside a plain paragraph. Keep writing the `·`
+  prefix in the markdown source; the converter strips it and applies the
+  real bullet formatting.
+- **Target 2 pages, 3 is acceptable.** Page count is not tuned: never cut
+  content, and never reduce bullets, to make a draft fit a page count.
+- **Jobs do not split across pages.** The converter uses keep-with-next
+  chaining to hold each job block together. EDUCATION and CERTIFICATIONS are
+  kept together the same way whenever EDUCATION has no bullets of its own.
 
 ### Output Requirements
 
