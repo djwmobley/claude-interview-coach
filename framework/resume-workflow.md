@@ -14,8 +14,8 @@ When asked to create a targeted resume for a specific role:
 7. **Adjust skill emphasis** — highlight skills that match the job description, de-emphasise irrelevant ones
 8. **Choose language** — match the language of the job posting (or the candidate's preferred language from `data/profile.md`)
 9. **Choose format** — select the appropriate market format (see `framework/style-guidelines.md`)
-10. **Output format** — produce clean markdown in an `output/` file named `YYYYMMDD-[target-role-slug].md`
-11. **Generate call cheat sheet** — produce a companion cheat sheet alongside the CV in `output/YYYYMMDD-[target-role-slug]-cheatsheet.md`. This is a quick-reference table the candidate keeps on screen during recruiter calls. Build it using these sources:
+10. **Output format** — produce clean markdown in an `output/markdown/` file named `YYYYMMDD-[target-role-slug].md`
+11. **Generate call cheat sheet** — produce a companion cheat sheet alongside the CV in `output/markdown/YYYYMMDD-[target-role-slug]-cheatsheet.md`. This is a quick-reference table the candidate keeps on screen during recruiter calls. Build it using these sources:
 
     **Content to include:**
     - For each must-have requirement from the job posting, list 2-3 bullet points of *specific things the candidate did* (not generic skills — concrete actions from projects)
@@ -43,7 +43,7 @@ When asked to create a targeted resume for a specific role:
 - For **entrepreneurial / startup roles:** include co-founded companies and side businesses from `data/companies.md`
 - For **consulting / advisory roles:** include relevant early-career experience, professional qualifications, and degree focus areas
 - Early-career experience (internships, student jobs, apprenticeships, bootcamps, first roles) is usually omitted unless specifically relevant to the target role
-- Keep resumes to 2-4 pages depending on role seniority
+- Target 2 pages, 3 is the maximum. Page count is not tuned to fit; never cut content to hit a page target
 - Daily rate and availability are only included if explicitly requested
 
 ### Keyword Pragmatism
@@ -79,7 +79,7 @@ These rules apply to every generated CV. They prevent recurring issues that redu
 
 ### Structural Consistency
 
-- **Project headers must follow one pattern throughout.** Use either `Role — Description` or `Description — Role` for all project entries. Never mix. No prefixes like "Flagship:".
+- **Project headers must follow one pattern throughout.** Use the `Title` line followed by a `Company | City, ST | Year – Year` pipe line (the md_to_docx.py format) for every project entry. Never mix in a different header shape. No prefixes like "Flagship:".
 - **All bullets within a section must follow the same format.** If most bullets have bold labels (e.g., `**Architecture:**`), every bullet in that section must. No exceptions.
 - **Every project and engagement must have dates.** No "second engagement" or "later period" without a time range. Even approximate dates (e.g., "Q2 2023") are better than nothing.
 - **Include availability and location context** in the header, when the target market convention expects it (check the job posting and `data/profile.md` for market context) or if the candidate is based in a different region from the role. Add a line like "Available: [date] · Remote ([timezone]) · Travel to [region] on request".
@@ -102,7 +102,7 @@ Before delivering any generated CV, verify all of the following. This is mandato
 4. **No weakness admissions:** Scan for hedging language ("currently expanding", "basic", "evaluated but not used", "consulting-level"). Remove or reframe.
 5. **Concurrent engagement explanation:** If any selected projects overlap in time, is it explained? (Skip if no timelines overlap.)
 6. **Team-fit signals:** Are there at least 2-3 collaboration references across the CV?
-7. **Header consistency:** Do all project headers follow the same `Role — Description` pattern?
+7. **Header consistency:** Do all project headers follow the same `Title` / `Company | City, ST | Year – Year` pattern?
 8. **Bullet consistency:** Do all bullets within each section follow the same format (all with bold labels or all without)?
 9. **Dates complete:** Does every project and engagement have a date range?
 10. **Availability present:** Is availability/location/remote context included in the header (check market conventions from the job posting; recommended for all markets)?

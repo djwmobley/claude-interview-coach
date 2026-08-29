@@ -61,6 +61,30 @@ def add_inline(para, text, size=BODY_PT, color=BLACK):
             add_run(para, part, size=size, bold=False, color=color)
 
 
+def strip_contextual_spacing(style):
+    """Remove w:contextualSpacing from a style's pPr, if present, so spacing
+    between adjacent bullets is not collapsed."""
+    pPr = style.element.find(qn("w:pPr"))
+    if pPr is None:
+        return
+    cs = pPr.find(qn("w:contextualSpacing"))
+    if cs is not None:
+        pPr.remove(cs)
+
+
+def set_eastasia_cs_font(style, font_name="Calibri"):
+    """python-docx's Font.name setter only sets w:rFonts ascii/hAnsi; without
+    eastAsia/cs, a non-Latin character in body text falls back to Word's
+    theme font instead of Calibri."""
+    rPr = style.element.get_or_add_rPr()
+    rFonts = rPr.find(qn("w:rFonts"))
+    if rFonts is None:
+        rFonts = OxmlElement("w:rFonts")
+        rPr.insert(0, rFonts)
+    rFonts.set(qn("w:eastAsia"), font_name)
+    rFonts.set(qn("w:cs"), font_name)
+
+
 def add_rule(doc, color_hex="CCCCCC", space_before=4, space_after=6):
     p = doc.add_paragraph()
     p.paragraph_format.space_before = Pt(space_before)
@@ -107,12 +131,9 @@ def add_body(doc, text, before=1, after=3):
 
 
 def add_bullet(doc, text):
-    p = doc.add_paragraph()
-    p.paragraph_format.left_indent   = Inches(0.2)
-    p.paragraph_format.first_line_indent = Inches(-0.15)
+    p = doc.add_paragraph(style="List Bullet")
     p.paragraph_format.space_before  = Pt(1)
     p.paragraph_format.space_after   = Pt(2)
-    add_run(p, "\u00b7  ", size=BULLET_PT, bold=False, color=GREY)
     add_inline(p, text, size=BULLET_PT, color=BLACK)
 
 
@@ -132,6 +153,9 @@ def convert(md_path, docx_path):
     normal = doc.styles["Normal"]
     normal.font.name = "Calibri"
     normal.font.size = Pt(BODY_PT)
+    set_eastasia_cs_font(normal)
+
+    strip_contextual_spacing(doc.styles["List Bullet"])
 
     i = 0
     while i < len(lines):

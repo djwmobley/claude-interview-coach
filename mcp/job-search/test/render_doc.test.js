@@ -10,7 +10,7 @@ import fs from 'node:fs';
 import os from 'node:os';
 import path from 'node:path';
 import { fileURLToPath } from 'node:url';
-import { preflight, renderDoc, detectLocked, checkOutputName, loadStyleConfig, readProjectIndexCompanies, resolveSource } from '../src/core/render.js';
+import { preflight, renderDoc, detectLocked, checkOutputName, loadStyleConfig, readProjectIndexCompanies, resolveSource, checkResumeStructure } from '../src/core/render.js';
 
 const HERE = path.dirname(fileURLToPath(import.meta.url));
 const CLEAN = path.join(HERE, 'fixtures', 'render', 'clean-resume.md');
@@ -137,6 +137,81 @@ describe('render_doc preflight', () => {
       assert.match(String(c.detail), re, name);
       assert.ok(c.lines.length > 0, name);
     }
+  });
+
+  // Pure checkResumeStructure unit tests with inline line arrays (amendments
+  // A1, A2, A3, A5). Each case supplies just enough header/summary/
+  // competency filler to satisfy the 4-block minimum; the interesting
+  // content is always in the last (body) block.
+  /** @param {string[]} bodyLines */
+  function wrap(bodyLines) {
+    return ['Jordan Reyes', 'Contact info here', 'Tagline | separated | parts', '---', 'Summary text.', '---', 'Competency list', '---', ...bodyLines];
+  }
+
+  test('A1: bullet opener is a total classification, not an allow-list', () => {
+    // A real bullet, correctly spaced, is fine.
+    assert.equal(checkResumeStructure(wrap(['Role', `Acme | City, ST | 2020 ${EN} 2021`, '· Real bullet text'])).result, 'pass');
+    // Two spaces after the dot is not "one space then non-space".
+    const twoSpaces = checkResumeStructure(wrap(['Role', `Acme | City, ST | 2020 ${EN} 2021`, '·  Two spaces after the dot']));
+    assert.equal(twoSpaces.result, 'fail');
+    assert.match(String(twoSpaces.detail), /middle dot followed by one space/);
+    // An unlisted bullet glyph (not in the -,* allow-list this replaces) still fails.
+    for (const glyph of ['•', '‣', '◦', '⁃', '∙']) {
+      const r = checkResumeStructure(wrap(['Role', `Acme | City, ST | 2020 ${EN} 2021`, `${glyph} Unlisted glyph`]));
+      assert.equal(r.result, 'fail', glyph);
+      assert.match(String(r.detail), /middle dot/, glyph);
+    }
+    // Content-legitimate openers ($ ( " ' £ €) are not mistaken for bullets.
+    for (const opener of ['$100K target bonus.', '(Confidential client) engagement.', '"Quoted phrase" opens a sentence.', "'Single quoted' opens a sentence.", '£50,000 budget line.', '€2M contract value.']) {
+      const r = checkResumeStructure(wrap(['Role', `Acme | City, ST | 2020 ${EN} 2021`, opener]));
+      assert.equal(r.result, 'pass', opener);
+    }
+  });
+
+  test('A2: a pipe-shaped, non-company line right after a company line is refused', () => {
+    const bad = checkResumeStructure(wrap(['Role', `Acme | City, ST | 2020 ${EN} 2021`, 'Some | Fragment']));
+    assert.equal(bad.result, 'fail');
+    assert.match(String(bad.detail), /description line after a company line must not contain \|/);
+    // No pipe at all in the description: fine.
+    assert.equal(checkResumeStructure(wrap(['Role', `Acme | City, ST | 2020 ${EN} 2021`, 'Plain description, no pipe.'])).result, 'pass');
+    // Straight into a bullet, no description: fine.
+    assert.equal(checkResumeStructure(wrap(['Role', `Acme | City, ST | 2020 ${EN} 2021`, '· Straight to the bullet'])).result, 'pass');
+    // Two consecutive real company lines, no role title between them
+    // (concurrent roles at the same employer): not flagged. City fields use
+    // no comma here so the (pre-existing, unrelated) "no commas in role
+    // titles" check does not also fire by misreading the first company
+    // line as the second one's role title.
+    assert.equal(checkResumeStructure(wrap(['Role', `Acme | Remote | 2020 ${EN} 2021`, `Beta | Remote | 2020 ${EN} 2021`, '· Bullet'])).result, 'pass');
+  });
+
+  test('A3: an all-caps line inside a job is refused; a real section heading is not', () => {
+    // Sits directly after a company line, before any bullets.
+    const afterCompany = checkResumeStructure(wrap(['Role', `Acme | City, ST | 2020 ${EN} 2021`, 'AWS GCP AZURE', '· Bullet text']));
+    assert.equal(afterCompany.result, 'fail');
+    assert.match(String(afterCompany.detail), /section heading and splits the job/);
+    // Directly followed by a bullet (even if preceded by one too).
+    const beforeBullet = checkResumeStructure(wrap(['Role', `Acme | City, ST | 2020 ${EN} 2021`, '· First bullet', 'AWS GCP AZURE', '· Second bullet']));
+    assert.equal(beforeBullet.result, 'fail');
+    // A real section heading as the first line of the body block: not flagged.
+    assert.equal(checkResumeStructure(wrap(['EXPERIENCE', 'Role', `Acme | City, ST | 2020 ${EN} 2021`, '· Bullet'])).result, 'pass');
+    // EDUCATION -> trailing note (no pipe, one-pipe school line) -> CERTIFICATIONS:
+    // the note is not a "description" under the strict COMPANY_LINE regex
+    // (only one pipe), so CERTIFICATIONS is not misread as sitting inside a job.
+    assert.equal(
+      checkResumeStructure(wrap(['EDUCATION', 'Bachelor of Science | Minor: Something', `Some University | 2010 ${EN} 2013`, 'Completed while employed full-time', 'CERTIFICATIONS', 'PMP (Expired 2017), Project Management Institute'])).result,
+      'pass',
+    );
+  });
+
+  test('A5: continuation lines must be indented with two or more literal ASCII spaces', () => {
+    assert.equal(checkResumeStructure(wrap(['Role', `Acme | City, ST | 2020 ${EN} 2021`, '· Bullet text', '  continued with two spaces'])).result, 'pass');
+    assert.equal(checkResumeStructure(wrap(['Role', `Acme | City, ST | 2020 ${EN} 2021`, '· Bullet text', '   continued with three spaces'])).result, 'pass');
+    const oneSpace = checkResumeStructure(wrap(['Role', `Acme | City, ST | 2020 ${EN} 2021`, '· Bullet text', ' continued with one space']));
+    assert.equal(oneSpace.result, 'fail');
+    assert.match(String(oneSpace.detail), /two or more ASCII spaces/);
+    const tabLed = checkResumeStructure(wrap(['Role', `Acme | City, ST | 2020 ${EN} 2021`, '· Bullet text', '\tcontinued with a tab']));
+    assert.equal(tabLed.result, 'fail');
+    assert.match(String(tabLed.detail), /two or more ASCII spaces/);
   });
 
   test('PMP wording: Lapsed or a variant fails; exact string passes; N/A when absent', () => {
