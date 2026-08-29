@@ -11,7 +11,16 @@ import { on, off } from '../lib/bus.js';
 import { createListCursor } from '../lib/list-cursor.js';
 import { openAddOpportunityDrawer } from '../components/add-opportunity-drawer.js';
 
-const ACTIVE_GROUPS = Object.freeze(['review', 'new', 'maybe', 'shortlisted', 'applied', 'interviewing', 'offer']);
+// 'untriaged' (status IS NULL: never manually triaged) and 'new' (the literal status='new' a manual add
+// defaults to, and digit-1 maps to -- see components/stage-buttons.js) used to be the same section under
+// one 'new' key, with loadGroup() silently redirecting every 'new' request to the untriaged query. That
+// made literal status='new' rows permanently invisible on this page: a manually added opportunity, or any
+// row someone explicitly set back to 'new', never showed up anywhere. They are two distinct groups now:
+// Untriaged immediately before New, then Maybe, Shortlisted, and the rest unchanged. Decision: 'review'
+// keeps its original first position rather than moving after the new Untriaged/New split -- it is its own
+// urgent pseudo-group (rows with an open review-queue item awaiting human reconciliation), not part of
+// the triage ladder the task ordering describes, and nothing asked for it to move.
+const ACTIVE_GROUPS = Object.freeze(['review', 'untriaged', 'new', 'maybe', 'shortlisted', 'applied', 'interviewing', 'offer']);
 const OUTCOME_GROUPS = Object.freeze(['accepted', 'passed', 'lost', 'dead']);
 
 /** Section 12/kbaction totality (independent review comment 5440498360, blocking finding 1). */
@@ -37,8 +46,7 @@ export async function render(container, params, app) {
   };
 
   async function loadGroup(status) {
-    const untriaged = status === 'new';
-    const query = untriaged ? { untriaged: '1', limit: '50' } : { status, limit: '50' };
+    const query = status === 'untriaged' ? { untriaged: '1', limit: '50' } : { status, limit: '50' };
     const outcome = handleOutcome(await getJson('/api/listings', query));
     return outcome.kind === 'ok' ? outcome.body.rows : [];
   }
@@ -129,6 +137,6 @@ export async function render(container, params, app) {
 }
 
 function groupLabel(g) {
-  const table = { new: 'New', maybe: 'Maybe', shortlisted: 'Shortlisted', applied: 'Applied', interviewing: 'Interviewing', offer: 'Offer', review: 'Review', accepted: 'Accepted', passed: 'Passed', lost: 'Lost', dead: 'Dead' };
+  const table = { untriaged: 'Untriaged', new: 'New', maybe: 'Maybe', shortlisted: 'Shortlisted', applied: 'Applied', interviewing: 'Interviewing', offer: 'Offer', review: 'Review', accepted: 'Accepted', passed: 'Passed', lost: 'Lost', dead: 'Dead' };
   return table[g] ?? g;
 }
