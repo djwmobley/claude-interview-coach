@@ -107,9 +107,10 @@ export async function createManualListing(client, input, opts = {}) {
   // decision's own update/repost/dup branch -- even under `force`, this is a fresh row the human is
   // deliberately adding, not an update of whatever classify() happened to match.
   const insertDecision = { ...decision, outcome: /** @type {const} */ ('new'), inherit: { status, queueReason: null }, rootId: null, repostOf: null, queue: false, reason: null };
-  const id = await insertListing(client, rec, insertDecision, {
+  const inserted = await insertListing(client, rec, insertDecision, {
     runId: null, prescore: prescoreRaw, prescoreRaw, noiseClass: 'ok_manual', now,
   });
+  const id = inserted.id;
 
   if (force && decision.outcome !== 'new') {
     // The row was created despite classify() finding a likely match: queue it for human reconciliation
@@ -118,6 +119,15 @@ export async function createManualListing(client, input, opts = {}) {
     await client.query(
       `INSERT INTO ic_job_review_queue (candidate_id, matches, reason, status_at_create) VALUES ($1, $2::int[], 'manual_duplicate_forced', $3)`,
       [id, candidates, status],
+    );
+  } else if (inserted.conflictAnchor !== null) {
+    // classify() said 'new' (no candidates above), yet the physical insert still collided with a live
+    // row's url_normalized/(source, external_id) and insertListing had to auto-anchor duplicate_of to
+    // it -- same defense-in-depth as scan-run.js's applyDecision. Should not happen once classify() and
+    // insertListing agree, but never leaves it silent if it does.
+    await client.query(
+      `INSERT INTO ic_job_review_queue (candidate_id, matches, reason, status_at_create) VALUES ($1, $2::int[], 'insert_conflict_auto_anchored', $3)`,
+      [id, [inserted.conflictAnchor], status],
     );
   }
 
