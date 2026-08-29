@@ -72,6 +72,23 @@ export function scoreBucket(score) {
 }
 
 /**
+ * Fit-score bucket: same 'good'/'ok'/'low' thresholds as scoreBucket(), but a missing Fit score (never
+ * yet triaged) maps to its own neutral 'not-scored' bucket rather than reusing 'low'. Prescore is a
+ * deterministic, always-computed-at-scan-time number, so scoreBucket()'s "missing reads as low" default
+ * is fine there; Fit is a human/agent judgment call that is legitimately absent until someone makes it,
+ * and rendering an untriaged listing with the same red/low styling as a listing someone actively scored
+ * poorly would misrepresent "nobody has looked at this yet" as "this was judged and rejected."
+ * @param {number|null|undefined} score
+ */
+export function fitBucket(score) {
+  if (score === null || score === undefined || Number.isNaN(Number(score))) return 'not-scored';
+  const n = Number(score);
+  if (n >= 85) return 'good';
+  if (n >= 70) return 'ok';
+  return 'low';
+}
+
+/**
  * Format an ISO date/datetime string as a short human date, e.g. "Aug 27". Invalid/missing input
  * renders as a placeholder dash-free string, never throws.
  * @param {string|Date|null|undefined} value

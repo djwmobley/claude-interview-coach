@@ -1,5 +1,5 @@
 #!/usr/bin/env bash
-# Hook: UserPromptSubmit — query semantic memory on first prompt of each session.
+# Hook: UserPromptSubmit - query semantic memory on first prompt of each session.
 # Runs once per session (uses a sentinel file keyed by SESSION_ID).
 # Injects matching coached answers and session moments as context.
 
@@ -19,8 +19,9 @@ PROMPT=$(echo "$INPUT" | python -c "
 import sys, json
 try:
     data = json.load(sys.stdin)
-    # UserPromptSubmit sends the prompt content
-    content = data.get('content', '') if isinstance(data, dict) else str(data)
+    # UserPromptSubmit's payload field is 'prompt'; keep 'content' as a fallback
+    # in case an older or different event shape is ever piped through here.
+    content = data.get('prompt', data.get('content', '')) if isinstance(data, dict) else str(data)
     # Truncate to first 200 chars for a reasonable query
     print(content[:200])
 except:

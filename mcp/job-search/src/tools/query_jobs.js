@@ -55,13 +55,26 @@ export function buildQuery(a) {
     if (a.outcome && a.outcome.length) where.push(`ri.outcome = ANY(${add(a.outcome)}::text[])`);
   }
   if (a.q && a.q.trim()) where.push(`(l.tsv @@ plainto_tsquery('english', ${add(a.q.trim())}) OR l.title ILIKE ${add('%' + a.q.trim() + '%')})`);
-  if (a.status && a.status.length) where.push(`l.status = ANY(${add(a.status)}::text[])`);
   // Dashboard-only extensions (PR 2, not part of the MCP tool's zod schema above): `untriaged` narrows to
   // the NULL-status pseudo-group; `group` narrows to one named group from src/core/statuses.js. Both are
   // plain fields on the args object the dashboard route builds itself, never routed through this tool's
   // zod validation.
-  if (a.untriaged) where.push('l.status IS NULL');
-  else if (a.group && Object.prototype.hasOwnProperty.call(STATUS_GROUPS, a.group)) where.push(`l.status = ANY(${add(STATUS_GROUPS[a.group])}::text[])`);
+  //
+  // `status` and `untriaged` used to be two independent `if` blocks, which is wrong when both are set:
+  // `l.status = ANY($n)` AND `l.status IS NULL` in the same WHERE is never true for any row (a column
+  // cannot be both a specific value and NULL at once), so the filter modal's "Untriaged" toggle plus any
+  // status checkbox silently zeroed the result set. `= ANY(array)` also never matches NULL on its own, so
+  // untriaged rows need the explicit `OR l.status IS NULL` arm, not just inclusion in the array. The fix:
+  // status+untriaged together become one OR'd clause; each alone keeps its own prior single-condition
+  // behavior; neither falls through to the `group` extension, unchanged from before.
+  const hasStatus = Boolean(a.status && a.status.length);
+  if (hasStatus && a.untriaged) {
+    where.push(`(l.status = ANY(${add(a.status)}::text[]) OR l.status IS NULL)`);
+  } else {
+    if (hasStatus) where.push(`l.status = ANY(${add(a.status)}::text[])`);
+    if (a.untriaged) where.push('l.status IS NULL');
+    else if (a.group && Object.prototype.hasOwnProperty.call(STATUS_GROUPS, a.group)) where.push(`l.status = ANY(${add(STATUS_GROUPS[a.group])}::text[])`);
+  }
   if (a.unscored) where.push('l.fit_score IS NULL');
   if (a.noiseClass && a.noiseClass.length) where.push(`l.noise_class = ANY(${add(a.noiseClass)}::text[])`);
   if (a.source && a.source.length) where.push(`l.source = ANY(${add(a.source)}::text[])`);
@@ -76,13 +89,32 @@ export function buildQuery(a) {
   if (a.seenAfter) where.push(`l.last_seen >= ${add(a.seenAfter)}::timestamptz`);
   if (typeof a.minPrescore === 'number') where.push(`l.prescore >= ${add(a.minPrescore)}`);
   if (typeof a.minFit === 'number') where.push(`l.fit_score >= ${add(a.minFit)}`);
-  const order = {
-    posted: 'l.posted_at DESC NULLS LAST, l.id DESC',
-    seen: 'l.last_seen DESC NULLS LAST, l.id DESC',
-    prescore: 'l.prescore DESC NULLS LAST, l.id DESC',
-    fit: 'l.fit_score DESC NULLS LAST, l.id DESC',
-    id: 'l.id DESC',
-  }[/** @type {string} */ (a.sort) ?? 'posted'];
+  // `sort` is guarded by exact membership in SORTS, never a bare object-property lookup on the raw
+  // input: an object literal indexed by an unvalidated string (the old `{...}[a.sort ?? 'posted']` shape)
+  // silently resolves to `undefined` for any value outside the known keys, which then interpolates into
+  // the SQL as the literal text "undefined" -- a crash, not a graceful fallback. Falling back to 'posted'
+  // BEFORE the lookup, rather than after, means the lookup itself can never miss.
+  const sortKey = SORTS.includes(a.sort) ? a.sort : 'posted';
+  // `dir` is a dashboard-only extension (like `group`/`untriaged` above): it is never part of this tool's
+  // zod schema and an MCP caller can never set it. Total classification, case/whitespace-insensitive:
+  // anything other than exactly 'asc' (after trim+lowercase) is 'desc', including missing, empty,
+  // garbage, or mixed-case input. Never interpolated into SQL directly -- only ever used to pick between
+  // the two literal ORDER BY direction keywords below.
+  const dir = String(a.dir ?? '').trim().toLowerCase() === 'asc' ? 'asc' : 'desc';
+  const sqlDir = dir === 'asc' ? 'ASC' : 'DESC';
+  // NULLS LAST is unconditional regardless of dir (a null score/date always sorts to the bottom, in
+  // either direction); the `l.id` tiebreak flips with dir so an ascending sort is stable end-to-end
+  // rather than descending on ties.
+  const orderColumns = {
+    posted: 'l.posted_at',
+    seen: 'l.last_seen',
+    prescore: 'l.prescore',
+    fit: 'l.fit_score',
+    id: 'l.id',
+  };
+  const order = sortKey === 'id'
+    ? `l.id ${sqlDir}`
+    : `${orderColumns[sortKey]} ${sqlDir} NULLS LAST, l.id ${sqlDir}`;
   // Dashboard-only extension (PR 2's plan line said "buildQuery (extended)"; the columns below were
   // never actually added, discovered while wiring the PR 3 Jobs table against real data): url/
   // url_normalized for the guarded link, first_seen/last_seen for the "first seen" column and the

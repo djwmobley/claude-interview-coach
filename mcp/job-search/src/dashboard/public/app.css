@@ -180,6 +180,26 @@ table { border-collapse: collapse; width: 100%; }
 .score--good { color: var(--green); }
 .score--ok { color: var(--yellow); }
 .score--low { color: var(--muted); }
+/* Fit's own "nobody has judged this yet" bucket (lib/format.js's fitBucket()): visually distinct from
+   score--low so an untriaged listing never reads as "scored poorly." */
+.score--not-scored { color: var(--muted-2); font-style: italic; }
+
+/* Sortable column headers (data-table.js): the header cell itself keeps the existing th styling; the
+   button inside it is a plain, unstyled-looking control so a sortable header still reads as a header,
+   not a button, while remaining a real <button> for keyboard/AT users. */
+.data-table__sort-btn {
+  background: none;
+  border: none;
+  padding: 0;
+  margin: 0;
+  font: inherit;
+  color: inherit;
+  text-transform: inherit;
+  letter-spacing: inherit;
+  cursor: pointer;
+}
+.data-table__sort-btn:hover,
+.data-table__sort-btn:focus-visible { color: var(--text); }
 
 .bulk-bar { display: flex; align-items: center; gap: 8px; background: var(--surface2); border: 1px solid var(--border); border-radius: 6px; padding: 6px 10px; margin-bottom: 8px; }
 
@@ -327,6 +347,9 @@ textarea.notes-textarea { min-height: 100px; }
   .scan-progress__sources { grid-template-columns: repeat(3, 1fr); }
   .home-body, .job-detail-grid, .run-detail-grid, .reports-grid { grid-template-columns: 1fr; }
   .data-table .job-row__location { display: none; }
+  /* Fit is the secondary, often-empty judgment score; Prescore (always computed at scan time) stays
+     visible. Paired header/cell class, same pattern as .job-row__location above. */
+  .data-table .job-row__fit { display: none; }
   .followup-row__actions { display: none; }
 }
 

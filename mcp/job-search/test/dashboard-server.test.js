@@ -285,6 +285,85 @@ describe('listings', () => {
     assert.equal(r.status, 200);
     assert.equal(r.json.results.length, 2);
   });
+
+  test('GET /api/listings honors sort=prescore&dir=asc (dashboard-only extension)', async () => {
+    const low = await req('POST', '/api/listings', { body: { title: 'Low Prescore', company: `${CO} Sort`, status: 'new' } });
+    const high = await req('POST', '/api/listings', { body: { title: 'Chief Technology Officer High Prescore', company: `${CO} Sort`, status: 'new' } });
+    await verifyClient.query('UPDATE ic_job_listings SET prescore = 10 WHERE id = $1', [low.json.id]);
+    await verifyClient.query('UPDATE ic_job_listings SET prescore = 90 WHERE id = $1', [high.json.id]);
+    // `q` (full-text, matched against a tsv covering title+company+location+description) scopes this
+    // query down to just these two rows: `CO` is unique per test-process pid, so no other test's
+    // title/company text can plausibly also contain "<CO> Sort".
+    const qParam = `q=${encodeURIComponent(`${CO} Sort`)}`;
+    const asc = await req('GET', `/api/listings?${qParam}&sort=prescore&dir=asc&limit=200`);
+    const ids = asc.json.rows.filter((r2) => [low.json.id, high.json.id].includes(r2.id)).map((r2) => r2.id);
+    assert.deepEqual(ids, [low.json.id, high.json.id], 'ascending prescore: low id first');
+    const desc = await req('GET', `/api/listings?${qParam}&sort=prescore&dir=desc&limit=200`);
+    const idsDesc = desc.json.rows.filter((r2) => [low.json.id, high.json.id].includes(r2.id)).map((r2) => r2.id);
+    assert.deepEqual(idsDesc, [high.json.id, low.json.id], 'descending prescore: high id first');
+  });
+
+  test('GET /api/listings with a garbage sort value does not crash (latent-crash fix, real HTTP round trip)', async () => {
+    const r = await req('GET', '/api/listings?sort=not-a-real-sort&limit=1');
+    assert.equal(r.status, 200);
+  });
+
+  test('GET /api/listings with untriaged=1 plus a status filter ORs them together (three-way combination fix, real HTTP round trip)', async () => {
+    const untriagedRow = await req('POST', '/api/listings', { body: { title: 'Untriaged Combo', company: `${CO} Combo`, status: null } });
+    const shortlistedRow = await req('POST', '/api/listings', { body: { title: 'Shortlisted Combo', company: `${CO} Combo`, status: 'shortlisted' } });
+    const combined = await req('GET', `/api/listings?untriaged=1&status=shortlisted&limit=200`);
+    const ids = combined.json.rows.map((r2) => r2.id);
+    assert.ok(ids.includes(untriagedRow.json.id), 'untriaged row present via the OR arm');
+    assert.ok(ids.includes(shortlistedRow.json.id), 'shortlisted row present via the ANY(array) arm');
+  });
+});
+
+describe('prescore breakdown (GET /api/listings/:id)', () => {
+  test('a listing with no search_profile recorded returns { available: false, reason: "profile_missing" }', async () => {
+    // Manually-created listings never carry a search_profile (src/core/manual.js never sets one) -- this
+    // exercises that real, common case directly, no raw SQL needed to arrange it.
+    const created = await req('POST', '/api/listings', { body: { title: 'No Profile', company: `${CO} Breakdown`, status: 'new' } });
+    const detail = await req('GET', `/api/listings/${created.json.id}`);
+    assert.equal(detail.status, 200);
+    assert.deepEqual(detail.json.prescore_breakdown, { available: false, reason: 'profile_missing' });
+  });
+
+  test('a search_profile naming a row no longer in ic_search_profiles also returns profile_missing (renamed/deleted since scan time)', async () => {
+    const created = await req('POST', '/api/listings', { body: { title: 'Deleted Profile', company: `${CO} Breakdown`, status: 'new' } });
+    await verifyClient.query('UPDATE ic_job_listings SET search_profile = $2 WHERE id = $1', [created.json.id, `zz-nonexistent-${process.pid}`]);
+    const detail = await req('GET', `/api/listings/${created.json.id}`);
+    assert.deepEqual(detail.json.prescore_breakdown, { available: false, reason: 'profile_missing' });
+  });
+
+  test('an existing search_profile recomputes the full breakdown, including staleness when it differs from the stored value', async () => {
+    const profileName = `zz-test-breakdown-${process.pid}`;
+    await verifyClient.query(
+      `INSERT INTO ic_search_profiles (name, keywords, phrases, exclude_terms, locations, remote, posted_within_days, max_pages, sources, rev)
+       VALUES ($1, '{cto}', '{}', '{}', '{}', 'any', 7, 3, '{}', 'zz-rev')
+       ON CONFLICT (name) DO UPDATE SET keywords = EXCLUDED.keywords`,
+      [profileName],
+    );
+    const created = await req('POST', '/api/listings', { body: { title: 'Chief Technology Officer', company: `${CO} Breakdown`, status: 'new' } });
+    // Force a stored prescore_raw that will not match the live recompute, so `stale` is deterministically
+    // true; also set noise_class to a known multiplier so recomputed_prescore is checkable.
+    await verifyClient.query(
+      'UPDATE ic_job_listings SET search_profile = $2, noise_class = $3, prescore_raw = $4 WHERE id = $1',
+      [created.json.id, profileName, 'ok', 999],
+    );
+    const detail = await req('GET', `/api/listings/${created.json.id}`);
+    assert.equal(detail.status, 200);
+    const b = detail.json.prescore_breakdown;
+    assert.equal(b.available, true);
+    assert.equal(typeof b.parts, 'object');
+    assert.equal(typeof b.sum, 'number');
+    assert.equal(typeof b.raw, 'number');
+    assert.equal(b.noise_class, 'ok');
+    assert.equal(b.multiplier, 1);
+    assert.equal(b.recomputed_prescore, b.raw, 'ok noise class has a 1x multiplier');
+    assert.equal(b.stored_prescore_raw, 999);
+    assert.equal(b.stale, true, 'recomputed raw (a real prescore for a CTO title) differs from the forced stored 999');
+    await verifyClient.query('DELETE FROM ic_search_profiles WHERE name = $1', [profileName]);
+  });
 });
 
 describe('documents', () => {

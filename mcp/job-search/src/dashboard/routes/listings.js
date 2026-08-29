@@ -5,7 +5,7 @@
  * listing's detail view assembles from the same functions the MCP tools use.
  */
 import { JobSearchError } from '../../core/errors.js';
-import { buildQuery } from '../../tools/query_jobs.js';
+import { buildQuery, SORTS } from '../../tools/query_jobs.js';
 import { applyMark } from '../../tools/mark_jobs.js';
 import { createManualListing } from '../../core/manual.js';
 import { listEvents } from '../../core/events.js';
@@ -15,6 +15,8 @@ import { PIPELINE_STATUSES } from '../../core/statuses.js';
 import { reembedRows } from '../../core/reembed.js';
 import { buildRegistry } from '../../core/urlguard.js';
 import { urlPassesRegistry } from '../../core/report.js';
+import { prescoreParts } from '../../core/prescore.js';
+import { weightedPrescore, getDefaultNoiseRules } from '../../core/noise.js';
 import { sendJson } from '../http.js';
 
 /** @param {Record<string,string>} q @param {string} key */
@@ -22,8 +24,25 @@ function listParam(q, key) {
   return q[key] ? String(q[key]).split(',').map((s) => s.trim()).filter(Boolean) : undefined;
 }
 
-/** @param {Record<string,string>} q */
-function parseListingsQuery(q) {
+/**
+ * Mirrors the MCP tool's own zod rule (`z.number().int().min(0).max(100).optional()`) exactly: a
+ * non-integer, out-of-range, or unparseable value is DROPPED (returns `undefined`, applying no filter),
+ * never clamped into range. Clamping a typo like `minPrescore=1000` down to 100 would silently apply a
+ * filter the user never asked for; dropping it applies no filter at all, which is the same "did nothing
+ * surprising" behavior the MCP schema already gives an out-of-range caller.
+ * @param {string|undefined} raw
+ * @returns {number|undefined}
+ */
+function parseScoreParam(raw) {
+  if (raw === undefined) return undefined;
+  const n = Number(raw);
+  return Number.isInteger(n) && n >= 0 && n <= 100 ? n : undefined;
+}
+
+/**
+ * @param {Record<string,string>} q
+ */
+export function parseListingsQuery(q) {
   return {
     q: q.q || undefined,
     status: listParam(q, 'status'),
@@ -35,14 +54,64 @@ function parseListingsQuery(q) {
     remote: q.remote || undefined,
     postedAfter: q.postedAfter || undefined,
     seenAfter: q.seenAfter || undefined,
-    minPrescore: q.minPrescore !== undefined ? Number(q.minPrescore) : undefined,
-    minFit: q.minFit !== undefined ? Number(q.minFit) : undefined,
+    minPrescore: parseScoreParam(q.minPrescore),
+    minFit: parseScoreParam(q.minFit),
     unscored: q.unscored === '1' || q.unscored === 'true',
     includeDuplicates: q.includeDuplicates === '1' || q.includeDuplicates === 'true',
     includeExpired: q.includeExpired === '1' || q.includeExpired === 'true',
-    sort: q.sort || 'posted',
+    // Exact membership in the real SORTS list (imported, not redeclared): the previous `q.sort ||
+    // 'posted'` let any garbage string through to buildQuery's ORDER BY lookup, which used to resolve to
+    // `undefined` and produce broken SQL for a non-empty, non-SORTS value (a latent crash, not just a
+    // validation gap -- see query_jobs.js's own order-lookup guard for the other half of this fix).
+    sort: SORTS.includes(q.sort) ? q.sort : 'posted',
+    // `dir` is a dashboard-only extension to buildQuery (see query_jobs.js): total classification,
+    // case/whitespace-insensitive, anything but exactly 'asc' is 'desc'.
+    dir: String(q.dir ?? '').trim().toLowerCase() === 'asc' ? 'asc' : 'desc',
     limit: q.limit !== undefined ? Math.max(1, Math.min(200, Number(q.limit) || 50)) : 50,
     offset: q.offset !== undefined ? Math.max(0, Number(q.offset) || 0) : 0,
+  };
+}
+
+/**
+ * Recompute a listing's prescore breakdown against its `search_profile`'s CURRENT row in
+ * `ic_search_profiles` (never a snapshot from scan time -- a profile can be edited after the listing was
+ * scored, and this route's whole purpose is showing whether the stored score still matches today's
+ * profile). Two closed branches:
+ *
+ * - the listing has no `search_profile` recorded, or that profile name no longer exists in
+ *   `ic_search_profiles` (renamed or deleted since scan time) -> `{ available: false, reason:
+ *   'profile_missing' }`, with no parts/numbers to show.
+ * - the profile still exists -> the full named parts breakdown, the pre-clamp sum, the recomputed
+ *   clamped `raw`, the noise multiplier for the listing's CURRENT `noise_class`, the recomputed
+ *   noise-weighted prescore, and `stale`: whether the recomputed `raw` differs from the `prescore_raw`
+ *   value stored on the row at scan time.
+ * @param {import('../server.js').DashboardDeps} deps
+ * @param {any} listing a row carrying search_profile, noise_class, prescore, prescore_raw, title,
+ *   location, location_norm, remote_mode, description, salary_max
+ */
+async function computePrescoreBreakdown(deps, listing) {
+  if (!listing.search_profile) return { available: false, reason: 'profile_missing' };
+  const profileRow = await deps.withClient((c) => c.query(
+    'SELECT keywords, phrases, exclude_terms, locations, remote FROM ic_search_profiles WHERE name = $1',
+    [listing.search_profile],
+  ));
+  if (profileRow.rowCount === 0) return { available: false, reason: 'profile_missing' };
+  const profile = profileRow.rows[0];
+  const { parts, sum, raw } = prescoreParts(listing, profile);
+  const rules = getDefaultNoiseRules();
+  const multiplier = typeof rules.multipliers[listing.noise_class] === 'number' ? rules.multipliers[listing.noise_class] : 1;
+  const recomputedPrescore = weightedPrescore(raw, listing.noise_class, { rules });
+  return {
+    available: true,
+    parts,
+    sum,
+    raw,
+    noise_class: listing.noise_class,
+    multiplier,
+    recomputed_prescore: recomputedPrescore,
+    stored_prescore_raw: listing.prescore_raw,
+    stored_prescore: listing.prescore,
+    stale: raw !== listing.prescore_raw,
   };
 }
 
@@ -94,6 +163,7 @@ export function register(router, deps, streamHub) {
     const files = listOutputFiles(deps.outputRoot);
     const aliases = deps.config?.companyAliases ?? {};
     const suggestions = suggestDocuments(listing, files, { aliases }).filter((s) => !documents.some((d) => d.rel_path === s.file));
+    const prescoreBreakdown = await computePrescoreBreakdown(deps, listing);
     sendJson(ctx.res, 200, {
       ok: true,
       row: listing,
@@ -105,6 +175,7 @@ export function register(router, deps, streamHub) {
       duplicates: duplicates.rows,
       also_posted: alsoPosted.rows,
       run_sightings: runSightings.rows.map((r2) => Number(r2.run_id)),
+      prescore_breakdown: prescoreBreakdown,
     });
   });
 
