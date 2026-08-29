@@ -79,6 +79,10 @@ export function ensureDotenv() {
  * @typedef {Object} Env
  * @property {string|null} PG_DSN full connection URL from .env, or null to use the local defaults
  * @property {string} SCAN_CDP_URL
+ * @property {string} DAILY_CDP_URL the operator's normal daily-driver Chrome (remote debugging), used
+ *   only by bin/remind.js --open-dashboard to reload/focus an already-open dashboard tab. Distinct from
+ *   SCAN_CDP_URL (the dedicated scan browser profile on a different port): the two must never be
+ *   conflated, so this has its own env var and its own default port rather than reusing SCAN_CDP_URL.
  * @property {string} SCAN_PROFILE_DIR
  * @property {string|null} CHROME_EXECUTABLE
  * @property {string} OLLAMA_URL
@@ -108,6 +112,7 @@ export function getEnv() {
   return {
     PG_DSN: e.PG_DSN || null,
     SCAN_CDP_URL: e.SCAN_CDP_URL || 'http://127.0.0.1:9333',
+    DAILY_CDP_URL: e.DAILY_CDP_URL || 'http://127.0.0.1:9222',
     SCAN_PROFILE_DIR: e.SCAN_PROFILE_DIR || path.join(os.homedir(), 'chrome-scan-profile'),
     CHROME_EXECUTABLE: e.CHROME_EXECUTABLE || null,
     OLLAMA_URL: (e.OLLAMA_URL || 'http://localhost:11434').replace(/\/+$/, ''),

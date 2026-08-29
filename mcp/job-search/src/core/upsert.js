@@ -12,6 +12,7 @@ import { withSavepoint, isUniqueViolation } from './db.js';
 import { classify, LISTING_COLUMNS, makePgLookups } from './dedup.js';
 import { normalizeLegacyRow } from './normalize.js';
 import { classifyNoise } from './noise.js';
+import { JobSearchError } from './errors.js';
 
 /**
  * sha256 over the searchable profile fields (spec 2.3 `rev`).
@@ -105,16 +106,42 @@ export async function recordRunItem(client, runId, listingId, source, outcome, p
 /**
  * Insert a listing row for outcomes new / cross_source_dup / repost / ambiguous.
  * fit_score is always NULL; status comes from inheritance or 'review'.
+ *
+ * classify() is pure with respect to the database (dedup.js's own doc comment): its ambiguous
+ * branches (4-ambiguous `url_reuse`, `branch1_conflict`) can match a row that is CURRENTLY the sole
+ * live (duplicate_of IS NULL) holder of the same url_normalized or (source, external_id) key WITHOUT
+ * setting decision.rootId -- an ambiguous outcome means "queue this for a human", not "merge it", so
+ * classify() correctly leaves target/rootId unset. But the partial unique indexes
+ * (sql/unique_indexes.sql: ic_job_listings_url_norm_uniq, ic_job_listings_source_ext_uniq) allow at
+ * most one duplicate_of-NULL row per key, so inserting a second one for the SAME key throws 23505 and,
+ * uncaught, aborted the whole source (observed on gmail: scan #2112, source_failed, err_code 23505 --
+ * a gmail-sourced listing whose title/description didn't corroborate an existing row well enough for
+ * the safe sameExternalId/contentMatch cross-source-dup path landed in url_reuse instead, then failed
+ * to insert). ON CONFLICT DO NOTHING turns that failure into a no-op INSTEAD OF an error (a real 23505
+ * would abort the enclosing SAVEPOINT, leaving no clean way to run the recovery query below in the
+ * same transaction) so the fallback can run: find whichever row currently holds the colliding key and
+ * anchor duplicate_of to it, exactly the way cross_source_dup already does
+ * (target.duplicate_of ?? target.id). This is a persistence-layer fallback, not a reclassification --
+ * the outcome/branch/reason recorded on the run item and the review-queue entry are unchanged (still
+ * 'ambiguous' / 'url_reuse' / 'branch1_conflict'), so a human still resolves it via
+ * review({resolution:'merge'|'separate'}); review.js's own uniqueConflict() check already anticipates
+ * exactly this shape (a candidate whose key is still live elsewhere blocks 'separate' with
+ * separate_blocked_unique and a merge hint), so the loop closes correctly however the human resolves
+ * it. Only the two partial indexes above exist on this table (no other unique constraint), so a
+ * conflict this fallback cannot explain is a genuine defect worth surfacing loudly rather than papering
+ * over.
  * @param {import('pg').ClientBase} client
  * @param {import('./normalize.js').NormalizedListing} rec
  * @param {import('./dedup.js').Decision} decision
  * @param {ApplyContext} ctx
- * @returns {Promise<number>} new id
+ * @returns {Promise<{ id: number, conflictAnchor: number|null }>} new id, plus the live row it had to
+ *   anchor duplicate_of to when the primary insert hit a unique conflict (null on the common path)
  */
 export async function insertListing(client, rec, decision, ctx) {
   const status = decision.outcome === 'ambiguous' ? 'review' : decision.inherit?.status ?? null;
   const now = ctx.now ?? new Date();
-  const r = await client.query(
+  /** @param {number|null} duplicateOf */
+  const insertOnce = (duplicateOf) => client.query(
     `INSERT INTO ic_job_listings
        (title, company, status, ad_date, url, notes, record_kind, source, external_id, url_normalized, dedup_hash,
         company_norm, title_norm, location, location_norm, remote_mode, remote_declared, salary_min, salary_max, salary_raw,
@@ -125,16 +152,43 @@ export async function insertListing(client, rec, decision, ctx) {
         $10,$11,$12,$13,$14,$15,$16,$17,$18,
         $19,$20,$20,1,0,$21,$22,$23,$24,
         $25,$26,$27,$28,$29,$30,$31,$32::vector)
+     ON CONFLICT DO NOTHING
      RETURNING id`,
     [
       rec.title, rec.company, status, rec.posted_at, rec.url_normalized,
       rec.source, rec.external_id, rec.url_normalized, rec.dedup_hash,
       rec.company_norm, rec.title_norm, rec.location, rec.location_norm, rec.remote_mode, rec.remote_declared, rec.salary_min, rec.salary_max, rec.salary_raw,
       rec.posted_at, now, ctx.pageIndex ?? null, ctx.profileRev ?? null, rec.description, rec.description_hash,
-      ctx.searchProfile ?? null, ctx.prescore ?? null, ctx.prescoreRaw ?? null, ctx.noiseClass ?? null, Boolean(ctx.detailSkipped), decision.rootId, decision.repostOf, ctx.embedding ?? null,
+      ctx.searchProfile ?? null, ctx.prescore ?? null, ctx.prescoreRaw ?? null, ctx.noiseClass ?? null, Boolean(ctx.detailSkipped), duplicateOf, decision.repostOf, ctx.embedding ?? null,
     ],
   );
-  return r.rows[0].id;
+
+  let r = await insertOnce(decision.rootId);
+  let conflictAnchor = null;
+  if (r.rowCount === 0) {
+    const conflict = await client.query(
+      `SELECT id, duplicate_of FROM ic_job_listings
+       WHERE duplicate_of IS NULL AND (
+         ($1::text IS NOT NULL AND source = $2 AND external_id = $1)
+         OR ($3::text IS NOT NULL AND url_normalized = $3))
+       ORDER BY id LIMIT 1`,
+      [rec.external_id, rec.source, rec.url_normalized],
+    );
+    if (conflict.rowCount === 0) {
+      throw new JobSearchError('INTERNAL', 'insertListing: unique conflict with no resolvable live row', {
+        details: { source: rec.source, external_id: rec.external_id, url_normalized: rec.url_normalized },
+      });
+    }
+    const anchor = conflict.rows[0];
+    conflictAnchor = anchor.duplicate_of ?? anchor.id;
+    r = await insertOnce(conflictAnchor);
+    if (r.rowCount === 0) {
+      throw new JobSearchError('INTERNAL', 'insertListing: unique conflict persisted after anchoring to the live conflict row', {
+        details: { source: rec.source, external_id: rec.external_id, url_normalized: rec.url_normalized, anchor: anchor.id },
+      });
+    }
+  }
+  return { id: r.rows[0].id, conflictAnchor };
 }
 
 /**
@@ -204,11 +258,21 @@ export async function applyDecision(client, rec, decision, ctx) {
       }
       return { id, outcome: decision.outcome, queued, branch: decision.branch };
     }
-    id = await insertListing(c, rec, decision, ctx);
+    const inserted = await insertListing(c, rec, decision, ctx);
+    id = inserted.id;
     await recordRunItem(c, ctx.runId, id, rec.source, decision.outcome, ctx.pageIndex ?? null);
     if (decision.queue && decision.reason) {
       const statusAtCreate = decision.outcome === 'ambiguous' ? 'review' : decision.inherit?.status ?? null;
       queued = await enqueueReview(c, { runId: ctx.runId, candidate: candidateSnapshot(rec), candidateId: id, matches: decision.matches, reason: decision.reason, statusAtCreate });
+    } else if (inserted.conflictAnchor !== null) {
+      // Defense in depth: classify() should never hand back a non-queued decision whose key
+      // physically collided with a live row (only the ambiguous url_reuse / branch1_conflict
+      // branches do that, and both already set queue+reason -- see insertListing's doc comment).
+      // If some other decision shape ever reaches here, insertListing still had to auto-anchor
+      // duplicate_of to avoid a 23505 crash; that anchoring must never happen silently, so it gets
+      // its own review-queue entry even though the decision itself didn't ask for one.
+      const statusAtCreate = decision.outcome === 'ambiguous' ? 'review' : decision.inherit?.status ?? null;
+      queued = await enqueueReview(c, { runId: ctx.runId, candidate: candidateSnapshot(rec), candidateId: id, matches: [inserted.conflictAnchor], reason: 'insert_conflict_auto_anchored', statusAtCreate });
     }
     return { id, outcome: decision.outcome, queued, branch: decision.branch };
   });
