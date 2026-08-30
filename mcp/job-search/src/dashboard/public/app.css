@@ -171,11 +171,47 @@ table { border-collapse: collapse; width: 100%; }
 .data-table th { text-align: left; font-size: 11px; text-transform: uppercase; letter-spacing: 0.03em; color: var(--muted-2); background: var(--surface2); padding: 6px 8px; border-bottom: 1px solid var(--border); }
 .data-table td { padding: 6px 8px; border-bottom: 1px solid var(--border); font-size: 12.5px; }
 .data-table tbody tr:hover { background: var(--hover); cursor: pointer; }
+
+/* Jobs table only (pages/companies.js and pages/runs.js keep the default auto .data-table layout
+   untouched). GET /api/listings pages 1400+ visible rows 50 at a time, and the table's default `table`
+   rule (`width: 100%`, auto layout) recomputes every column's width from whichever 50-row page happens to
+   be on screen -- switching sort key swaps in a different 50 rows with different content, so column
+   widths visibly jump/"squeeze" on every sort (Title measured 370-768px, Location 114-372px across
+   sorts). `table-layout: fixed` plus explicit header widths below take column widths out of the content's
+   hands entirely: every sort now renders the same stable widths regardless of which rows loaded. Widths
+   are tuned for a ~1456px-wide table with some headroom for chip/label content (chips render near
+   source 85px / stage 76px including 8px cell padding) and for the active-sort header's ~14px arrow
+   indicator; the checkbox column and 6 fixed-px columns leave Title with no declared width so it absorbs
+   whatever space company/location's percentage widths do not claim. */
+.jobs-table { table-layout: fixed; }
+.jobs-table .job-row__checkbox { width: 36px; }
+.jobs-table .job-row__source { width: 100px; }
+.jobs-table .job-row__stage { width: 104px; }
+.jobs-table .job-row__prescore { width: 76px; }
+.jobs-table .job-row__fit { width: 76px; }
+.jobs-table .job-row__first-seen { width: 86px; }
+.jobs-table .job-row__company { width: 20%; }
+.jobs-table .job-row__location { width: 16%; }
+/* Fixed layout takes column widths from the header row; hiding a header at the 1180px breakpoint below
+   (job-row__location, job-row__fit) simply removes that column's width claim and lets Title (still
+   undeclared) absorb the freed space, same as at full width. */
+
+/* Checkbox and chip cells align with the FIRST LINE of a wrapped title instead of vertically centering
+   across the row's full height -- the actual fix for the checkbox/chip vertical misalignment on
+   two-line-title rows (checkbox measured at 18px top-offset on a wrapped row vs 9px on a single-line
+   row). Scoped to .jobs-table only so the other data-table pages' default vertical-align is untouched. */
+.jobs-table td { vertical-align: top; }
 /* j/k keyboard row-cursor (lib/list-cursor.js), independent of native :focus-visible so it stays visible
    even in a browser context where the row's own .focus() call does not render a ring (kept anyway as a
    second, redundant signal). Works identically on <tr> and row <div>s (pipeline/follow-ups/review). */
 .row-cursor { outline: 2px solid var(--accent); outline-offset: -2px; background: var(--hover); }
-.job-row__title { display: flex; align-items: center; gap: 4px; }
+/* The link+badges row inside the Title cell lives on this inner div (components/job-row.js), never on the
+   <td> itself -- `display: flex` on a table cell stops it being a real table-cell box (the browser wraps
+   it in an anonymous cell), which broke vertical-align on sibling cells in wrapped-title rows. `baseline`
+   (not `center`) keeps the Manual/DUP badges sitting on the title's first line once titles wrap to two
+   lines, instead of centering them across the wrapped block; the badges are `inline-flex` so they never
+   stretch to the row's height. */
+.job-row__title-flex { display: flex; align-items: baseline; gap: 4px; }
 .score { font-variant-numeric: tabular-nums; }
 .score--good { color: var(--green); }
 .score--ok { color: var(--yellow); }
@@ -382,6 +418,9 @@ textarea.notes-textarea { min-height: 100px; }
   .tile-row { grid-template-columns: repeat(3, 1fr); grid-template-rows: repeat(2, 1fr); }
   .scan-progress__sources { grid-template-columns: repeat(3, 1fr); }
   .home-body, .job-detail-grid, .run-detail-grid, .reports-grid { grid-template-columns: 1fr; }
+  /* Still correct under .jobs-table's table-layout: fixed (added for the layout-stability fix above):
+     hiding a header here removes its explicit-width claim entirely, and Title -- which never has a
+     declared width -- simply absorbs the freed space, same as it does at full width. */
   .data-table .job-row__location { display: none; }
   /* Fit is the secondary, often-empty judgment score; Prescore (always computed at scan time) stays
      visible. Paired header/cell class, same pattern as .job-row__location above. */

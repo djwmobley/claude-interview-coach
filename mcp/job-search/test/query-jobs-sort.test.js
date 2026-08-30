@@ -10,6 +10,11 @@
  * maps server-side to last_seen -- adversary finding 3), and every sortable COLUMNS entry must have a
  * matching FIRST_CLICK_DIR entry (adversary finding 2) plus table-driven coverage of the pure
  * nextSortState() click-state transition (adversary finding 1).
+ *
+ * Jobs-table layout-stability fix additions: every COLUMNS entry (including the leading checkbox column)
+ * now carries a className matching its body-cell class in components/job-row.js, since app.css's
+ * .jobs-table fixed-layout width rules and the 1180px breakpoint's column-hiding rules both key off that
+ * pairing -- see the "paired header/cell className" describe block below.
  */
 import { test, describe } from 'node:test';
 import assert from 'node:assert/strict';
@@ -47,6 +52,38 @@ describe('every COLUMNS sortKey is a real SORTS value', () => {
     for (const key of sortKeys) {
       assert.ok(Object.prototype.hasOwnProperty.call(FIRST_CLICK_DIR, key), `sortKey "${key}" has no FIRST_CLICK_DIR entry`);
     }
+  });
+});
+
+describe('every COLUMNS entry carries the paired header/cell className used by app.css (layout-stability fix)', () => {
+  // app.css's .jobs-table fixed-layout width rules and the 1180px breakpoint's column-hiding rules both
+  // key off these classes matching the real body-cell classes in components/job-row.js -- a header
+  // without (or with the wrong) className either gets no explicit width (auto layout falls back to
+  // content-driven sizing for that column again) or gets hidden/sized under the wrong column entirely.
+  // Table-driven so adding a column without wiring its className shows up here, not as a layout bug only
+  // visible in a live browser.
+  const EXPECTED_CLASS_NAMES = {
+    '': 'job-row__checkbox',
+    Title: 'job-row__title',
+    Company: 'job-row__company',
+    Source: 'job-row__source',
+    Stage: 'job-row__stage',
+    Prescore: 'job-row__prescore',
+    Fit: 'job-row__fit',
+    'First seen': 'job-row__first-seen',
+    Location: 'job-row__location',
+  };
+
+  test('every column is an object with a className, no bare string columns remain', () => {
+    for (const col of COLUMNS) {
+      assert.equal(typeof col, 'object', `column ${JSON.stringify(col)} should be an object, not a bare string`);
+    }
+  });
+
+  test('every column className exactly matches its expected body-cell class, in COLUMNS order', () => {
+    const actual = COLUMNS.map((c) => [/** @type {any} */ (c).text, /** @type {any} */ (c).className]);
+    const expected = Object.entries(EXPECTED_CLASS_NAMES);
+    assert.deepEqual(actual, expected);
   });
 });
 

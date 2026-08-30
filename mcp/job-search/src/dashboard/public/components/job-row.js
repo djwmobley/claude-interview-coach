@@ -46,9 +46,16 @@ export function jobRow(row, opts) {
       h('input', { attrs: { type: 'checkbox' }, checked: opts.selected, on: { change: () => opts.onToggleSelect(row.id) } }),
     ]),
     h('td', { className: 'job-row__title' }, [
-      hLink({ url: row.url_normalized ?? row.url, urlOk: row.url_ok === true, text: row.title ?? 'untitled', target: '_blank' }),
-      row.record_kind === 'manual' ? h('span', { className: 'badge badge--manual', text: 'Manual' }) : null,
-      row.duplicate_of != null ? h('span', { className: 'badge badge--dup', text: 'DUP' }) : null,
+      // The flex layout lives on this inner div, not the <td> itself: a `display: flex` directly on a
+      // table cell stops it being a real table-cell box (the browser wraps it in an anonymous cell),
+      // which breaks the cell's own vertical-align and lets sibling cells in wrapped-title rows misalign
+      // (dashboard layout-stability fix). Keeping the <td> a plain table-cell and pushing the flex row
+      // into `.job-row__title-flex` restores normal cell behavior while keeping the link+badges layout.
+      h('div', { className: 'job-row__title-flex' }, [
+        hLink({ url: row.url_normalized ?? row.url, urlOk: row.url_ok === true, text: row.title ?? 'untitled', target: '_blank' }),
+        row.record_kind === 'manual' ? h('span', { className: 'badge badge--manual', text: 'Manual' }) : null,
+        row.duplicate_of != null ? h('span', { className: 'badge badge--dup', text: 'DUP' }) : null,
+      ]),
     ]),
     h('td', { className: 'job-row__company', text: row.company ?? 'unknown company' }),
     h('td', { className: 'job-row__source' }, [h('span', { className: chipClassName(src), text: src.label })]),
