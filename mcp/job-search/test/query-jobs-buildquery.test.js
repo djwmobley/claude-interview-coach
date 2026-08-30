@@ -110,3 +110,20 @@ describe('buildQuery(): minPrescore/minFit are already-validated numbers by the 
     assert.doesNotMatch(sql, /l\.fit_score >=/);
   });
 });
+
+describe('buildQuery(): triagedBy=auto (slice 3 auto-triage spec section 7)', () => {
+  test('triagedBy: "auto" adds the latest-status-event-actor correlated subquery clause', () => {
+    const { sql } = buildQuery({ ...BASE, triagedBy: 'auto' });
+    assert.match(
+      sql,
+      /\(SELECT actor FROM ic_job_events WHERE listing_id = l\.id AND kind = 'status' ORDER BY at DESC, id DESC LIMIT 1\) = 'auto'/,
+    );
+  });
+
+  test('triagedBy absent, or any value other than the literal "auto", adds no clause (total classification: only "auto" is recognized)', () => {
+    for (const triagedBy of [undefined, 'dashboard', 'mcp', '', 'AUTO', 1]) {
+      const { sql } = buildQuery({ ...BASE, triagedBy });
+      assert.doesNotMatch(sql, /ic_job_events/, `triagedBy=${JSON.stringify(triagedBy)}`);
+    }
+  });
+});

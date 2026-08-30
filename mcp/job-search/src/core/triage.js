@@ -367,6 +367,15 @@ export function validateModelOutput(outcome, requestedIds, cfg) {
  * child-process-level test (bin/scan.js spawned with the env var set) can point this at a fake script
  * without any JS-level dependency injection. `deps.execFile` is the direct injection seam for unit
  * tests in this same process (mirrors render.js's `opts.execFile` pattern).
+ *
+ * `process.env.JOBSEARCH_TRIAGE_CLAUDE_SCRIPT`, when set, is prepended as the FIRST element of argv
+ * before the real flags: a compiled test binary is never committed to this repo, so a test fixture is a
+ * plain, cross-platform Node script (test/fixtures/triage/fake-claude.js) that has to be invoked as
+ * `node <script> -p --model ...`, not `<script> -p --model ...` directly. Setting
+ * `JOBSEARCH_TRIAGE_CLAUDE_BIN=process.execPath` and `JOBSEARCH_TRIAGE_CLAUDE_SCRIPT=<path to the
+ * fixture>` together reproduces that invocation shape without any production-code special-casing beyond
+ * this one optional prepend; in real production neither variable is set, `claudeBin` resolves to
+ * `'claude'`, and no script is prepended.
  * @param {import('pg').ClientBase} client
  * @param {number} runId
  * @param {number[]} ids
@@ -397,6 +406,7 @@ export async function runModelTriage(client, runId, ids, cfg, configDir, candida
   const schemaJson = fs.readFileSync(path.join(configDir, 'triage-output-schema.json'), 'utf8');
   const mcpEmptyPath = path.join(configDir, 'triage-mcp-empty.json');
   const claudeBin = process.env.JOBSEARCH_TRIAGE_CLAUDE_BIN || 'claude';
+  const claudeScript = process.env.JOBSEARCH_TRIAGE_CLAUDE_SCRIPT || null;
   const run = deps.execFile ?? execFileWithStdin;
 
   const allBatches = [];
@@ -408,11 +418,12 @@ export async function runModelTriage(client, runId, ids, cfg, configDir, candida
     stats.batches_sent++;
     const listings = await loadListingsForBatch(client, batchIds, cfg);
     const prompt = buildTriagePrompt({ candidateSummary, profile, listings });
-    const args = [
+    const realArgs = [
       '-p', '--model', cfg.model.modelName, '--output-format', 'json',
       '--json-schema', schemaJson,
       '--strict-mcp-config', '--mcp-config', mcpEmptyPath,
     ];
+    const args = claudeScript ? [claudeScript, ...realArgs] : realArgs;
     /** @type {ClaudeOutcome} */
     let outcome;
     try {

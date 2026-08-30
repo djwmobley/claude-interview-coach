@@ -3,9 +3,10 @@
  * bin/scan.js end to end with slice 3 auto-triage turned on: a temp config dir carrying a real
  * triage.json (deterministic enabled, floor 0 / ceiling 100 so noise-ok, non-null-prescore rows land in
  * model_band regardless of the exact fixture prescore) plus a fake `claude` binary pointed at via
- * JOBSEARCH_TRIAGE_CLAUDE_BIN (docs/slice3-auto-triage-spec.md section 9), so the model step's whole
- * CLI-invocation path (binary resolution, argv shape, stdin prompt, envelope parsing) runs as a real
- * child process, not just through the deps.execFile seam test/triage.test.js exercises directly.
+ * JOBSEARCH_TRIAGE_CLAUDE_BIN=process.execPath plus JOBSEARCH_TRIAGE_CLAUDE_SCRIPT (a cross-platform Node
+ * script, never a compiled binary -- docs/slice3-auto-triage-spec.md section 9), so the model step's
+ * whole CLI-invocation path (binary resolution, argv shape, stdin prompt, envelope parsing) runs as a
+ * real child process, not just through the deps.execFile seam test/triage.test.js exercises directly.
  */
 import { test, describe, before, after } from 'node:test';
 import assert from 'node:assert/strict';
@@ -21,7 +22,7 @@ const HERE = path.dirname(fileURLToPath(import.meta.url));
 const PKG = path.join(HERE, '..');
 const SCAN = path.join(PKG, 'bin', 'scan.js');
 const MAP = path.join(HERE, 'fixtures', 'triage', 'fixture-map.json');
-const FAKE_CLAUDE = path.join(HERE, 'fixtures', 'triage', 'fake-claude.exe');
+const FAKE_CLAUDE_JS = path.join(HERE, 'fixtures', 'triage', 'fake-claude.js');
 const PROFILE = `zz-test-cli-triage-${process.pid}`;
 const BASE_CONFIG_FILES = ['adapters.json', 'ats-boards.json', 'exec-boards.json', 'company-aliases.json', 'alert-senders.json', 'noise-rules.json'];
 
@@ -120,7 +121,8 @@ describe('bin/scan.js with slice 3 auto-triage enabled', () => {
       JOBSEARCH_CONFIG_DIR: tmpConfigDir,
       JOBSEARCH_CONFIG_LOCK: lockPath,
       JOBSEARCH_LOG_DIR: logDir,
-      JOBSEARCH_TRIAGE_CLAUDE_BIN: FAKE_CLAUDE,
+      JOBSEARCH_TRIAGE_CLAUDE_BIN: process.execPath,
+      JOBSEARCH_TRIAGE_CLAUDE_SCRIPT: FAKE_CLAUDE_JS,
     };
     const r = await runCliWaiting(['--profile', PROFILE, '--sources', 'greenhouse'], env);
     const summary = JSON.parse((r.out.trim().split('\n').pop()) ?? '{}');
@@ -139,7 +141,7 @@ describe('bin/scan.js with slice 3 auto-triage enabled', () => {
 
     // At least one model_band listing was marked by the fake script's fixed fingerprint (fit_score 62,
     // status 'new'): confirms the real child-process CLI invocation path (binary resolution via
-    // JOBSEARCH_TRIAGE_CLAUDE_BIN, argv shape, stdin prompt, envelope parsing) actually reached
+    // JOBSEARCH_TRIAGE_CLAUDE_BIN/SCRIPT, argv shape, stdin prompt, envelope parsing) actually reached
     // applyMark, not just that the stats counters incremented.
     const scored = await client.query(`SELECT id FROM ic_job_listings WHERE fit_score = 62 AND status = 'new' LIMIT 1`);
     assert.equal(scored.rowCount, 1, 'at least one listing was marked by the fake claude script');
@@ -158,7 +160,8 @@ describe('bin/scan.js with slice 3 auto-triage enabled', () => {
       JOBSEARCH_CONFIG_DIR: dir,
       JOBSEARCH_CONFIG_LOCK: lockPath,
       JOBSEARCH_LOG_DIR: logDir,
-      JOBSEARCH_TRIAGE_CLAUDE_BIN: FAKE_CLAUDE,
+      JOBSEARCH_TRIAGE_CLAUDE_BIN: process.execPath,
+      JOBSEARCH_TRIAGE_CLAUDE_SCRIPT: FAKE_CLAUDE_JS,
     };
     const r = await runCliWaiting(['--profile', PROFILE, '--sources', 'greenhouse', '--dry-run'], env);
     const summary = JSON.parse((r.out.trim().split('\n').pop()) ?? '{}');

@@ -572,6 +572,116 @@ describe('runModelTriage (fake execFile, real DB writes)', () => {
 // buildTriagePrompt: injection hardening framing is present
 // ---------------------------------------------------------------------------
 
+describe('runModelTriage against the real fake-claude.js fixture (real spawned child process, no deps.execFile injection)', () => {
+  const configDir2 = testConfig().configDir;
+  const FAKE_CLAUDE_JS = path.join(HERE, 'fixtures', 'triage', 'fake-claude.js');
+
+  /** @param {string} mode @param {() => Promise<void>} fn */
+  async function withFakeClaudeMode(mode, fn) {
+    const prevBin = process.env.JOBSEARCH_TRIAGE_CLAUDE_BIN;
+    const prevScript = process.env.JOBSEARCH_TRIAGE_CLAUDE_SCRIPT;
+    const prevMode = process.env.FAKE_CLAUDE_MODE;
+    process.env.JOBSEARCH_TRIAGE_CLAUDE_BIN = process.execPath;
+    process.env.JOBSEARCH_TRIAGE_CLAUDE_SCRIPT = FAKE_CLAUDE_JS;
+    process.env.FAKE_CLAUDE_MODE = mode;
+    try {
+      await fn();
+    } finally {
+      if (prevBin === undefined) delete process.env.JOBSEARCH_TRIAGE_CLAUDE_BIN; else process.env.JOBSEARCH_TRIAGE_CLAUDE_BIN = prevBin;
+      if (prevScript === undefined) delete process.env.JOBSEARCH_TRIAGE_CLAUDE_SCRIPT; else process.env.JOBSEARCH_TRIAGE_CLAUDE_SCRIPT = prevScript;
+      if (prevMode === undefined) delete process.env.FAKE_CLAUDE_MODE; else process.env.FAKE_CLAUDE_MODE = prevMode;
+    }
+  }
+
+  test('valid: a real spawned process scores the listing and applyMark lands it', async () => {
+    await withFakeClaudeMode('valid', async () => {
+      const runId = await insertRun();
+      const id = await insertListing({ prescore: 55 });
+      const stats = await runModelTriage(client, runId, [id], cfgFor({ model: { enabled: true } }), configDir2, 'candidate summary text', { keywords: [] }, {});
+      assert.equal(stats.batches_ok, 1);
+      assert.equal(stats.scored, 1);
+      const row = await client.query('SELECT status, fit_score FROM ic_job_listings WHERE id = $1', [id]);
+      assert.equal(row.rows[0].status, 'new');
+      assert.equal(row.rows[0].fit_score, 62);
+    });
+  });
+
+  test('exit1: the real process exiting 1 rejects the whole batch, no marks applied', async () => {
+    await withFakeClaudeMode('exit1', async () => {
+      const runId = await insertRun();
+      const id = await insertListing({ prescore: 55 });
+      const stats = await runModelTriage(client, runId, [id], cfgFor({ model: { enabled: true } }), configDir2, 'candidate summary text', { keywords: [] }, {});
+      assert.equal(stats.batches_failed, 1);
+      assert.equal(stats.scored, 0);
+      assert.equal(stats.last_failure_reason, 'cli_exit_1');
+      const row = await client.query('SELECT status FROM ic_job_listings WHERE id = $1', [id]);
+      assert.equal(row.rows[0].status, null);
+    });
+  });
+
+  test('malformed: non-JSON stdout from the real process rejects the batch as malformed_json', async () => {
+    await withFakeClaudeMode('malformed', async () => {
+      const runId = await insertRun();
+      const id = await insertListing({ prescore: 55 });
+      const stats = await runModelTriage(client, runId, [id], cfgFor({ model: { enabled: true } }), configDir2, 'candidate summary text', { keywords: [] }, {});
+      assert.equal(stats.batches_failed, 1);
+      assert.equal(stats.last_failure_reason, 'malformed_json');
+    });
+  });
+
+  test('unknown_id: a hallucinated extra id from the real process rejects the whole batch', async () => {
+    await withFakeClaudeMode('unknown_id', async () => {
+      const runId = await insertRun();
+      const id = await insertListing({ prescore: 55 });
+      const stats = await runModelTriage(client, runId, [id], cfgFor({ model: { enabled: true } }), configDir2, 'candidate summary text', { keywords: [] }, {});
+      assert.equal(stats.batches_failed, 1);
+      assert.equal(stats.last_failure_reason, 'unknown_id');
+      const row = await client.query('SELECT status FROM ic_job_listings WHERE id = $1', [id]);
+      assert.equal(row.rows[0].status, null, 'a hallucinated id has no path to a mark, even on the requested id');
+    });
+  });
+
+  test('high_fit_skip: a real skip recommendation above skipMaxFit is downgraded to maybe', async () => {
+    await withFakeClaudeMode('high_fit_skip', async () => {
+      const runId = await insertRun();
+      const id = await insertListing({ prescore: 55 });
+      const stats = await runModelTriage(client, runId, [id], cfgFor({ model: { enabled: true } }), configDir2, 'candidate summary text', { keywords: [] }, {});
+      assert.equal(stats.batches_ok, 1);
+      assert.equal(stats.downgraded, 1);
+      const row = await client.query('SELECT status, fit_score FROM ic_job_listings WHERE id = $1', [id]);
+      assert.equal(row.rows[0].status, 'maybe');
+      assert.equal(row.rows[0].fit_score, 90);
+    });
+  });
+
+  test('injection_echo: a hallucinated extra id alongside a legitimate one has no path to a mark for either', async () => {
+    // The fake fixture only appends its hallucinated id when more than one listing was requested
+    // (test/fixtures/triage/fake-claude.js), matching the realistic shape of this scenario: a batch of
+    // several listings where one description carries injected text, not a single-listing batch.
+    await withFakeClaudeMode('injection_echo', async () => {
+      const runId = await insertRun();
+      const id1 = await insertListing({ prescore: 55 });
+      const id2 = await insertListing({ prescore: 55 });
+      const stats = await runModelTriage(client, runId, [id1, id2], cfgFor({ model: { enabled: true } }), configDir2, 'candidate summary text', { keywords: [] }, {});
+      assert.equal(stats.batches_failed, 1);
+      assert.equal(stats.last_failure_reason, 'unknown_id');
+      const rows = await client.query('SELECT id, status FROM ic_job_listings WHERE id = ANY($1::int[])', [[id1, id2]]);
+      for (const row of rows.rows) assert.equal(row.status, null, `id ${row.id} must be untouched: a rejected batch applies none of its marks`);
+    });
+  });
+
+  test('hang: a real process that never responds is killed by the timeout and counted as a timeout failure', async () => {
+    await withFakeClaudeMode('hang', async () => {
+      const runId = await insertRun();
+      const id = await insertListing({ prescore: 55 });
+      const cfg = cfgFor({ model: { enabled: true, timeoutMs: 1500 } });
+      const stats = await runModelTriage(client, runId, [id], cfg, configDir2, 'candidate summary text', { keywords: [] }, {});
+      assert.equal(stats.batches_failed, 1);
+      assert.equal(stats.last_failure_reason, 'timeout');
+    });
+  });
+});
+
 describe('buildTriagePrompt', () => {
   test('includes the injection-hardening framing and the listings JSON block', () => {
     const prompt = buildTriagePrompt({

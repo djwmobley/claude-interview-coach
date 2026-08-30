@@ -80,3 +80,14 @@ describe('repeated query params: Object.fromEntries keeps the LAST value (docume
     assert.equal(parseListingsQuery(q).dir, 'desc');
   });
 });
+
+describe('parseListingsQuery(): triagedBy (slice 3 auto-triage spec section 7)', () => {
+  test('"auto" passes through unchanged', () => {
+    assert.equal(parseListingsQuery({ triagedBy: 'auto' }).triagedBy, 'auto');
+  });
+  test('any other value, or a missing param, reduces to undefined -- total classification, never passed through raw', () => {
+    for (const triagedBy of [undefined, '', 'dashboard', 'AUTO', 'auto ']) {
+      assert.equal(parseListingsQuery({ triagedBy }).triagedBy, undefined, `triagedBy=${JSON.stringify(triagedBy)}`);
+    }
+  });
+});

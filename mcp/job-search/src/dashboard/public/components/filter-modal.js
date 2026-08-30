@@ -145,6 +145,15 @@ export function openFilterModal(opts) {
     attrs: { type: 'checkbox' }, checked: Boolean(draft.untriaged),
     on: { change: (ev) => { draft = { ...draft, untriaged: /** @type {HTMLInputElement} */ (ev.target).checked }; } },
   });
+  // Slice 3 auto-triage (spec section 7, locked decision): auto-skipped/auto-newed/model-scored rows must
+  // stay visible via an explicit, opt-in filter rather than only being discoverable by reading the daily
+  // report line. Serializes to `triagedBy=auto` (filter-bar.js's filterStateToQuery), never a bare '1' --
+  // this is a value-based query extension, not a boolean flag, matching buildQuery's own total
+  // classification (src/tools/query_jobs.js).
+  const triagedByAutoCheckbox = h('input', {
+    attrs: { type: 'checkbox' }, checked: Boolean(draft.triagedByAuto),
+    on: { change: (ev) => { draft = { ...draft, triagedByAuto: /** @type {HTMLInputElement} */ (ev.target).checked }; } },
+  });
 
   const { el, close } = drawer({
     title: 'Filters',
@@ -189,6 +198,9 @@ export function openFilterModal(opts) {
         h('label', { className: 'drawer__field filter-bar__checkbox' }, [unscoredCheckbox, h('span', { text: 'Unscored only (no fit score yet)' })]),
         h('label', { className: 'drawer__field filter-bar__checkbox' }, [includeExpiredCheckbox, h('span', { text: 'Include expired listings' })]),
       ]),
+      filterSection('Auto-triage', [
+        h('label', { className: 'drawer__field filter-bar__checkbox' }, [triagedByAutoCheckbox, h('span', { text: 'Show only rows triaged by auto' })]),
+      ]),
       h('div', { className: 'drawer__actions' }, [
         h('button', { className: 'btn btn--primary', text: 'Apply', on: { click: () => { opts.onApply(draft); close(); } } }),
         h('button', { className: 'btn', text: 'Clear', on: {
@@ -197,7 +209,7 @@ export function openFilterModal(opts) {
               ...draft,
               status: undefined, source: undefined, noiseClass: undefined, remote: undefined,
               postedAfterExact: undefined, minPrescore: undefined, minFit: undefined,
-              unscored: false, includeExpired: false, untriaged: false,
+              unscored: false, includeExpired: false, untriaged: false, triagedByAuto: false,
             };
             opts.onApply(cleared);
             close();
