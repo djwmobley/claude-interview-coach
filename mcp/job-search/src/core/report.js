@@ -529,6 +529,29 @@ function triageFailureText(reason) {
 }
 
 /**
+ * Auto-new fit-scoring clause ("K of M auto-new fit-scored", spec section 6 extension): appended to
+ * the triage report line only when the model step actually ran (`m.enabled`) and there was at least
+ * one auto_new id this run to fit-score (`autoNew > 0`) -- when the model step is disabled, no fit
+ * scoring happened for auto_new ids either, and the base line's own "(model scoring disabled...)"
+ * clause already says so, so appending a redundant "0 of N" here would not add information. Mentions
+ * "already scored" / "unscored" only when nonzero, keeping the common case ("all fit-scored") compact.
+ * @param {any} m triage.model
+ * @param {number} autoNew triage.deterministic.auto_new
+ */
+function renderAutoNewFitClause(m, autoNew) {
+  if (!m.enabled || !autoNew) return null;
+  const scored = m.fit_only_scored ?? 0;
+  const already = m.fit_only_already_scored ?? 0;
+  const unscored = m.fit_only_unscored ?? 0;
+  let clause = `${scored} of ${autoNew} auto-new fit-scored`;
+  const extras = [];
+  if (already) extras.push(`${already} already scored`);
+  if (unscored) extras.push(`${unscored} unscored`);
+  if (extras.length) clause += ` (${extras.join(', ')})`;
+  return clause;
+}
+
+/**
  * One auto-triage report line (slice 3 spec section 6) for a single run's `stats.triage`. Returns null
  * when `triage` is absent (a run from before this feature shipped, or an old row) so the caller omits
  * the line entirely rather than printing a placeholder.
@@ -543,18 +566,20 @@ export function renderTriageLine(triage) {
   const autoSkipped = (d.skip_noise ?? 0) + (d.skip_low ?? 0);
   const autoNew = d.auto_new ?? 0;
   const base = `triage: ${autoSkipped} auto-skipped, ${autoNew} auto-new`;
+  const fitClause = renderAutoNewFitClause(m, autoNew);
+  const suffix = fitClause ? `, ${fitClause}` : '';
   if (!m.enabled) {
     const reasonText = m.reason === 'candidate_summary_missing' ? ': candidate summary missing' : '';
     return `${base}, ${d.model_band ?? 0} sent to model (model scoring disabled${reasonText})`;
   }
   const sentToModel = (m.scored ?? 0) + (m.unscored ?? 0);
   if (m.batches_failed > 0) {
-    return `${base}, ${sentToModel} sent to model, ${m.scored ?? 0} of ${sentToModel} scored, claude -p ${triageFailureText(m.last_failure_reason)}`;
+    return `${base}, ${sentToModel} sent to model, ${m.scored ?? 0} of ${sentToModel} scored, claude -p ${triageFailureText(m.last_failure_reason)}${suffix}`;
   }
   if (m.batches_zero_scored > 0) {
-    return `${base}, ${sentToModel} sent to model, ${m.scored ?? 0} scored, ${m.batches_zero_scored} of ${m.batches_sent} batches scored nothing (check the prompt)`;
+    return `${base}, ${sentToModel} sent to model, ${m.scored ?? 0} scored, ${m.batches_zero_scored} of ${m.batches_sent} batches scored nothing (check the prompt)${suffix}`;
   }
-  return `${base}, ${sentToModel} sent to model, ${m.scored ?? 0} scored`;
+  return `${base}, ${sentToModel} sent to model, ${m.scored ?? 0} scored${suffix}`;
 }
 
 /**

@@ -130,6 +130,17 @@ reusing `applyMark`'s explicit path, not an oversight: no code today reads `mark
 future feature that wants to know "did a person decide this" must check `actor`, never `marked_at`
 alone.
 
+**`auto_new` also feeds the model step (auto_new band model scoring PR).** The original build left
+`auto_new` rows entirely untouched by the model step: a row scoring high enough to auto-mark `new`
+never received a `fit_score`, so an operator's strongest candidates read "not scored" in the
+dashboard. `runDeterministicTriage` now additionally returns `autoNewIds`, the ids it marked
+`auto_new` in this pass, alongside the existing per-branch counts (`{ counts..., autoNewIds }`).
+`runTriage()` (section 5) merges these into the model step's combined candidate list; see section 4's
+"Auto-new fit-scoring" subsection for the apply semantics. `deterministic`'s persisted/returned shape
+(the counts object `ic_scan_runs.stats.triage.deterministic` and the report line read) is unchanged:
+`runTriage()` destructures `autoNewIds` off before returning `deterministic`, so it is consumed
+in-process only, never persisted as a growing id list on every run's stats row.
+
 ## 3. Config: `config/triage.json`
 
 New file, validated with zod in `src/core/config.js` alongside the existing six. Add `'triage.json'`
@@ -255,14 +266,25 @@ under `readValidated()`.
 
 ## 4. Model step
 
-**Candidate set.** Every `model_band` id from section 2's pass, capped at `maxListingsPerRun`; ids
-beyond the cap are left untouched and counted in `stats.triage.model.capped`, never silently
-dropped from the count. Section 2's `SELECT DISTINCT` guarantees this list has no duplicate id
-already, so no id-level dedup or per-id locking is needed here; a listing touched by two sources in
-the same run was already collapsed to one row before it could ever become a `model_band` candidate.
+**Candidate set.** Every `model_band` id from section 2's pass, PLUS (auto_new band model scoring
+PR) every `auto_new` id from the same pass (`runDeterministicTriage`'s `autoNewIds`), as ONE combined
+list: `model_band` ids first, then `auto_new` ids, capped ONCE at `maxListingsPerRun` (adversary
+MUST-FIX B1). Capping `model_band` and `auto_new` independently, then concatenating the two already
+-capped sub-lists, could let their sum exceed the per-run ceiling and could make `capped` under
+-report (each sub-list's own overflow counted against its own smaller slice rather than the true
+combined overflow); `runTriage()` in `src/core/triage.js` builds `[...modelBandIdsUncapped,
+...autoNewIds].slice(0, cfg.model.maxListingsPerRun)` and derives `capped` from that one combined
+length. Ids beyond the cap are left untouched and counted in `stats.triage.model.capped`, never
+silently dropped from the count, exactly as before this PR. Section 2's `SELECT DISTINCT` guarantees
+neither sub-list has an internal duplicate id already, so no id-level dedup or per-id locking is
+needed here.
 
 **Batching.** `cfg.model.batchSize` (10 to 20) ids per `claude -p` call, up to `maxBatchesPerRun`
-batches.
+batches. (SHOULD-FIX B5) Batches are formed by slicing the ONE combined `model_band` + `auto_new`
+list above at `batchSize`, with no special-casing at the batch-formation step: the one batch that
+happens to straddle the model_band/auto_new boundary succeeds or fails atomically for both kinds of
+ids, exactly like any other batch. The apply-time branching described below (model_band vs. auto_new)
+happens per entry, after a batch's `results` are validated, never at batch-formation time.
 
 **Prompt.** Built by `buildTriagePrompt()` in `src/core/triage.js`, written to a fresh tempfile and
 piped to the CLI's stdin (never inline `-p "<text>"`, per the complex-payload rule). Structure, top
@@ -376,6 +398,48 @@ counted in `unscored`. A batch failure never rolls back another batch's transact
 column, so an operator's own notes are never overwritten by triage. Confirmed compatible with
 `applyMark` as it stands today; no signature change needed.
 
+**Auto-new fit-scoring: apply semantics for `auto_new` ids (auto_new band model scoring PR).** A
+validated entry for an `auto_new` id passes the exact same validation ladder above (unchanged
+injection/schema hardening for both kinds of ids) but is applied differently at the last step:
+
+- **`model_band` ids:** unchanged from before this PR. `applyMark(client, { id, status, fit_score,
+  statusNote: reason }, { now, explicit: true, actor: 'auto', runId })`. Only a `model_band` apply
+  increments `stats.triage.model.downgraded` (adversary MUST-FIX B4): a `skip` recommendation
+  downgraded to `maybe` by the ladder is meaningful only where the status recommendation is actually
+  applied.
+- **`auto_new` ids:** `fit_score` ONLY. The model's status recommendation for this id (already
+  validated, possibly already downgraded by the ladder) is discarded at apply time, never written,
+  and never counted in `downgraded`. Immediately before writing, inside the batch's own transaction:
+  `SELECT fit_score FROM ic_job_listings WHERE id = $1 FOR UPDATE`. (MUST-FIX B6) `rowCount === 0`
+  (the row vanished or was deleted mid-run) is skipped gracefully, exactly like
+  `runDeterministicTriage`'s own race guard: never thrown, never aborting the rest of the batch's
+  transaction. A non-NULL `fit_score` already present (a human scored it in the gap between selection
+  and this write) is also skipped, a human fit score is never overwritten by an automated pass. A
+  human STATUS change in that same gap does NOT block the fit-only write (only `fit_score` is read and
+  guarded here, `status` is never touched for an `auto_new` id). The write itself is
+  `applyMark(client, { id, fit_score }, { now, explicit: true, actor: 'auto', runId })`, a legal
+  `mark_jobs` shape with `status` omitted. (Adversary note B11, accepted tradeoff) This still stamps
+  `marked_at` via `applyMark`'s existing `explicit: true` path, exactly like every other automated mark
+  this module makes (see "`marked_at` is indistinguishable from a human mark" above); a fit-only write
+  is not treated specially here, for consistency with the rest of this design's marked_at handling.
+
+**Counters: total classification over every id sent to the model (MUST-FIXes B2 + B3).** Every id in
+the combined `model_band` + `auto_new` list actually sent to the model (i.e. not capped out) lands in
+exactly one bucket per run:
+
+- `model_band` ids: `scored` (applied) or `unscored` (the model omitted it, OR the whole batch failed
+  validation). The batch-failure case closes a pre-existing hole (adversary MUST-FIX B2): before this
+  PR, a rejected batch's ids were counted in neither `scored` nor `unscored`, so
+  `sentToModel = scored + unscored` (the report line's own arithmetic, section 6) silently understated
+  how many ids were actually sent whenever any batch failed. Fixed in this PR for `model_band` ids by
+  classifying every id in a batch, success or failure alike, rather than skipping the classification
+  loop on a failed batch.
+- `auto_new` ids: `fit_only_scored` (fit applied), `fit_only_already_scored` (the guard found a
+  non-NULL `fit_score`, not missing data and not a failure), or `fit_only_unscored` (the model omitted
+  it, the whole batch failed validation, or the row vanished per the B6 guard above).
+- Ids beyond the per-run cap (`stats.triage.model.capped`) are never sent to the model at all, so none
+  of the above buckets apply to them, exactly as before this PR.
+
 ## 5. Ordering and atomicity, and where the call site lives
 
 **Call site: inside `executeRun()`, not `bin/scan.js`.** `src/tools/search_jobs.js` calls `runScan(a,
@@ -454,11 +518,16 @@ issues its own `UPDATE ic_scan_runs SET stats = stats || $2::jsonb WHERE id = $1
     "model": {
       "enabled": true,
       "batches_sent": 1, "batches_ok": 1, "batches_failed": 0, "batches_zero_scored": 0,
-      "scored": 8, "unscored": 0, "downgraded": 1, "capped": 0
+      "scored": 8, "unscored": 0, "downgraded": 1, "capped": 0,
+      "fit_only_scored": 3, "fit_only_already_scored": 0, "fit_only_unscored": 0
     }
   }
 }
 ```
+
+(auto_new band model scoring PR) `fit_only_scored` / `fit_only_already_scored` / `fit_only_unscored`
+are the `auto_new`-id counterparts of `scored` / `unscored`, described in section 4's "Counters"
+subsection.
 
 `configured` mirrors `LoadedConfig.triage.present` from section 3: `false` means no
 `config/triage.json` was found at all (schema defaults applied silently), as distinct from `true`
@@ -472,9 +541,9 @@ before this feature shipped):
 
 ```
 triage: not configured (no config/triage.json; deterministic and model triage are off)
-triage: 12 auto-skipped, 3 auto-new, 8 sent to model, 8 scored
-triage: 12 auto-skipped, 3 auto-new, 8 sent to model, 0 of 8 scored, claude -p exited 1
-triage: 12 auto-skipped, 3 auto-new, 8 sent to model, 8 scored, 1 of 2 batches scored nothing (check the prompt)
+triage: 12 auto-skipped, 3 auto-new, 8 sent to model, 8 scored, 3 of 3 auto-new fit-scored
+triage: 12 auto-skipped, 3 auto-new, 8 sent to model, 0 of 8 scored, claude -p exited 1, 0 of 3 auto-new fit-scored (3 unscored)
+triage: 12 auto-skipped, 3 auto-new, 8 sent to model, 8 scored, 1 of 2 batches scored nothing (check the prompt), 3 of 3 auto-new fit-scored
 triage: 12 auto-skipped, 3 auto-new, 8 sent to model (model scoring disabled: candidate summary missing)
 ```
 
@@ -485,6 +554,16 @@ and returns zero results, section 4's validation ladder final row) reads as an a
 rather than as routine "nothing interesting this run," which is exactly what a `batches_failed: 0`
 run would otherwise look like; the fourth whenever `model.enabled` is `false` and a reason is
 present.
+
+**Auto-new fit-scoring clause (auto_new band model scoring PR).** `, K of M auto-new fit-scored` is
+appended to the first three forms above (never the fourth): `M` is `deterministic.auto_new`, `K` is
+`model.fit_only_scored`. The clause is appended only when the model step actually ran (`model.enabled`
+is `true`) AND there was at least one `auto_new` id this run (`M > 0`); when the model step is
+disabled, no fit-scoring happened for `auto_new` ids either, and the fourth form's own "(model scoring
+disabled...)" text already says so, appending a redundant "0 of M" would add no information. Mentions
+`fit_only_already_scored` / `fit_only_unscored` in a trailing parenthetical only when nonzero
+(`(N already scored)`, `(N unscored)`, or both comma-separated), keeping the common "everything
+fit-scored cleanly" case compact.
 
 ## 7. Dashboard
 
@@ -824,3 +903,46 @@ instructions for this PR.
    ladder row.** Every case section 9 names (i-xi) is covered; several are covered as fast, deterministic
    pure-function tests against constructed envelope objects rather than as a spawned script, which is a
    methodology choice (equally strict, faster, no OS-process variance) not a coverage gap.
+7. **Auto_new band model scoring PR (`feat/triage-score-auto-new`): a pre-authoring spec-adversary pass
+   (findings labeled B1-B11) reviewed the spec for this PR before any code was written; every
+   must-fix/should-fix is closed by an explicit change, listed here rather than as a separate numbered
+   adversary-disposition section since this PR's adversary review was against this PR's own spec text,
+   not against `docs/slice3-auto-triage-adversary.md`'s original 18 findings (section 12 above).
+   - **B1 (must-fix), closed.** The model step's candidate list is one combined array (`model_band` ids
+     then `auto_new` ids), sliced ONCE at `cfg.model.maxListingsPerRun`; `loadModelBandIdsUncapped()`
+     (`src/core/triage.js`) replaces the old `loadModelBandIds()` at `runTriage()`'s own call site for
+     exactly this reason (the old function's internal cap could not be composed correctly with a second,
+     separately-capped id source). Section 4.
+   - **B2 (must-fix), closed.** A failed batch's `model_band` ids are now always counted in `unscored`,
+     closing the pre-existing hole where they were counted nowhere and `sentToModel = scored + unscored`
+     silently understated what was actually sent. Section 4's "Counters" subsection.
+   - **B3 (must-fix), closed.** Every id sent to the model, `model_band` or `auto_new`, lands in exactly
+     one counter bucket per run: `scored`/`unscored` for `model_band`, `fit_only_scored` /
+     `fit_only_already_scored` / `fit_only_unscored` for `auto_new`. Section 4's "Counters" subsection.
+   - **B4 (must-fix), closed.** `stats.triage.model.downgraded` increments only for a `model_band` apply;
+     a downgraded recommendation for an `auto_new` id is discarded at apply time (status is never
+     written for an `auto_new` id) and never counted. Section 4's "Auto-new fit-scoring" subsection.
+   - **B5 (should-fix), closed.** Batches are formed by slicing the one combined list at `batchSize`,
+     with no special-casing at batch-formation time; the batch straddling the `model_band`/`auto_new`
+     boundary succeeds or fails atomically for both kinds of ids, like any other batch. Section 4's
+     "Batching" paragraph.
+   - **B6 (must-fix), closed.** The fit-only write's own `SELECT fit_score ... FOR UPDATE` guard skips a
+     vanished row (`rowCount === 0`) gracefully, never throwing and never aborting the rest of the
+     batch's transaction, mirroring `runDeterministicTriage`'s own race guard. Section 4's "Auto-new
+     fit-scoring" subsection.
+   - **B8 (should-fix), closed.** `bin/triage-backfill.js`'s new leftover fit-scoring pass restricts its
+     candidate query to `coalesce(record_kind,'listing') = 'listing' AND duplicate_of IS NULL AND
+     expired_at IS NULL`, the same liveness guards `TRIAGE_CANDIDATE_QUERY` applies, so it never
+     fit-scores a note, a since-merged duplicate, or a since-expired posting.
+   - **B10 (should-fix), closed.** The leftover fit-scoring pass is gated behind `--dry-run` exactly like
+     the primary replay loop: a dry run prints the candidate count/ids and calls `runModelTriage()` zero
+     times, so no write and no `claude` process ever happens.
+     `test/triage-backfill-leftover.test.js` proves this against the real test database.
+   - **B11 (note, accepted tradeoff), folded in.** A fit-only auto write still stamps `marked_at` via
+     `applyMark`'s existing `explicit: true` path, consistent with every other automated mark this
+     module makes; not treated as a special case. Section 4's "Auto-new fit-scoring" subsection.
+   - B7 and B9 are not listed above: the build instructions for this PR named B1-B6, B8, B10, and B11 as
+     the findings requiring a spec-level resolution before authoring; B7 and B9 were not in that set, and
+     this PR's author did not have access to the underlying adversary transcript to characterize them
+     independently. Not claimed here as "no finding exists at those numbers", only as "out of this PR's
+     required-resolution scope."

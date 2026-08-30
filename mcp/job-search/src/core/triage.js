@@ -177,11 +177,17 @@ export async function loadTriageCandidates(client, runId, cfg) {
  * @param {number} runId
  * @param {{ deterministic: { enabled: boolean, floor: number, ceiling: number } }} cfg
  * @param {{ now?: Date }} [opts]
- * @returns {Promise<{ skip_noise: number, skip_low: number, auto_new: number, model_band: number, has_open_review: number }>}
+ * @returns {Promise<{ skip_noise: number, skip_low: number, auto_new: number, model_band: number, has_open_review: number, autoNewIds: number[] }>}
+ *   `autoNewIds` (auto_new fit-scoring PR): the ids this pass actually marked `auto_new` in this run,
+ *   alongside the existing per-branch counts. `runTriage()` below destructures `autoNewIds` back off
+ *   before persisting/returning `deterministic` to callers, so the shape written to
+ *   `ic_scan_runs.stats.triage.deterministic` and read by report.js's renderTriageLine is unchanged
+ *   from before this PR -- `autoNewIds` is consumed in-process only, never persisted as a growing id
+ *   list on every run's stats row.
  */
 export async function runDeterministicTriage(client, runId, cfg, opts = {}) {
   const now = opts.now ?? new Date();
-  const counts = { skip_noise: 0, skip_low: 0, auto_new: 0, model_band: 0, has_open_review: 0 };
+  const counts = { skip_noise: 0, skip_low: 0, auto_new: 0, model_band: 0, has_open_review: 0, autoNewIds: /** @type {number[]} */ ([]) };
   if (!cfg.deterministic.enabled) return counts;
   await withTransaction(client, async (c) => {
     const candidates = await loadTriageCandidates(c, runId, cfg);
@@ -200,6 +206,7 @@ export async function runDeterministicTriage(client, runId, cfg, opts = {}) {
       const status = result.action === 'skip' ? 'skip' : 'new';
       await applyMark(c, { id: row.id, status, statusNote: result.reason }, { now, explicit: true, actor: 'auto', runId });
       counts[result.branch]++;
+      if (result.branch === 'auto_new') counts.autoNewIds.push(row.id);
     }
   });
   return counts;
@@ -207,16 +214,36 @@ export async function runDeterministicTriage(client, runId, cfg, opts = {}) {
 
 /**
  * Fresh model_band id list, queried after the deterministic step's transaction has committed (spec
- * section 5, item 2), capped at `cfg.model.maxListingsPerRun`. Ids beyond the cap are counted in
- * `capped`, never silently dropped (spec section 4).
+ * section 5, item 2), with NO cap applied. `runTriage()` (below) merges this with the deterministic
+ * step's `autoNewIds` into ONE combined list before applying `cfg.model.maxListingsPerRun` exactly
+ * once (auto_new fit-scoring PR, MUST-FIX B1): capping `model_band` and `auto_new` independently could
+ * let their sum exceed the per-run ceiling, or make `capped` under-report by counting each sub-list's
+ * overflow against its own, smaller slice instead of the true combined overflow. Returns `[]` when the
+ * deterministic step is disabled, matching `loadModelBandIds()`'s existing behavior.
+ * @param {import('pg').ClientBase} client
+ * @param {number} runId
+ * @param {{ deterministic: { enabled: boolean, floor: number, ceiling: number } }} cfg
+ * @returns {Promise<number[]>}
+ */
+export async function loadModelBandIdsUncapped(client, runId, cfg) {
+  if (!cfg.deterministic.enabled) return [];
+  const candidates = await loadTriageCandidates(client, runId, cfg);
+  return candidates.filter((c) => c.result.branch === 'model_band').map((c) => c.row.id);
+}
+
+/**
+ * Backward-compatible, model_band-only capped view of `loadModelBandIdsUncapped()`, at
+ * `cfg.model.maxListingsPerRun`. Ids beyond the cap are counted in `capped`, never silently dropped
+ * (spec section 4). Kept for existing callers/tests that only care about `model_band` in isolation
+ * (e.g. this module's own dedup test); `runTriage()` does NOT use this function for its own combined
+ * model_band + auto_new cap -- see `loadModelBandIdsUncapped()`'s doc comment for why a single
+ * combined-list slice is required instead of two independently-capped sub-lists.
  * @param {import('pg').ClientBase} client
  * @param {number} runId
  * @param {{ deterministic: { enabled: boolean, floor: number, ceiling: number }, model: { maxListingsPerRun: number } }} cfg
  */
 export async function loadModelBandIds(client, runId, cfg) {
-  if (!cfg.deterministic.enabled) return { ids: [], capped: 0 };
-  const candidates = await loadTriageCandidates(client, runId, cfg);
-  const all = candidates.filter((c) => c.result.branch === 'model_band').map((c) => c.row.id);
+  const all = await loadModelBandIdsUncapped(client, runId, cfg);
   const ids = all.slice(0, cfg.model.maxListingsPerRun);
   return { ids, capped: Math.max(0, all.length - ids.length) };
 }
@@ -376,20 +403,62 @@ export function validateModelOutput(outcome, requestedIds, cfg) {
  * fixture>` together reproduces that invocation shape without any production-code special-casing beyond
  * this one optional prepend; in real production neither variable is set, `claudeBin` resolves to
  * `'claude'`, and no script is prepended.
+ *
+ * **Auto-new fit-scoring (fit-only ids), added after the original slice 3 build.** `ids` is one
+ * combined, already-capped list: `model_band` ids first, then `auto_new` ids (`runTriage()` builds
+ * this; see `loadModelBandIdsUncapped()`'s doc comment for why the cap is applied once, to the
+ * combined list, rather than twice). `autoNewIds` names which of `ids` are the auto_new subset, so a
+ * batch can straddle both kinds (SHOULD-FIX B5: batches are formed by slicing the combined list at
+ * `batchSize`, so the one batch spanning the model_band/auto_new boundary succeeds or fails
+ * atomically for both kinds of ids, exactly like any other batch -- there is no special-casing at the
+ * batch-formation step, only at apply time below). For every validated entry:
+ *   - a `model_band` id gets the full `applyMark({ status, fit_score, statusNote })` treatment exactly
+ *     as before this change, and only a `model_band` apply increments `stats.downgraded` (MUST-FIX
+ *     B4: a downgraded recommendation for an auto_new id is discarded at apply time below, so no
+ *     status change happens for it and `downgraded` must not count it).
+ *   - an `auto_new` id gets `fit_score` ONLY: the model's status recommendation for it passed the same
+ *     validation ladder (so injection/schema hardening is identical for both kinds) but is discarded
+ *     here, never applied. Immediately before writing, `SELECT fit_score FROM ic_job_listings WHERE id
+ *     = $1 FOR UPDATE` inside the batch's own transaction guards two races: (MUST-FIX B6) the row
+ *     vanished between selection and this write (`rowCount === 0`) is skipped gracefully, exactly like
+ *     `runDeterministicTriage`'s own guard, never thrown and never aborting the rest of the batch's
+ *     transaction; a non-NULL `fit_score` already present (a human scored it in between) is also
+ *     skipped, a human's fit score is never overwritten by an automated pass. A human STATUS change in
+ *     between does not block the fit-only write (only `fit_score` is read/guarded here, never
+ *     `status`). The fit-only write still uses `applyMark(c, { id, fit_score }, { explicit: true, actor:
+ *     'auto', runId })` (a legal `mark_jobs` shape with `status` omitted, B11: this still stamps
+ *     `marked_at` via `applyMark`'s existing explicit path, an accepted, documented tradeoff consistent
+ *     with every other automated mark this module makes), so it is recorded identically to a
+ *     deterministic mark in `ic_job_events`/`marked_at`, just without a status change.
+ *
+ * **Counters, total classification (MUST-FIXes B2 + B3): every id in `ids` lands in exactly one
+ * bucket.** `model_band` ids: `scored` (applied) or `unscored` (the model omitted it, OR the whole
+ * batch failed validation -- closing a pre-existing hole where a failed batch's ids were counted
+ * nowhere, silently understating `sentToModel = scored + unscored` in the report line). `auto_new`
+ * ids: `fit_only_scored` (fit applied), `fit_only_already_scored` (the guard found a non-NULL
+ * `fit_score`, not missing data and not a failure), or `fit_only_unscored` (the model omitted it, the
+ * batch failed, or the row vanished). Ids beyond the per-run/per-batch caps stay in `capped` only, as
+ * today, they are never sent to the model at all so none of the above buckets apply to them.
  * @param {import('pg').ClientBase} client
- * @param {number} runId
+ * @param {number|null} runId `null` is legal (`ic_job_events.run_id` is nullable): bin/triage-backfill.js's
+ *   leftover fit-scoring pass has no single run_id to attribute a cross-run pass to.
  * @param {number[]} ids
  * @param {{ model: { enabled: boolean, modelName: string, batchSize: number, skipMaxFit: number, timeoutMs: number, maxBatchesPerRun: number, descriptionTruncateChars: number } }} cfg
  * @param {string} configDir
  * @param {string|null} candidateSummary
  * @param {{ keywords?: string[], phrases?: string[], exclude_terms?: string[], locations?: string[], remote?: string }} profile
  * @param {{ execFile?: Function }} [deps]
+ * @param {number[]} [autoNewIds] subset of `ids` to treat as fit-only auto_new ids (default: none, so
+ *   every id is treated as `model_band`, unchanged from this function's original behavior -- every
+ *   pre-existing call site that does not pass this argument is unaffected).
  */
-export async function runModelTriage(client, runId, ids, cfg, configDir, candidateSummary, profile, deps = {}) {
+export async function runModelTriage(client, runId, ids, cfg, configDir, candidateSummary, profile, deps = {}, autoNewIds = []) {
+  const autoNewSet = new Set(autoNewIds);
   const stats = {
     enabled: false, reason: /** @type {string|null} */ (null),
     batches_sent: 0, batches_ok: 0, batches_failed: 0, batches_zero_scored: 0,
     scored: 0, unscored: 0, downgraded: 0, capped: 0,
+    fit_only_scored: 0, fit_only_already_scored: 0, fit_only_unscored: 0,
     last_failure_reason: /** @type {string|null} */ (null),
   };
   if (!cfg.model.enabled) {
@@ -436,25 +505,48 @@ export async function runModelTriage(client, runId, ids, cfg, configDir, candida
       outcome = { exitCode: typeof e.code === 'number' ? e.code : 1, timedOut, stdout: typeof e.stdout === 'string' ? e.stdout : '' };
     }
     const validated = validateModelOutput(outcome, batchIds, cfg);
+    const scoredIds = new Set(); // model_band ids fully applied (status + fit_score) this batch
+    const autoNewHandled = new Set(); // auto_new ids resolved this batch, in any of the three fit-only buckets
     if (!validated.ok) {
       stats.batches_failed++;
       stats.last_failure_reason = validated.reason;
-      continue;
+    } else {
+      stats.batches_ok++;
+      if (validated.entries.length === 0) stats.batches_zero_scored++;
+      if (validated.entries.length) {
+        await withTransaction(client, async (c) => {
+          for (const entry of validated.entries) {
+            if (autoNewSet.has(entry.id)) {
+              const guard = await c.query('SELECT fit_score FROM ic_job_listings WHERE id = $1 FOR UPDATE', [entry.id]);
+              if (guard.rowCount === 0) {
+                // MUST-FIX B6: row vanished mid-run; skip gracefully, never throw, never abort the batch.
+              } else if (guard.rows[0].fit_score !== null) {
+                stats.fit_only_already_scored++;
+                autoNewHandled.add(entry.id);
+              } else {
+                await applyMark(c, { id: entry.id, fit_score: entry.fit_score }, { now: new Date(), explicit: true, actor: 'auto', runId });
+                stats.fit_only_scored++;
+                autoNewHandled.add(entry.id);
+              }
+            } else {
+              await applyMark(c, { id: entry.id, status: entry.status, fit_score: entry.fit_score, statusNote: entry.reason }, { now: new Date(), explicit: true, actor: 'auto', runId });
+              if (entry.downgraded) stats.downgraded++; // MUST-FIX B4: model_band applies only.
+              stats.scored++;
+              scoredIds.add(entry.id);
+            }
+          }
+        });
+      }
     }
-    stats.batches_ok++;
-    if (validated.entries.length === 0) stats.batches_zero_scored++;
-    const scoredIds = new Set();
-    if (validated.entries.length) {
-      await withTransaction(client, async (c) => {
-        for (const entry of validated.entries) {
-          await applyMark(c, { id: entry.id, status: entry.status, fit_score: entry.fit_score, statusNote: entry.reason }, { now: new Date(), explicit: true, actor: 'auto', runId });
-          if (entry.downgraded) stats.downgraded++;
-          stats.scored++;
-          scoredIds.add(entry.id);
-        }
-      });
+    // MUST-FIX B2/B3: total classification over every id in this batch, success or failure alike, so a
+    // failed or partially-scored batch's ids are always counted somewhere, never silently nowhere.
+    for (const id of batchIds) {
+      if (autoNewSet.has(id)) {
+        if (!autoNewHandled.has(id)) stats.fit_only_unscored++;
+      } else if (!scoredIds.has(id)) {
+        stats.unscored++;
+      }
     }
-    for (const id of batchIds) if (!scoredIds.has(id)) stats.unscored++;
   }
   return stats;
 }
@@ -464,6 +556,13 @@ export async function runModelTriage(client, runId, ids, cfg, configDir, candida
  * model_band query, merged into one stats.triage-shaped object. Never throws for a per-row or
  * per-batch problem (those are absorbed into the ladder / race guard above); a total failure (e.g. the
  * caller's own connection dying) is the caller's responsibility to catch, per spec item 5.
+ *
+ * Auto-new fit-scoring (MUST-FIX B1): `autoNewIds` from the deterministic step are appended AFTER the
+ * uncapped `model_band` list, and `cfg.model.maxListingsPerRun` is applied ONCE to that combined
+ * array -- never as two separate caps on `model_band` and `auto_new` individually, which could let
+ * their sum exceed the per-run ceiling or make `capped` under-report. `deterministic`'s own
+ * `autoNewIds` field is destructured off before being returned/persisted, so
+ * `ic_scan_runs.stats.triage.deterministic`'s shape is unchanged from before this PR.
  * @param {import('pg').ClientBase} client dedicated connection, opened and closed by the caller
  * @param {number} runId
  * @param {import('./config.js').LoadedConfig} config
@@ -472,13 +571,18 @@ export async function runModelTriage(client, runId, ids, cfg, configDir, candida
  */
 export async function runTriage(client, runId, config, profile, deps = {}) {
   const cfg = config.triage;
-  const deterministic = await runDeterministicTriage(client, runId, cfg, { now: deps.now });
-  const band = await loadModelBandIds(client, runId, cfg);
+  const { autoNewIds, ...deterministic } = await runDeterministicTriage(client, runId, cfg, { now: deps.now });
+  const modelBandAll = await loadModelBandIdsUncapped(client, runId, cfg);
+  const combined = [...modelBandAll, ...autoNewIds];
+  const ids = combined.slice(0, cfg.model.maxListingsPerRun);
+  const capped = Math.max(0, combined.length - ids.length);
+  const idsSet = new Set(ids);
+  const autoNewInBatch = autoNewIds.filter((id) => idsSet.has(id));
   // Read once per triage invocation, reused verbatim for every batch this run sends (spec section 3,
   // finding 17): never re-read mid-run, so a file edited partway through a long run cannot produce a
   // self-inconsistent run.
   const candidateSummary = loadTriageCandidateSummary(config.configDir);
-  const model = await runModelTriage(client, runId, band.ids, cfg, config.configDir, candidateSummary, profile, deps);
-  model.capped += band.capped;
+  const model = await runModelTriage(client, runId, ids, cfg, config.configDir, candidateSummary, profile, deps, autoNewInBatch);
+  model.capped += capped;
   return { configured: Boolean(cfg.present), deterministic, model };
 }

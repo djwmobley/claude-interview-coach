@@ -8,6 +8,7 @@
 import { test, describe, before, after } from 'node:test';
 import assert from 'node:assert/strict';
 import fs from 'node:fs';
+import os from 'node:os';
 import path from 'node:path';
 import { fileURLToPath } from 'node:url';
 import pg from 'pg';
@@ -15,7 +16,7 @@ import { pgConnectionConfig } from '../src/core/config.js';
 import { connectDedicated } from '../src/core/db.js';
 import { ensureAuxSchema } from '../src/core/schema.js';
 import {
-  classifyForTriage, loadTriageCandidates, runDeterministicTriage, loadModelBandIds,
+  classifyForTriage, loadTriageCandidates, runDeterministicTriage, loadModelBandIds, loadModelBandIdsUncapped,
   validateModelOutput, runModelTriage, runTriage, buildTriagePrompt, describeTriageFailure,
 } from '../src/core/triage.js';
 import { triageSchema } from '../src/core/config.js';
@@ -23,7 +24,23 @@ import { runScan } from '../src/core/scan-run.js';
 import { offlineDeps, upsertTestProfile, cleanupScan, testConfig, FIXTURE_NOW } from './helpers/scan-fixtures.js';
 
 const HERE = path.dirname(fileURLToPath(import.meta.url));
+const PKG = path.join(HERE, '..');
 const REAL_ENVELOPE = JSON.parse(fs.readFileSync(path.join(HERE, 'fixtures', 'triage', 'claude-cli-real-output-example.json'), 'utf8'));
+
+/**
+ * A private temp config dir carrying a non-blank triage-candidate.md (so runTriage()'s own
+ * loadTriageCandidateSummary() call, unlike the shared test/fixtures/scan/config/ fixture, never
+ * disables the model step with candidate_summary_missing) plus the two config-locked model-step
+ * support files copied from the real, shipped mcp/job-search/config/ dir. Never mutates the shared
+ * fixture directory other test files also read concurrently.
+ */
+function buildRunTriageConfigDir() {
+  const dir = fs.mkdtempSync(path.join(os.tmpdir(), 'triage-runtriage-config-'));
+  fs.copyFileSync(path.join(PKG, 'config', 'triage-output-schema.json'), path.join(dir, 'triage-output-schema.json'));
+  fs.copyFileSync(path.join(PKG, 'config', 'triage-mcp-empty.json'), path.join(dir, 'triage-mcp-empty.json'));
+  fs.writeFileSync(path.join(dir, 'triage-candidate.md'), 'A CTO with 20 years of experience.');
+  return dir;
+}
 
 const CO = `ZZ-TEST-TRIAGE-${process.pid}`;
 const SRC = `zz-test-triage-${process.pid}`;
@@ -257,6 +274,7 @@ describe('runDeterministicTriage', () => {
     assert.equal(counts.skip_low, 1);
     assert.equal(counts.auto_new, 1);
     assert.equal(counts.model_band, 1);
+    assert.deepEqual(counts.autoNewIds, [newId], 'autoNewIds names the ids this pass marked auto_new (auto-new fit-scoring PR)');
     const rows = await client.query('SELECT id, status, marked_at FROM ic_job_listings WHERE id = ANY($1::int[])', [[skipId, newId, bandId]]);
     const byId = new Map(rows.rows.map((r) => [Number(r.id), r]));
     assert.equal(byId.get(skipId).status, 'skip');
@@ -327,7 +345,7 @@ describe('runDeterministicTriage', () => {
     const id = await insertListing({ prescore: 95 });
     await recordRunItem(runId, id, 'greenhouse');
     const counts = await runDeterministicTriage(client, runId, cfgFor({ deterministic: { enabled: false } }));
-    assert.deepEqual(counts, { skip_noise: 0, skip_low: 0, auto_new: 0, model_band: 0, has_open_review: 0 });
+    assert.deepEqual(counts, { skip_noise: 0, skip_low: 0, auto_new: 0, model_band: 0, has_open_review: 0, autoNewIds: [] });
     const row = await client.query('SELECT status FROM ic_job_listings WHERE id = $1', [id]);
     assert.equal(row.rows[0].status, null);
     const band = await loadModelBandIds(client, runId, cfgFor({ deterministic: { enabled: false } }));
@@ -565,6 +583,216 @@ describe('runModelTriage (fake execFile, real DB writes)', () => {
     assert.equal(stats.batches_sent, 1);
     assert.equal(stats.scored, 10);
     assert.equal(stats.capped, 2);
+  });
+});
+
+// ---------------------------------------------------------------------------
+// Auto-new fit-scoring: the model step's fit-only apply path for auto_new ids (auto_new band model
+// scoring PR). model_band ids and auto_new ids are exercised side by side in some cases to prove the
+// two kinds are classified independently within the same batch (SHOULD-FIX B5).
+// ---------------------------------------------------------------------------
+
+describe('runModelTriage: auto_new fit-only apply path (auto_new band model scoring PR)', () => {
+  const configDir = testConfig().configDir;
+
+  test('an auto_new id gets fit_score only: status recommendation is discarded, never applied', async () => {
+    const runId = await insertRun();
+    const id = await insertListing({ prescore: 95 });
+    await client.query(`UPDATE ic_job_listings SET status = 'new' WHERE id = $1`, [id]); // simulate the deterministic step's own auto_new mark
+    const fakeExecFile = async () => ({ stdout: JSON.stringify({ type: 'result', is_error: false, structured_output: { results: [{ id, fit_score: 72, status: 'skip', reason: 'model would skip it' }] } }) });
+    const stats = await runModelTriage(client, runId, [id], cfgFor({ model: { enabled: true } }), configDir, 'candidate summary text', { keywords: [] }, { execFile: fakeExecFile }, [id]);
+    assert.equal(stats.fit_only_scored, 1);
+    assert.equal(stats.scored, 0, 'an auto_new apply is never counted as a model_band scored apply');
+    const row = await client.query('SELECT status, fit_score FROM ic_job_listings WHERE id = $1', [id]);
+    assert.equal(row.rows[0].status, 'new', 'the model status recommendation is discarded for an auto_new id');
+    assert.equal(row.rows[0].fit_score, 72);
+  });
+
+  test('B4: a skip->maybe downgrade for an auto_new id (fit_score >= skipMaxFit) never increments stats.downgraded', async () => {
+    const runId = await insertRun();
+    const id = await insertListing({ prescore: 95 });
+    await client.query(`UPDATE ic_job_listings SET status = 'new' WHERE id = $1`, [id]);
+    // fit_score 35 >= the default skipMaxFit (30): validateModelOutput's ladder downgrades status:'skip'
+    // to 'maybe' internally regardless of which kind of id this is, but that recommendation is for an
+    // auto_new id and must never be applied or counted -- only a model_band apply may increment downgraded.
+    const fakeExecFile = async () => ({ stdout: JSON.stringify({ type: 'result', is_error: false, structured_output: { results: [{ id, fit_score: 35, status: 'skip', reason: 'would downgrade if applied' }] } }) });
+    const stats = await runModelTriage(client, runId, [id], cfgFor({ model: { enabled: true } }), configDir, 'candidate summary text', { keywords: [] }, { execFile: fakeExecFile }, [id]);
+    assert.equal(stats.fit_only_scored, 1);
+    assert.equal(stats.downgraded, 0, 'downgraded counts model_band applies only (B4)');
+    const row = await client.query('SELECT status, fit_score FROM ic_job_listings WHERE id = $1', [id]);
+    assert.equal(row.rows[0].status, 'new');
+    assert.equal(row.rows[0].fit_score, 35);
+  });
+
+  test('an auto_new id whose fit_score is already non-NULL (a human scored it in between) is never overwritten, counted fit_only_already_scored', async () => {
+    const runId = await insertRun();
+    const id = await insertListing({ prescore: 95 });
+    await client.query(`UPDATE ic_job_listings SET status = 'new', fit_score = 77 WHERE id = $1`, [id]);
+    const fakeExecFile = async () => ({ stdout: JSON.stringify({ type: 'result', is_error: false, structured_output: { results: [{ id, fit_score: 40, status: 'new', reason: 'model would rescore' }] } }) });
+    const stats = await runModelTriage(client, runId, [id], cfgFor({ model: { enabled: true } }), configDir, 'candidate summary text', { keywords: [] }, { execFile: fakeExecFile }, [id]);
+    assert.equal(stats.fit_only_already_scored, 1);
+    assert.equal(stats.fit_only_scored, 0);
+    const row = await client.query('SELECT fit_score FROM ic_job_listings WHERE id = $1', [id]);
+    assert.equal(row.rows[0].fit_score, 77, 'a human fit score is never overwritten by an automated fit-only apply');
+  });
+
+  test('B6: a vanished row (deleted between selection and the batch write) is skipped gracefully, counted fit_only_unscored, the batch is not aborted', async () => {
+    const runId = await insertRun();
+    const id = await insertListing({ prescore: 95 });
+    const other = await insertListing({ prescore: 95 }); // a second auto_new id in the SAME batch, to prove the vanished row does not abort the rest
+    await client.query(`UPDATE ic_job_listings SET status = 'new' WHERE id = ANY($1::int[])`, [[id, other]]);
+    await client.query('DELETE FROM ic_job_listings WHERE id = $1', [id]); // simulate the row vanishing mid-run
+    const fakeExecFile = async () => ({
+      stdout: JSON.stringify({
+        type: 'result', is_error: false,
+        structured_output: { results: [{ id, fit_score: 62, status: 'new', reason: 'x' }, { id: other, fit_score: 63, status: 'new', reason: 'y' }] },
+      }),
+    });
+    const stats = await runModelTriage(client, runId, [id, other], cfgFor({ model: { enabled: true } }), configDir, 'candidate summary text', { keywords: [] }, { execFile: fakeExecFile }, [id, other]);
+    assert.equal(stats.batches_ok, 1, 'a vanished row never fails the whole batch');
+    assert.equal(stats.fit_only_unscored, 1, 'the vanished id is counted fit_only_unscored, never thrown');
+    assert.equal(stats.fit_only_scored, 1, 'the other auto_new id in the same batch is still applied normally');
+    const row = await client.query('SELECT fit_score FROM ic_job_listings WHERE id = $1', [other]);
+    assert.equal(row.rows[0].fit_score, 63);
+  });
+
+  test('a requested auto_new id never appearing in a successful batch is counted fit_only_unscored, not model_band unscored', async () => {
+    const runId = await insertRun();
+    const id = await insertListing({ prescore: 95 });
+    const fakeExecFile = async () => ({ stdout: JSON.stringify({ type: 'result', is_error: false, structured_output: { results: [] } }) });
+    const stats = await runModelTriage(client, runId, [id], cfgFor({ model: { enabled: true } }), configDir, 'candidate summary text', { keywords: [] }, { execFile: fakeExecFile }, [id]);
+    assert.equal(stats.fit_only_unscored, 1);
+    assert.equal(stats.unscored, 0, 'an auto_new omission is never counted in the model_band unscored bucket');
+  });
+
+  test('B2: a failed batch (non-zero exit) counts model_band ids unscored and auto_new ids fit_only_unscored -- never nowhere', async () => {
+    const runId = await insertRun();
+    const bandId = await insertListing({ prescore: 55 });
+    const autoId = await insertListing({ prescore: 95 });
+    const fakeExecFile = async () => {
+      const err = new Error('claude exited 1');
+      // @ts-ignore test-only error shape
+      err.code = 1;
+      throw err;
+    };
+    const stats = await runModelTriage(client, runId, [bandId, autoId], cfgFor({ model: { enabled: true } }), configDir, 'candidate summary text', { keywords: [] }, { execFile: fakeExecFile }, [autoId]);
+    assert.equal(stats.batches_failed, 1);
+    assert.equal(stats.unscored, 1, 'the model_band id in a failed batch is counted unscored, closing the pre-existing hole (B2)');
+    assert.equal(stats.fit_only_unscored, 1, 'the auto_new id in the same failed batch is counted fit_only_unscored');
+    assert.equal(stats.scored, 0);
+    assert.equal(stats.fit_only_scored, 0);
+  });
+
+  test('one batch straddling the model_band/auto_new boundary succeeds or fails atomically for both kinds (SHOULD-FIX B5)', async () => {
+    const runId = await insertRun();
+    const bandId = await insertListing({ prescore: 55 });
+    const autoId = await insertListing({ prescore: 95 });
+    await client.query(`UPDATE ic_job_listings SET status = 'new' WHERE id = $1`, [autoId]);
+    const fakeExecFile = async () => ({
+      stdout: JSON.stringify({
+        type: 'result', is_error: false,
+        structured_output: { results: [{ id: bandId, fit_score: 66, status: 'new', reason: 'a' }, { id: autoId, fit_score: 71, status: 'maybe', reason: 'b' }] },
+      }),
+    });
+    // batchSize large enough that one batch covers both ids.
+    const stats = await runModelTriage(client, runId, [bandId, autoId], cfgFor({ model: { enabled: true, batchSize: 15 } }), configDir, 'candidate summary text', { keywords: [] }, { execFile: fakeExecFile }, [autoId]);
+    assert.equal(stats.batches_sent, 1, 'one batch covers both kinds of ids');
+    assert.equal(stats.scored, 1);
+    assert.equal(stats.fit_only_scored, 1);
+    const bandRow = await client.query('SELECT status, fit_score FROM ic_job_listings WHERE id = $1', [bandId]);
+    assert.equal(bandRow.rows[0].status, 'new');
+    assert.equal(bandRow.rows[0].fit_score, 66);
+    const autoRow = await client.query('SELECT status, fit_score FROM ic_job_listings WHERE id = $1', [autoId]);
+    assert.equal(autoRow.rows[0].status, 'new', 'auto_new status is untouched even though the model recommended maybe');
+    assert.equal(autoRow.rows[0].fit_score, 71);
+  });
+});
+
+// ---------------------------------------------------------------------------
+// runTriage: combined model_band + auto_new list capped ONCE at maxListingsPerRun (MUST-FIX B1)
+// ---------------------------------------------------------------------------
+
+describe('runTriage: combined model_band + auto_new list, capped once (MUST-FIX B1)', () => {
+  /** @type {string} */
+  let configDir;
+  before(() => {
+    configDir = buildRunTriageConfigDir();
+  });
+  after(() => {
+    fs.rmSync(configDir, { recursive: true, force: true });
+  });
+
+  test('model_band ids plus auto_new ids are capped together at maxListingsPerRun, never independently, and model_band ids are sent first', async () => {
+    const runId = await insertRun();
+    const bandIds = [];
+    for (let i = 0; i < 3; i++) bandIds.push(await insertListing({ prescore: 55 })); // gray zone: model_band
+    const autoIds = [];
+    for (let i = 0; i < 2; i++) autoIds.push(await insertListing({ prescore: 90 })); // >= ceiling: auto_new
+    for (const id of [...bandIds, ...autoIds]) await recordRunItem(runId, id, 'greenhouse');
+    const triageCfg = {
+      present: true,
+      deterministic: { enabled: true, floor: 40, ceiling: 70 },
+      model: { enabled: true, modelName: 'x', batchSize: 10, skipMaxFit: 30, timeoutMs: 5000, maxListingsPerRun: 4, maxBatchesPerRun: 5, descriptionTruncateChars: 1200 },
+    };
+    const seenIds = /** @type {number[]} */ ([]);
+    const fakeExecFile = async (/** @type {string} */ _bin, /** @type {string[]} */ _args, /** @type {any} */ opts) => {
+      const requested = JSON.parse(String(opts.input).split('\n').pop());
+      seenIds.push(...requested.listings.map((/** @type {any} */ l) => l.id));
+      const results = requested.listings.map((/** @type {any} */ l) => ({ id: l.id, fit_score: 50, status: 'maybe', reason: 'ok' }));
+      return { stdout: JSON.stringify({ type: 'result', is_error: false, structured_output: { results } }) };
+    };
+    const config = { ...testConfig(), configDir, triage: triageCfg };
+    const stats = await runTriage(client, runId, config, { keywords: [] }, { execFile: fakeExecFile });
+    // maxListingsPerRun=4: all 3 model_band ids plus only the first 1 of the 2 auto_new ids are sent;
+    // the second auto_new id is capped by the SAME combined ceiling, never an independent auto_new cap.
+    assert.equal(seenIds.length, 4, 'exactly 4 ids reach the model, the combined per-run ceiling');
+    assert.equal(stats.model.capped, 1, 'exactly one id (the combined-list overflow) is capped, not zero and not two');
+    assert.ok(bandIds.every((id) => seenIds.includes(id)), 'every model_band id is sent (model_band ids come first in the combined list)');
+    assert.equal(seenIds.filter((id) => autoIds.includes(id)).length, 1, 'only one auto_new id fits after the 3 model_band ids');
+    assert.equal(stats.model.scored, 3, 'the 3 model_band ids are scored');
+    assert.equal(stats.model.fit_only_scored, 1, 'the 1 admitted auto_new id is fit-scored');
+  });
+
+  test('auto_new ids alone (no model_band) are still capped against the same maxListingsPerRun ceiling', async () => {
+    const runId = await insertRun();
+    const autoIds = [];
+    for (let i = 0; i < 3; i++) autoIds.push(await insertListing({ prescore: 90 }));
+    for (const id of autoIds) await recordRunItem(runId, id, 'greenhouse');
+    const triageCfg = {
+      present: true,
+      deterministic: { enabled: true, floor: 40, ceiling: 70 },
+      model: { enabled: true, modelName: 'x', batchSize: 10, skipMaxFit: 30, timeoutMs: 5000, maxListingsPerRun: 2, maxBatchesPerRun: 5, descriptionTruncateChars: 1200 },
+    };
+    const fakeExecFile = async (/** @type {string} */ _bin, /** @type {string[]} */ _args, /** @type {any} */ opts) => {
+      const requested = JSON.parse(String(opts.input).split('\n').pop());
+      const results = requested.listings.map((/** @type {any} */ l) => ({ id: l.id, fit_score: 50, status: 'maybe', reason: 'ok' }));
+      return { stdout: JSON.stringify({ type: 'result', is_error: false, structured_output: { results } }) };
+    };
+    const config = { ...testConfig(), configDir, triage: triageCfg };
+    const stats = await runTriage(client, runId, config, { keywords: [] }, { execFile: fakeExecFile });
+    assert.equal(stats.model.fit_only_scored, 2);
+    assert.equal(stats.model.capped, 1);
+  });
+});
+
+describe('loadModelBandIdsUncapped: no cap applied (backing loadModelBandIds and runTriage\'s own combined cap)', () => {
+  test('returns every model_band id with no slicing, even past what maxListingsPerRun would otherwise allow', async () => {
+    const runId = await insertRun();
+    const ids = [];
+    for (let i = 0; i < 3; i++) ids.push(await insertListing({ prescore: 55 }));
+    for (const id of ids) await recordRunItem(runId, id, 'greenhouse');
+    const cfg = cfgFor({ model: { maxListingsPerRun: 1 } });
+    const all = await loadModelBandIdsUncapped(client, runId, cfg);
+    assert.equal(all.length, 3, 'uncapped: every model_band id returned regardless of maxListingsPerRun');
+    for (const id of ids) assert.ok(all.includes(id));
+  });
+
+  test('deterministic.enabled=false returns [] (matches loadModelBandIds\'s existing behavior)', async () => {
+    const runId = await insertRun();
+    const id = await insertListing({ prescore: 55 });
+    await recordRunItem(runId, id, 'greenhouse');
+    const all = await loadModelBandIdsUncapped(client, runId, cfgFor({ deterministic: { enabled: false } }));
+    assert.deepEqual(all, []);
   });
 });
 

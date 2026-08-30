@@ -277,30 +277,30 @@ describe('renderTriageLine / per-run triage line in text, html, markdown (slice 
     const triage = {
       configured: true,
       deterministic: { skip_noise: 4, skip_low: 8, auto_new: 3, model_band: 8, has_open_review: 1 },
-      model: { enabled: true, batches_sent: 1, batches_ok: 1, batches_failed: 0, batches_zero_scored: 0, scored: 8, unscored: 0, downgraded: 1, capped: 0 },
+      model: { enabled: true, batches_sent: 1, batches_ok: 1, batches_failed: 0, batches_zero_scored: 0, scored: 8, unscored: 0, downgraded: 1, capped: 0, fit_only_scored: 3, fit_only_already_scored: 0, fit_only_unscored: 0 },
     };
     const line = renderTriageLine(triage);
-    assert.equal(line, 'triage: 12 auto-skipped, 3 auto-new, 8 sent to model, 8 scored');
+    assert.equal(line, 'triage: 12 auto-skipped, 3 auto-new, 8 sent to model, 8 scored, 3 of 3 auto-new fit-scored');
   });
 
   test('failed-batch: claude -p exited non-zero', () => {
     const triage = {
       configured: true,
       deterministic: { skip_noise: 4, skip_low: 8, auto_new: 3, model_band: 8, has_open_review: 0 },
-      model: { enabled: true, batches_sent: 1, batches_ok: 0, batches_failed: 1, batches_zero_scored: 0, scored: 0, unscored: 8, downgraded: 0, capped: 0, last_failure_reason: 'cli_exit_1' },
+      model: { enabled: true, batches_sent: 1, batches_ok: 0, batches_failed: 1, batches_zero_scored: 0, scored: 0, unscored: 8, downgraded: 0, capped: 0, fit_only_scored: 0, fit_only_already_scored: 0, fit_only_unscored: 3, last_failure_reason: 'cli_exit_1' },
     };
     const line = renderTriageLine(triage);
-    assert.equal(line, 'triage: 12 auto-skipped, 3 auto-new, 8 sent to model, 0 of 8 scored, claude -p exited 1');
+    assert.equal(line, 'triage: 12 auto-skipped, 3 auto-new, 8 sent to model, 0 of 8 scored, claude -p exited 1, 0 of 3 auto-new fit-scored (3 unscored)');
   });
 
   test('zero-scored-batch: a batch succeeded but scored nothing (distinguished from batches_failed)', () => {
     const triage = {
       configured: true,
       deterministic: { skip_noise: 4, skip_low: 8, auto_new: 3, model_band: 8, has_open_review: 0 },
-      model: { enabled: true, batches_sent: 2, batches_ok: 2, batches_failed: 0, batches_zero_scored: 1, scored: 8, unscored: 0, downgraded: 0, capped: 0 },
+      model: { enabled: true, batches_sent: 2, batches_ok: 2, batches_failed: 0, batches_zero_scored: 1, scored: 8, unscored: 0, downgraded: 0, capped: 0, fit_only_scored: 3, fit_only_already_scored: 0, fit_only_unscored: 0 },
     };
     const line = renderTriageLine(triage);
-    assert.equal(line, 'triage: 12 auto-skipped, 3 auto-new, 8 sent to model, 8 scored, 1 of 2 batches scored nothing (check the prompt)');
+    assert.equal(line, 'triage: 12 auto-skipped, 3 auto-new, 8 sent to model, 8 scored, 1 of 2 batches scored nothing (check the prompt), 3 of 3 auto-new fit-scored');
   });
 
   test('model-disabled: candidate summary missing', () => {
@@ -322,11 +322,11 @@ describe('renderTriageLine / per-run triage line in text, html, markdown (slice 
     const data = dataWith({
       configured: true,
       deterministic: { skip_noise: 4, skip_low: 8, auto_new: 3, model_band: 8, has_open_review: 0 },
-      model: { enabled: true, batches_sent: 1, batches_ok: 1, batches_failed: 0, batches_zero_scored: 0, scored: 8, unscored: 0, downgraded: 0, capped: 0 },
+      model: { enabled: true, batches_sent: 1, batches_ok: 1, batches_failed: 0, batches_zero_scored: 0, scored: 8, unscored: 0, downgraded: 0, capped: 0, fit_only_scored: 3, fit_only_already_scored: 0, fit_only_unscored: 0 },
     });
-    assert.match(renderReportText(data), /triage: 12 auto-skipped, 3 auto-new, 8 sent to model, 8 scored/);
-    assert.match(renderReportHtml(data), /triage: 12 auto-skipped, 3 auto-new, 8 sent to model, 8 scored/);
-    assert.match(renderReportMarkdown(data), /triage: 12 auto-skipped, 3 auto-new, 8 sent to model, 8 scored/);
+    assert.match(renderReportText(data), /triage: 12 auto-skipped, 3 auto-new, 8 sent to model, 8 scored, 3 of 3 auto-new fit-scored/);
+    assert.match(renderReportHtml(data), /triage: 12 auto-skipped, 3 auto-new, 8 sent to model, 8 scored, 3 of 3 auto-new fit-scored/);
+    assert.match(renderReportMarkdown(data), /triage: 12 auto-skipped, 3 auto-new, 8 sent to model, 8 scored, 3 of 3 auto-new fit-scored/);
   });
 
   test('all three renderers omit the triage line entirely when stats.triage is absent (a run from before this feature shipped)', () => {
@@ -334,6 +334,48 @@ describe('renderTriageLine / per-run triage line in text, html, markdown (slice 
     for (const rendered of [renderReportText(data), renderReportHtml(data), renderReportMarkdown(data)]) {
       assert.ok(!rendered.includes('triage:'), 'no triage line when stats.triage is absent');
     }
+  });
+});
+
+describe('renderTriageLine: auto-new fit-scoring clause (auto_new band model scoring PR)', () => {
+  /** @param {Partial<{ deterministic: any, model: any }>} o */
+  function triageWith(o = {}) {
+    return {
+      configured: true,
+      deterministic: { skip_noise: 0, skip_low: 0, auto_new: 3, model_band: 0, has_open_review: 0, ...(o.deterministic ?? {}) },
+      model: { enabled: true, batches_sent: 1, batches_ok: 1, batches_failed: 0, batches_zero_scored: 0, scored: 0, unscored: 0, downgraded: 0, capped: 0, fit_only_scored: 0, fit_only_already_scored: 0, fit_only_unscored: 0, ...(o.model ?? {}) },
+    };
+  }
+
+  test('no auto_new ids this run: the clause is omitted entirely, even with the model enabled', () => {
+    const line = renderTriageLine(triageWith({ deterministic: { auto_new: 0 }, model: { fit_only_scored: 0 } }));
+    assert.ok(!line.includes('auto-new fit-scored'));
+  });
+
+  test('model scoring disabled: the clause is omitted even when auto_new > 0 (the base line already says scoring is off)', () => {
+    const line = renderTriageLine(triageWith({ model: { enabled: false, reason: 'candidate_summary_missing' } }));
+    assert.ok(!line.includes('auto-new fit-scored'));
+    assert.match(line, /model scoring disabled: candidate summary missing/);
+  });
+
+  test('all fit-scored: compact form, no parenthetical', () => {
+    const line = renderTriageLine(triageWith({ model: { fit_only_scored: 3 } }));
+    assert.match(line, /3 of 3 auto-new fit-scored$/);
+  });
+
+  test('some already scored by a human in between: mentioned in the parenthetical', () => {
+    const line = renderTriageLine(triageWith({ model: { fit_only_scored: 2, fit_only_already_scored: 1 } }));
+    assert.match(line, /2 of 3 auto-new fit-scored \(1 already scored\)$/);
+  });
+
+  test('some unscored (model omitted / batch failed / row vanished): mentioned in the parenthetical', () => {
+    const line = renderTriageLine(triageWith({ model: { fit_only_scored: 1, fit_only_unscored: 2 } }));
+    assert.match(line, /1 of 3 auto-new fit-scored \(2 unscored\)$/);
+  });
+
+  test('both already-scored and unscored nonzero: both mentioned, comma separated', () => {
+    const line = renderTriageLine(triageWith({ model: { fit_only_scored: 1, fit_only_already_scored: 1, fit_only_unscored: 1 } }));
+    assert.match(line, /1 of 3 auto-new fit-scored \(1 already scored, 1 unscored\)$/);
   });
 });
 
