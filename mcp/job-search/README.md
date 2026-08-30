@@ -28,7 +28,7 @@ mcp/job-search/
                       auto-triage); unattended runs refuse a mismatch
   sql/                001-011 migrations (each BEGIN/COMMIT, idempotent) + unique_indexes.sql (conditional)
   bin/                scan.js  migrate.js  backfill-embeddings.js  config-lock.js  remind.js
-                      dashboard.js  seed-opportunities.js
+                      dashboard.js  seed-opportunities.js  triage-backfill.js
   seed/               opportunities.example.json (synthetic; the real file is gitignored under data/)
   scripts/            register-dashboard-task.ps1
   src/server.js       MCP server (stdout carries JSON-RPC frames only)
@@ -289,6 +289,19 @@ the scan the same way a malformed `noise-rules.json` does today.
 `stats.triage` is present, for example `triage: 12 auto-skipped, 3 auto-new, 8 sent to model, 8 scored`,
 distinguishing "not configured", an ordinary run, a failed model batch, a batch that scored nothing (an
 anomaly worth checking the prompt over), and model scoring deliberately disabled.
+
+**Backfill.** `bin/triage-backfill.js` is a one-time (or as-needed) catch-up for the backlog that
+predates auto-triage, or any run where the triage step never ran or failed: nightly scans only triage the
+rows their own `run_id` touched, so an older run's untriaged rows are never revisited on their own. The
+script finds every historical `run_id` that still has at least one live, non-duplicate, untriaged listing
+attached to it and replays `runTriage()` for each, reusing the exact same deterministic and model steps a
+nightly scan uses, with no separate classification logic. `node bin/triage-backfill.js --dry-run` reports
+per-run branch counts (skip_noise, skip_low, auto_new, model_band, has_open_review, other) without writing
+anything or calling `claude`; the live form writes marks exactly as a scan does and merges each run's
+stats into `ic_scan_runs.stats.triage_backfill`. `--limit-runs N` stages the rollout across several
+invocations. Safe to re-run: a row a previous pass (or a human, or a nightly scan) already touched
+reclassifies to `already_marked` or another terminal branch and is left alone. Run it when no nightly scan
+is in flight; the model step has no per-row lock of its own.
 
 ### Gmail job alerts
 
