@@ -11,7 +11,7 @@
         "hooks": [
           {
             "type": "command",
-            "command": "bash .claude/hooks/pre-commit-secret-grep.sh",
+            "command": "bash \"$CLAUDE_PROJECT_DIR/.claude/hooks/pre-commit-secret-grep.sh\"",
             "timeout": 15000
           }
         ]

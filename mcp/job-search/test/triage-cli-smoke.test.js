@@ -12,12 +12,9 @@ import { test, describe } from 'node:test';
 import assert from 'node:assert/strict';
 import fs from 'node:fs';
 import path from 'node:path';
-import { execFile } from 'node:child_process';
-import { promisify } from 'node:util';
 import { fileURLToPath } from 'node:url';
-import { buildTriagePrompt, validateModelOutput } from '../src/core/triage.js';
+import { buildTriagePrompt, validateModelOutput, execFileWithStdin } from '../src/core/triage.js';
 
-const execFileP = promisify(execFile);
 const LIVE = process.env.LIVE === '1';
 const HERE = path.dirname(fileURLToPath(import.meta.url));
 const PKG = path.join(HERE, '..');
@@ -37,7 +34,7 @@ describe('LIVE auto-triage CLI smoke', { skip: !LIVE && 'set LIVE=1 to run again
       '--json-schema', schemaJson,
       '--strict-mcp-config', '--mcp-config', mcpEmptyPath,
     ];
-    const res = await execFileP('claude', args, { input: prompt, timeout: 60000, maxBuffer: 1 << 20, windowsHide: true });
+    const res = await execFileWithStdin('claude', args, { input: prompt, timeout: 60000, maxBuffer: 1 << 20, windowsHide: true });
     const stdout = String(res.stdout);
     const validated = validateModelOutput({ exitCode: 0, timedOut: false, stdout }, [1], { model: { skipMaxFit: 30 } });
     assert.equal(validated.ok, true, `expected the real CLI's envelope to validate against this spec's captured shape; got: ${stdout.slice(0, 500)}`);
