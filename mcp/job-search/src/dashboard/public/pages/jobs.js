@@ -24,6 +24,16 @@ export const SORTS = Object.freeze(['posted', 'seen', 'prescore', 'fit', 'id', '
 
 const SORT_STORAGE_KEY = 'jobs.sort.v1';
 
+/**
+ * Single source of truth for this page's default filter state -- used both as the initial `filterState`
+ * in render() and as what onResetView() restores. Previously these were two independent object literals
+ * that had to be kept in sync by hand; a change to one (e.g. adding hideSkip here) silently missed the
+ * other. Frozen so a caller mutating the returned object cannot corrupt the shared default; both call
+ * sites spread it (`{ ...DEFAULT_FILTER_STATE }`) into a fresh object instead of holding a reference to
+ * this one.
+ */
+export const DEFAULT_FILTER_STATE = Object.freeze({ hideDuplicates: true, hideSkip: true });
+
 /** @param {unknown} s */
 function validateSort(s) {
   return typeof s === 'string' && SORTS.includes(s) ? s : 'posted';
@@ -153,7 +163,7 @@ export const KEYBOARD_ACTIONS = Object.freeze({
 
 /** @param {HTMLElement} container */
 export async function render(container, params, app) {
-  let filterState = { hideDuplicates: true };
+  let filterState = { ...DEFAULT_FILTER_STATE };
   let sortState = loadSortState();
   const selected = new Set();
   const cursor = createListCursor();
@@ -209,7 +219,7 @@ export async function render(container, params, app) {
    */
   function onResetView() {
     sortState = { sort: 'posted', dir: 'desc' };
-    filterState = { hideDuplicates: true };
+    filterState = { ...DEFAULT_FILTER_STATE };
     selected.clear();
     try {
       localStorage.removeItem(SORT_STORAGE_KEY);
