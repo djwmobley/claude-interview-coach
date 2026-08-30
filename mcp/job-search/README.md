@@ -290,6 +290,12 @@ the scan the same way a malformed `noise-rules.json` does today.
 distinguishing "not configured", an ordinary run, a failed model batch, a batch that scored nothing (an
 anomaly worth checking the prompt over), and model scoring deliberately disabled.
 
+**Finding auto-triaged rows in the dashboard.** The Jobs page Filters modal has a dedicated "Auto-triage"
+section with a "Show only rows triaged by auto" checkbox, serialized as `triagedBy=auto`, so
+auto-skipped/auto-newed/model-scored rows stay discoverable beyond the daily report line. Rows that have
+never been triaged at all, by auto or by a human, are reachable via the separate "Untriaged (never
+triaged)" toggle in the same Status section.
+
 **Backfill.** `bin/triage-backfill.js` is a one-time (or as-needed) catch-up for the backlog that
 predates auto-triage, or any run where the triage step never ran or failed: nightly scans only triage the
 rows their own `run_id` touched, so an older run's untriaged rows are never revisited on their own. The
@@ -569,7 +575,8 @@ page, and a link's `href`/`src` is only ever written after the server's own
 `https:`.
 
 **Pages:** Home (status tiles, run/cancel scan, scan progress, agenda, recent
-activity), Jobs (filterable table with bulk stage actions and 10 s Undo), Job
+activity), Jobs (filterable table, including an Auto-triage filter, with bulk stage actions and 10 s
+Undo), Job
 detail (stage buttons, notes with 800 ms autosave, documents, follow-ups, history),
 Pipeline (grouped list by stage, not a kanban board), Follow-ups (Overdue/Today/
 This week/Later/Snoozed/Done), Review (candidate vs. matches with differing fields
