@@ -76,7 +76,102 @@
       "mode": "browser",
       "enabled": false,
       "comment": "VERIFIED 2026-08-25: no public list of client searches. /en/opportunities is 404; careers-with-our-clients is a resume-submission CTA page with no listings (refers candidates to AESC BlueSteps). Nothing to scan. Keep disabled."
+    },
+    {
+      "slug": "dsg",
+      "name": "Diversified Search Group (DSG / Odgers Berndtson US)",
+      "listUrl": "https://www.dsgco.com/active-searches/",
+      "domains": [
+        "dsgco.com",
+        "www.dsgco.com"
+      ],
+      "pathPatterns": [
+        "^/active-searches/?$",
+        "^/search/[0-9]+-[a-z0-9-]+/?$"
+      ],
+      "mode": "fetch",
+      "enabled": true,
+      "comment": "VERIFIED 2026-08-29 via non-browser GET: active-searches page is server-rendered with 150+ real listing anchors (page states Active (241)), no login, no form submission. No JSON-LD or datePosted found, so rows cannot be window-filtered by date. Detail pages are plain HTML with full text. pathPatterns includes the list page itself (/active-searches/) alongside the detail pattern: urlguard requires the list-page fetch to match a registered pattern too, not just extracted detail links."
+    },
+    {
+      "slug": "chiefjobs",
+      "name": "ChiefJobs.com (The C-Suite Job Board)",
+      "listUrl": "https://www.chiefjobs.com/chief-jobs/",
+      "domains": [
+        "chiefjobs.com",
+        "www.chiefjobs.com"
+      ],
+      "pathPatterns": [
+        "^/chief-jobs/?$",
+        "^/job/[a-z0-9-]+/?$"
+      ],
+      "mode": "fetch",
+      "enabled": true,
+      "comment": "VERIFIED 2026-08-29 via non-browser GET: C-suite/VP/SVP board, about 10 rows on page 1 of 6, no login to browse or read detail, relative posted dates shown (2 days to 2 weeks old). No JSON-LD found; adapter falls back to anchor scan. Only page 1 is fetched. pathPatterns includes the list page itself (/chief-jobs/) alongside the detail pattern: urlguard requires the list-page fetch to match a registered pattern too, not just extracted detail links."
+    },
+    {
+      "slug": "execthread",
+      "name": "ExecThread",
+      "listUrl": "https://execthread.com/browse/latest",
+      "domains": [
+        "execthread.com",
+        "www.execthread.com"
+      ],
+      "pathPatterns": [
+        "^/browse/latest/?$",
+        "^/listings/[a-z0-9-]+/?$"
+      ],
+      "mode": "fetch",
+      "enabled": true,
+      "comment": "VERIFIED 2026-08-29 via non-browser GET: browse/latest lists about 90 real listing anchors with posted dates (2026-08-27/28), no login wall on list or detail. By site design the company name and apply link are hidden on detail pages, so rows land as company Confidential with thin descriptions; expected, not a fetch failure. pathPatterns includes the list page itself (/browse/latest) alongside the detail pattern: urlguard requires the list-page fetch to match a registered pattern too, not just extracted detail links."
+    },
+    {
+      "slug": "builtin-houston",
+      "name": "Built In (Houston)",
+      "listUrl": "https://builtin.com/jobs/houston",
+      "domains": [
+        "builtin.com",
+        "www.builtin.com"
+      ],
+      "pathPatterns": [
+        "^/jobs/houston/?$",
+        "^/job/[a-z0-9-]+/[0-9]+/?$"
+      ],
+      "mode": "fetch",
+      "enabled": true,
+      "comment": "VERIFIED 2026-08-29 via non-browser GET: server-rendered, 12 real anchors on page 1 of 688, rows dated minutes to 2 days old, no login. builtinhouston.com is a parked domain; use builtin.com/jobs/houston. Broad tech board, relies on the title filter; only page 1 is fetched. pathPatterns includes the list page itself (/jobs/houston) alongside the detail pattern: urlguard requires the list-page fetch to match a registered pattern too, not just extracted detail links."
+    },
+    {
+      "slug": "wittkieffer",
+      "name": "WittKieffer",
+      "listUrl": "https://wittkieffer.com/positions",
+      "domains": [
+        "wittkieffer.com",
+        "www.wittkieffer.com",
+        "candidateportal.wittkieffer.com"
+      ],
+      "pathPatterns": [
+        "^/positions/[a-z0-9-]+/?$"
+      ],
+      "mode": "browser",
+      "enabled": false,
+      "comment": "CHECKED 2026-08-29: /positions, /search-open-positions/, and candidateportal.wittkieffer.com each returned an empty shell to a non-browser GET (Salesforce Experience Cloud LWC). Likely JS-rendered SPA or login-gated portal; not distinguished without a real browser session. Needs a browser-mode check before enabling."
+    },
+    {
+      "slug": "theladders",
+      "name": "TheLadders",
+      "listUrl": "https://www.theladders.com/jobs/chief-technology-officer-cto-jobs,houston-tx",
+      "domains": [
+        "theladders.com",
+        "www.theladders.com"
+      ],
+      "pathPatterns": [
+        "^/job/[a-z0-9-]+/?$"
+      ],
+      "mode": "browser",
+      "enabled": false,
+      "comment": "CHECKED 2026-08-29: 403 to a non-browser GET (bot defense). Might work in browser mode; detail path pattern is a guess and unverified. Keep disabled until checked in a real browser."
     }
   ],
-  "_comment": "Exec-search firm boards for the exec-generic adapter. All five were verified on 2026-08-25: none exposes a scannable public list today. Retained-search firms (Heidrick, Spencer Stuart, Russell Reynolds) publish no client mandates; Korn Ferry needs a form submit the capability object forbids; East 57th is a JobDiva SPA that needs its own extractor. Every entry stays disabled; a wrong listUrl fails closed (CONFIG_INVALID) and never reaches the network."
+  "_comment": "Exec-search firm boards for the exec-generic adapter. The original five were verified on 2026-08-25: none exposes a scannable public list today. Retained-search firms (Heidrick, Spencer Stuart, Russell Reynolds) publish no client mandates; Korn Ferry needs a form submit the capability object forbids; East 57th is a JobDiva SPA that needs its own extractor. Six more boards were checked 2026-08-29: dsg, chiefjobs, execthread, and builtin-houston are enabled (fetch mode, verified live via non-browser GET); wittkieffer and theladders stay disabled pending a browser-mode check (empty JS shell and a 403 respectively). Every entry stays disabled unless verified; a wrong listUrl fails closed (CONFIG_INVALID) and never reaches the network. Sources rejected 2026-08-29 (not added, no config entry): Boyden (public list is nonprofit fundraising roles only); Wellfound (startup IC roles, noise); Heller Search, Riviera, Nexus, Kirk Palmer, DHR, Egon Zehnder, Stanton Chase (no public client-search lists); BlueSteps and ExecuNet (subscription-gated); Ivy Exec (no usable body, unverified); Odgers US (2 roles, PDF briefs only); CIO.com and Hunt Scanlon (editorial/directory, not boards); Otta/WTTJ (login-gated); Google Jobs and site: queries (no API / wrong domain for the adapter model)."
 }
