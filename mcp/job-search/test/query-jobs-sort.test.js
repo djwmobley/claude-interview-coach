@@ -19,7 +19,26 @@
 import { test, describe } from 'node:test';
 import assert from 'node:assert/strict';
 import { SORTS as REAL_SORTS } from '../src/tools/query_jobs.js';
-import { SORTS as JOBS_PAGE_SORTS, COLUMNS, FIRST_CLICK_DIR, nextSortState } from '../src/dashboard/public/pages/jobs.js';
+import { SORTS as JOBS_PAGE_SORTS, COLUMNS, FIRST_CLICK_DIR, nextSortState, DEFAULT_FILTER_STATE } from '../src/dashboard/public/pages/jobs.js';
+
+describe('DEFAULT_FILTER_STATE (single source of truth for the default Jobs view, adversary must-fix A2)', () => {
+  // pages/jobs.js's render() (initial filterState) and onResetView() (the Reset view button's restore
+  // path) both spread this SAME object (`{ ...DEFAULT_FILTER_STATE }`) rather than each keeping its own
+  // independent `{ hideDuplicates: true, ... }` literal -- two literals had already drifted out of sync
+  // once (hideSkip needed adding to both) before this constant existed. Neither render() nor
+  // onResetView() is itself unit-testable without a DOM/page harness (no such harness exists yet for this
+  // page, per the other test files here), so this test pins the one thing that IS directly testable: the
+  // shared constant's exact shape. A future literal reintroduced at either call site instead of this
+  // constant would not be caught by this test, but a change to the constant's shape not reflected here
+  // would be.
+  test('is exactly { hideDuplicates: true, hideSkip: true }', () => {
+    assert.deepEqual(DEFAULT_FILTER_STATE, { hideDuplicates: true, hideSkip: true });
+  });
+
+  test('is frozen (Object.freeze), so a caller cannot mutate the shared default in place', () => {
+    assert.ok(Object.isFrozen(DEFAULT_FILTER_STATE));
+  });
+});
 
 describe('pages/jobs.js SORTS mirror matches the real SORTS array', () => {
   test('same values, same order', () => {

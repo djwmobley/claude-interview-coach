@@ -11,6 +11,14 @@
  * every other, "modal-owned" dimension. `activeFilterCount()` and `filterStateToQuery()` are the two
  * single sources of truth for what counts as a modal-owned dimension and how it serializes; see each
  * function's own comment.
+ *
+ * "Hide skipped" (default Jobs view hides status='skip' rows -- auto-skipped noise that is deliberately
+ * never fit-scored) is bar-owned like hideDuplicates, not modal-owned. Its polarity is deliberately the
+ * OPPOSITE of hideDuplicates/includeDuplicates: the checked/default state SENDS `hideSkip=1`, and only the
+ * unchecked state omits the param. This is intentional, not an inconsistency -- the server-side default
+ * (buildQuery/query_jobs.js) must stay unfiltered so the MCP query_jobs tool, which never sets hideSkip,
+ * sees zero behavior change. hideDuplicates instead flips its own server default (excluded by default),
+ * so its bar-checked state can safely omit the param.
  */
 import { h } from '../lib/dom.js';
 
@@ -91,6 +99,10 @@ export function filterStateToQuery(state) {
   // hideDuplicates checked (the common/default state) omits includeDuplicates entirely; only the
   // unchecked state sends includeDuplicates=1 (section 9 item 6's polarity rule).
   if (state.hideDuplicates === false) q.includeDuplicates = '1';
+  // hideSkip is the OPPOSITE polarity of hideDuplicates above (see this file's top-of-file comment): the
+  // checked/default state sends `hideSkip=1`, the unchecked state sends nothing, so the server default
+  // stays unfiltered for MCP callers that never set this param at all.
+  if (state.hideSkip) q.hideSkip = '1';
   return q;
 }
 
@@ -110,6 +122,12 @@ export function filterBar(opts) {
   const hideDupCheckbox = h('input', {
     attrs: { type: 'checkbox' }, checked: state.hideDuplicates !== false,
     on: { change: (ev) => opts.onChange({ hideDuplicates: /** @type {HTMLInputElement} */ (ev.target).checked }) },
+  });
+  // Default true, like hideDuplicates -- but see the opposite-polarity note in this file's top comment
+  // and in filterStateToQuery above for why the two serialize differently.
+  const hideSkipCheckbox = h('input', {
+    attrs: { type: 'checkbox' }, checked: state.hideSkip !== false,
+    on: { change: (ev) => opts.onChange({ hideSkip: /** @type {HTMLInputElement} */ (ev.target).checked }) },
   });
   const n = activeFilterCount(state);
   const filtersButton = h('button', {
@@ -133,6 +151,7 @@ export function filterBar(opts) {
     h('label', { className: 'filter-bar__field' }, [h('span', { text: 'Location' }), locationSelect]),
     h('label', { className: 'filter-bar__field' }, [h('span', { text: 'First seen' }), firstSeenSelect]),
     h('label', { className: 'filter-bar__field filter-bar__checkbox' }, [hideDupCheckbox, h('span', { text: 'Hide duplicates' })]),
+    h('label', { className: 'filter-bar__field filter-bar__checkbox' }, [hideSkipCheckbox, h('span', { text: 'Hide skipped' })]),
     filtersButton,
     resetButton,
   ]);

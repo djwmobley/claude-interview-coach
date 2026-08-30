@@ -81,6 +81,19 @@ describe('repeated query params: Object.fromEntries keeps the LAST value (docume
   });
 });
 
+describe('parseListingsQuery(): hideSkip (default Jobs view hides status=skip rows, total classification)', () => {
+  test('"1" and "true" both parse to true', () => {
+    assert.equal(parseListingsQuery({ hideSkip: '1' }).hideSkip, true);
+    assert.equal(parseListingsQuery({ hideSkip: 'true' }).hideSkip, true);
+  });
+
+  test('anything else -- missing, empty, garbage -- parses to false (fail-open: shows skip rows rather than hiding data on a malformed param)', () => {
+    for (const hideSkip of [undefined, '', 'garbage', '0', 'false', 'TRUE']) {
+      assert.equal(parseListingsQuery({ hideSkip }).hideSkip, false, `hideSkip=${JSON.stringify(hideSkip)}`);
+    }
+  });
+});
+
 describe('parseListingsQuery(): triagedBy (slice 3 auto-triage spec section 7)', () => {
   test('"auto" passes through unchanged', () => {
     assert.equal(parseListingsQuery({ triagedBy: 'auto' }).triagedBy, 'auto');

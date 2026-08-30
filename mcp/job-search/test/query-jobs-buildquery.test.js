@@ -10,7 +10,7 @@
 import { test, describe } from 'node:test';
 import assert from 'node:assert/strict';
 import { buildQuery, SORTS } from '../src/tools/query_jobs.js';
-import { PIPELINE_STATUSES } from '../src/core/statuses.js';
+import { PIPELINE_STATUSES, STATUS_GROUPS } from '../src/core/statuses.js';
 
 const BASE = { includeDuplicates: false, includeExpired: false, sort: 'posted', limit: 25, offset: 0 };
 
@@ -184,6 +184,62 @@ describe('buildQuery(): minPrescore/minFit are already-validated numbers by the 
     const { sql } = buildQuery({ ...BASE, minPrescore: undefined, minFit: undefined });
     assert.doesNotMatch(sql, /l\.prescore >=/);
     assert.doesNotMatch(sql, /l\.fit_score >=/);
+  });
+});
+
+describe('buildQuery(): hideSkip (default Jobs view hides status=skip rows)', () => {
+  test('hideSkip alone adds the IS-NULL-OR-not-skip predicate, keeping untriaged rows matchable', () => {
+    const { sql } = buildQuery({ ...BASE, hideSkip: true });
+    assert.match(sql, /\(l\.status IS NULL OR l\.status <> 'skip'\)/);
+  });
+
+  test('hideSkip absent or false adds no predicate', () => {
+    for (const hideSkip of [undefined, false]) {
+      const { sql } = buildQuery({ ...BASE, hideSkip });
+      assert.doesNotMatch(sql, /l\.status <> 'skip'/, `hideSkip=${JSON.stringify(hideSkip)}`);
+    }
+  });
+
+  test('hideSkip + status containing "skip": suppressed (explicit request to see skip rows wins)', () => {
+    const { sql } = buildQuery({ ...BASE, hideSkip: true, status: ['skip', 'dead'] });
+    assert.doesNotMatch(sql, /l\.status <> 'skip'/);
+    assert.match(sql, /l\.status = ANY\(\$\d+::text\[\]\)/);
+  });
+
+  test('hideSkip + status NOT containing "skip": applied alongside the status filter', () => {
+    const { sql } = buildQuery({ ...BASE, hideSkip: true, status: ['dead', 'lost'] });
+    assert.match(sql, /l\.status <> 'skip'/);
+    assert.match(sql, /l\.status = ANY\(\$\d+::text\[\]\)/);
+  });
+
+  test('every real STATUS_GROUPS group: hideSkip is suppressed only for a group whose members include "skip"', () => {
+    for (const [group, members] of Object.entries(STATUS_GROUPS)) {
+      const { sql } = buildQuery({ ...BASE, hideSkip: true, group });
+      if (/** @type {readonly string[]} */ (members).includes('skip')) {
+        assert.doesNotMatch(sql, /l\.status <> 'skip'/, `group=${group} includes skip, predicate must be suppressed`);
+      } else {
+        assert.match(sql, /l\.status <> 'skip'/, `group=${group} does not include skip, predicate must apply`);
+      }
+    }
+  });
+
+  test('hideSkip + untriaged=1: applied (untriaged discards group entirely, hideSkip is harmless there)', () => {
+    const { sql } = buildQuery({ ...BASE, hideSkip: true, untriaged: true });
+    assert.match(sql, /l\.status <> 'skip'/);
+    assert.match(sql, /l\.status IS NULL/);
+  });
+
+  test('hideSkip + untriaged=1 + a group whose members include "skip": still applied -- group is dead in this combination', () => {
+    const groupWithSkip = Object.entries(STATUS_GROUPS).find(([, members]) => /** @type {readonly string[]} */ (members).includes('skip'))?.[0];
+    assert.ok(groupWithSkip, 'sanity: at least one STATUS_GROUPS group includes skip');
+    const { sql } = buildQuery({ ...BASE, hideSkip: true, untriaged: true, group: groupWithSkip });
+    assert.match(sql, /l\.status <> 'skip'/);
+  });
+
+  test('a bogus group with hideSkip set does not throw (adversary must-fix A1: hasOwnProperty guard before indexing STATUS_GROUPS)', () => {
+    assert.doesNotThrow(() => buildQuery({ ...BASE, hideSkip: true, group: 'bogus' }));
+    const { sql } = buildQuery({ ...BASE, hideSkip: true, group: 'bogus' });
+    assert.match(sql, /l\.status <> 'skip'/);
   });
 });
 

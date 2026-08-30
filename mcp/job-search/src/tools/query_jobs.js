@@ -94,6 +94,26 @@ export function buildQuery(a) {
     if (a.untriaged) where.push('l.status IS NULL');
     else if (a.group && Object.prototype.hasOwnProperty.call(STATUS_GROUPS, a.group)) where.push(`l.status = ANY(${add(STATUS_GROUPS[a.group])}::text[])`);
   }
+  // Dashboard-only extension (default Jobs view hides status='skip' rows -- auto-skipped noise that is
+  // deliberately never fit-scored): like group/untriaged/dir/triagedBy above, `hideSkip` is never part of
+  // the MCP tool's zod schema, so it is always undefined for an MCP caller and this predicate never
+  // applies there. Untriaged (NULL status) rows are explicitly kept visible via the `IS NULL` arm --
+  // hideSkip narrows out one known status, it does not narrow the result to only-triaged rows.
+  //
+  // Precedence: suppress the predicate entirely (never apply it) when the caller already made an
+  // explicit request it would otherwise contradict --
+  //   (a) the `status` array itself names 'skip' (an explicit ask to see skip rows), OR
+  //   (b) `untriaged` is NOT set AND `a.group` names a real STATUS_GROUPS group whose members include
+  //       'skip' (today only 'closed' does). The "untriaged is NOT set" guard mirrors the branch above:
+  //       when untriaged IS set, that branch already discards `a.group` entirely for the request, so a
+  //       skip-including group must not be treated as a live skip-request in that combination either --
+  //       hideSkip stays applied (harmless: group is already dead there).
+  // The `hasOwnProperty` check is required before indexing STATUS_GROUPS[a.group]: a bare
+  // `STATUS_GROUPS[a.group].includes('skip')` throws a TypeError (and 500s the endpoint) for a bogus
+  // group like `?group=bogus`, since the lookup itself would be `undefined`.
+  const statusArrayHasSkip = hasStatus && a.status.includes('skip');
+  const groupHasSkip = !a.untriaged && a.group && Object.prototype.hasOwnProperty.call(STATUS_GROUPS, a.group) && STATUS_GROUPS[a.group].includes('skip');
+  if (a.hideSkip && !statusArrayHasSkip && !groupHasSkip) where.push(`(l.status IS NULL OR l.status <> 'skip')`);
   // Dashboard-only extension (slice 3 auto-triage spec section 7, like `group`/`untriaged` above):
   // narrows to rows whose most recent 'status' event was written by the automated triage step. A
   // correlated subquery per row is cheap enough at this project's scale (hundreds to low thousands of

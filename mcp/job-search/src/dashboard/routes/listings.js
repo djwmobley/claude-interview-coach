@@ -63,6 +63,11 @@ export function parseListingsQuery(q) {
     unscored: q.unscored === '1' || q.unscored === 'true',
     includeDuplicates: q.includeDuplicates === '1' || q.includeDuplicates === 'true',
     includeExpired: q.includeExpired === '1' || q.includeExpired === 'true',
+    // Default Jobs view hides status='skip' rows (dashboard-only, like group/untriaged/dir/triagedBy
+    // above -- not part of the MCP query_jobs zod schema). Total classification over the one recognized
+    // value: anything else (missing, empty, garbage) is false, which fails open by showing skip rows
+    // rather than silently hiding data on a malformed query param.
+    hideSkip: q.hideSkip === '1' || q.hideSkip === 'true',
     // Exact membership in the real SORTS list (imported, not redeclared): the previous `q.sort ||
     // 'posted'` let any garbage string through to buildQuery's ORDER BY lookup, which used to resolve to
     // `undefined` and produce broken SQL for a non-empty, non-SORTS value (a latent crash, not just a
