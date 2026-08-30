@@ -60,8 +60,11 @@ function saveSortState(state) {
   }
 }
 
-// 'Location' and 'Fit' carry the same classes as their body cells (components/job-row.js) so app.css's
-// 1180px breakpoint rule can hide each header alongside the cells it labels, not just the cells.
+// Every column carries the same class as its body cell (components/job-row.js), not just 'Location' and
+// 'Fit': app.css's 1180px breakpoint rule needs the paired header/cell classes to hide each header
+// alongside the cells it labels, and the jobs-table fixed-layout width rules (also app.css) key off these
+// same classes to give the table stable per-sort-key column widths instead of an auto layout that
+// recomputes from whichever 50-row /api/listings page happens to be showing.
 // `sortKey` values are string literals matching SORTS above (not this same array by reference, since a
 // column's sortKey is also read directly by pages/jobs.js's own tests via COLUMNS -- see
 // test/query-jobs-sort.test.js).
@@ -71,14 +74,14 @@ function saveSortState(state) {
 // column from the one this header labels; using 'seen' here would sort the table by the wrong field
 // while the header itself kept reading "First seen".
 export const COLUMNS = Object.freeze([
-  '',
-  { text: 'Title', sortKey: 'title' },
-  { text: 'Company', sortKey: 'company' },
-  { text: 'Source', sortKey: 'source' },
-  { text: 'Stage', sortKey: 'status' },
-  { text: 'Prescore', sortKey: 'prescore' },
+  { text: '', className: 'job-row__checkbox' },
+  { text: 'Title', sortKey: 'title', className: 'job-row__title' },
+  { text: 'Company', sortKey: 'company', className: 'job-row__company' },
+  { text: 'Source', sortKey: 'source', className: 'job-row__source' },
+  { text: 'Stage', sortKey: 'status', className: 'job-row__stage' },
+  { text: 'Prescore', sortKey: 'prescore', className: 'job-row__prescore' },
   { text: 'Fit', sortKey: 'fit', className: 'job-row__fit' },
-  { text: 'First seen', sortKey: 'first_seen' },
+  { text: 'First seen', sortKey: 'first_seen', className: 'job-row__first-seen' },
   { text: 'Location', sortKey: 'location', className: 'job-row__location' },
 ]);
 
@@ -253,6 +256,7 @@ export async function render(container, params, app) {
       rows.length === 0
         ? emptyState({ message: 'No jobs match the current filters.', hint: 'Try widening the location or first-seen window.' })
         : dataTable({
+            className: 'jobs-table',
             columns: COLUMNS,
             sort: sortState.sort,
             dir: sortState.dir,
