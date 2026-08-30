@@ -50,6 +50,10 @@ export function parseListingsQuery(q) {
     noiseClass: listParam(q, 'noiseClass'),
     group: q.group || undefined,
     untriaged: q.untriaged === '1' || q.untriaged === 'true',
+    // Slice 3 auto-triage (spec section 7): total classification over the one recognized value -- any
+    // other query value (missing, empty, garbage) reduces to `undefined` (no filter), never passed
+    // through raw to buildQuery.
+    triagedBy: q.triagedBy === 'auto' ? 'auto' : undefined,
     location: q.location || undefined,
     remote: q.remote || undefined,
     postedAfter: q.postedAfter || undefined,

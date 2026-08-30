@@ -29,7 +29,24 @@ async function main() {
   // two files' marker-writing tests race each other even though production is now fully out of the
   // picture. Serializing file execution trades some wall-clock time for a suite that cannot flake on
   // that shared state.
-  const child = spawn(process.execPath, ['--test', '--test-concurrency=1', ...extraArgs], {
+  //
+  // Explicit glob when no file/pattern was given on the command line (bug found authoring slice 3
+  // auto-triage): with no positional argument, `node --test`'s own DEFAULT recursive discovery treats
+  // EVERY .js/.cjs/.mjs file anywhere under a directory literally named `test` as a test file, not only
+  // ones matching `*.test.js` -- including non-test executable fixtures like
+  // `test/fixtures/triage/fake-claude.mjs` (a fake `claude` CLI spawned by src/core/triage.js's
+  // runModelTriage in a real child process for test/scan-cli-triage.test.js). Node isolates each
+  // discovered file into its own subprocess (`node --test-concurrency=1 <file>`), which makes that file
+  // process.argv[1] in that subprocess exactly as if it had been run directly -- an `isMain`
+  // (`process.argv[1] === fileURLToPath(import.meta.url)`) guard inside the fixture file itself, the
+  // usual defense against accidental direct execution elsewhere in this codebase (bin/scan.js,
+  // bin/migrate.js), does NOT distinguish that isolated-subprocess case from a real direct invocation, so
+  // it cannot fix this on its own. Any test file added directly under `test/` still matches this glob
+  // (its own name still ends in `.test.js`); only non-test files under `test/fixtures/`, `test/helpers/`,
+  // etc. are excluded, which is exactly the set that should never have been "test files" in the first
+  // place. A caller passing an explicit file/pattern via `npm test -- <path>` is unaffected.
+  const files = extraArgs.length ? extraArgs : ['test/*.test.js'];
+  const child = spawn(process.execPath, ['--test', '--test-concurrency=1', ...files], {
     cwd: ROOT,
     stdio: 'inherit',
     // JOBSEARCH_TEST_GUARD=1 backs up src/core/config.js's assertTestDbGuard() in case a future Node

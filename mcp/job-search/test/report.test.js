@@ -16,6 +16,7 @@ import {
   buildScanReport, buildReportSubject, renderReportText, renderReportHtml, renderReportMarkdown,
   dayKeyInTz, isWeekdayInTz, escapeHtml, urlPassesRegistry, getReportState, stampReportSent,
   collectSuspectAndUnclassified, resolveReportWindow, homeLocationNormsFor, writeReportFile, wrapReportHtml,
+  renderTriageLine,
 } from '../src/core/report.js';
 import { tool as scanReport } from '../src/tools/scan_report.js';
 import { registryFrom } from '../src/core/urlguard.js';
@@ -244,6 +245,94 @@ describe('renderReportText / Html / Markdown: no em-dashes, listing text present
     for (const s of [text, html, md]) {
       assert.ok(s.includes('Chief Technology Officer'));
       assert.ok(!s.includes(String.fromCharCode(8212)), 'no em-dash in rendered report');
+    }
+  });
+});
+
+describe('renderTriageLine / per-run triage line in text, html, markdown (slice 3 auto-triage spec section 6)', () => {
+  /** @param {any} triage */
+  function runWith(triage) {
+    return {
+      run_id: 1, profile: 'exec-default', status: 'ok', started_at: '2026-08-29T00:00:00.000Z',
+      finished_at: '2026-08-29T00:05:00.000Z', duration_seconds: 300,
+      stats: { fetched: 0, new: 0, updated: 0, repost: 0, ambiguous: 0, detail_skipped_budget: 0, triage },
+      errors: [], pages_by_source: {},
+    };
+  }
+  /** @param {any} triage */
+  function dataWith(triage) {
+    return {
+      dayKey: '2026-08-29', timezone: 'America/Chicago', noScan: false, runs: [runWith(triage)],
+      lookAtThese: { rows: [], excludedCount: 0 }, suspectUnclassified: [],
+      homeLocations: { rows: [], excludedCount: 0 }, reviewQueue: { total: 0, topReasons: [] }, disabledSources: [],
+    };
+  }
+
+  test('unconfigured (no config/triage.json at all)', () => {
+    const line = renderTriageLine({ configured: false });
+    assert.equal(line, 'triage: not configured (no config/triage.json; deterministic and model triage are off)');
+  });
+
+  test('ok: deterministic ran, model scored everything', () => {
+    const triage = {
+      configured: true,
+      deterministic: { skip_noise: 4, skip_low: 8, auto_new: 3, model_band: 8, has_open_review: 1 },
+      model: { enabled: true, batches_sent: 1, batches_ok: 1, batches_failed: 0, batches_zero_scored: 0, scored: 8, unscored: 0, downgraded: 1, capped: 0 },
+    };
+    const line = renderTriageLine(triage);
+    assert.equal(line, 'triage: 12 auto-skipped, 3 auto-new, 8 sent to model, 8 scored');
+  });
+
+  test('failed-batch: claude -p exited non-zero', () => {
+    const triage = {
+      configured: true,
+      deterministic: { skip_noise: 4, skip_low: 8, auto_new: 3, model_band: 8, has_open_review: 0 },
+      model: { enabled: true, batches_sent: 1, batches_ok: 0, batches_failed: 1, batches_zero_scored: 0, scored: 0, unscored: 8, downgraded: 0, capped: 0, last_failure_reason: 'cli_exit_1' },
+    };
+    const line = renderTriageLine(triage);
+    assert.equal(line, 'triage: 12 auto-skipped, 3 auto-new, 8 sent to model, 0 of 8 scored, claude -p exited 1');
+  });
+
+  test('zero-scored-batch: a batch succeeded but scored nothing (distinguished from batches_failed)', () => {
+    const triage = {
+      configured: true,
+      deterministic: { skip_noise: 4, skip_low: 8, auto_new: 3, model_band: 8, has_open_review: 0 },
+      model: { enabled: true, batches_sent: 2, batches_ok: 2, batches_failed: 0, batches_zero_scored: 1, scored: 8, unscored: 0, downgraded: 0, capped: 0 },
+    };
+    const line = renderTriageLine(triage);
+    assert.equal(line, 'triage: 12 auto-skipped, 3 auto-new, 8 sent to model, 8 scored, 1 of 2 batches scored nothing (check the prompt)');
+  });
+
+  test('model-disabled: candidate summary missing', () => {
+    const triage = {
+      configured: true,
+      deterministic: { skip_noise: 4, skip_low: 8, auto_new: 3, model_band: 8, has_open_review: 0 },
+      model: { enabled: false, reason: 'candidate_summary_missing', batches_sent: 0, batches_ok: 0, batches_failed: 0, batches_zero_scored: 0, scored: 0, unscored: 0, downgraded: 0, capped: 0 },
+    };
+    const line = renderTriageLine(triage);
+    assert.equal(line, 'triage: 12 auto-skipped, 3 auto-new, 8 sent to model (model scoring disabled: candidate summary missing)');
+  });
+
+  test('null triage returns null (caller omits the line entirely)', () => {
+    assert.equal(renderTriageLine(null), null);
+    assert.equal(renderTriageLine(undefined), null);
+  });
+
+  test('all three renderers include the triage line when present', () => {
+    const data = dataWith({
+      configured: true,
+      deterministic: { skip_noise: 4, skip_low: 8, auto_new: 3, model_band: 8, has_open_review: 0 },
+      model: { enabled: true, batches_sent: 1, batches_ok: 1, batches_failed: 0, batches_zero_scored: 0, scored: 8, unscored: 0, downgraded: 0, capped: 0 },
+    });
+    assert.match(renderReportText(data), /triage: 12 auto-skipped, 3 auto-new, 8 sent to model, 8 scored/);
+    assert.match(renderReportHtml(data), /triage: 12 auto-skipped, 3 auto-new, 8 sent to model, 8 scored/);
+    assert.match(renderReportMarkdown(data), /triage: 12 auto-skipped, 3 auto-new, 8 sent to model, 8 scored/);
+  });
+
+  test('all three renderers omit the triage line entirely when stats.triage is absent (a run from before this feature shipped)', () => {
+    const data = dataWith(undefined);
+    for (const rendered of [renderReportText(data), renderReportHtml(data), renderReportMarkdown(data)]) {
+      assert.ok(!rendered.includes('triage:'), 'no triage line when stats.triage is absent');
     }
   });
 });

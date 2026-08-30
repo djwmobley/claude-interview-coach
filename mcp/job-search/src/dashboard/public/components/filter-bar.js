@@ -37,6 +37,7 @@ export const FIRST_SEEN_WINDOWS = Object.freeze([
  */
 const MODAL_OWNED_STATE_KEYS = Object.freeze([
   'status', 'source', 'noiseClass', 'remote', 'postedAfterExact', 'minPrescore', 'minFit', 'unscored', 'includeExpired', 'untriaged',
+  'triagedByAuto',
 ]);
 
 /**
@@ -83,6 +84,10 @@ export function filterStateToQuery(state) {
   if (state.unscored) q.unscored = '1';
   if (state.includeExpired) q.includeExpired = '1';
   if (state.untriaged) q.untriaged = '1';
+  // Slice 3 auto-triage (spec section 7): the UI-side state is a plain boolean like every other
+  // modal-owned checkbox, but the query param it serializes to is a VALUE ('auto'), never a bare '1' --
+  // buildQuery/parseListingsQuery's total classification only ever recognizes the literal 'auto'.
+  if (state.triagedByAuto) q.triagedBy = 'auto';
   // hideDuplicates checked (the common/default state) omits includeDuplicates entirely; only the
   // unchecked state sends includeDuplicates=1 (section 9 item 6's polarity rule).
   if (state.hideDuplicates === false) q.includeDuplicates = '1';

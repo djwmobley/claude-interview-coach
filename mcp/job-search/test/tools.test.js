@@ -17,7 +17,7 @@ import { tool as profiles } from '../src/tools/profiles.js';
 import { tool as scans } from '../src/tools/scans.js';
 import { wrapHandler } from '../src/tools/_shared.js';
 import { untrustedRows } from '../src/core/compact.js';
-import { listEvents } from '../src/core/events.js';
+import { listEvents, recordEvent } from '../src/core/events.js';
 
 // Derived from untrustedRows() itself rather than duplicated string literals,
 // so a delimiter-text change would only need to happen in one place.
@@ -148,6 +148,33 @@ describe('query_jobs', () => {
     assert.match(aggRow, /noise:/, 'row line is capped at 120 chars, so the exact noise class text may itself be truncated');
     const okRow = dataRows(all.rows).find((l) => l.startsWith(`#${ok} `));
     assert.doesNotMatch(okRow, /noise:/, 'an ok row never carries a noise: segment');
+  });
+});
+
+describe('query_jobs: triagedBy=auto (slice 3 auto-triage spec section 7, server-side)', () => {
+  test('triagedBy=auto returns only rows whose latest status event actor is auto', async () => {
+    const autoRow = await insert({ title: 'CTO auto-triaged', status: 'new' });
+    const humanRow = await insert({ title: 'CTO human-triaged', status: 'new' });
+    await recordEvent(client, { listingId: autoRow, kind: 'status', toStatus: 'new', actor: 'auto' });
+    await recordEvent(client, { listingId: humanRow, kind: 'status', toStatus: 'new', actor: 'dashboard' });
+    const base = { includeDuplicates: false, includeExpired: false, sort: 'posted', limit: 25, offset: 0, source: [SRC] };
+    const r = /** @type {any} */ (await queryJobs.handler({ ...base, triagedBy: 'auto' }, deps));
+    const ids = dataRows(r.rows).map((l) => Number(l.match(/^#(\d+)/)[1]));
+    assert.ok(ids.includes(autoRow), 'the auto-triaged row is included');
+    assert.ok(!ids.includes(humanRow), 'the human-triaged row is excluded');
+    const withoutFilter = /** @type {any} */ (await queryJobs.handler(base, deps));
+    const allIds = dataRows(withoutFilter.rows).map((l) => Number(l.match(/^#(\d+)/)[1]));
+    assert.ok(allIds.includes(autoRow) && allIds.includes(humanRow), 'triagedBy is opt-in: without it, both rows are visible as usual');
+  });
+
+  test('only the LATEST status event actor counts, not an earlier one', async () => {
+    const row = await insert({ title: 'CTO re-triaged', status: 'shortlisted' });
+    await recordEvent(client, { listingId: row, kind: 'status', toStatus: 'new', actor: 'auto' });
+    await recordEvent(client, { listingId: row, kind: 'status', toStatus: 'shortlisted', actor: 'dashboard' });
+    const base = { includeDuplicates: false, includeExpired: false, sort: 'posted', limit: 25, offset: 0, source: [SRC] };
+    const r = /** @type {any} */ (await queryJobs.handler({ ...base, triagedBy: 'auto' }, deps));
+    const ids = dataRows(r.rows).map((l) => Number(l.match(/^#(\d+)/)[1]));
+    assert.ok(!ids.includes(row), 'the later human mark wins; this row no longer counts as triaged-by-auto');
   });
 });
 

@@ -1,0 +1,4 @@
+{
+  "deterministic": { "enabled": false, "floor": 40, "ceiling": 70 },
+  "model": { "enabled": false }
+}

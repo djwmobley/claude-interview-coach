@@ -18,6 +18,10 @@
  *      its own transaction; every page reserves daily budget first
  *   8. expiry pass per completed source (spec 3.2 rules)
  *   9. finalize the run row, close pages, disconnect, unlock
+ *   10. slice 3 auto-triage (docs/slice3-auto-triage-spec.md): AFTER the advisory lock releases and this
+ *       run's own client closes, on a fresh dedicated connection -- deterministic skip/new routing, then
+ *       a gated claude -p fit-scoring step for the plausible middle band. Never runs for a dry run; never
+ *       changes this run's own status/exit code, only stats.triage.
  *
  * Network side effects are identical with dryRun; only database writes for
  * listings, queue, run items, expiry, and adoption are skipped (the run row
@@ -43,6 +47,7 @@ import { classifyPage, recordWall, recordClean, sourceEnabled } from '../browser
 import { connectSession as defaultConnectSession } from '../browser/session.js';
 import { makeCapability } from '../browser/capability.js';
 import { ADAPTERS, getAdapter } from '../adapters/index.js';
+import { runTriage } from './triage.js';
 
 /** Advisory lock key shared by MCP and CLI (spec section 5). */
 export const LOCK_KEY = 730193001;
@@ -72,6 +77,11 @@ export const USER_AGENT = 'job-search-mcp/0.1 (interview-coach; read-only scanne
  * @property {(ms: number, signal?: AbortSignal) => Promise<void>} [sleep]
  * @property {() => number} [random]
  * @property {typeof reserveBudget} [reserveBudget] tests inject an in-memory reservation so fixture runs never consume the real daily budget
+ * @property {Function} [execFile] slice 3 auto-triage's model step (src/core/triage.js's runModelTriage)
+ *   seam for a fake `claude` CLI script in tests, mirroring render.js's `opts.execFile` pattern. The
+ *   binary NAME is separately overridable via the JOBSEARCH_TRIAGE_CLAUDE_BIN env var (mirrors
+ *   JOBSEARCH_FIXTURE_MAP), for a child-process-level test that cannot pass a JS function across the
+ *   process boundary.
  */
 
 /**
@@ -759,6 +769,48 @@ async function executeRun(p) {
   } catch {
     /* ignore */
   }
+
+  // Slice 3 auto-triage (docs/slice3-auto-triage-spec.md section 5): runs AFTER the advisory lock
+  // releases and this run's own client closes, on a fresh dedicated connection, so a model step that can
+  // run for minutes (up to maxBatchesPerRun * cfg.model.timeoutMs) never blocks a second scan trigger
+  // that only needs the lock for the network fetch/dedupe/store loop above. Gated on !dryRun (always
+  // true at this point, since a run row was just finalized -- a defensive restatement, not a new check,
+  // per the spec). The whole call is wrapped in one try/catch so a total triage failure (e.g. the
+  // dedicated connection itself throwing, or runDeterministicTriage's first query failing before any row
+  // is processed) never changes this run's own status/exit code -- only stats.triage describes the
+  // failure, and the scan's own rows/response are written normally either way.
+  if (!dryRun) {
+    /** @type {any} */
+    let triageStats = { configured: Boolean(config.triage && config.triage.present) };
+    try {
+      const connectTriage = deps.connectDedicated ?? defaultConnectDedicated;
+      const triageClient = await connectTriage();
+      try {
+        triageStats = await runTriage(triageClient, runId, config, profile, { execFile: deps.execFile, now });
+        try {
+          await triageClient.query('UPDATE ic_scan_runs SET stats = stats || $2::jsonb WHERE id = $1', [runId, JSON.stringify({ triage: triageStats })]);
+        } catch (err) {
+          log({ evt: 'triage_stats_write_failed', run_id: runId, ...errFields(err) });
+        }
+      } finally {
+        try {
+          await triageClient.end();
+        } catch {
+          /* ignore */
+        }
+      }
+    } catch (err) {
+      const f = errFields(err);
+      log({ evt: 'triage_failed', run_id: runId, ...f });
+      triageStats = { configured: Boolean(config.triage && config.triage.present), error: f.err_code };
+    }
+    // Merged into the same in-memory stats object `response` is built from below (spec section 5, item
+    // 6), not only written to the database above, so result.stats.triage is available synchronously to
+    // whichever caller is waiting (bin/scan.js's JSON summary, or search_jobs.js's tool result) without a
+    // second DB round trip.
+    stats.triage = triageStats;
+  }
+
   log({ evt: 'run_finished', run_id: runId, status, fetched: stats.fetched, new: stats.new, updated: stats.updated, errors: errors.length });
 
   // Response

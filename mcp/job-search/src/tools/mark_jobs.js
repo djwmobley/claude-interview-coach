@@ -41,8 +41,11 @@ export const schema = {
  *   statusNote (dashboard PR 2's POST /listings/:id/status {status, note}): text recorded on the status
  *   event itself, separate from the persistent `notes` column -- passing a status change annotation here
  *   never also writes a `note` event, so a status change with a `note` still writes exactly one event.
- * @param {{ now: Date, explicit: boolean, propagatedFrom?: number, actor?: 'dashboard'|'mcp'|'cli'|'migration'|'seed', runId?: number|null }} ctx
- *   actor defaults to 'mcp' (dashboard PR 2 passes 'dashboard' for its own mutating requests).
+ * @param {{ now: Date, explicit: boolean, propagatedFrom?: number, actor?: 'dashboard'|'mcp'|'cli'|'migration'|'seed'|'auto', runId?: number|null }} ctx
+ *   actor defaults to 'mcp' (dashboard PR 2 passes 'dashboard' for its own mutating requests; slice 3
+ *   auto-triage passes 'auto' -- see src/core/triage.js -- so an automated mark is never indistinguishable
+ *   from a human one in ic_job_events, even though marked_at itself carries no such distinction, see that
+ *   file's own doc comment).
  * @returns {Promise<{ id: number, applied: boolean, routed_to_review: boolean, resolved_queue: number[], reembed: boolean }>}
  */
 export async function applyMark(c, item, ctx) {

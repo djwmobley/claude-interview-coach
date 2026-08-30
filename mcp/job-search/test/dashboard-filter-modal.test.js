@@ -67,6 +67,18 @@ describe('filterStateToQuery(): multi-select arrays join as a single comma-separ
   });
 });
 
+describe('filterStateToQuery(): triagedByAuto -> triagedBy=auto (slice 3 auto-triage spec section 7, a value-based query extension, not a boolean flag like the checkboxes above)', () => {
+  test('true -> triagedBy=auto', () => {
+    assert.equal(filterStateToQuery({ triagedByAuto: true }).triagedBy, 'auto');
+  });
+  test('false -> absent', () => {
+    assert.equal(Object.prototype.hasOwnProperty.call(filterStateToQuery({ triagedByAuto: false }), 'triagedBy'), false);
+  });
+  test('absent from state -> absent from query', () => {
+    assert.equal(Object.prototype.hasOwnProperty.call(filterStateToQuery({}), 'triagedBy'), false);
+  });
+});
+
 describe('activeFilterCount(): counts each modal-owned dimension once, using filterStateToQuery\'s own truthiness rules', () => {
   test('an empty state counts zero', () => {
     assert.equal(activeFilterCount({}), 0);
@@ -76,13 +88,13 @@ describe('activeFilterCount(): counts each modal-owned dimension once, using fil
     assert.equal(activeFilterCount({ status: ['maybe', 'shortlisted', 'applied'] }), 1);
   });
 
-  test('every modal-owned dimension set at once counts exactly ten', () => {
+  test('every modal-owned dimension set at once counts exactly eleven (slice 3 auto-triage spec section 7 adds triagedByAuto)', () => {
     const state = {
       status: ['maybe'], source: ['linkedin'], noiseClass: ['ok'], remote: 'remote',
       postedAfterExact: '2026-01-01', minPrescore: 40, minFit: 60,
-      unscored: true, includeExpired: true, untriaged: true,
+      unscored: true, includeExpired: true, untriaged: true, triagedByAuto: true,
     };
-    assert.equal(activeFilterCount(state), 10);
+    assert.equal(activeFilterCount(state), 11);
   });
 
   test('bar-owned fields (search, location, firstSeenDays, hideDuplicates) never count toward n', () => {

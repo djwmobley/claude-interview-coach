@@ -22,8 +22,11 @@ mcp/job-search/
   .env.example        copy to .env (gitignored); config.js loads it itself
   config/             adapters.json ats-boards.json exec-boards.json company-aliases.json
                       alert-senders.json noise-rules.json noise-fixtures.json style-checks.json
-  config.lock.json    sha256 of the six scan config files; unattended runs refuse a mismatch
-  sql/                001-009 migrations (each BEGIN/COMMIT, idempotent) + unique_indexes.sql (conditional)
+                      triage.json triage-output-schema.json triage-mcp-empty.json
+                      triage-candidate.md (gitignored, personal data, not committed -- see "Auto-triage")
+  config.lock.json    sha256 of the ten config-locked files (six original plus four for slice 3
+                      auto-triage); unattended runs refuse a mismatch
+  sql/                001-011 migrations (each BEGIN/COMMIT, idempotent) + unique_indexes.sql (conditional)
   bin/                scan.js  migrate.js  backfill-embeddings.js  config-lock.js  remind.js
                       dashboard.js  seed-opportunities.js
   seed/               opportunities.example.json (synthetic; the real file is gitignored under data/)
@@ -33,7 +36,7 @@ mcp/job-search/
                       followups scan_report
   src/core/           config db logger errors normalize dedup upsert prescore noise compact embed
                       urlguard budget ratelimit scheduler scan-run google followups remind report render schema
-                      statuses events manual documents calendar-provider startup reembed
+                      statuses events manual documents calendar-provider startup reembed triage
   src/dashboard/      http router server stream scan-runner calendar-cache task-names
                       next-scheduled-scan routes/*.js public/index.html (front end lands in PR 3)
   src/browser/        session (the only playwright import) capability extractors wall
@@ -235,6 +238,57 @@ location (no city), posted within 14 days of each other, merge automatically
 (never queued for review) -- the "same role broadcast once per state"
 pattern. `bin/migrate.js` re-normalizes every existing listing's title/
 location/hash and backfills this merge rule against the open review queue.
+
+### Auto-triage
+
+After every non-dry-run scan (whatever triggered it: the `search_jobs` MCP tool, `bin/scan.js`, or the
+dashboard's spawn of `bin/scan.js` -- all three converge on `executeRun()` in `src/core/scan-run.js`,
+which is where the call lives, one call site reached by every trigger), `src/core/triage.js` routes the
+obvious cases so the Untriaged queue only holds rows that genuinely need a human look. It runs AFTER the
+scan's own advisory lock releases, on a fresh connection, so a slow model step never blocks a second scan.
+A row with an open, unresolved review-queue item is never touched (its resolution stays a human decision).
+Every automated change lands as an `ic_job_events` row with `actor='auto'`, so it is visible in the
+listing history and reversible through the existing `mark_jobs` tool or dashboard status controls,
+exactly like a human mark, except that only the event `actor` (never `marked_at`, which auto-triage sets
+identically to a human mark) can tell them apart.
+
+**Deterministic step** (`runDeterministicTriage`, gated by `config/triage.json`'s
+`deterministic.enabled`): a total classification of every row this run touched that a human has not yet
+marked --
+
+- `noise_class` not `ok`/`ok_manual` (including `NULL`) -> `status='skip'`
+- `noise_class` ok and `prescore < floor` -> `status='skip'`
+- `noise_class` ok and `prescore >= ceiling` -> `status='new'`
+- `noise_class` ok, `prescore` between `floor` and `ceiling` (or `NULL`) -> left untriaged, eligible for
+  the model step below
+
+**Model step** (`runModelTriage`, gated by `config/triage.json`'s `model.enabled`, off by default until
+verified): the plausible middle band is batched (10-20 ids per call, capped per run) into a tool-free
+`claude -p --output-format json --json-schema ... --strict-mcp-config --mcp-config config/triage-mcp-empty.json`
+call, prompted with `config/triage-candidate.md` (a plain-text candidate summary, never committed --
+personal data) and the search profile. Every listing field in the prompt is framed as untrusted data, not
+instructions; a batch is validated against a strict ladder (unknown/duplicate ids, out-of-range scores, or
+a non-zero exit all reject the WHOLE batch, applying none of its marks) before any mark is written. A
+`status='skip'` recommendation with `fit_score >= skipMaxFit` is downgraded to `maybe` rather than trusted
+outright.
+
+**Enabling model scoring:**
+1. Create `mcp/job-search/config/triage-candidate.md` (plain text, a few paragraphs describing the
+   candidate) -- gitignored, never commit it.
+2. Set `"model": { "enabled": true }` in `config/triage.json`.
+3. Run `node bin/config-lock.js --write` and commit the updated `config.lock.json` (the candidate summary
+   file itself is still config-locked for hash purposes only, per the "config drift must be deliberate"
+   rule every config file gets -- editing it without re-running `config-lock.js --write` fails the next
+   scan's lock check).
+
+A missing `config/triage.json`, a missing/blank candidate summary, or any model-step failure never blocks
+or fails the scan -- only a loud report line (below). A present but malformed `triage.json` still fails
+the scan the same way a malformed `noise-rules.json` does today.
+
+**Report line.** The daily report (`src/core/report.js`) prints one guarded line per run when
+`stats.triage` is present, for example `triage: 12 auto-skipped, 3 auto-new, 8 sent to model, 8 scored`,
+distinguishing "not configured", an ordinary run, a failed model batch, a batch that scored nothing (an
+anomaly worth checking the prompt over), and model scoring deliberately disabled.
 
 ### Gmail job alerts
 
@@ -623,7 +677,7 @@ is never opened afterwards. The `/write-resume`, `/write-cover-letter`, and
 `npm test` (== `node bin/run-tests.js`) is the only supported way to run the suite. It NEVER touches the
 real, shared `ic_context` database: `bin/bootstrap-test-db.js` first creates or refreshes a throwaway
 `<name>_test` database (`ic_context_test` for the default local setup) by `pg_dump --schema-only` of the
-configured real database, then re-applies this server's own SQL migrations (`sql/001-008`) against the
+configured real database, then re-applies this server's own SQL migrations (`sql/001-011`) against the
 copy -- idempotent, so this also proves the migrations themselves are sound, not just that the schema
 copy succeeded -- and seeds the `exec-default` profile from the deterministic fallback (never personal
 `data/profile.md`). `bin/run-tests.js` then spawns `node --test --test-concurrency=1` with `PG_DSN` pointed
@@ -696,16 +750,30 @@ outside the registry patterns. `bin/scan.js` accepts
 be exercised offline; `JOBSEARCH_CONFIG_LOCK` points the lock check at another
 file for the same reason.
 
+`LIVE=1 PG_DSN=<a _test DSN> node --test test/triage-cli-smoke.test.js` shells out to the real `claude`
+binary once with auto-triage's exact flag set and asserts the returned envelope still matches the shape
+`src/core/triage.js`'s `validateModelOutput` expects, so a future CLI version change that alters the
+envelope is caught by a deliberate, occasional run rather than every production batch failing silently.
+Same `_test`-suffixed-DSN requirement as the Greenhouse smoke test above; writes nothing to the database.
+
 ## Config lock
 
-`node bin/config-lock.js` reports whether `config/*.json` matches
-`config.lock.json` (exit 2 on mismatch). It also lints `config/noise-rules.json`
-against the named fixture cases in `config/noise-fixtures.json` on every run
+`node bin/config-lock.js` reports whether the config-locked files (`CONFIG_FILES` in `src/core/config.js`
+-- the original six plus, since slice 3, `triage.json`, `triage-candidate.md`, `triage-output-schema.json`,
+and `triage-mcp-empty.json`) match `config.lock.json` (exit 2 on mismatch). It also lints
+`config/noise-rules.json` against the named fixture cases in `config/noise-fixtures.json` on every run
 (check or `--write`), failing closed (exit 1) if any fixture's expected
 `noise_class` no longer holds under the current rules -- this catches a
 noise-rule edit that silently changes behavior for a known case, not just a
 hash mismatch. After an intentional config edit run
 `node bin/config-lock.js --write` and commit both.
+
+`triage.json` is loaded tolerantly (a missing file loads with every field at its schema default, never
+`CONFIG_INVALID`, see "Auto-triage" above), but it is still hashed here: a missing `triage.json`, and a
+missing `triage-candidate.md` (gitignored, personal data, present only on an operator's own machine), both
+hash to a fixed `<missing>` placeholder, so `config.lock.json` still needs a `--write` whenever either
+file's presence or content changes on a given machine, same "config drift must be deliberate" rule every
+other config file gets.
 
 ## Embeddings
 

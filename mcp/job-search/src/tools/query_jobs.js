@@ -75,6 +75,15 @@ export function buildQuery(a) {
     if (a.untriaged) where.push('l.status IS NULL');
     else if (a.group && Object.prototype.hasOwnProperty.call(STATUS_GROUPS, a.group)) where.push(`l.status = ANY(${add(STATUS_GROUPS[a.group])}::text[])`);
   }
+  // Dashboard-only extension (slice 3 auto-triage spec section 7, like `group`/`untriaged` above):
+  // narrows to rows whose most recent 'status' event was written by the automated triage step. A
+  // correlated subquery per row is cheap enough at this project's scale (hundreds to low thousands of
+  // listings) to ship directly. `triagedBy` only ever carries the literal 'auto' by the time it reaches
+  // here (listings.js's parseListingsQuery() already reduces any other value to `undefined`), so this is
+  // the total classification for the one value this extension recognizes.
+  if (a.triagedBy === 'auto') {
+    where.push(`(SELECT actor FROM ic_job_events WHERE listing_id = l.id AND kind = 'status' ORDER BY at DESC, id DESC LIMIT 1) = 'auto'`);
+  }
   if (a.unscored) where.push('l.fit_score IS NULL');
   if (a.noiseClass && a.noiseClass.length) where.push(`l.noise_class = ANY(${add(a.noiseClass)}::text[])`);
   if (a.source && a.source.length) where.push(`l.source = ANY(${add(a.source)}::text[])`);

@@ -1,0 +1,6 @@
+{
+ "https://boards-api.greenhouse.io/v1/boards/zztest/jobs/7000000001": "../adapters/greenhouse-zztest-detail.json",
+ "https://boards-api.greenhouse.io/v1/boards/zztest/jobs": "../adapters/greenhouse-zztest-jobs.json",
+ "https://boards-api.greenhouse.io/v1/boards/gitlab/jobs/8700245002": "../adapters/greenhouse-job-detail.json",
+ "https://boards-api.greenhouse.io/v1/boards/gitlab/jobs": "../adapters/greenhouse-gitlab-jobs.json"
+}
