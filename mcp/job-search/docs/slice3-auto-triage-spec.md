@@ -768,14 +768,22 @@ reason. Nothing here contradicts a `blocks-authoring`/`must-fix` adversary findi
 either spec gaps the literal text left silent, or a scoping call made against the operator's own build
 instructions for this PR.
 
-1. **Section 7 (dashboard `triagedBy=auto` filter) is NOT implemented in this PR.** The operator's build
-   instructions for this PR listed the exact source files to read and touch, and deliberately did not
-   include `src/dashboard/query_jobs.js` (or wherever `buildQuery()` actually lives), `listings.js`, or
-   `filter-modal.js`. Sections 1-6, 8, and 9 (the deterministic step, the model step, config, the
-   migration, and the test plan) are fully implemented; the dashboard-only query extension and filter
-   checkbox are scoped out as a follow-up, not an oversight. `PIPELINE_STATUSES`/`FILTER_MODAL_STATUSES`
-   are untouched either way, so `test/dashboard-filter-modal.test.js`'s drift assertion is unaffected by
-   this PR regardless.
+1. **Section 7 (dashboard `triagedBy=auto` filter) was scoped out of this PR's early commits, then
+   implemented in full before the PR merged.** The operator's original build instructions for this PR
+   listed the exact source files to read and touch, and deliberately did not include
+   `src/tools/query_jobs.js`, `src/dashboard/routes/listings.js`, or `filter-modal.js`, so sections 1-6, 8,
+   and 9 (the deterministic step, the model step, config, the migration, and the test plan) landed first,
+   with the dashboard-only query extension and filter checkbox scoped out as a follow-up. That follow-up
+   landed before merge, in commit `121dead` ("Replace binary auto-triage fixture with a Node script; add
+   the dashboard auto-triage filter"), the PR's final head commit: `buildQuery()` in
+   `src/tools/query_jobs.js` gained the `triagedBy === 'auto'` branch, `parseListingsQuery()` in
+   `src/dashboard/routes/listings.js` parses the `triagedBy` query param as a total classification (any
+   value other than the literal `auto` reduces to `undefined`, no filter applied), and `filter-modal.js`
+   gained a dedicated "Auto-triage" section with a "Show only rows triaged by auto" checkbox
+   (`filter-bar.js` serializes it to `triagedBy=auto`), sitting alongside the separate, pre-existing
+   "Untriaged (never triaged)" toggle. Section 7 is fully shipped, not a remaining follow-up.
+   `PIPELINE_STATUSES`/`FILTER_MODAL_STATUSES` were untouched by either commit, so
+   `test/dashboard-filter-modal.test.js`'s drift assertion is unaffected either way.
 2. **`triageSchema`'s nested objects need `.default({})`, not shown in section 3's literal code sample.**
    `readOptionalValidated()`'s own doc comment (and this file's prose) promises `schema.parse({})` always
    succeeds for a missing `triage.json`. The literal `z.object({ deterministic: z.object({...}).refine(...),
