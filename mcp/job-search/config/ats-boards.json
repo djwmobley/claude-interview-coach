@@ -1,5 +1,6 @@
 {
-  "_comment": "Boards scanned by the fetch adapters. Greenhouse/Lever entries were chosen as large companies that plausibly post executive roles; each was verified only by the first LIVE=1 dry run recorded in the stage 3 report (a 404 there means the board token is wrong: disable it). Workday and Dayforce entries are examples, disabled: no live run has touched those adapters.",
+  "_comment": "Boards scanned by the fetch adapters. Greenhouse/Lever entries were chosen as large companies that plausibly post executive roles; each was verified only by the first LIVE=1 dry run recorded in the stage 3 report (a 404 there means the board token is wrong: disable it). Workday entries were verified 2026-08-29 with a real POST to the cxs jobs endpoint (200 + a jobPostings array) for every enabled tenant; dell is kept but disabled (cxs search returns total 0 for every term and the detail call 403s, consistent with WAF protection against non-browser clients). Dayforce entries are still examples, disabled: no live run has touched that adapter.",
+  "_notOnWorkday": "Companies checked 2026-08-29 and confirmed NOT on Workday, recorded so nobody re-researches them. SuccessFactors: Halliburton, Phillips 66, CenterPoint, ExxonMobil, LyondellBasell, APA. Oracle Cloud/Taleo/SelectMinds: Cheniere, Texas Instruments, Enterprise Products, Targa, NOV, Valero, MD Anderson. iCIMS: Kinder Morgan, Quanta, Group 1. UKG: Crown Castle. SmartSearch: EOG. Unresolved (JS shell, could not identify the ATS from a non-browser GET): SLB, NRG, WM, Schwab, Texas Children's, JPMC, American Airlines. Hess: jobs.hess.com has an expired TLS certificate. Comerica: redirects to Fifth Third's career site.",
   "greenhouse": [
     {
       "board": "gitlab",
@@ -92,13 +93,26 @@
     }
   ],
   "workday": [
-    {
-      "tenant": "example",
-      "site": "External",
-      "wd": "wd5",
-      "displayName": "Example Workday Co",
-      "enabled": false
-    }
+    { "tenant": "conocophillips", "site": "eQuest", "wd": "wd1", "displayName": "ConocoPhillips", "enabled": true },
+    { "tenant": "bakerhughes", "site": "BakerHughes", "wd": "wd5", "displayName": "Baker Hughes", "enabled": true },
+    { "tenant": "oxy", "site": "Corporate", "wd": "wd5", "displayName": "Occidental Petroleum", "enabled": true },
+    { "tenant": "chevron", "site": "jobs", "wd": "wd5", "displayName": "Chevron", "enabled": true },
+    { "tenant": "shell", "site": "ShellCareers", "wd": "wd3", "displayName": "Shell USA", "enabled": true },
+    { "tenant": "mpc", "site": "MPCCareers", "wd": "wd1", "displayName": "Marathon Petroleum", "enabled": true },
+    { "tenant": "sysco", "site": "syscocareers", "wd": "wd5", "displayName": "Sysco", "enabled": true },
+    { "tenant": "memorialhermann", "site": "external", "wd": "wd5", "displayName": "Memorial Hermann Health System", "enabled": true },
+    { "tenant": "houstonmethodist", "site": "GTI", "wd": "wd12", "displayName": "Houston Methodist", "enabled": true },
+    { "tenant": "hcahealthcare", "site": "hcacareers", "wd": "wd3", "displayName": "HCA Healthcare", "enabled": true },
+    { "tenant": "academy", "site": "Careers", "wd": "wd1", "displayName": "Academy Sports + Outdoors", "enabled": true },
+    { "tenant": "att", "site": "ATTGeneral", "wd": "wd1", "displayName": "AT&T", "enabled": true },
+    { "tenant": "usaa", "site": "USAAJOBSWD", "wd": "wd1", "displayName": "USAA", "enabled": true },
+    { "tenant": "frostbank", "site": "External", "wd": "wd5", "displayName": "Frost Bank", "enabled": true },
+    { "tenant": "visa", "site": "Visa", "wd": "wd5", "displayName": "Visa", "enabled": true },
+    { "tenant": "mastercard", "site": "CorporateCareers", "wd": "wd1", "displayName": "Mastercard", "enabled": true },
+    { "tenant": "target", "site": "targetcareers", "wd": "wd5", "displayName": "Target", "enabled": true },
+    { "tenant": "walmart", "site": "WalmartExternal", "wd": "wd504", "displayName": "Walmart", "enabled": true },
+    { "tenant": "swa", "site": "external", "wd": "wd1", "displayName": "Southwest Airlines", "enabled": true },
+    { "tenant": "dell", "site": "External", "wd": "wd1", "displayName": "Dell Technologies", "enabled": false, "comment": "CHECKED 2026-08-29: cxs search returns 200 but total 0 and empty facets for every term; detail call returns 403. Looks WAF-protected against non-browser clients. Enable only after a live dry run shows rows." }
   ],
   "dayforce": [
     {

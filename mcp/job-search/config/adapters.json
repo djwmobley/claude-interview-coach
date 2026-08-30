@@ -136,9 +136,10 @@
         2000,
         4000
       ],
-      "dailyPages": 200,
+      "dailyPages": 250,
       "dailyDetails": 200,
-      "maxPagesPerQuery": 5
+      "maxPagesPerQuery": 1,
+      "maxPagesPerRun": 200
     },
     "dayforce": {
       "transport": "html",
