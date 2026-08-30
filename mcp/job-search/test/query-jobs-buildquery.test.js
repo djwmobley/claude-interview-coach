@@ -3,26 +3,49 @@
  * buildQuery() (src/tools/query_jobs.js) is a pure SQL-string builder: no DB connection needed to test
  * its WHERE/ORDER shape. Covers dashboard UX slice 2's additions: the `dir` total classification, the
  * order-lookup guard (a garbage `sort` must never resolve to `undefined` in the SQL text), and the
- * status+untriaged three-way combination fix.
+ * status+untriaged three-way combination fix. Also covers the full-column-sort spec's additions: the six
+ * new literal-column sort keys, the status column's pipeline-order CASE expression (built only from the
+ * closed PIPELINE_STATUSES array, never from caller input), and the NULL-untriaged-sorts-last guard.
  */
 import { test, describe } from 'node:test';
 import assert from 'node:assert/strict';
 import { buildQuery, SORTS } from '../src/tools/query_jobs.js';
+import { PIPELINE_STATUSES } from '../src/core/statuses.js';
 
 const BASE = { includeDuplicates: false, includeExpired: false, sort: 'posted', limit: 25, offset: 0 };
 
+// Every SORTS key that maps to a fixed literal column expression (i.e. every key except 'status', which
+// gets its own CASE-expression coverage below).
+const LITERAL_COLUMN_FOR = {
+  posted: 'l.posted_at',
+  seen: 'l.last_seen',
+  prescore: 'l.prescore',
+  fit: 'l.fit_score',
+  id: 'l.id',
+  title: 'lower(l.title)',
+  company: 'lower(l.company)',
+  source: 'lower(l.source)',
+  location: 'lower(l.location)',
+  first_seen: 'l.first_seen',
+};
+
+describe('buildQuery(): SORTS is exactly the literal-column keys plus "status"', () => {
+  test('no SORTS key is missing coverage in either this file\'s literal map or the status CASE test below', () => {
+    for (const sort of SORTS) assert.ok(sort === 'status' || Object.prototype.hasOwnProperty.call(LITERAL_COLUMN_FOR, sort), `sort key "${sort}" has no test coverage`);
+  });
+});
+
 describe('buildQuery(): dir total classification', () => {
-  test('every SORTS key, dir asc and desc, produces the matching ORDER BY column and direction', () => {
-    const columnFor = { posted: 'l.posted_at', seen: 'l.last_seen', prescore: 'l.prescore', fit: 'l.fit_score', id: 'l.id' };
-    for (const sort of SORTS) {
+  test('every literal-column SORTS key, dir asc and desc, produces the matching ORDER BY column and direction', () => {
+    for (const sort of Object.keys(LITERAL_COLUMN_FOR)) {
       for (const dir of ['asc', 'desc']) {
         const { sql } = buildQuery({ ...BASE, sort, dir });
-        const col = columnFor[sort];
+        const col = LITERAL_COLUMN_FOR[sort];
         const sqlDir = dir === 'asc' ? 'ASC' : 'DESC';
         if (sort === 'id') {
           assert.match(sql, new RegExp(`ORDER BY l\\.id ${sqlDir}\\s*$`, 'm'), `sort=${sort} dir=${dir}`);
         } else {
-          assert.match(sql, new RegExp(`ORDER BY ${col.replace('.', '\\.')} ${sqlDir} NULLS LAST, l\\.id ${sqlDir}`), `sort=${sort} dir=${dir}`);
+          assert.match(sql, new RegExp(`ORDER BY ${col.replace(/[.()]/g, '\\$&')} ${sqlDir} NULLS LAST, l\\.id ${sqlDir}`), `sort=${sort} dir=${dir}`);
         }
       }
     }
@@ -62,6 +85,59 @@ describe('buildQuery(): sort garbage never reaches the SQL as "undefined" (laten
       const { sql } = buildQuery({ ...BASE, sort });
       assert.doesNotMatch(sql, /undefined/i, `sort=${JSON.stringify(sort)}`);
       assert.match(sql, /ORDER BY l\.posted_at DESC NULLS LAST, l\.id DESC/, `sort=${JSON.stringify(sort)}`);
+    }
+  });
+});
+
+describe('buildQuery(): sort=status pipeline-order CASE (full-column-sort spec, deliberately not alphabetical)', () => {
+  test('the CASE maps every PIPELINE_STATUSES member to its ordinal, in pipeline order, via literal WHEN arms', () => {
+    const { sql } = buildQuery({ ...BASE, sort: 'status', dir: 'desc' });
+    const caseMatch = sql.match(/CASE WHEN l\.status IS NULL THEN NULL (.*?) ELSE (\d+) END/);
+    assert.ok(caseMatch, 'sql contains a CASE expression for the status sort');
+    const arms = [...caseMatch[1].matchAll(/WHEN l\.status = '([^']+)' THEN (\d+)/g)].map((m) => [m[1], Number(m[2])]);
+    assert.deepEqual(arms.map(([status]) => status), [...PIPELINE_STATUSES], 'WHEN arms appear in exact PIPELINE_STATUSES order');
+    arms.forEach(([, ordinal], i) => assert.equal(ordinal, i + 1, `arm ${i} has the expected 1-based ordinal`));
+    assert.equal(Number(caseMatch[2]), PIPELINE_STATUSES.length + 1, 'ELSE arm is one past the last known status ordinal');
+  });
+
+  test('every WHEN arm is built only from the closed PIPELINE_STATUSES array -- no other literal sneaks in', () => {
+    const { sql } = buildQuery({ ...BASE, sort: 'status', dir: 'asc' });
+    const caseText = sql.match(/CASE WHEN l\.status IS NULL THEN NULL .*? END/)?.[0] ?? '';
+    const armValues = [...caseText.matchAll(/WHEN l\.status = '([^']+)'/g)].map((m) => m[1]);
+    assert.deepEqual(new Set(armValues), new Set(PIPELINE_STATUSES));
+  });
+
+  test('NULL (untriaged) is guarded before the ordinal arms, ahead of the fallback ELSE, in both directions', () => {
+    for (const dir of ['asc', 'desc']) {
+      const { sql } = buildQuery({ ...BASE, sort: 'status', dir });
+      assert.match(sql, /CASE WHEN l\.status IS NULL THEN NULL WHEN l\.status = /, `dir=${dir}`);
+    }
+  });
+
+  test('untriaged (NULL status) sorts last in BOTH directions: the CASE returns NULL for it, and NULLS LAST is unconditional on the resulting expression', () => {
+    for (const dir of ['asc', 'desc']) {
+      const sqlDir = dir === 'asc' ? 'ASC' : 'DESC';
+      const { sql } = buildQuery({ ...BASE, sort: 'status', dir });
+      // The NULLS LAST modifier binds to the whole CASE...END expression immediately preceding it, so a
+      // NULL result from the CASE (produced only by the `WHEN l.status IS NULL THEN NULL` arm) sorts
+      // after every row that hit a real WHEN or ELSE arm, in both ASC and DESC -- Postgres's NULLS LAST
+      // semantics are direction-independent by definition, which is exactly why this sort key relies on
+      // it instead of building direction-specific NULL handling itself.
+      assert.match(sql, new RegExp(`CASE WHEN l\\.status IS NULL THEN NULL .*? END ${sqlDir} NULLS LAST, l\\.id ${sqlDir}`), `dir=${dir}`);
+    }
+  });
+
+  test('status sort/dir never leak into params -- no interpolation of raw input into query values', () => {
+    const { params } = buildQuery({ ...BASE, sort: 'status', dir: 'asc' });
+    for (const p of params) assert.ok(typeof p !== 'string' || !PIPELINE_STATUSES.includes(/** @type {any} */ (p)), `params must not carry a bare status literal from the sort key: got ${JSON.stringify(p)}`);
+  });
+});
+
+describe('buildQuery(): sort/dir are never interpolated into params for any new sort key', () => {
+  test('params never contain the raw sortKey string itself', () => {
+    for (const sort of ['title', 'company', 'source', 'status', 'location', 'first_seen']) {
+      const { params } = buildQuery({ ...BASE, sort, dir: 'asc' });
+      assert.ok(!params.includes(sort), `sort key "${sort}" must never appear in params`);
     }
   });
 });

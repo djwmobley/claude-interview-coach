@@ -22,14 +22,18 @@ export function dataTable(opts) {
     const active = opts.sort === col.sortKey;
     const dir = active && opts.dir === 'asc' ? 'asc' : active ? 'desc' : null;
     const ariaSort = dir === 'asc' ? 'ascending' : dir === 'desc' ? 'descending' : 'none';
-    const indicator = dir === 'asc' ? ' ▲' : dir === 'desc' ? ' ▼' : '';
+    const indicator = dir === 'asc' ? '▲' : dir === 'desc' ? '▼' : '';
     return h('th', { className: col.className, attrs: { 'aria-sort': ariaSort } }, [
       h('button', {
         className: 'data-table__sort-btn',
         attrs: { type: 'button' },
-        text: `${col.text}${indicator}`,
         on: { click: () => opts.onSort?.(/** @type {string} */ (col.sortKey)) },
-      }),
+      }, [
+        col.text,
+        // Muted indicator span (legibility tweak, no structural redesign): the arrow reads as a
+        // secondary cue next to the label rather than competing with it for attention.
+        indicator ? h('span', { className: 'data-table__sort-indicator', text: ` ${indicator}` }) : null,
+      ]),
     ]);
   }))]);
   const tbody = h('tbody', {}, opts.rows);

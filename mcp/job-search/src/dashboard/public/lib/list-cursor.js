@@ -61,5 +61,16 @@ export function createListCursor() {
     return current()?.dataset.rowId ?? null;
   }
 
-  return { setRows, move, current, currentId };
+  /**
+   * Clear the cursor back to "nothing selected" (index -1) without forgetting the row list. Used by
+   * Reset view (pages/jobs.js) so a keyboard-cursored row from before the reset never carries a stale
+   * cursor position into the freshly reset default view; the next render's setRows() call still
+   * re-clamps against whatever rows exist then, same as any other refresh.
+   */
+  function reset() {
+    index = -1;
+    applyCursorClass();
+  }
+
+  return { setRows, move, current, currentId, reset };
 }

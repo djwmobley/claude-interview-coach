@@ -8,10 +8,29 @@ import { z } from 'zod';
 import { compactRows, capResponse, MAX_ROWS, MAX_RESPONSE_CHARS, untrustedRows, ROWS_WRAP_OVERHEAD_CHARS } from '../core/compact.js';
 import { normalizeLocation } from '../core/normalize.js';
 import { NOISE_CLASSES } from '../core/config.js';
-import { STATUS_GROUPS } from '../core/statuses.js';
+import { STATUS_GROUPS, PIPELINE_STATUSES } from '../core/statuses.js';
 
-export const SORTS = Object.freeze(['posted', 'seen', 'prescore', 'fit', 'id']);
+export const SORTS = Object.freeze(['posted', 'seen', 'prescore', 'fit', 'id', 'title', 'company', 'source', 'status', 'location', 'first_seen']);
 export const OUTCOMES = Object.freeze(['new', 'update', 'cross_source_dup', 'repost', 'ambiguous']);
+
+// Status sort orders by PIPELINE ORDER (src/core/statuses.js's PIPELINE_STATUSES), not alphabetically --
+// a deliberate decision. The pipeline is a progression (new -> maybe -> ... -> dead/review), and this
+// column should read as "where does this row sit in the pipeline," the same progression
+// DIGIT_STAGE_ORDER and STATUS_PRECEDENCE already encode elsewhere in this codebase, not an arbitrary
+// alphabetical shuffle of the status words.
+//
+// Built ONLY by mapping over the closed, server-side PIPELINE_STATUSES array into literal
+// `WHEN l.status = 'x' THEN n` arms -- never by interpolating `l.status` itself or any caller-supplied
+// value into the CASE. An unknown non-null status (a value somehow outside PIPELINE_STATUSES) falls
+// through every WHEN arm to the ELSE and sorts immediately after every known status.
+//
+// NULL (untriaged) gets its own explicit `WHEN l.status IS NULL THEN NULL` arm ahead of the rest: a
+// searched CASE matches no bare `WHEN l.status = 'x'` arm for a NULL subject and would otherwise fall to
+// the ELSE, which would sort untriaged rows alongside "unknown status" instead of last. Returning SQL
+// NULL here instead lets the existing unconditional NULLS LAST suffix (applied uniformly to every sort
+// key, see orderColumns below) place untriaged rows last in BOTH directions, the same way it already
+// does for a null prescore/fit/date.
+const STATUS_ORDER_CASE = `CASE WHEN l.status IS NULL THEN NULL ${PIPELINE_STATUSES.map((s, i) => `WHEN l.status = '${s}' THEN ${i + 1}`).join(' ')} ELSE ${PIPELINE_STATUSES.length + 1} END`;
 
 export const schema = {
   q: z.string().max(200).optional().describe('full-text query over title/company/description'),
@@ -114,12 +133,29 @@ export function buildQuery(a) {
   // NULLS LAST is unconditional regardless of dir (a null score/date always sorts to the bottom, in
   // either direction); the `l.id` tiebreak flips with dir so an ascending sort is stable end-to-end
   // rather than descending on ties.
+  //
+  // INVARIANT: every value below is a fixed, hardcoded SQL expression. `sortKey` is validated above as
+  // exact SORTS membership and used ONLY as a lookup key into this closed object, never interpolated
+  // directly into SQL text; `dir` is validated as an exact 'asc' string match and used ONLY to pick one
+  // of the two literal direction keywords below. A future refactor to something like
+  // `` lower(l.${sortKey}) `` would reintroduce SQL injection through an innocuous-looking column-name
+  // interpolation -- if a change is heading that direction, it is a bug, not a simplification.
   const orderColumns = {
     posted: 'l.posted_at',
     seen: 'l.last_seen',
     prescore: 'l.prescore',
     fit: 'l.fit_score',
     id: 'l.id',
+    title: 'lower(l.title)',
+    company: 'lower(l.company)',
+    source: 'lower(l.source)',
+    // Location deliberately sorts by the raw display text (lower(l.location)), not location_norm: the
+    // location FILTER above normalizes for substring/exact matching, but this is a display-text SORT a
+    // person visually scans down the table, so it orders by exactly what the column shows, not the
+    // normalized value.
+    location: 'lower(l.location)',
+    first_seen: 'l.first_seen',
+    status: STATUS_ORDER_CASE,
   };
   const order = sortKey === 'id'
     ? `l.id ${sqlDir}`
