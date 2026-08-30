@@ -12,7 +12,7 @@ import { fileURLToPath } from 'node:url';
 const HERE = path.dirname(fileURLToPath(import.meta.url));
 const SQL_DIR = path.join(HERE, '..', '..', 'sql');
 
-export const AUX_MIGRATIONS = Object.freeze(['007_mark_meta.sql', '008_noise_and_report.sql', '009_pipeline_events_documents.sql']);
+export const AUX_MIGRATIONS = Object.freeze(['007_mark_meta.sql', '008_noise_and_report.sql', '009_pipeline_events_documents.sql', '011_triage_actor.sql']);
 
 /**
  * @param {import('pg').ClientBase} client

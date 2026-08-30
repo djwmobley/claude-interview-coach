@@ -31,3 +31,8 @@ nul
 mcp/job-search/logs/
 mcp/job-search/node_modules/
 mcp/job-search/test/screenshots/
+# Auto-triage candidate summary (slice 3): personal data, never committed. computeConfigHash() still
+# hashes it (as "<missing>" here) via CONFIG_FILES, so an operator who creates a real one locally must
+# run node bin/config-lock.js --write for that machine, same "config drift must be deliberate" rule
+# every other config file gets.
+mcp/job-search/config/triage-candidate.md

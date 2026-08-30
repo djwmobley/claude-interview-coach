@@ -1,0 +1,7 @@
+{
+  "type": "result",
+  "subtype": "success",
+  "is_error": false,
+  "result": "{\"results\":[{\"id\":1,\"fit_score\":50,\"status\":\"maybe\",\"reason\":\"test\"}]}",
+  "structured_output": { "results": [ { "id": 1, "fit_score": 50, "status": "maybe", "reason": "test" } ] }
+}

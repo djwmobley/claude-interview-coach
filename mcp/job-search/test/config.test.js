@@ -12,7 +12,9 @@ import assert from 'node:assert/strict';
 import { spawnSync } from 'node:child_process';
 import path from 'node:path';
 import { fileURLToPath } from 'node:url';
-import { alertSendersSchema, GMAIL_PARSER_NAMES, loadConfig } from '../src/core/config.js';
+import fs from 'node:fs';
+import os from 'node:os';
+import { alertSendersSchema, GMAIL_PARSER_NAMES, loadConfig, triageSchema, CONFIG_FILES, computeConfigHash, loadTriageCandidateSummary } from '../src/core/config.js';
 import { PARSERS } from '../src/adapters/gmail-parsers.js';
 import { CONFIG_DIR } from './helpers/scan-fixtures.js';
 
@@ -106,5 +108,123 @@ describe('assertTestDbGuard (scan-report-fixes item: structural test-isolation g
     const r = runGuardChild({ PG_DSN: 'postgresql://postgres@localhost:5432/ic_context' });
     assert.equal(r.status, 0, r.stderr);
     assert.match(r.stdout, /OK/);
+  });
+});
+
+describe('triageSchema and triage.json loading (slice 3 auto-triage, docs/slice3-auto-triage-spec.md section 3)', () => {
+  test('CONFIG_FILES includes triage.json, triage-candidate.md, triage-output-schema.json, triage-mcp-empty.json', () => {
+    for (const name of ['triage.json', 'triage-candidate.md', 'triage-output-schema.json', 'triage-mcp-empty.json']) {
+      assert.ok(CONFIG_FILES.includes(name), `${name} must be in CONFIG_FILES`);
+    }
+  });
+
+  test('the test fixture config dir\'s triage.json (deterministic and model both off) parses and loadConfig sets present=true', () => {
+    const cfg = loadConfig({ dir: CONFIG_DIR, fresh: true });
+    assert.equal(cfg.triage.present, true);
+    assert.equal(cfg.triage.deterministic.enabled, false);
+    assert.equal(cfg.triage.model.enabled, false);
+  });
+
+  test('a MISSING triage.json loads successfully with present=false and every field at its schema default (finding 11 fix, never CONFIG_INVALID)', () => {
+    const tmp = fs.mkdtempSync(path.join(os.tmpdir(), 'triage-config-missing-'));
+    try {
+      for (const name of ['adapters.json', 'ats-boards.json', 'exec-boards.json', 'company-aliases.json', 'alert-senders.json', 'noise-rules.json']) {
+        fs.copyFileSync(path.join(CONFIG_DIR, name), path.join(tmp, name));
+      }
+      const cfg = loadConfig({ dir: tmp, fresh: true });
+      assert.equal(cfg.triage.present, false);
+      assert.equal(cfg.triage.deterministic.enabled, false);
+      assert.equal(cfg.triage.deterministic.floor, 40);
+      assert.equal(cfg.triage.deterministic.ceiling, 70);
+      assert.equal(cfg.triage.model.enabled, false);
+      assert.equal(cfg.triage.model.batchSize, 15);
+    } finally {
+      fs.rmSync(tmp, { recursive: true, force: true });
+    }
+  });
+
+  test('a MALFORMED triage.json (floor > ceiling) still throws CONFIG_INVALID, same as a malformed noise-rules.json does today', () => {
+    const tmp = fs.mkdtempSync(path.join(os.tmpdir(), 'triage-config-malformed-'));
+    try {
+      for (const name of ['adapters.json', 'ats-boards.json', 'exec-boards.json', 'company-aliases.json', 'alert-senders.json', 'noise-rules.json']) {
+        fs.copyFileSync(path.join(CONFIG_DIR, name), path.join(tmp, name));
+      }
+      fs.writeFileSync(path.join(tmp, 'triage.json'), JSON.stringify({ deterministic: { enabled: true, floor: 80, ceiling: 20 }, model: {} }));
+      assert.throws(() => loadConfig({ dir: tmp, fresh: true }), (err) => err.code === 'CONFIG_INVALID');
+    } finally {
+      fs.rmSync(tmp, { recursive: true, force: true });
+    }
+  });
+
+  test('a triage.json with invalid JSON also throws CONFIG_INVALID', () => {
+    const tmp = fs.mkdtempSync(path.join(os.tmpdir(), 'triage-config-badjson-'));
+    try {
+      for (const name of ['adapters.json', 'ats-boards.json', 'exec-boards.json', 'company-aliases.json', 'alert-senders.json', 'noise-rules.json']) {
+        fs.copyFileSync(path.join(CONFIG_DIR, name), path.join(tmp, name));
+      }
+      fs.writeFileSync(path.join(tmp, 'triage.json'), '{not valid json');
+      assert.throws(() => loadConfig({ dir: tmp, fresh: true }), (err) => err.code === 'CONFIG_INVALID');
+    } finally {
+      fs.rmSync(tmp, { recursive: true, force: true });
+    }
+  });
+
+  test('triage.json round-trips through computeConfigHash: a content change changes the hash', () => {
+    const tmp = fs.mkdtempSync(path.join(os.tmpdir(), 'triage-config-hash-'));
+    try {
+      for (const name of ['adapters.json', 'ats-boards.json', 'exec-boards.json', 'company-aliases.json', 'alert-senders.json', 'noise-rules.json']) {
+        fs.copyFileSync(path.join(CONFIG_DIR, name), path.join(tmp, name));
+      }
+      const hashWithoutFile = computeConfigHash(tmp);
+      fs.writeFileSync(path.join(tmp, 'triage.json'), JSON.stringify({ deterministic: { enabled: true, floor: 40, ceiling: 70 }, model: {} }));
+      const hashWithFile = computeConfigHash(tmp);
+      assert.notEqual(hashWithoutFile, hashWithFile, 'an absent-vs-present triage.json changes the config-lock hash (config drift must be deliberate)');
+    } finally {
+      fs.rmSync(tmp, { recursive: true, force: true });
+    }
+  });
+
+  describe('triageSchema', () => {
+    test('floor > ceiling is rejected', () => {
+      const r = triageSchema.safeParse({ deterministic: { floor: 71, ceiling: 70 }, model: {} });
+      assert.equal(r.success, false);
+    });
+    test('floor === ceiling is accepted', () => {
+      const r = triageSchema.safeParse({ deterministic: { floor: 50, ceiling: 50 }, model: {} });
+      assert.equal(r.success, true);
+    });
+    test('empty object parses to every default', () => {
+      const r = triageSchema.safeParse({});
+      assert.equal(r.success, true);
+    });
+  });
+
+  describe('loadTriageCandidateSummary', () => {
+    test('missing file returns null', () => {
+      const tmp = fs.mkdtempSync(path.join(os.tmpdir(), 'triage-candidate-missing-'));
+      try {
+        assert.equal(loadTriageCandidateSummary(tmp), null);
+      } finally {
+        fs.rmSync(tmp, { recursive: true, force: true });
+      }
+    });
+    test('a blank (whitespace-only) file returns null, not a silent default description', () => {
+      const tmp = fs.mkdtempSync(path.join(os.tmpdir(), 'triage-candidate-blank-'));
+      try {
+        fs.writeFileSync(path.join(tmp, 'triage-candidate.md'), '   \n\n  ');
+        assert.equal(loadTriageCandidateSummary(tmp), null);
+      } finally {
+        fs.rmSync(tmp, { recursive: true, force: true });
+      }
+    });
+    test('a real file returns its text verbatim', () => {
+      const tmp = fs.mkdtempSync(path.join(os.tmpdir(), 'triage-candidate-real-'));
+      try {
+        fs.writeFileSync(path.join(tmp, 'triage-candidate.md'), 'A CTO with 20 years of experience.');
+        assert.equal(loadTriageCandidateSummary(tmp), 'A CTO with 20 years of experience.');
+      } finally {
+        fs.rmSync(tmp, { recursive: true, force: true });
+      }
+    });
   });
 });

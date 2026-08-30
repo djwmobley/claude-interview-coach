@@ -6,13 +6,14 @@
  * re-deriving it from ic_scan_run_items timestamps or mark_meta alone.
  *
  * kind and actor are both closed, total classifications (matching the CHECK constraints in
- * sql/009_pipeline_events_documents.sql): a value outside either list throws VALIDATION here, before
- * the round trip, rather than being silently coerced or left to the database to reject.
+ * sql/009_pipeline_events_documents.sql, widened by sql/011_triage_actor.sql to add the 'auto' actor for
+ * slice 3 auto-triage): a value outside either list throws VALIDATION here, before the round trip,
+ * rather than being silently coerced or left to the database to reject.
  */
 import { JobSearchError } from './errors.js';
 
 export const EVENT_KINDS = Object.freeze(['status', 'note', 'fit', 'created', 'document', 'followup', 'reply', 'migrated']);
-export const EVENT_ACTORS = Object.freeze(['dashboard', 'mcp', 'cli', 'migration', 'seed']);
+export const EVENT_ACTORS = Object.freeze(['dashboard', 'mcp', 'cli', 'migration', 'seed', 'auto']);
 
 const COLS = 'id, listing_id, at, kind, from_status, to_status, note, actor, run_id';
 
@@ -25,7 +26,7 @@ const COLS = 'id, listing_id, at, kind, from_status, to_status, note, actor, run
  * @property {string|null} from_status
  * @property {string|null} to_status
  * @property {string|null} note
- * @property {'dashboard'|'mcp'|'cli'|'migration'|'seed'} actor
+ * @property {'dashboard'|'mcp'|'cli'|'migration'|'seed'|'auto'} actor
  * @property {number|null} run_id
  */
 

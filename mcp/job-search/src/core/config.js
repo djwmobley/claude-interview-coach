@@ -399,7 +399,42 @@ export const alertSendersSchema = z.object({
   })),
 });
 
-export const CONFIG_FILES = Object.freeze(['adapters.json', 'ats-boards.json', 'exec-boards.json', 'company-aliases.json', 'alert-senders.json', 'noise-rules.json']);
+/**
+ * Slice 3 auto-triage config (docs/slice3-auto-triage-spec.md section 3). `deterministic` and `model`
+ * are independent toggles, both defaulting to `false`: model scoring ships off "until verified" (locked
+ * decision); deterministic auto-skip/auto-new ships off by default too so a fresh clone or fork never
+ * auto-marks rows until an operator deliberately opts in. `floor === ceiling` is a legal, accepted
+ * degenerate case (the `.refine` only requires `<=`, not `<`): every row lands in skip_low or auto_new,
+ * model_band is permanently empty, and the model step never has anything to batch.
+ */
+export const triageSchema = z.object({
+  deterministic: z.object({
+    enabled: z.boolean().default(false),
+    floor: z.number().int().min(0).max(100).default(40),
+    ceiling: z.number().int().min(0).max(100).default(70),
+  }).refine((d) => d.floor <= d.ceiling, { message: 'triage.json: deterministic.floor must be <= ceiling' }).default({}),
+  model: z.object({
+    enabled: z.boolean().default(false), // off until verified, per the locked decision
+    modelName: z.string().min(1).default('claude-sonnet-5'),
+    batchSize: z.number().int().min(10).max(20).default(15),
+    skipMaxFit: z.number().int().min(0).max(100).default(30),
+    timeoutMs: z.number().int().positive().default(60000),
+    maxListingsPerRun: z.number().int().positive().default(200),
+    maxBatchesPerRun: z.number().int().positive().default(15),
+    descriptionTruncateChars: z.number().int().positive().default(1200),
+  }).default({}),
+});
+
+export const CONFIG_FILES = Object.freeze([
+  'adapters.json', 'ats-boards.json', 'exec-boards.json', 'company-aliases.json', 'alert-senders.json', 'noise-rules.json',
+  // Slice 3 auto-triage (spec section 3): all four hashed for "config drift must be deliberate", even
+  // though triage.json is loaded tolerantly (readOptionalValidated, below) and triage-candidate.md is
+  // never committed (personal data, gitignored) -- computeConfigHash() hashes a "<missing>" placeholder
+  // for an absent file without throwing, so this list growing never blocks loadConfig() on its own; it
+  // only changes the config-lock hash, which is why the real triage.json + a fresh config.lock.json must
+  // ship in the same deploy as this code (spec section 3, "Production rollout").
+  'triage.json', 'triage-candidate.md', 'triage-output-schema.json', 'triage-mcp-empty.json',
+]);
 
 /**
  * @typedef {Object} LoadedConfig
@@ -409,6 +444,9 @@ export const CONFIG_FILES = Object.freeze(['adapters.json', 'ats-boards.json', '
  * @property {Record<string, string>} companyAliases
  * @property {z.infer<typeof alertSendersSchema>['senders']} alertSenders
  * @property {z.infer<typeof noiseRulesSchema>} noiseRules
+ * @property {z.infer<typeof triageSchema> & { present: boolean }} triage present=false means no
+ *   config/triage.json was found at all (schema defaults applied silently); present=true with both
+ *   steps disabled means an operator deliberately configured triage and turned it off (spec section 3/6).
  * @property {string} configDir
  * @property {string} hash sha256 over the raw config files
  */
@@ -441,6 +479,70 @@ function readValidated(dir, name, schema) {
     });
   }
   return parsed.data;
+}
+
+/**
+ * Tolerant loader for triage.json (spec section 3): every field of `schema` carries a zod default, so
+ * `schema.parse({})` always succeeds, meaning a missing file yields `{ data: schema.parse({}), present:
+ * false }` instead of throwing CONFIG_INVALID the way readValidated() does for every other config file.
+ * A missing config/triage.json must never fail the scan (adding 'triage.json' to CONFIG_FILES and
+ * wiring it through readValidated() the same way as the other six would mean the entire scan pipeline
+ * fails closed the moment this code ships, until the real file exists on disk -- this is not
+ * hypothetical: it would break the operator's own unattended `job-search scan` Task Scheduler job at the
+ * next run after merge). A file that DOES exist but fails to parse or validate still throws
+ * CONFIG_INVALID exactly like readValidated() does for every other file: a present, malformed file is a
+ * real, deliberate config error, not tolerated.
+ * @param {string} dir
+ * @param {string} name
+ * @param {z.ZodTypeAny} schema
+ */
+function readOptionalValidated(dir, name, schema) {
+  const file = path.join(dir, name);
+  let text;
+  try {
+    text = fs.readFileSync(file, 'utf8');
+  } catch {
+    return { data: schema.parse({}), present: false };
+  }
+  let json;
+  try {
+    json = JSON.parse(text);
+  } catch (err) {
+    throw new JobSearchError('CONFIG_INVALID', `config file is not valid JSON: ${name}`, { details: { file: name } });
+  }
+  const parsed = schema.safeParse(json);
+  if (!parsed.success) {
+    const first = parsed.error.issues[0];
+    const where = first ? first.path.join('.') : '';
+    throw new JobSearchError('CONFIG_INVALID', `config validation failed: ${name} at ${where}: ${first ? first.message : 'unknown'}`, {
+      details: { file: name, path: where },
+    });
+  }
+  return { data: parsed.data, present: true };
+}
+
+/**
+ * Read config/triage-candidate.md (spec section 3): a plain-text candidate summary for the auto-triage
+ * model prompt, never zod-validated, never touched by loadConfig() itself. Intended to be called once
+ * per triage invocation (src/core/triage.js's runTriage()) and the same in-memory string reused verbatim
+ * for every batch that run sends, never re-read mid-run (finding 17): a file edited partway through a
+ * long, multi-batch run must not produce a self-inconsistent run.
+ *
+ * Missing, or blank after trimming, returns null -- the caller disables model scoring for that run with
+ * reason 'candidate_summary_missing', never a silent default description. Not committed to the repo
+ * (personal data): gitignored (mcp/job-search/.gitignore via the repo root .gitignore), present only on
+ * an operator's own machine.
+ * @param {string} dir configDir
+ * @returns {string|null}
+ */
+export function loadTriageCandidateSummary(dir) {
+  let text;
+  try {
+    text = fs.readFileSync(path.join(dir, 'triage-candidate.md'), 'utf8');
+  } catch {
+    return null;
+  }
+  return text.trim() ? text : null;
 }
 
 /**
@@ -480,6 +582,7 @@ export function loadConfig(opts = {}) {
   const aliasesFile = readValidated(dir, 'company-aliases.json', companyAliasesSchema);
   const alertSendersFile = readValidated(dir, 'alert-senders.json', alertSendersSchema);
   const noiseRules = readValidated(dir, 'noise-rules.json', noiseRulesSchema);
+  const triageFile = readOptionalValidated(dir, 'triage.json', triageSchema);
   /** @type {LoadedConfig} */
   const cfg = {
     adapters,
@@ -488,6 +591,7 @@ export function loadConfig(opts = {}) {
     companyAliases: aliasesFile.aliases,
     alertSenders: alertSendersFile.senders,
     noiseRules,
+    triage: { ...triageFile.data, present: triageFile.present },
     configDir: dir,
     hash: computeConfigHash(dir),
   };

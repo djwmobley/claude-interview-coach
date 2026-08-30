@@ -23,7 +23,7 @@ import { classifyNoise, NOISE_CLASSES } from '../src/core/noise.js';
 
 const HERE = path.dirname(fileURLToPath(import.meta.url));
 const SQL_DIR = path.join(HERE, '..', 'sql');
-const MIGRATIONS = ['001_extend_ic_job_listings.sql', '002_search_profiles.sql', '003_scan_runs.sql', '004_review_queue.sql', '005_budget.sql', '006_followups.sql', '007_mark_meta.sql', '008_noise_and_report.sql', '009_pipeline_events_documents.sql', '010_status_event_backfill.sql'];
+const MIGRATIONS = ['001_extend_ic_job_listings.sql', '002_search_profiles.sql', '003_scan_runs.sql', '004_review_queue.sql', '005_budget.sql', '006_followups.sql', '007_mark_meta.sql', '008_noise_and_report.sql', '009_pipeline_events_documents.sql', '010_status_event_backfill.sql', '011_triage_actor.sql'];
 const DEFAULT_NOTE_IDS = [53, 54, 55, 56, 57, 58];
 
 const EXPECTED_COLUMNS = [

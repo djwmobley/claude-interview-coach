@@ -499,13 +499,62 @@ export function buildReportSubject(data, extra = {}) {
   return [...prefixes, parts.join(', ')].join(' ');
 }
 
-/** @param {{ salary_min: number|null, salary_max: number|null }} r */
-function salaryText(r) {
+/**
+ * Short formatted salary string (e.g. "$150k-$200k"), reused verbatim by the auto-triage model prompt
+ * (src/core/triage.js's loadListingsForBatch) so the model sees the exact same shape a human reading
+ * the daily report would.
+ * @param {{ salary_min: number|null, salary_max: number|null }} r
+ */
+export function salaryText(r) {
   const hasMin = typeof r.salary_min === 'number';
   const hasMax = typeof r.salary_max === 'number';
   if (!hasMin && !hasMax) return 'n/a';
   if (hasMin && hasMax) return `$${Math.round(r.salary_min / 1000)}k-$${Math.round(r.salary_max / 1000)}k`;
   return hasMin ? `$${Math.round(r.salary_min / 1000)}k+` : `to $${Math.round(r.salary_max / 1000)}k`;
+}
+
+/**
+ * Human-readable text for a rejected auto-triage model batch's reason (mirrors
+ * src/core/triage.js's describeTriageFailure(), duplicated here rather than imported to avoid a
+ * report.js <-> triage.js circular module dependency for one small pure mapping).
+ * @param {string|null|undefined} reason
+ */
+function triageFailureText(reason) {
+  if (typeof reason === 'string' && reason.startsWith('cli_exit_')) return `exited ${reason.slice('cli_exit_'.length)}`;
+  if (reason === 'timeout') return 'timed out';
+  if (reason === 'malformed_json') return 'returned malformed output';
+  if (reason === 'schema_violation') return 'returned invalid results';
+  if (reason === 'unknown_id') return 'returned an unrequested id';
+  return 'failed';
+}
+
+/**
+ * One auto-triage report line (slice 3 spec section 6) for a single run's `stats.triage`. Returns null
+ * when `triage` is absent (a run from before this feature shipped, or an old row) so the caller omits
+ * the line entirely rather than printing a placeholder.
+ * @param {any} triage
+ */
+export function renderTriageLine(triage) {
+  if (!triage) return null;
+  if (triage.error) return `triage: failed (${triage.error})`;
+  if (!triage.configured) return 'triage: not configured (no config/triage.json; deterministic and model triage are off)';
+  const d = triage.deterministic ?? {};
+  const m = triage.model ?? {};
+  const autoSkipped = (d.skip_noise ?? 0) + (d.skip_low ?? 0);
+  const autoNew = d.auto_new ?? 0;
+  const base = `triage: ${autoSkipped} auto-skipped, ${autoNew} auto-new`;
+  if (!m.enabled) {
+    const reasonText = m.reason === 'candidate_summary_missing' ? ': candidate summary missing' : '';
+    return `${base}, ${d.model_band ?? 0} sent to model (model scoring disabled${reasonText})`;
+  }
+  const sentToModel = (m.scored ?? 0) + (m.unscored ?? 0);
+  if (m.batches_failed > 0) {
+    return `${base}, ${sentToModel} sent to model, ${m.scored ?? 0} of ${sentToModel} scored, claude -p ${triageFailureText(m.last_failure_reason)}`;
+  }
+  if (m.batches_zero_scored > 0) {
+    return `${base}, ${sentToModel} sent to model, ${m.scored ?? 0} scored, ${m.batches_zero_scored} of ${m.batches_sent} batches scored nothing (check the prompt)`;
+  }
+  return `${base}, ${sentToModel} sent to model, ${m.scored ?? 0} scored`;
 }
 
 /**
@@ -529,6 +578,8 @@ export function renderReportText(data, registry) {
     lines.push(`${banner}run #${r.run_id} | profile ${r.profile} | status ${r.status} | started ${r.started_at} | duration ${r.duration_seconds ?? '?'}s`);
     lines.push(`  fetched ${s.fetched ?? 0} | new ${s.new ?? 0} | updated ${s.updated ?? 0} | repost ${s.repost ?? 0} | ambiguous ${s.ambiguous ?? 0} | detail_skipped_budget ${s.detail_skipped_budget ?? 0}`);
     if (Object.keys(r.pages_by_source).length) lines.push(`  pages by source: ${Object.entries(r.pages_by_source).map(([k, v]) => `${k}=${v}`).join(', ')}`);
+    const triageLine = renderTriageLine(s.triage);
+    if (triageLine) lines.push(`  ${triageLine}`);
     for (const e of r.errors.slice(0, 5)) lines.push(`  error: ${e.source ?? 'run'} ${e.code}: ${String(e.message ?? '').slice(0, 200)}`);
   }
   lines.push('');
@@ -591,7 +642,9 @@ export function renderReportHtml(data, registry) {
       const s = r.stats;
       const banner = r.status !== 'ok' ? `<strong>[${esc(String(r.status).toUpperCase())}]</strong> ` : '';
       const errs = r.errors.slice(0, 5).map((e) => `<br>error: ${esc(e.source ?? 'run')} ${esc(e.code)}: ${esc(String(e.message ?? '').slice(0, 200))}`).join('');
-      parts.push(`<li>${banner}run #${r.run_id}, profile ${esc(r.profile)}, status ${esc(r.status)}, started ${esc(r.started_at)}, duration ${r.duration_seconds ?? '?'}s<br>fetched ${s.fetched ?? 0}, new ${s.new ?? 0}, updated ${s.updated ?? 0}, repost ${s.repost ?? 0}, ambiguous ${s.ambiguous ?? 0}, detail_skipped_budget ${s.detail_skipped_budget ?? 0}${errs}</li>`);
+      const triageLine = renderTriageLine(s.triage);
+      const triageHtml = triageLine ? `<br>${esc(triageLine)}` : '';
+      parts.push(`<li>${banner}run #${r.run_id}, profile ${esc(r.profile)}, status ${esc(r.status)}, started ${esc(r.started_at)}, duration ${r.duration_seconds ?? '?'}s<br>fetched ${s.fetched ?? 0}, new ${s.new ?? 0}, updated ${s.updated ?? 0}, repost ${s.repost ?? 0}, ambiguous ${s.ambiguous ?? 0}, detail_skipped_budget ${s.detail_skipped_budget ?? 0}${triageHtml}${errs}</li>`);
     }
     parts.push('</ul>');
   }
@@ -636,6 +689,8 @@ export function renderReportMarkdown(data, registry) {
     lines.push(`- ${banner}run #${r.run_id}, profile ${r.profile}, status ${r.status}, started ${r.started_at}, duration ${r.duration_seconds ?? '?'}s`);
     lines.push(`  fetched ${s.fetched ?? 0}, new ${s.new ?? 0}, updated ${s.updated ?? 0}, repost ${s.repost ?? 0}, ambiguous ${s.ambiguous ?? 0}, detail_skipped_budget ${s.detail_skipped_budget ?? 0}`);
     if (Object.keys(r.pages_by_source).length) lines.push(`  pages by source: ${Object.entries(r.pages_by_source).map(([k, v]) => `${k}=${v}`).join(', ')}`);
+    const triageLine = renderTriageLine(s.triage);
+    if (triageLine) lines.push(`  ${triageLine}`);
     for (const e of r.errors.slice(0, 5)) lines.push(`  error: ${e.source ?? 'run'} ${e.code}: ${String(e.message ?? '').slice(0, 200)}`);
   }
   lines.push('');

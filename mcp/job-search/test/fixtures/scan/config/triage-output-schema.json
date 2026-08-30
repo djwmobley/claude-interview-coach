@@ -1,0 +1,21 @@
+{
+  "type": "object",
+  "properties": {
+    "results": {
+      "type": "array",
+      "items": {
+        "type": "object",
+        "properties": {
+          "id": { "type": "integer" },
+          "fit_score": { "type": "integer", "minimum": 0, "maximum": 100 },
+          "status": { "type": "string", "enum": ["new", "maybe", "skip"] },
+          "reason": { "type": "string", "maxLength": 200 }
+        },
+        "required": ["id", "fit_score", "status", "reason"],
+        "additionalProperties": false
+      }
+    }
+  },
+  "required": ["results"],
+  "additionalProperties": false
+}
