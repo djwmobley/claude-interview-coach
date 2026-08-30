@@ -9,7 +9,7 @@
 import { test, describe, before, after } from 'node:test';
 import assert from 'node:assert/strict';
 import { LOCK_KEY, resolveSources, fetchDetailForRow } from '../src/core/scan-run.js';
-import { newClient, upsertTestProfile, cleanupScan, offlineDeps, runScanWaiting, testConfig, makeFixtureFetch, DEFAULT_MAP, makeFakeSession, memoryReserve } from './helpers/scan-fixtures.js';
+import { newClient, upsertTestProfile, cleanupScan, offlineDeps, runScanWaiting, testConfig, makeFixtureFetch, DEFAULT_MAP, makeFakeSession, memoryReserve, FIXTURE_NOW } from './helpers/scan-fixtures.js';
 import { untrustedRows } from '../src/core/compact.js';
 
 const [ROWS_OPEN, , ROWS_CLOSE] = untrustedRows(['x']);
@@ -39,7 +39,7 @@ const ZZ_MAP = DEFAULT_MAP.filter((m) => m.prefix.includes('zztest') || m.prefix
 describe('runScan persisted', () => {
   test('first run inserts new rows with run items, prescore, detail through the gate, and embedding attempts', async () => {
     const deps = offlineDeps({ fetch: makeFixtureFetch(ZZ_MAP) });
-    const r = await runScanWaiting({ profile: PROFILE, sources: ['greenhouse'], dryRun: false, wait: true }, deps, { trigger: 'cli', log: () => {} });
+    const r = await runScanWaiting({ profile: PROFILE, sources: ['greenhouse'], dryRun: false, wait: true }, deps, { trigger: 'cli', log: () => {}, now: FIXTURE_NOW });
     assert.equal(r.status, 'ok', JSON.stringify(r.errors));
     assert.equal(r.stats.fetched, 2, 'CTO + VP match; engineer filtered; old CIO dropped by the window');
     assert.equal(r.stats.new, 2);
@@ -76,7 +76,7 @@ describe('runScan persisted', () => {
 
   test('second run is all updates: times_seen bumps once, no new rows, no queue rows', async () => {
     const deps = offlineDeps({ fetch: makeFixtureFetch(ZZ_MAP) });
-    const r = await runScanWaiting({ profile: PROFILE, sources: ['greenhouse'], dryRun: false, wait: true }, deps, { trigger: 'mcp', log: () => {} });
+    const r = await runScanWaiting({ profile: PROFILE, sources: ['greenhouse'], dryRun: false, wait: true }, deps, { trigger: 'mcp', log: () => {}, now: FIXTURE_NOW });
     assert.equal(r.status, 'ok', JSON.stringify(r.errors));
     assert.equal(r.stats.updated, 2);
     assert.equal(r.stats.new, 0);
@@ -93,7 +93,7 @@ describe('runScan persisted', () => {
     jobs.jobs = jobs.jobs.filter((/** @type {any} */ j) => j.id !== 7000000002);
     const map = [{ prefix: 'https://boards-api.greenhouse.io/v1/boards/zztest/jobs/7000000001', file: 'adapters/greenhouse-zztest-detail.json' }, { prefix: 'https://boards-api.greenhouse.io/v1/boards/zztest/jobs', body: JSON.stringify(jobs) }, ...DEFAULT_MAP.filter((m) => m.prefix.includes('/gitlab/'))];
     for (let i = 1; i <= 3; i++) {
-      const r = await runScanWaiting({ profile: PROFILE, sources: ['greenhouse'], dryRun: false, wait: true }, offlineDeps({ fetch: makeFixtureFetch(map) }), { trigger: 'cli', log: () => {} });
+      const r = await runScanWaiting({ profile: PROFILE, sources: ['greenhouse'], dryRun: false, wait: true }, offlineDeps({ fetch: makeFixtureFetch(map) }), { trigger: 'cli', log: () => {}, now: FIXTURE_NOW });
       assert.equal(r.status, 'ok', JSON.stringify(r.errors));
       const vp = await client.query(`SELECT absent_runs, expired_at, stale FROM ic_job_listings WHERE company = 'ZZ-TEST-SCAN' AND external_id = 'greenhouse:zztest/7000000002'`);
       assert.equal(vp.rows[0].absent_runs, i);
@@ -108,7 +108,7 @@ describe('runScan persisted', () => {
       assert.equal(cto.rows[0].absent_runs, 0, 'seen rows are untouched');
     }
     // Repost of the expired listing on the next run with the same id reopens it (1a-repost-same-id).
-    const r = await runScanWaiting({ profile: PROFILE, sources: ['greenhouse'], dryRun: false, wait: true }, offlineDeps({ fetch: makeFixtureFetch(ZZ_MAP) }), { trigger: 'cli', log: () => {} });
+    const r = await runScanWaiting({ profile: PROFILE, sources: ['greenhouse'], dryRun: false, wait: true }, offlineDeps({ fetch: makeFixtureFetch(ZZ_MAP) }), { trigger: 'cli', log: () => {}, now: FIXTURE_NOW });
     assert.equal(r.stats.repost, 1, JSON.stringify(r.stats));
     const vp = await client.query(`SELECT absent_runs, expired_at FROM ic_job_listings WHERE company = 'ZZ-TEST-SCAN' AND external_id = 'greenhouse:zztest/7000000002'`);
     assert.equal(vp.rows[0].expired_at, null);
@@ -118,7 +118,7 @@ describe('runScan persisted', () => {
   test('a profile change resets absent_runs for that profile', async () => {
     await client.query(`UPDATE ic_job_listings SET absent_runs = 2 WHERE company = 'ZZ-TEST-SCAN'`);
     await upsertTestProfile(client, PROFILE, { sources: ['greenhouse'], keywords: ['Chief Technology Officer', 'Chief Information Officer', 'Vice President, Technology', 'Chief Digital Officer'], phrases: [], locations: ['Houston, TX'] });
-    const r = await runScanWaiting({ profile: PROFILE, sources: ['greenhouse'], dryRun: false, wait: true }, offlineDeps({ fetch: makeFixtureFetch(ZZ_MAP) }), { trigger: 'cli', log: () => {} });
+    const r = await runScanWaiting({ profile: PROFILE, sources: ['greenhouse'], dryRun: false, wait: true }, offlineDeps({ fetch: makeFixtureFetch(ZZ_MAP) }), { trigger: 'cli', log: () => {}, now: FIXTURE_NOW });
     assert.equal(r.status, 'ok');
     const rows = await client.query(`SELECT absent_runs, profile_rev FROM ic_job_listings WHERE company = 'ZZ-TEST-SCAN'`);
     assert.ok(rows.rows.every((x) => x.absent_runs === 0));

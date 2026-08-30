@@ -19,6 +19,23 @@ const HERE = path.dirname(fileURLToPath(import.meta.url));
 export const FIXTURES = path.join(HERE, '..', 'fixtures');
 export const CONFIG_DIR = path.join(FIXTURES, 'scan', 'config');
 
+/**
+ * Pinned clock for tests that classify the zztest Greenhouse fixture (postings dated
+ * 2026-08-23 CTO, 2026-08-22 VP, 2026-01-02 CIO, see fixtures/adapters/greenhouse-zztest-jobs.json)
+ * against a posted-within-days window. runScan's window is `opts.now - posted_within_days`,
+ * and `opts.now` defaults to the real clock (src/core/scan-run.js), so a test that never
+ * passes `now` drifts out of the window on the fixture's own schedule instead of on a code
+ * change: with the default 7-day window, the VP posting fell outside it on 2026-08-29 and
+ * the CTO posting falls outside it on 2026-08-30.
+ *
+ * Pass this explicitly as `now` in any runScan/runScanWaiting call whose assertions depend
+ * on which of those postings fall inside the window. It is intentionally NOT a default
+ * inside runScanWaiting: other suites (e.g. scenarios.test.js) generate their own fixture
+ * postings dated relative to the real `Date.now()` and must keep comparing against the real
+ * clock, not this fixed one.
+ */
+export const FIXTURE_NOW = new Date('2026-08-25T12:00:00Z');
+
 /** @param {string} rel */
 export function readFixture(rel) {
   return fs.readFileSync(path.join(FIXTURES, rel), 'utf8');
