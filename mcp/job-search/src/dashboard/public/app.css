@@ -200,6 +200,10 @@ table { border-collapse: collapse; width: 100%; }
 }
 .data-table__sort-btn:hover,
 .data-table__sort-btn:focus-visible { color: var(--text); }
+/* Active-sort arrow (asc/desc), split into its own span so it reads as a secondary cue next to the
+   column label rather than competing with it -- no new accent color, same muted tone as the rest of the
+   header row. */
+.data-table__sort-indicator { color: var(--muted-2); }
 
 .bulk-bar { display: flex; align-items: center; gap: 8px; background: var(--surface2); border: 1px solid var(--border); border-radius: 6px; padding: 6px 10px; margin-bottom: 8px; }
 

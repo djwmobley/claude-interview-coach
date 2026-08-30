@@ -95,7 +95,7 @@ export function filterStateToQuery(state) {
 }
 
 /**
- * @param {{ state: any, onChange: (patch: any) => void, onOpenFilters?: () => void }} opts
+ * @param {{ state: any, onChange: (patch: any) => void, onOpenFilters?: () => void, onReset?: () => void }} opts
  */
 export function filterBar(opts) {
   const state = opts.state;
@@ -118,11 +118,22 @@ export function filterBar(opts) {
     text: `Filters${n > 0 ? ` (${n})` : ''}`,
     on: { click: () => opts.onOpenFilters?.() },
   });
+  // Reset view (full-column-sort spec): same restrained `.btn btn--small` styling as Filters, no new
+  // accent color -- this dashboard deliberately keeps color use minimal. Optional, same pattern as
+  // onOpenFilters above, since filterBar currently has exactly one caller (pages/jobs.js) but need not
+  // assume it stays that way.
+  const resetButton = opts.onReset ? h('button', {
+    className: 'btn btn--small',
+    attrs: { type: 'button' },
+    text: 'Reset view',
+    on: { click: () => opts.onReset?.() },
+  }) : null;
   return h('div', { className: 'filter-bar' }, [
     searchInput,
     h('label', { className: 'filter-bar__field' }, [h('span', { text: 'Location' }), locationSelect]),
     h('label', { className: 'filter-bar__field' }, [h('span', { text: 'First seen' }), firstSeenSelect]),
     h('label', { className: 'filter-bar__field filter-bar__checkbox' }, [hideDupCheckbox, h('span', { text: 'Hide duplicates' })]),
     filtersButton,
+    resetButton,
   ]);
 }

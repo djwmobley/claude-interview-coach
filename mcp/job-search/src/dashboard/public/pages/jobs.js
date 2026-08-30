@@ -20,7 +20,7 @@ import { stageChip } from '../components/chips.js';
  * this mirror (and every sortKey used in COLUMNS below) against the real SORTS array, so drift between
  * the two is a test failure, not a silent runtime mismatch.
  */
-export const SORTS = Object.freeze(['posted', 'seen', 'prescore', 'fit', 'id']);
+export const SORTS = Object.freeze(['posted', 'seen', 'prescore', 'fit', 'id', 'title', 'company', 'source', 'status', 'location', 'first_seen']);
 
 const SORT_STORAGE_KEY = 'jobs.sort.v1';
 
@@ -65,13 +65,61 @@ function saveSortState(state) {
 // `sortKey` values are string literals matching SORTS above (not this same array by reference, since a
 // column's sortKey is also read directly by pages/jobs.js's own tests via COLUMNS -- see
 // test/query-jobs-sort.test.js).
+//
+// Every column is sortable now except the leading '' checkbox column. 'First seen' uses sortKey
+// 'first_seen', NOT 'seen' -- 'seen' maps server-side to last_seen (the re-scan timestamp), a different
+// column from the one this header labels; using 'seen' here would sort the table by the wrong field
+// while the header itself kept reading "First seen".
 export const COLUMNS = Object.freeze([
-  '', 'Title', 'Company', 'Source', 'Stage',
+  '',
+  { text: 'Title', sortKey: 'title' },
+  { text: 'Company', sortKey: 'company' },
+  { text: 'Source', sortKey: 'source' },
+  { text: 'Stage', sortKey: 'status' },
   { text: 'Prescore', sortKey: 'prescore' },
   { text: 'Fit', sortKey: 'fit', className: 'job-row__fit' },
-  'First seen',
-  { text: 'Location', className: 'job-row__location' },
+  { text: 'First seen', sortKey: 'first_seen' },
+  { text: 'Location', sortKey: 'location', className: 'job-row__location' },
 ]);
+
+/**
+ * Per-sort-key first-click direction (the direction a column sorts on the FIRST click after switching to
+ * it from a different column). Alpha columns (title/company/source/location) and the status/pipeline
+ * column start ascending -- for status this means pipeline order start-to-finish (new -> ... -> review),
+ * the most natural "where does this row sit in the pipeline" reading. Numeric/date columns
+ * (prescore/fit/first_seen) start descending -- highest score or most recent first, since that is almost
+ * always what someone wants to see first for a score or a date.
+ *
+ * TOTAL CLASSIFICATION: nextSortState() below reads this with `?? 'desc'`, so any sortKey without an
+ * explicit entry here defaults to 'desc' rather than throwing or producing `undefined`. The drift test
+ * (test/query-jobs-sort.test.js) still requires every real, sortable COLUMNS entry to have an explicit
+ * entry here -- the 'desc' fallback is a safety net for stray/future callers, not a substitute for
+ * keeping this object in sync with COLUMNS.
+ */
+export const FIRST_CLICK_DIR = Object.freeze({
+  title: 'asc',
+  company: 'asc',
+  source: 'asc',
+  status: 'asc',
+  location: 'asc',
+  prescore: 'desc',
+  fit: 'desc',
+  first_seen: 'desc',
+});
+
+/**
+ * Pure click-state transition, extracted out of onSort so it is directly unit-testable without a
+ * DOM/page render (table-driven tests live in test/query-jobs-sort.test.js). A click on the
+ * already-active column toggles asc<->desc; a click on a different column switches to that column at its
+ * type's first-click direction (FIRST_CLICK_DIR above).
+ * @param {{ sort: string, dir: 'asc'|'desc' }} current
+ * @param {string} sortKey
+ * @returns {{ sort: string, dir: 'asc'|'desc' }}
+ */
+export function nextSortState(current, sortKey) {
+  if (current.sort === sortKey) return { sort: sortKey, dir: current.dir === 'asc' ? 'desc' : 'asc' };
+  return { sort: sortKey, dir: FIRST_CLICK_DIR[sortKey] ?? 'desc' };
+}
 
 /**
  * Pure merge of the two source lists the Jobs page keeps: the server's current distinct-source list
@@ -145,10 +193,28 @@ export async function render(container, params, app) {
 
   /** @param {string} sortKey */
   function onSort(sortKey) {
-    sortState = sortState.sort === sortKey
-      ? { sort: sortKey, dir: sortState.dir === 'asc' ? 'desc' : 'asc' }
-      : { sort: sortKey, dir: 'desc' };
+    sortState = nextSortState(sortState, sortKey);
     saveSortState(sortState);
+    load();
+  }
+
+  /**
+   * Reset view: restores the default sort, the default filter state, and clears selection and the
+   * keyboard cursor -- everything this page keeps as its own working state. Deliberately does NOT clear
+   * seenSources/apiSources: those are session-persistent Filter-modal option lists by design (see their
+   * own comments above), not part of "the current view."
+   */
+  function onResetView() {
+    sortState = { sort: 'posted', dir: 'desc' };
+    filterState = { hideDuplicates: true };
+    selected.clear();
+    try {
+      localStorage.removeItem(SORT_STORAGE_KEY);
+    } catch {
+      // Private browsing, blocked site data, or a full quota: sortState is already reset in memory for
+      // this page load, it simply will not persist as "removed" across a reload. Never throws out.
+    }
+    cursor.reset();
     load();
   }
 
@@ -167,6 +233,7 @@ export async function render(container, params, app) {
       filterBar({
         state: filterState,
         onChange: (patch) => { filterState = { ...filterState, ...patch }; load(); },
+        onReset: onResetView,
         onOpenFilters: async () => {
           // Cheap refresh each time the modal opens: a source added to a row since page load (or since
           // the last time this modal was opened) should not require a full page reload to show up.
