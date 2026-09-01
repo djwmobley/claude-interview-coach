@@ -7,13 +7,14 @@
  *
  * kind and actor are both closed, total classifications (matching the CHECK constraints in
  * sql/009_pipeline_events_documents.sql, widened by sql/011_triage_actor.sql to add the 'auto' actor for
- * slice 3 auto-triage): a value outside either list throws VALIDATION here, before the round trip,
- * rather than being silently coerced or left to the database to reject.
+ * slice 3 auto-triage, and further widened by sql/012_applications.sql to add the 'application' kind and
+ * the 'apply' actor for the apply pipeline): a value outside either list throws VALIDATION here, before
+ * the round trip, rather than being silently coerced or left to the database to reject.
  */
 import { JobSearchError } from './errors.js';
 
-export const EVENT_KINDS = Object.freeze(['status', 'note', 'fit', 'created', 'document', 'followup', 'reply', 'migrated']);
-export const EVENT_ACTORS = Object.freeze(['dashboard', 'mcp', 'cli', 'migration', 'seed', 'auto']);
+export const EVENT_KINDS = Object.freeze(['status', 'note', 'fit', 'created', 'document', 'followup', 'reply', 'migrated', 'application']);
+export const EVENT_ACTORS = Object.freeze(['dashboard', 'mcp', 'cli', 'migration', 'seed', 'auto', 'apply']);
 
 const COLS = 'id, listing_id, at, kind, from_status, to_status, note, actor, run_id';
 
@@ -22,22 +23,22 @@ const COLS = 'id, listing_id, at, kind, from_status, to_status, note, actor, run
  * @property {number} id
  * @property {number} listing_id
  * @property {Date} at
- * @property {'status'|'note'|'fit'|'created'|'document'|'followup'|'reply'|'migrated'} kind
+ * @property {'status'|'note'|'fit'|'created'|'document'|'followup'|'reply'|'migrated'|'application'} kind
  * @property {string|null} from_status
  * @property {string|null} to_status
  * @property {string|null} note
- * @property {'dashboard'|'mcp'|'cli'|'migration'|'seed'|'auto'} actor
+ * @property {'dashboard'|'mcp'|'cli'|'migration'|'seed'|'auto'|'apply'} actor
  * @property {number|null} run_id
  */
 
 /**
  * @typedef {Object} RecordEventInput
  * @property {number} listingId
- * @property {'status'|'note'|'fit'|'created'|'document'|'followup'|'reply'|'migrated'} kind
+ * @property {'status'|'note'|'fit'|'created'|'document'|'followup'|'reply'|'migrated'|'application'} kind
  * @property {string|null} [fromStatus]
  * @property {string|null} [toStatus]
  * @property {string|null} [note]
- * @property {'dashboard'|'mcp'|'cli'|'migration'|'seed'} [actor] default 'mcp'
+ * @property {'dashboard'|'mcp'|'cli'|'migration'|'seed'|'auto'|'apply'} [actor] default 'mcp'
  * @property {number|null} [runId]
  * @property {Date} [at] default now() (server clock)
  */
