@@ -1,9 +1,9 @@
 ---
 name: write-resume
 description: Write a targeted resume for a specific role, reads all source data, tailors content, generates markdown and DOCX
-argument-hint: <job-ad-url-or-file-or-paste>
+argument-hint: <job-ad-url-or-file-or-paste-or-listing-id>
 user-invocable: true
-allowed-tools: Read(*), Write(*), Edit(*), Glob(*), WebFetch, mcp__job-search__render_doc
+allowed-tools: Read(*), Write(*), Edit(*), Glob(*), WebFetch, mcp__job-search__get_job, mcp__job-search__render_doc
 ---
 
 # Write Resume
@@ -15,6 +15,14 @@ recruiter call cheat sheet.
 ## Arguments
 
 - `$ARGUMENTS` (required): The target role: one of:
+  - A numeric job-search dashboard listing id (e.g. `1234`), from the apply
+    pipeline's "Create application" card or `/write-resume 1234` copy button.
+    Call the job-search MCP `get_job` tool with that id for the url, company,
+    and stored description. Never re-fetch the posting with WebFetch when an
+    id is given: `get_job` already returns the description the dashboard
+    stored at scan time. Pass this same id through to `render_doc` as
+    `listingId` in Step 7 and Step 8 (see NON-NEGOTIABLE RULES > Output
+    Requirements) so the rendered DOCX links to the listing's application.
   - A URL to a live job posting
   - A file path to a saved job description
   - A pasted job description (if no argument, ask the candidate to paste it)
@@ -178,8 +186,15 @@ candidate.
 
 ### Step 2: Load the Job Posting
 
-If a URL was provided, fetch it. If a file path, read it. If neither, ask the
-candidate to paste the job description.
+If `$ARGUMENTS` is a numeric listing id, call `get_job({id: <listingId>})` and
+use its `url`, `company`, and `description` fields as the job posting. Do not
+also call WebFetch on that url: `get_job` already returns the description the
+dashboard stored at scan time, and re-fetching risks pulling a page that has
+since changed or gone stale. Remember the listing id; it is passed to
+`render_doc` as `listingId` in Step 7 and Step 8.
+
+Otherwise: if a URL was provided, fetch it. If a file path, read it. If
+neither, ask the candidate to paste the job description.
 
 Fetch prompt:
 ```
@@ -309,6 +324,14 @@ Fix any failures before proceeding.
 3. Render:
    `render_doc({kind:'resume', source:'output/markdown/YYYYMMDD-[role-slug].md', outName:'Jordan Reyes - [Title]'})`
    The response carries `output_path` and `bytes`. Do not open the file.
+   If Step 2 used a listing id, pass it through as `listingId` on this render
+   call (not on the `checkOnly` preflight call): `render_doc({kind:'resume',
+   source:'output/markdown/YYYYMMDD-[role-slug].md', outName:'Jordan Reyes -
+   [Title]', listingId:<listingId>})`. This links the DOCX to the listing's
+   application and moves it from drafting to docs_ready. The response's
+   `application_link` reports whether the link took effect; if
+   `application_link.ignored` is true, tell the candidate why (the reason
+   field) rather than assuming the link happened silently.
 
 ---
 

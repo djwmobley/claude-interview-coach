@@ -308,7 +308,18 @@ textarea.notes-textarea { min-height: 100px; }
 .stage-btn--active { outline: 2px solid var(--accent); outline-offset: 1px; }
 .stage-btn:disabled { opacity: 0.45; cursor: not-allowed; }
 .stage-btn__digit { font-family: "Cascadia Mono", Consolas, "SF Mono", monospace; font-size: 9px; color: var(--muted-2); }
-.description-panel, .documents-panel, .followups-panel, .dedup-card, .prescore-breakdown { background: var(--surface); border: 1px solid var(--border); border-radius: 6px; padding: 10px 12px; margin-top: 12px; }
+.description-panel, .documents-panel, .followups-panel, .dedup-card, .prescore-breakdown, .application-card { background: var(--surface); border: 1px solid var(--border); border-radius: 6px; padding: 10px 12px; margin-top: 12px; }
+
+/* Application card (apply pipeline slice 3, plan section 7): thin, low-color panel matching the rest of
+   the job-detail side/main columns -- house UI restraint (a state chip is the only color accent). */
+.application-card__header { display: flex; align-items: center; justify-content: space-between; gap: 8px; }
+.application-card__hint { font-size: 12px; color: var(--muted); margin: 6px 0; }
+.application-card__note { font-size: 12px; color: var(--muted); margin: 6px 0; }
+.application-card__copy-row { display: flex; align-items: center; gap: 8px; margin: 8px 0; }
+.application-card__copy-code { font-family: "Cascadia Mono", Consolas, "SF Mono", monospace; font-size: 12px; background: var(--tag-bg); border-radius: 4px; padding: 2px 6px; }
+.application-card__docs { list-style: none; margin: 8px 0; padding: 0; }
+.application-card__doc { display: flex; align-items: center; justify-content: space-between; gap: 8px; font-size: 12px; padding: 3px 0; }
+.application-card__doc--missing { color: var(--muted-2); }
 .timeline__row { display: flex; gap: 8px; align-items: baseline; font-size: 12px; padding: 4px 0; border-bottom: 1px solid var(--border); }
 
 /* Prescore breakdown panel (pages/job-detail.js's prescoreBreakdownPanel): a compact list of scored parts

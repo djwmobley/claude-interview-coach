@@ -10,10 +10,11 @@ import assert from 'node:assert/strict';
 import { PIPELINE_STATUSES } from '../src/core/statuses.js';
 import { EVENT_ACTORS } from '../src/core/events.js';
 import { DOCUMENT_KINDS } from '../src/core/documents.js';
-import { ATS_TYPES } from '../src/core/applications.js';
+import { ATS_TYPES, APPLICATION_STATES } from '../src/core/applications.js';
 import { CONFIDENCE_LEVELS } from '../src/apply/ats-detect.js';
 import {
-  stageChip, actorBadge, documentChip, sourceChip, runStatusChip, runItemOutcomeChip, atsChip, atsConfidenceChip, chipClassName,
+  stageChip, actorBadge, documentChip, sourceChip, runStatusChip, runItemOutcomeChip, atsChip, atsConfidenceChip,
+  applicationStateChip, chipClassName,
 } from '../src/dashboard/public/components/chips.js';
 
 function assertChipShape(chip, ctx) {
@@ -145,6 +146,21 @@ describe('atsConfidenceChip(): totality over the real CONFIDENCE_LEVELS (src/app
     assertChipShape(atsConfidenceChip(null), 'null confidence');
     assertChipShape(atsConfidenceChip(undefined), 'undefined confidence');
     assertChipShape(atsConfidenceChip('some-future-confidence'), 'unrecognized confidence');
+  });
+});
+
+describe('applicationStateChip(): totality over the real APPLICATION_STATES (src/core/applications.js, apply pipeline slice 3)', () => {
+  test('every real application state returns a defined chip', () => {
+    for (const state of APPLICATION_STATES) {
+      assertChipShape(applicationStateChip(state), `state=${state}`);
+    }
+  });
+
+  test('null/undefined/an unrecognized state still return a defined fallback, never undefined', () => {
+    assertChipShape(applicationStateChip(null), 'null state');
+    assertChipShape(applicationStateChip(undefined), 'undefined state');
+    assertChipShape(applicationStateChip('some-future-state'), 'unrecognized state');
+    assert.equal(applicationStateChip('some-future-state').label, 'Unknown');
   });
 });
 

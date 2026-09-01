@@ -192,6 +192,30 @@ export function atsConfidenceChip(confidence) {
   return { label: confidence ?? 'unknown', fg: '--muted-2', bg: '--tag-bg', style: O };
 }
 
+/**
+ * Application state chip (apply pipeline slice 3, plan section 7). TOTAL over the real
+ * APPLICATION_STATES enum (src/core/applications.js); test/dashboard-public-chips.test.js cross-checks
+ * completeness the same way it does for atsChip against ATS_TYPES. Deliberately not cross-imported (this
+ * file cannot import src/core/*.js -- browser-only, no bundler, same constraint every other table in
+ * this file already documents).
+ * @param {string|null|undefined} state
+ */
+export function applicationStateChip(state) {
+  /** @type {Record<string, Chip>} */
+  const table = {
+    drafting: { label: 'Drafting', fg: '--muted', bg: '--tag-bg', style: O },
+    docs_ready: { label: 'Docs ready', fg: '--cyan', bg: '--cyan-dim', style: O },
+    approved: { label: 'Approved', fg: '--accent', bg: '--accent-dim', style: O },
+    submitting: { label: 'Submitting', fg: '--yellow', bg: '--yellow-dim', style: O },
+    submitted: { label: 'Submitted', fg: '--yellow', bg: '--yellow-dim', style: O },
+    confirmed: { label: 'Confirmed', fg: '--green', bg: '--green-dim', style: O },
+    failed: { label: 'Failed', fg: '--red', bg: '--red-dim', style: O },
+    needs_human: { label: 'Needs you', fg: '--pink', bg: '--pink-dim', style: O },
+    withdrawn: { label: 'Withdrawn', fg: '--muted-2', bg: '--tag-bg', style: O },
+  };
+  return table[state ?? ''] ?? { label: 'Unknown', fg: '--muted-2', bg: '--tag-bg', style: O };
+}
+
 /** Turn a token slug like "--purple-dim" into the CSS class suffix "purple-dim". @param {string} token */
 function slug(token) {
   return String(token).replace(/^--/, '');

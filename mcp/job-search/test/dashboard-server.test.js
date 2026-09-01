@@ -484,6 +484,100 @@ describe('documents', () => {
   });
 });
 
+describe('applications (apply pipeline slice 3, plan section 7 reduced scope: create + approve only)', () => {
+  test('POST /api/listings/:id/application creates a row in drafting, ats classified from the listing url', async () => {
+    const created = await req('POST', '/api/listings', {
+      body: { title: 'Applications Greenhouse Test Role', company: `${CO} Applications GH`, status: 'new', url: 'https://boards.greenhouse.io/zzapp/jobs/554433' },
+    });
+    assert.equal(created.status, 201, JSON.stringify(created.json));
+    const app = await req('POST', `/api/listings/${created.json.id}/application`);
+    assert.equal(app.status, 201, JSON.stringify(app.json));
+    assert.equal(app.json.row.state, 'drafting');
+    assert.equal(app.json.row.ats_type, 'greenhouse');
+    assert.equal(app.json.ats.tenant, 'zzapp');
+    const detail = await req('GET', `/api/listings/${created.json.id}`);
+    assert.equal(detail.json.application.id, app.json.row.id);
+    assert.equal(detail.json.application.state, 'drafting');
+  });
+
+  test('an unknown-ATS listing still creates a drafting application (orchestrator decision: never routed to needs_human at creation)', async () => {
+    const created = await req('POST', '/api/listings', { body: { title: 'Applications Unknown ATS Test Role', company: `${CO} Applications Unknown`, status: 'new' } });
+    const app = await req('POST', `/api/listings/${created.json.id}/application`);
+    assert.equal(app.status, 201);
+    assert.equal(app.json.row.ats_type, 'unknown');
+    assert.equal(app.json.row.state, 'drafting');
+  });
+
+  test('a duplicate active application is a clean 409 DUPLICATE_APPLICATION, not a raw pg error surfaced as 500', async () => {
+    const created = await req('POST', '/api/listings', { body: { title: 'Applications Duplicate Test Role', company: `${CO} Applications Dup`, status: 'new' } });
+    const first = await req('POST', `/api/listings/${created.json.id}/application`);
+    assert.equal(first.status, 201);
+    const dup = await req('POST', `/api/listings/${created.json.id}/application`);
+    assert.equal(dup.status, 409);
+    assert.equal(dup.json.code, 'DUPLICATE_APPLICATION');
+  });
+
+  test('POST /api/listings/:id/application on a nonexistent listing is 404', async () => {
+    const r = await req('POST', '/api/listings/999999999/application');
+    assert.equal(r.status, 404);
+  });
+
+  test('GET /api/listings/:id reports application: null before any application exists', async () => {
+    const created = await req('POST', '/api/listings', { body: { title: 'Applications No App Yet Test Role', company: `${CO} Applications No App`, status: 'new' } });
+    const detail = await req('GET', `/api/listings/${created.json.id}`);
+    assert.equal(detail.json.application, null);
+  });
+
+  describe('approve', () => {
+    /** @param {string} name @param {string} bytes @returns {string} relPath */
+    function writeResumeFixture(name, bytes) {
+      fs.writeFileSync(path.join(outputRoot, 'resumes', name), bytes);
+      return `resumes/${name}`;
+    }
+
+    test('happy path: docs_ready with a linked resume approves, storing resume_hash and approved_at', async () => {
+      const created = await req('POST', '/api/listings', { body: { title: 'Approve Happy Path Test Role', company: `${CO} Approve Happy`, status: 'new' } });
+      const appId = (await req('POST', `/api/listings/${created.json.id}/application`)).json.row.id;
+      const relPath = writeResumeFixture(`${CO}-approve-happy.docx`, 'approve-happy-fixture-bytes');
+      const linked = await req('POST', `/api/listings/${created.json.id}/documents`, { body: { kind: 'resume', relPath } });
+      assert.equal(linked.status, 201, JSON.stringify(linked.json));
+      // No renderer is invoked by this route test suite (per house convention, real python is not
+      // exercised here); the state->docs_ready flip that render_doc's listingId path performs is covered
+      // by test/render-doc-link.test.js, so this DB-level seed stands in for it.
+      await verifyClient.query('UPDATE ic_job_applications SET state = $2, resume_doc_id = $3 WHERE id = $1', [appId, 'docs_ready', linked.json.row.id]);
+      const approved = await req('POST', `/api/applications/${appId}/approve`);
+      assert.equal(approved.status, 200, JSON.stringify(approved.json));
+      assert.equal(approved.json.row.state, 'approved');
+      assert.ok(approved.json.row.resume_hash, 'resume_hash must be stored');
+      assert.equal(approved.json.row.coverletter_hash, null);
+      assert.ok(approved.json.row.approved_at, 'approved_at must be stored');
+    });
+
+    test('blocked from a state other than docs_ready', async () => {
+      const created = await req('POST', '/api/listings', { body: { title: 'Approve Wrong State Test Role', company: `${CO} Approve Wrong State`, status: 'new' } });
+      const appId = (await req('POST', `/api/listings/${created.json.id}/application`)).json.row.id;
+      // still 'drafting': no resume linked, no state seed.
+      const r = await req('POST', `/api/applications/${appId}/approve`);
+      assert.equal(r.status, 400);
+      assert.equal(r.json.code, 'VALIDATION');
+    });
+
+    test('blocked without a linked resume document, even in docs_ready', async () => {
+      const created = await req('POST', '/api/listings', { body: { title: 'Approve No Resume Test Role', company: `${CO} Approve No Resume`, status: 'new' } });
+      const appId = (await req('POST', `/api/listings/${created.json.id}/application`)).json.row.id;
+      await verifyClient.query(`UPDATE ic_job_applications SET state = 'docs_ready' WHERE id = $1`, [appId]);
+      const r = await req('POST', `/api/applications/${appId}/approve`);
+      assert.equal(r.status, 400);
+      assert.equal(r.json.code, 'VALIDATION');
+    });
+
+    test('POST /api/applications/:id/approve on a nonexistent application is 404', async () => {
+      const r = await req('POST', '/api/applications/999999999/approve');
+      assert.equal(r.status, 404);
+    });
+  });
+});
+
 describe('follow-ups', () => {
   /** @type {number} */
   let followupId;

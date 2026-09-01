@@ -1,9 +1,9 @@
 ---
 name: write-cover-letter
 description: Write a targeted cover letter for a specific role, conversational, in the candidate's voice, no resume regurgitation, generates DOCX via cover_letter_to_docx.py
-argument-hint: <job-ad-url-or-file-or-paste>
+argument-hint: <job-ad-url-or-file-or-paste-or-listing-id>
 user-invocable: true
-allowed-tools: Read(*), Write(*), Edit(*), Glob(*), WebFetch, mcp__job-search__render_doc
+allowed-tools: Read(*), Write(*), Edit(*), Glob(*), WebFetch, mcp__job-search__get_job, mcp__job-search__render_doc
 ---
 
 # Write Cover Letter
@@ -15,6 +15,13 @@ would actually write.
 ## Arguments
 
 - `$ARGUMENTS` (required): The target role: one of:
+  - A numeric job-search dashboard listing id (e.g. `1234`). Call the
+    job-search MCP `get_job` tool with that id for the url, company, and
+    stored description. Never re-fetch the posting with WebFetch when an id
+    is given: `get_job` already returns the description the dashboard stored
+    at scan time. Pass this same id through to `render_doc` as `listingId`
+    in Step 6 (see Output Rules) so the rendered DOCX links to the listing's
+    application.
   - A URL to a live job posting
   - A file path to a saved job description
   - A pasted job description (if no argument, ask the candidate to paste it)
@@ -166,7 +173,13 @@ Also read `memory/voice.md` if it exists.
 
 ### Step 2: Load the Job Posting
 
-If a URL was provided, fetch it. If a file path, read it. If neither, ask.
+If `$ARGUMENTS` is a numeric listing id, call `get_job({id: <listingId>})` and
+use its `url`, `company`, and `description` fields as the job posting. Do not
+also call WebFetch on that url. Remember the listing id; it is passed to
+`render_doc` as `listingId` in Step 6.
+
+Otherwise: if a URL was provided, fetch it. If a file path, read it. If
+neither, ask.
 
 Fetch prompt:
 ```
@@ -288,6 +301,14 @@ Fix any failures before writing the file.
 
 3. Render: `render_doc({kind:'cover_letter', source:'output/markdown/YYYYMMDD-[slug]-cover.txt', outName:'Jordan Reyes - Cover Letter - [Company]'})`.
    Note the `output_path` in the response. Do not open the file.
+   If Step 2 used a listing id, pass it through as `listingId` on this render
+   call (not on the `checkOnly` preflight call): `render_doc({kind:'cover_letter',
+   source:'output/markdown/YYYYMMDD-[slug]-cover.txt', outName:'Jordan Reyes -
+   Cover Letter - [Company]', listingId:<listingId>})`. This links the DOCX to
+   the listing's application. A cover letter link never by itself moves the
+   application to docs_ready (only a linked resume does); check the
+   response's `application_link` and mention it to the candidate if it was
+   ignored.
 
 ---
 
