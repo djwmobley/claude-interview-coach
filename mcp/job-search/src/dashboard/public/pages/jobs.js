@@ -32,7 +32,7 @@ const SORT_STORAGE_KEY = 'jobs.sort.v1';
  * sites spread it (`{ ...DEFAULT_FILTER_STATE }`) into a fresh object instead of holding a reference to
  * this one.
  */
-export const DEFAULT_FILTER_STATE = Object.freeze({ hideDuplicates: true, hideSkip: true });
+export const DEFAULT_FILTER_STATE = Object.freeze({ hideDuplicates: true, hideSkip: true, hideReview: true });
 
 /** @param {unknown} s */
 function validateSort(s) {
@@ -239,12 +239,26 @@ export async function render(container, params, app) {
       return;
     }
     const rows = outcome.body.rows;
+    // GET /api/listings' `triage` field (jobs-unscored-visibility PR, Change 3): the dashboard's own
+    // triage floor/ceiling, threaded into every row's Fit-cell classification (job-row.js's fitState via
+    // lib/format.js's fitDisplayState()). `null` when config/triage.json is not loaded server-side.
+    const triageBand = outcome.body.triage ?? null;
     for (const row of rows) if (row.source) seenSources.add(row.source);
+    // "Hide in review (N)" count (Change 4): a second, lightweight GET /api/listings call, count-only
+    // (limit 1, read `total`), reusing the exact same buildQuery-backed machinery -- no new SQL path.
+    // Deliberately independent of the current filter state's OTHER dimensions (search/location/source/
+    // etc.): this answers "how many rows are marked review right now," not "how many would show under
+    // today's other filters," so the count does not flicker as unrelated filters change. A failed fetch
+    // renders the checkbox label with no count (see filter-bar.js's own doc comment) rather than a
+    // misleading 0.
+    const reviewCountOutcome = handleOutcome(await getJson('/api/listings', { status: 'review', limit: '1' }), { silenceNotFound: true });
+    const reviewCount = reviewCountOutcome.kind === 'ok' ? Number(reviewCountOutcome.body.total) : null;
     const bulkStageSelect = h('select', { className: 'drawer__input' }, DIGIT_STAGE_ORDER.map((s) => h('option', { value: s, text: stageChip(s).label })));
     setChildren(container, [
       h('h1', { className: 'page-title', text: 'Jobs' }),
       filterBar({
         state: filterState,
+        reviewCount,
         onChange: (patch) => { filterState = { ...filterState, ...patch }; load(); },
         onReset: onResetView,
         onOpenFilters: async () => {
@@ -275,6 +289,7 @@ export async function render(container, params, app) {
               selected: selected.has(row.id),
               onToggleSelect: (id) => { if (selected.has(id)) selected.delete(id); else selected.add(id); load(); },
               onOpen: (id) => app.navigate('job-detail', { id }),
+              triageBand,
             })),
           }),
     ]);

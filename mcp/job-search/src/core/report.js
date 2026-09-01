@@ -583,6 +583,29 @@ function renderAutoNewFitClause(m, autoNew) {
 }
 
 /**
+ * Review-band fit-scoring clause (jobs-unscored-visibility PR, Change 1): mirrors
+ * renderAutoNewFitClause() exactly, one clause below it in the same line, but reads the SEPARATE
+ * `review_fit_*` counters (never `fit_only_*`, which is auto_new's own). Appended only when the model
+ * step actually ran (`m.enabled`) and there was at least one `review_band` id this run (`reviewBand >
+ * 0`) -- when the model step is disabled, the base line's own "(model scoring disabled...)" clause
+ * already says so.
+ * @param {any} m triage.model
+ * @param {number} reviewBand triage.deterministic.review_band
+ */
+function renderReviewBandFitClause(m, reviewBand) {
+  if (!m.enabled || !reviewBand) return null;
+  const scored = m.review_fit_scored ?? 0;
+  const already = m.review_fit_already_scored ?? 0;
+  const unscored = m.review_fit_unscored ?? 0;
+  let clause = `${scored} of ${reviewBand} review-band fit-scored`;
+  const extras = [];
+  if (already) extras.push(`${already} already scored`);
+  if (unscored) extras.push(`${unscored} unscored`);
+  if (extras.length) clause += ` (${extras.join(', ')})`;
+  return clause;
+}
+
+/**
  * One auto-triage report line (slice 3 spec section 6) for a single run's `stats.triage`. Returns null
  * when `triage` is absent (a run from before this feature shipped, or an old row) so the caller omits
  * the line entirely rather than printing a placeholder.
@@ -596,9 +619,12 @@ export function renderTriageLine(triage) {
   const m = triage.model ?? {};
   const autoSkipped = (d.skip_noise ?? 0) + (d.skip_low ?? 0);
   const autoNew = d.auto_new ?? 0;
+  const reviewBand = d.review_band ?? 0;
   const base = `triage: ${autoSkipped} auto-skipped, ${autoNew} auto-new`;
   const fitClause = renderAutoNewFitClause(m, autoNew);
-  const suffix = fitClause ? `, ${fitClause}` : '';
+  const reviewFitClause = renderReviewBandFitClause(m, reviewBand);
+  const clauses = [fitClause, reviewFitClause].filter(Boolean);
+  const suffix = clauses.length ? `, ${clauses.join(', ')}` : '';
   if (!m.enabled) {
     const reasonText = m.reason === 'candidate_summary_missing' ? ': candidate summary missing' : '';
     return `${base}, ${d.model_band ?? 0} sent to model (model scoring disabled${reasonText})`;

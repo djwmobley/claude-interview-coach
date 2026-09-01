@@ -70,6 +70,11 @@ export function parseListingsQuery(q) {
     // value: anything else (missing, empty, garbage) is false, which fails open by showing skip rows
     // rather than silently hiding data on a malformed query param.
     hideSkip: q.hideSkip === '1' || q.hideSkip === 'true',
+    // Default Jobs view hides status='review' rows (jobs-unscored-visibility PR, Change 4; mirrors
+    // hideSkip exactly, dashboard-only, not part of the MCP query_jobs zod schema). Same total
+    // classification and fail-open default: anything but exactly '1'/'true' is false, showing review
+    // rows rather than silently hiding data on a malformed query param.
+    hideReview: q.hideReview === '1' || q.hideReview === 'true',
     // Exact membership in the real SORTS list (imported, not redeclared): the previous `q.sort ||
     // 'posted'` let any garbage string through to buildQuery's ORDER BY lookup, which used to resolve to
     // `undefined` and produce broken SQL for a non-empty, non-SORTS value (a latent crash, not just a
@@ -142,7 +147,15 @@ export function register(router, deps, streamHub) {
       const { total: _t, ...rest } = row;
       return { ...rest, url_ok: urlPassesRegistry(row.url_normalized ?? row.url ?? null, registry) };
     });
-    sendJson(ctx.res, 200, { ok: true, total, rows, limit: args.limit, offset: args.offset });
+    // Jobs-unscored-visibility PR (Change 3): the dashboard's own triage floor/ceiling, so the public/
+    // fit-display classification (lib/format.js's fitDisplayState()) can tell an in-band 'pending review'
+    // row from a 'below floor' one without duplicating config/triage.json's values into browser code.
+    // `null` when no config/triage.json is loaded at all -- fitDisplayState() treats that as "in-band can
+    // never be proven" and falls back to the 'below floor' label (documented there).
+    const triageBand = deps.config?.triage?.deterministic
+      ? { floor: deps.config.triage.deterministic.floor, ceiling: deps.config.triage.deterministic.ceiling }
+      : null;
+    sendJson(ctx.res, 200, { ok: true, total, rows, limit: args.limit, offset: args.offset, triage: triageBand });
   });
 
   router.register('GET', '/api/listings/:id', async (ctx) => {

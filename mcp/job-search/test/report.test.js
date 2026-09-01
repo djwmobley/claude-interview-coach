@@ -433,6 +433,65 @@ describe('renderTriageLine: auto-new fit-scoring clause (auto_new band model sco
   });
 });
 
+describe('renderTriageLine: review-band fit-scoring clause (jobs-unscored-visibility PR, Change 1)', () => {
+  /** @param {Partial<{ deterministic: any, model: any }>} o */
+  function triageWith(o = {}) {
+    return {
+      configured: true,
+      deterministic: { skip_noise: 0, skip_low: 0, auto_new: 0, model_band: 0, has_open_review: 0, review_band: 3, review_other: 0, ...(o.deterministic ?? {}) },
+      model: {
+        enabled: true, batches_sent: 1, batches_ok: 1, batches_failed: 0, batches_zero_scored: 0, scored: 0, unscored: 0, downgraded: 0, capped: 0,
+        fit_only_scored: 0, fit_only_already_scored: 0, fit_only_unscored: 0, review_fit_scored: 0, review_fit_already_scored: 0, review_fit_unscored: 0,
+        ...(o.model ?? {}),
+      },
+    };
+  }
+
+  test('no review_band ids this run: the clause is omitted entirely, even with the model enabled', () => {
+    const line = renderTriageLine(triageWith({ deterministic: { review_band: 0 }, model: { review_fit_scored: 0 } }));
+    assert.ok(!line.includes('review-band fit-scored'));
+  });
+
+  test('model scoring disabled: the clause is omitted even when review_band > 0 (the base line already says scoring is off)', () => {
+    const line = renderTriageLine(triageWith({ model: { enabled: false, reason: 'candidate_summary_missing' } }));
+    assert.ok(!line.includes('review-band fit-scored'));
+    assert.match(line, /model scoring disabled: candidate summary missing/);
+  });
+
+  test('all fit-scored: compact form, no parenthetical', () => {
+    const line = renderTriageLine(triageWith({ model: { review_fit_scored: 3 } }));
+    assert.match(line, /3 of 3 review-band fit-scored$/);
+  });
+
+  test('some already scored by a human/prior pass in between: mentioned in the parenthetical', () => {
+    const line = renderTriageLine(triageWith({ model: { review_fit_scored: 2, review_fit_already_scored: 1 } }));
+    assert.match(line, /2 of 3 review-band fit-scored \(1 already scored\)$/);
+  });
+
+  test('some unscored (model omitted / batch failed / row vanished): mentioned in the parenthetical', () => {
+    const line = renderTriageLine(triageWith({ model: { review_fit_scored: 1, review_fit_unscored: 2 } }));
+    assert.match(line, /1 of 3 review-band fit-scored \(2 unscored\)$/);
+  });
+
+  test('both already-scored and unscored nonzero: both mentioned, comma separated', () => {
+    const line = renderTriageLine(triageWith({ model: { review_fit_scored: 1, review_fit_already_scored: 1, review_fit_unscored: 1 } }));
+    assert.match(line, /1 of 3 review-band fit-scored \(1 already scored, 1 unscored\)$/);
+  });
+
+  test('auto-new AND review-band clauses both present in the same run: both appended, comma separated, in that order', () => {
+    const triage = {
+      configured: true,
+      deterministic: { skip_noise: 0, skip_low: 0, auto_new: 2, model_band: 0, has_open_review: 0, review_band: 2, review_other: 0 },
+      model: {
+        enabled: true, batches_sent: 1, batches_ok: 1, batches_failed: 0, batches_zero_scored: 0, scored: 0, unscored: 0, downgraded: 0, capped: 0,
+        fit_only_scored: 2, fit_only_already_scored: 0, fit_only_unscored: 0, review_fit_scored: 2, review_fit_already_scored: 0, review_fit_unscored: 0,
+      },
+    };
+    const line = renderTriageLine(triage);
+    assert.match(line, /2 of 2 auto-new fit-scored, 2 of 2 review-band fit-scored$/);
+  });
+});
+
 describe('report marker (spec R1.1, decisions 23/24)', () => {
   test('stampReportSent advances the marker; getReportState reads it back', async () => {
     const now = new Date('2026-08-26T13:00:00Z');

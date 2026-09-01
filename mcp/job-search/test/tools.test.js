@@ -110,6 +110,12 @@ describe('query_jobs', () => {
     assert.equal(/** @type {any} */ (await queryJobs.handler({ ...base, q: 'CIO' }, deps)).total, 1);
     const byFit = /** @type {any} */ (await queryJobs.handler({ ...base, sort: 'fit' }, deps));
     assert.ok(dataRows(byFit.rows)[0].startsWith(`#${e} `));
+    // Fit-sort NULLS LAST regression (jobs-unscored-visibility PR): `a` has fit_score NULL (only
+    // prescore is set), `e` has fit_score 80 -- the unscored row must sort BELOW the scored one on the
+    // default (desc) fit sort, never above or interleaved. No new sort code is added for this PR (see
+    // query-jobs-buildquery.test.js's existing "NULLS LAST is present regardless of dir" coverage of the
+    // SQL shape); this is the live-data proof that the existing NULLS LAST behavior actually holds.
+    assert.ok(dataRows(byFit.rows)[1].startsWith(`#${a} `), 'the unscored row sorts below the scored one on fit sort');
     const page = /** @type {any} */ (await queryJobs.handler({ ...base, limit: 1 }, deps));
     assert.equal(dataRows(page.rows).length, 1);
     assert.equal(page.next_offset, 1);

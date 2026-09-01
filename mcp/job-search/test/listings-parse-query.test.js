@@ -94,6 +94,19 @@ describe('parseListingsQuery(): hideSkip (default Jobs view hides status=skip ro
   });
 });
 
+describe('parseListingsQuery(): hideReview (jobs-unscored-visibility PR, Change 4, total classification, mirrors hideSkip)', () => {
+  test('"1" and "true" both parse to true', () => {
+    assert.equal(parseListingsQuery({ hideReview: '1' }).hideReview, true);
+    assert.equal(parseListingsQuery({ hideReview: 'true' }).hideReview, true);
+  });
+
+  test('anything else -- missing, empty, garbage -- parses to false (fail-open: shows review rows rather than hiding data on a malformed param)', () => {
+    for (const hideReview of [undefined, '', 'garbage', '0', 'false', 'TRUE']) {
+      assert.equal(parseListingsQuery({ hideReview }).hideReview, false, `hideReview=${JSON.stringify(hideReview)}`);
+    }
+  });
+});
+
 describe('parseListingsQuery(): triagedBy (slice 3 auto-triage spec section 7)', () => {
   test('"auto" passes through unchanged', () => {
     assert.equal(parseListingsQuery({ triagedBy: 'auto' }).triagedBy, 'auto');

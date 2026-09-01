@@ -8,26 +8,36 @@
  * Prescore (a deterministic keyword/profile/location/salary score times a noise multiplier, computed at
  * scan time, never null in practice) and Fit (a judgment score a person or agent sets later, null until
  * triaged). Splitting them into their own columns, each with an explanatory `title` tooltip, means a null
- * Fit can render as its own neutral "not scored" bucket (fitBucket()) instead of borrowing Prescore's
- * "missing reads as low" default, which would otherwise make every untriaged listing look like it scored
- * poorly rather than simply not having been looked at yet.
+ * Fit can render as its own neutral bucket instead of borrowing Prescore's "missing reads as low" default,
+ * which would otherwise make every untriaged listing look like it scored poorly rather than simply not
+ * having been looked at yet.
+ *
+ * Unscored label totality (jobs-unscored-visibility PR, Change 3): a null Fit is no longer a single
+ * "not scored" catch-all. lib/format.js's fitDisplayState() classifies WHY it is unscored ('noise',
+ * 'pending review', or 'below floor') and this row only renders that label -- see fitDisplayState()'s
+ * own doc comment for the total classification. All three sub-labels still share the same neutral
+ * 'not-scored' CSS bucket/color; only the text differs.
  */
 import { h, hLink } from '../lib/dom.js';
 import { stageChip, chipClassName, sourceChip } from './chips.js';
-import { scoreBucket, fitBucket } from '../lib/format.js';
+import { scoreBucket, fitDisplayState } from '../lib/format.js';
 
 export const PRESCORE_TITLE = 'Prescore: deterministic keyword/profile/location/salary score times a noise multiplier, computed at scan time.';
 export const FIT_TITLE = 'Fit: judgment score set by you or an agent, empty until triaged.';
 
 /**
  * @param {any} row a GET /api/listings row (carries url_ok)
- * @param {{ selected: boolean, onToggleSelect: (id: number) => void, onOpen: (id: number) => void }} opts
+ * @param {{ selected: boolean, onToggleSelect: (id: number) => void, onOpen: (id: number) => void, triageBand?: { floor: number, ceiling: number }|null }} opts
+ *   triageBand (jobs-unscored-visibility PR, Change 3): the dashboard's own triage floor/ceiling, from
+ *   GET /api/listings' `triage` field, threaded through by pages/jobs.js -- see lib/format.js's
+ *   fitDisplayState() for how it is used.
  */
 export function jobRow(row, opts) {
   const chip = stageChip(row.status);
   const src = sourceChip(row.source);
   const prescoreCls = `score score--${scoreBucket(row.prescore)}`;
-  const fitCls = `score score--${fitBucket(row.fit_score)}`;
+  const fitState = fitDisplayState(row, opts.triageBand);
+  const fitCls = `score score--${fitState.bucket}`;
   const tr = h('tr', {
     className: 'job-row',
     dataset: { rowId: row.id },
@@ -61,7 +71,7 @@ export function jobRow(row, opts) {
     h('td', { className: 'job-row__source' }, [h('span', { className: chipClassName(src), text: src.label })]),
     h('td', { className: 'job-row__stage' }, [h('span', { className: chipClassName(chip), text: chip.label })]),
     h('td', { className: `job-row__prescore ${prescoreCls}`, attrs: { title: PRESCORE_TITLE }, text: row.prescore != null ? String(row.prescore) : 'not scored' }),
-    h('td', { className: `job-row__fit ${fitCls}`, attrs: { title: FIT_TITLE }, text: row.fit_score != null ? String(row.fit_score) : 'not scored' }),
+    h('td', { className: `job-row__fit ${fitCls}`, attrs: { title: FIT_TITLE }, text: fitState.label }),
     h('td', { className: 'job-row__first-seen', text: row.first_seen ? new Date(row.first_seen).toLocaleDateString('en-US', { month: 'short', day: 'numeric' }) : 'not set' }),
     h('td', { className: 'job-row__location', text: row.location ?? 'not listed' }),
   ]);

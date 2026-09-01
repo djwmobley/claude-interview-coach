@@ -19,6 +19,14 @@
  * (buildQuery/query_jobs.js) must stay unfiltered so the MCP query_jobs tool, which never sets hideSkip,
  * sees zero behavior change. hideDuplicates instead flips its own server default (excluded by default),
  * so its bar-checked state can safely omit the param.
+ *
+ * "Hide in review" (jobs-unscored-visibility PR, Change 4, operator-ratified -- mirrors PR #22's hideSkip
+ * pattern exactly): default Jobs view hides status='review' rows, which with skip rows also hidden made
+ * up 68.5% of what remained visible, almost none of it fit-scoreable. Same bar ownership, same
+ * hideSkip-opposite-of-hideDuplicates polarity (checked/default state sends `hideReview=1`), same
+ * server-default-stays-unfiltered rule for the MCP tool. Unlike hideSkip, this checkbox's label carries a
+ * live count ("Hide in review (N)") -- see `reviewCount` in filterBar()'s opts below -- so the operator
+ * can see how many rows are hidden without having to uncheck it first.
  */
 import { h } from '../lib/dom.js';
 
@@ -103,11 +111,16 @@ export function filterStateToQuery(state) {
   // checked/default state sends `hideSkip=1`, the unchecked state sends nothing, so the server default
   // stays unfiltered for MCP callers that never set this param at all.
   if (state.hideSkip) q.hideSkip = '1';
+  // hideReview (Change 4): same polarity as hideSkip immediately above, for the same reason.
+  if (state.hideReview) q.hideReview = '1';
   return q;
 }
 
 /**
- * @param {{ state: any, onChange: (patch: any) => void, onOpenFilters?: () => void, onReset?: () => void }} opts
+ * @param {{ state: any, onChange: (patch: any) => void, onOpenFilters?: () => void, onReset?: () => void, reviewCount?: number|null }} opts
+ *   reviewCount (Change 4): current count of status='review' rows, for the "Hide in review (N)" label --
+ *   `null`/`undefined` (not yet loaded, or the count fetch failed) renders the label with no count
+ *   rather than "(0)", which would misleadingly claim zero when the true count is simply unknown.
  */
 export function filterBar(opts) {
   const state = opts.state;
@@ -129,6 +142,14 @@ export function filterBar(opts) {
     attrs: { type: 'checkbox' }, checked: state.hideSkip !== false,
     on: { change: (ev) => opts.onChange({ hideSkip: /** @type {HTMLInputElement} */ (ev.target).checked }) },
   });
+  // Default true, like hideSkip immediately above (Change 4). The label carries a live count when known
+  // (`opts.reviewCount` a real number, including 0); `null`/`undefined` renders the plain label instead
+  // of a misleading "(0)" -- see opts' own doc comment above.
+  const hideReviewCheckbox = h('input', {
+    attrs: { type: 'checkbox' }, checked: state.hideReview !== false,
+    on: { change: (ev) => opts.onChange({ hideReview: /** @type {HTMLInputElement} */ (ev.target).checked }) },
+  });
+  const hideReviewLabel = typeof opts.reviewCount === 'number' ? `Hide in review (${opts.reviewCount})` : 'Hide in review';
   const n = activeFilterCount(state);
   const filtersButton = h('button', {
     className: 'btn btn--small',
@@ -152,6 +173,7 @@ export function filterBar(opts) {
     h('label', { className: 'filter-bar__field' }, [h('span', { text: 'First seen' }), firstSeenSelect]),
     h('label', { className: 'filter-bar__field filter-bar__checkbox' }, [hideDupCheckbox, h('span', { text: 'Hide duplicates' })]),
     h('label', { className: 'filter-bar__field filter-bar__checkbox' }, [hideSkipCheckbox, h('span', { text: 'Hide skipped' })]),
+    h('label', { className: 'filter-bar__field filter-bar__checkbox' }, [hideReviewCheckbox, h('span', { text: hideReviewLabel })]),
     filtersButton,
     resetButton,
   ]);
