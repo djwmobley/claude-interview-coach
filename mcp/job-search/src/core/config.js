@@ -334,6 +334,26 @@ export const execBoardsSchema = z.object({
   }, { message: 'listUrl host must be one of the board domains' })),
 });
 
+/**
+ * config/ats-apply.json (apply pipeline slice 2, spec-adversary amendment S11): the ATS host registry
+ * consumed by src/apply/ats-detect.js's classifyApplyUrl(). List-based host matching only -- Workday's
+ * tenant.wdN.myworkdayjobs.com hostname shape and Dayforce's CandidatePortal path shape are structural
+ * parsing rules pinned directly in ats-detect.js (amendment S4), not config-driven, so this schema only
+ * validates the two ATSs' bare host suffix and never grows a pattern field for either. `hosts` reuses the
+ * `domain` schema already defined above (bare hostname, no scheme/path) so every entry validates the same
+ * way config/ats-boards.json's own host lists do.
+ */
+export const atsApplySchema = z.object({
+  _comment: z.string().optional(),
+  greenhouse: z.object({ hosts: z.array(domain).min(1) }),
+  lever: z.object({ hosts: z.array(domain).min(1) }),
+  smartrecruiters: z.object({ hosts: z.array(domain).min(1) }),
+  icims: z.object({ hostSuffix: domain }),
+  dayforce: z.object({ hostSuffix: domain }),
+  linkedin: z.object({ hostSuffix: domain }),
+  indeed: z.object({ hostSuffix: domain }),
+});
+
 export const companyAliasesSchema = z.object({
   _comment: z.string().optional(),
   aliases: z.record(z.string().min(1), z.string().min(1)),
@@ -427,6 +447,14 @@ export const triageSchema = z.object({
 
 export const CONFIG_FILES = Object.freeze([
   'adapters.json', 'ats-boards.json', 'exec-boards.json', 'company-aliases.json', 'alert-senders.json', 'noise-rules.json',
+  // Apply pipeline slice 2 (spec-adversary amendment S11): config/ats-apply.json is the ATS host
+  // registry classifyApplyUrl() (src/apply/ats-detect.js) reads at runtime, so it is hashed here like
+  // every other config file -- a change to it is config drift and must be deliberate. NOTE for the apply
+  // runner (slice 5): it must hard-refuse a config-lock mismatch the same way bin/scan.js does
+  // (CONFIG_LOCK_MISMATCH, exit non-zero), never soft-banner it the way the dashboard server does -- an
+  // apply run submitting a real application under a silently-drifted ATS host list is a materially worse
+  // failure mode than a stale dashboard banner.
+  'ats-apply.json',
   // Slice 3 auto-triage (spec section 3): all four hashed for "config drift must be deliberate", even
   // though triage.json is loaded tolerantly (readOptionalValidated, below) and triage-candidate.md is
   // never committed (personal data, gitignored) -- computeConfigHash() hashes a "<missing>" placeholder
@@ -440,6 +468,7 @@ export const CONFIG_FILES = Object.freeze([
  * @typedef {Object} LoadedConfig
  * @property {z.infer<typeof adaptersSchema>} adapters
  * @property {z.infer<typeof atsBoardsSchema>} atsBoards
+ * @property {z.infer<typeof atsApplySchema>} atsApply
  * @property {z.infer<typeof execBoardsSchema>} execBoards
  * @property {Record<string, string>} companyAliases
  * @property {z.infer<typeof alertSendersSchema>['senders']} alertSenders
@@ -578,6 +607,7 @@ export function loadConfig(opts = {}) {
   const dir = opts.dir ?? getEnv().JOBSEARCH_CONFIG_DIR;
   const adapters = readValidated(dir, 'adapters.json', adaptersSchema);
   const atsBoards = readValidated(dir, 'ats-boards.json', atsBoardsSchema);
+  const atsApply = readValidated(dir, 'ats-apply.json', atsApplySchema);
   const execBoards = readValidated(dir, 'exec-boards.json', execBoardsSchema);
   const aliasesFile = readValidated(dir, 'company-aliases.json', companyAliasesSchema);
   const alertSendersFile = readValidated(dir, 'alert-senders.json', alertSendersSchema);
@@ -587,6 +617,7 @@ export function loadConfig(opts = {}) {
   const cfg = {
     adapters,
     atsBoards,
+    atsApply,
     execBoards,
     companyAliases: aliasesFile.aliases,
     alertSenders: alertSendersFile.senders,

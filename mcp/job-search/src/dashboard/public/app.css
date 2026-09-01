@@ -297,6 +297,10 @@ textarea.notes-textarea { min-height: 100px; }
 /* ---------------------------------------------------------------------------------------------------
    Job detail
    --------------------------------------------------------------------------------------------------- */
+.job-detail-header { display: flex; align-items: center; gap: 8px; flex-wrap: wrap; }
+/* ATS badge (apply pipeline slice 2, spec-adversary amendment S12): the ats chip and its confidence
+   chip sit side by side with a small gap, same pattern as .job-row__title-flex. */
+.job-detail-ats-badge { display: inline-flex; align-items: center; gap: 4px; }
 .job-detail-sub { color: var(--muted); margin-bottom: 12px; }
 .job-detail-grid { display: grid; grid-template-columns: 1fr 380px; gap: 16px; }
 .stage-buttons__grid { display: grid; grid-template-columns: repeat(5, 1fr); gap: 6px; margin-bottom: 8px; }

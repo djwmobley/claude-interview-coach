@@ -241,6 +241,9 @@ describe('listings', () => {
     assert.ok(Array.isArray(r.json.events));
     assert.ok(Array.isArray(r.json.documents));
     assert.ok(Array.isArray(r.json.suggestions));
+    // Apply pipeline slice 2 (ATS badge, spec-adversary amendment S12): a manually-created listing with no
+    // URL classifies unknown, computed on the fly, never persisted.
+    assert.deepEqual(r.json.ats, { ats: 'unknown', tenant: null, confidence: 'low' });
   });
 
   test('an invalid status is refused with 400, no event written', async () => {
@@ -382,6 +385,45 @@ describe('prescore breakdown (GET /api/listings/:id)', () => {
     assert.equal(b.stored_prescore_raw, 999);
     assert.equal(b.stale, true, 'recomputed raw (a real prescore for a CTO title) differs from the forced stored 999');
     await verifyClient.query('DELETE FROM ic_search_profiles WHERE name = $1', [profileName]);
+  });
+});
+
+describe('ATS badge (GET /api/listings/:id, apply pipeline slice 2, spec-adversary amendment S12)', () => {
+  // Distinct, non-overlapping titles (never the bare "CTO" reused by other tests in this file): the
+  // dedup classifier flags a near-duplicate by BOTH title and company similarity, and every company below
+  // already shares this whole file's long ${CO} prefix, so a repeated title would risk a false dedup
+  // match against an unrelated row created earlier in this same suite run.
+  test('a listing whose URL is a canonical Greenhouse apply URL classifies exact, with tenant', async () => {
+    const created = await req('POST', '/api/listings', {
+      body: { title: 'ATS Badge Greenhouse Test Role', company: `${CO} ATS Greenhouse`, status: 'new', url: 'https://boards.greenhouse.io/zzats/jobs/998877' },
+    });
+    assert.equal(created.status, 201, JSON.stringify(created.json));
+    const detail = await req('GET', `/api/listings/${created.json.id}`);
+    assert.equal(detail.status, 200);
+    assert.deepEqual(detail.json.ats, { ats: 'greenhouse', tenant: 'zzats', confidence: 'exact' });
+  });
+
+  test('a listing whose URL host is not any registered ATS classifies unknown', async () => {
+    const created = await req('POST', '/api/listings', {
+      body: { title: 'ATS Badge Unknown Host Test Role', company: `${CO} ATS Unknown`, status: 'new', url: 'https://careers.example.com/cto-role' },
+    });
+    assert.equal(created.status, 201, JSON.stringify(created.json));
+    const detail = await req('GET', `/api/listings/${created.json.id}`);
+    assert.equal(detail.status, 200);
+    assert.deepEqual(detail.json.ats, { ats: 'unknown', tenant: null, confidence: 'low' });
+  });
+
+  test('the ats field is recomputed live, not persisted: changing the stored URL changes the next GET', async () => {
+    const created = await req('POST', '/api/listings', {
+      body: { title: 'ATS Badge Live Recompute Test Role', company: `${CO} ATS Live`, status: 'new', url: 'https://careers.example.com/some-other-role' },
+    });
+    assert.equal(created.status, 201, JSON.stringify(created.json));
+    assert.equal((await req('GET', `/api/listings/${created.json.id}`)).json.ats.ats, 'unknown');
+    await verifyClient.query('UPDATE ic_job_listings SET url = $2, url_normalized = $2 WHERE id = $1', [
+      created.json.id, 'https://jobs.lever.co/zzats/11111111-2222-3333-4444-555555555555',
+    ]);
+    const after = await req('GET', `/api/listings/${created.json.id}`);
+    assert.deepEqual(after.json.ats, { ats: 'lever', tenant: 'zzats', confidence: 'exact' });
   });
 });
 

@@ -17,6 +17,7 @@ import { buildRegistry } from '../../core/urlguard.js';
 import { urlPassesRegistry } from '../../core/report.js';
 import { prescoreParts } from '../../core/prescore.js';
 import { weightedPrescore, getDefaultNoiseRules } from '../../core/noise.js';
+import { classifyApplyUrl } from '../../apply/ats-detect.js';
 import { sendJson } from '../http.js';
 
 /** @param {Record<string,string>} q @param {string} key */
@@ -173,6 +174,11 @@ export function register(router, deps, streamHub) {
     const aliases = deps.config?.companyAliases ?? {};
     const suggestions = suggestDocuments(listing, files, { aliases }).filter((s) => !documents.some((d) => d.rel_path === s.file));
     const prescoreBreakdown = await computePrescoreBreakdown(deps, listing);
+    // Apply pipeline slice 2 (ATS badge, spec-adversary amendment S12): computed on the fly from the
+    // listing's stored URL, never persisted -- no schema change, and the classification always reflects
+    // the CURRENT ats-detect.js rules rather than a stale value frozen at scan time. url_normalized wins
+    // over the raw url the same way GET /api/listings' url_ok computation already does above.
+    const ats = classifyApplyUrl(listing.url_normalized ?? listing.url ?? null);
     sendJson(ctx.res, 200, {
       ok: true,
       row: listing,
@@ -185,6 +191,7 @@ export function register(router, deps, streamHub) {
       also_posted: alsoPosted.rows,
       run_sightings: runSightings.rows.map((r2) => Number(r2.run_id)),
       prescore_breakdown: prescoreBreakdown,
+      ats,
     });
   });
 

@@ -10,7 +10,11 @@ import assert from 'node:assert/strict';
 import { PIPELINE_STATUSES } from '../src/core/statuses.js';
 import { EVENT_ACTORS } from '../src/core/events.js';
 import { DOCUMENT_KINDS } from '../src/core/documents.js';
-import { stageChip, actorBadge, documentChip, sourceChip, runStatusChip, runItemOutcomeChip, chipClassName } from '../src/dashboard/public/components/chips.js';
+import { ATS_TYPES } from '../src/core/applications.js';
+import { CONFIDENCE_LEVELS } from '../src/apply/ats-detect.js';
+import {
+  stageChip, actorBadge, documentChip, sourceChip, runStatusChip, runItemOutcomeChip, atsChip, atsConfidenceChip, chipClassName,
+} from '../src/dashboard/public/components/chips.js';
 
 function assertChipShape(chip, ctx) {
   assert.equal(typeof chip, 'object', ctx);
@@ -108,6 +112,39 @@ describe('runItemOutcomeChip(): the real ic_scan_run_items.outcome CHECK constra
 
   test('an unrecognized outcome still returns a defined fallback, never undefined', () => {
     assertChipShape(runItemOutcomeChip('some-future-outcome'), 'unrecognized outcome');
+  });
+});
+
+describe('atsChip(): totality over the real ATS_TYPES (src/core/applications.js), including unknown', () => {
+  test('every real ats value returns a defined chip', () => {
+    assert.ok(ATS_TYPES.includes('unknown'), 'sanity: unknown must be a real ats value for this test to mean anything');
+    for (const ats of ATS_TYPES) {
+      assertChipShape(atsChip(ats), `ats=${ats}`);
+    }
+  });
+
+  test('null/undefined maps to the same Unknown chip as the literal "unknown" value', () => {
+    assert.deepEqual(atsChip(null), atsChip('unknown'));
+    assert.deepEqual(atsChip(undefined), atsChip('unknown'));
+  });
+
+  test('an unrecognized ats value still returns a defined fallback, never undefined', () => {
+    assertChipShape(atsChip('some-future-ats'), 'unrecognized ats');
+    assert.equal(atsChip('some-future-ats').label, 'Unknown');
+  });
+});
+
+describe('atsConfidenceChip(): totality over the real CONFIDENCE_LEVELS (src/apply/ats-detect.js)', () => {
+  test('every real confidence level returns a defined chip', () => {
+    for (const confidence of CONFIDENCE_LEVELS) {
+      assertChipShape(atsConfidenceChip(confidence), `confidence=${confidence}`);
+    }
+  });
+
+  test('null/undefined and an unrecognized value still return a defined fallback, never undefined', () => {
+    assertChipShape(atsConfidenceChip(null), 'null confidence');
+    assertChipShape(atsConfidenceChip(undefined), 'undefined confidence');
+    assertChipShape(atsConfidenceChip('some-future-confidence'), 'unrecognized confidence');
   });
 });
 

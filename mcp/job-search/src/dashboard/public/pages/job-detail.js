@@ -9,7 +9,7 @@ import { handleOutcome } from '../lib/outcome.js';
 import { showToast, showUndoToast } from '../lib/toast.js';
 import { stageButtons, DIGIT_STAGE_ORDER } from '../components/stage-buttons.js';
 import { timeline } from '../components/timeline.js';
-import { documentChip, chipClassName } from '../components/chips.js';
+import { documentChip, chipClassName, atsChip, atsConfidenceChip } from '../components/chips.js';
 import { skeleton, emptyState } from '../components/empty-state.js';
 import { salaryRange, shortDate } from '../lib/format.js';
 import { on, off } from '../lib/bus.js';
@@ -180,11 +180,23 @@ export async function render(container, params, app) {
     ]) : null;
 
     const prescoreBreakdownCard = prescoreBreakdownPanel(outcome.body.prescore_breakdown, listing);
+    // Apply pipeline slice 2 (ATS badge, spec-adversary amendment S12): 'unknown' renders nothing here,
+    // matching the house dashboard UI-restraint preference (thin accent, no color for the common case --
+    // most listings are not a direct ATS apply URL) -- confidence text stays alongside the ats chip so a
+    // low/inferred match is visually distinguishable from an exact one at a glance.
+    const ats = outcome.body.ats;
+    const atsBadge = ats && ats.ats !== 'unknown'
+      ? h('span', { className: 'job-detail-ats-badge' }, [
+        h('span', { className: chipClassName(atsChip(ats.ats)), text: atsChip(ats.ats).label }),
+        h('span', { className: chipClassName(atsConfidenceChip(ats.confidence)), text: atsConfidenceChip(ats.confidence).label }),
+      ])
+      : null;
 
     setChildren(container, [
       h('div', { className: 'job-detail-header' }, [
         h('h1', { className: 'page-title', text: listing.title }),
         listing.record_kind === 'manual' ? h('span', { className: 'badge badge--manual', text: 'Manual' }) : null,
+        atsBadge,
       ]),
       h('p', { className: 'job-detail-sub', text: `${listing.company ?? 'unknown company'} - ${listing.location ?? 'not listed'} - ${salaryRange(listing.salary_min, listing.salary_max)}` }),
       h('div', { className: 'job-detail-grid' }, [

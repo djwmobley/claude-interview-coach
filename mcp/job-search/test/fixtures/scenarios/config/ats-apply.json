@@ -1,0 +1,36 @@
+{
+  "_comment": "ATS host registry for src/apply/ats-detect.js (classifyApplyUrl, apply pipeline slice 2). List-based host matching only. Workday's tenant.wdN.myworkdayjobs.com hostname shape and Dayforce's /CandidatePortal/<lang>/<client>/Posting/View/<id> path shape are pinned directly in ats-detect.js (spec-adversary amendment S4), never config-driven, so an edit here alone can never loosen either match. Greenhouse and Lever host lists are copied verbatim from src/core/normalize.js's production host lists (amendment S3/S8); keep the two in sync if normalize.js's lists ever change. myworkdaysite.com is explicitly NOT Workday (see the comment on WORKDAY_HOST_RE in ats-detect.js); do not add it below.",
+  "greenhouse": {
+    "hosts": [
+      "boards.greenhouse.io",
+      "job-boards.greenhouse.io",
+      "boards.eu.greenhouse.io",
+      "boards-api.greenhouse.io",
+      "my.greenhouse.io"
+    ]
+  },
+  "lever": {
+    "hosts": [
+      "jobs.lever.co",
+      "api.lever.co"
+    ]
+  },
+  "smartrecruiters": {
+    "hosts": [
+      "jobs.smartrecruiters.com",
+      "careers.smartrecruiters.com"
+    ]
+  },
+  "icims": {
+    "hostSuffix": "icims.com"
+  },
+  "dayforce": {
+    "hostSuffix": "dayforcehcm.com"
+  },
+  "linkedin": {
+    "hostSuffix": "linkedin.com"
+  },
+  "indeed": {
+    "hostSuffix": "indeed.com"
+  }
+}

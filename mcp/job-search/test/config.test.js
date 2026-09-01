@@ -14,7 +14,7 @@ import path from 'node:path';
 import { fileURLToPath } from 'node:url';
 import fs from 'node:fs';
 import os from 'node:os';
-import { alertSendersSchema, GMAIL_PARSER_NAMES, loadConfig, triageSchema, CONFIG_FILES, computeConfigHash, loadTriageCandidateSummary } from '../src/core/config.js';
+import { alertSendersSchema, GMAIL_PARSER_NAMES, loadConfig, triageSchema, atsApplySchema, CONFIG_FILES, computeConfigHash, loadTriageCandidateSummary } from '../src/core/config.js';
 import { PARSERS } from '../src/adapters/gmail-parsers.js';
 import { CONFIG_DIR } from './helpers/scan-fixtures.js';
 
@@ -84,6 +84,143 @@ describe('alertSendersSchema', () => {
   });
 });
 
+describe('atsApplySchema and config/ats-apply.json (apply pipeline slice 2, spec-adversary amendment S11)', () => {
+  test('CONFIG_FILES includes ats-apply.json', () => {
+    assert.ok(CONFIG_FILES.includes('ats-apply.json'));
+  });
+
+  test('the real config/ats-apply.json (via the test fixture config dir) validates', () => {
+    const cfg = loadConfig({ dir: CONFIG_DIR, fresh: true });
+    assert.ok(Array.isArray(cfg.atsApply.greenhouse.hosts) && cfg.atsApply.greenhouse.hosts.length > 0);
+    assert.ok(Array.isArray(cfg.atsApply.lever.hosts) && cfg.atsApply.lever.hosts.length > 0);
+    assert.ok(Array.isArray(cfg.atsApply.smartrecruiters.hosts) && cfg.atsApply.smartrecruiters.hosts.length > 0);
+    assert.equal(typeof cfg.atsApply.icims.hostSuffix, 'string');
+    assert.equal(typeof cfg.atsApply.dayforce.hostSuffix, 'string');
+    assert.equal(typeof cfg.atsApply.linkedin.hostSuffix, 'string');
+    assert.equal(typeof cfg.atsApply.indeed.hostSuffix, 'string');
+  });
+
+  test('a well-formed ats-apply payload parses', () => {
+    const r = atsApplySchema.safeParse({
+      greenhouse: { hosts: ['boards.greenhouse.io'] },
+      lever: { hosts: ['jobs.lever.co'] },
+      smartrecruiters: { hosts: ['jobs.smartrecruiters.com'] },
+      icims: { hostSuffix: 'icims.com' },
+      dayforce: { hostSuffix: 'dayforcehcm.com' },
+      linkedin: { hostSuffix: 'linkedin.com' },
+      indeed: { hostSuffix: 'indeed.com' },
+    });
+    assert.equal(r.success, true);
+  });
+
+  test('an empty greenhouse.hosts array is rejected (min 1)', () => {
+    const base = {
+      greenhouse: { hosts: [] },
+      lever: { hosts: ['jobs.lever.co'] },
+      smartrecruiters: { hosts: ['jobs.smartrecruiters.com'] },
+      icims: { hostSuffix: 'icims.com' },
+      dayforce: { hostSuffix: 'dayforcehcm.com' },
+      linkedin: { hostSuffix: 'linkedin.com' },
+      indeed: { hostSuffix: 'indeed.com' },
+    };
+    assert.equal(atsApplySchema.safeParse(base).success, false);
+  });
+
+  test('a hostSuffix that is not a bare hostname (has a scheme or a path) is rejected', () => {
+    const base = {
+      greenhouse: { hosts: ['boards.greenhouse.io'] },
+      lever: { hosts: ['jobs.lever.co'] },
+      smartrecruiters: { hosts: ['jobs.smartrecruiters.com'] },
+      icims: { hostSuffix: 'https://icims.com' },
+      dayforce: { hostSuffix: 'dayforcehcm.com' },
+      linkedin: { hostSuffix: 'linkedin.com' },
+      indeed: { hostSuffix: 'indeed.com' },
+    };
+    assert.equal(atsApplySchema.safeParse(base).success, false);
+  });
+
+  test('a missing top-level key (e.g. dayforce) is rejected', () => {
+    const r = atsApplySchema.safeParse({
+      greenhouse: { hosts: ['boards.greenhouse.io'] },
+      lever: { hosts: ['jobs.lever.co'] },
+      smartrecruiters: { hosts: ['jobs.smartrecruiters.com'] },
+      icims: { hostSuffix: 'icims.com' },
+      linkedin: { hostSuffix: 'linkedin.com' },
+      indeed: { hostSuffix: 'indeed.com' },
+    });
+    assert.equal(r.success, false);
+  });
+
+  test('a malformed (invalid JSON) ats-apply.json throws CONFIG_INVALID at loadConfig()', () => {
+    const tmp = fs.mkdtempSync(path.join(os.tmpdir(), 'ats-apply-config-badjson-'));
+    try {
+      for (const name of ['adapters.json', 'ats-boards.json', 'exec-boards.json', 'company-aliases.json', 'alert-senders.json', 'noise-rules.json']) {
+        fs.copyFileSync(path.join(CONFIG_DIR, name), path.join(tmp, name));
+      }
+      fs.writeFileSync(path.join(tmp, 'ats-apply.json'), '{not valid json');
+      assert.throws(() => loadConfig({ dir: tmp, fresh: true }), (err) => err.code === 'CONFIG_INVALID');
+    } finally {
+      fs.rmSync(tmp, { recursive: true, force: true });
+    }
+  });
+
+  test('a MISSING ats-apply.json throws CONFIG_INVALID at loadConfig() -- unlike triage.json, this file is required, never tolerantly defaulted', () => {
+    const tmp = fs.mkdtempSync(path.join(os.tmpdir(), 'ats-apply-config-missing-'));
+    try {
+      for (const name of ['adapters.json', 'ats-boards.json', 'exec-boards.json', 'company-aliases.json', 'alert-senders.json', 'noise-rules.json']) {
+        fs.copyFileSync(path.join(CONFIG_DIR, name), path.join(tmp, name));
+      }
+      assert.throws(() => loadConfig({ dir: tmp, fresh: true }), (err) => err.code === 'CONFIG_INVALID');
+    } finally {
+      fs.rmSync(tmp, { recursive: true, force: true });
+    }
+  });
+
+  test('a SCHEMA-INVALID ats-apply.json (empty greenhouse.hosts) throws CONFIG_INVALID at loadConfig()', () => {
+    const tmp = fs.mkdtempSync(path.join(os.tmpdir(), 'ats-apply-config-schema-invalid-'));
+    try {
+      for (const name of ['adapters.json', 'ats-boards.json', 'exec-boards.json', 'company-aliases.json', 'alert-senders.json', 'noise-rules.json']) {
+        fs.copyFileSync(path.join(CONFIG_DIR, name), path.join(tmp, name));
+      }
+      fs.writeFileSync(path.join(tmp, 'ats-apply.json'), JSON.stringify({
+        greenhouse: { hosts: [] },
+        lever: { hosts: ['jobs.lever.co'] },
+        smartrecruiters: { hosts: ['jobs.smartrecruiters.com'] },
+        icims: { hostSuffix: 'icims.com' },
+        dayforce: { hostSuffix: 'dayforcehcm.com' },
+        linkedin: { hostSuffix: 'linkedin.com' },
+        indeed: { hostSuffix: 'indeed.com' },
+      }));
+      assert.throws(() => loadConfig({ dir: tmp, fresh: true }), (err) => err.code === 'CONFIG_INVALID');
+    } finally {
+      fs.rmSync(tmp, { recursive: true, force: true });
+    }
+  });
+
+  test('ats-apply.json round-trips through computeConfigHash: a content change changes the hash', () => {
+    const tmp = fs.mkdtempSync(path.join(os.tmpdir(), 'ats-apply-config-hash-'));
+    try {
+      for (const name of ['adapters.json', 'ats-boards.json', 'ats-apply.json', 'exec-boards.json', 'company-aliases.json', 'alert-senders.json', 'noise-rules.json']) {
+        fs.copyFileSync(path.join(CONFIG_DIR, name), path.join(tmp, name));
+      }
+      const hashBefore = computeConfigHash(tmp);
+      fs.writeFileSync(path.join(tmp, 'ats-apply.json'), JSON.stringify({
+        greenhouse: { hosts: ['boards.greenhouse.io', 'a-new-host.example.com'] },
+        lever: { hosts: ['jobs.lever.co'] },
+        smartrecruiters: { hosts: ['jobs.smartrecruiters.com'] },
+        icims: { hostSuffix: 'icims.com' },
+        dayforce: { hostSuffix: 'dayforcehcm.com' },
+        linkedin: { hostSuffix: 'linkedin.com' },
+        indeed: { hostSuffix: 'indeed.com' },
+      }));
+      const hashAfter = computeConfigHash(tmp);
+      assert.notEqual(hashBefore, hashAfter, 'an ats-apply.json content change must change the config-lock hash');
+    } finally {
+      fs.rmSync(tmp, { recursive: true, force: true });
+    }
+  });
+});
+
 describe('assertTestDbGuard (scan-report-fixes item: structural test-isolation guard)', () => {
   test('trips when NODE_TEST_CONTEXT is set and the DSN does not resolve to a "_test" database', () => {
     const r = runGuardChild({ NODE_TEST_CONTEXT: 'child-v8', PG_DSN: 'postgresql://postgres@localhost:5432/ic_context' });
@@ -128,7 +265,7 @@ describe('triageSchema and triage.json loading (slice 3 auto-triage, docs/slice3
   test('a MISSING triage.json loads successfully with present=false and every field at its schema default (finding 11 fix, never CONFIG_INVALID)', () => {
     const tmp = fs.mkdtempSync(path.join(os.tmpdir(), 'triage-config-missing-'));
     try {
-      for (const name of ['adapters.json', 'ats-boards.json', 'exec-boards.json', 'company-aliases.json', 'alert-senders.json', 'noise-rules.json']) {
+      for (const name of ['adapters.json', 'ats-boards.json', 'ats-apply.json', 'exec-boards.json', 'company-aliases.json', 'alert-senders.json', 'noise-rules.json']) {
         fs.copyFileSync(path.join(CONFIG_DIR, name), path.join(tmp, name));
       }
       const cfg = loadConfig({ dir: tmp, fresh: true });
@@ -146,7 +283,7 @@ describe('triageSchema and triage.json loading (slice 3 auto-triage, docs/slice3
   test('a MALFORMED triage.json (floor > ceiling) still throws CONFIG_INVALID, same as a malformed noise-rules.json does today', () => {
     const tmp = fs.mkdtempSync(path.join(os.tmpdir(), 'triage-config-malformed-'));
     try {
-      for (const name of ['adapters.json', 'ats-boards.json', 'exec-boards.json', 'company-aliases.json', 'alert-senders.json', 'noise-rules.json']) {
+      for (const name of ['adapters.json', 'ats-boards.json', 'ats-apply.json', 'exec-boards.json', 'company-aliases.json', 'alert-senders.json', 'noise-rules.json']) {
         fs.copyFileSync(path.join(CONFIG_DIR, name), path.join(tmp, name));
       }
       fs.writeFileSync(path.join(tmp, 'triage.json'), JSON.stringify({ deterministic: { enabled: true, floor: 80, ceiling: 20 }, model: {} }));
@@ -159,7 +296,7 @@ describe('triageSchema and triage.json loading (slice 3 auto-triage, docs/slice3
   test('a triage.json with invalid JSON also throws CONFIG_INVALID', () => {
     const tmp = fs.mkdtempSync(path.join(os.tmpdir(), 'triage-config-badjson-'));
     try {
-      for (const name of ['adapters.json', 'ats-boards.json', 'exec-boards.json', 'company-aliases.json', 'alert-senders.json', 'noise-rules.json']) {
+      for (const name of ['adapters.json', 'ats-boards.json', 'ats-apply.json', 'exec-boards.json', 'company-aliases.json', 'alert-senders.json', 'noise-rules.json']) {
         fs.copyFileSync(path.join(CONFIG_DIR, name), path.join(tmp, name));
       }
       fs.writeFileSync(path.join(tmp, 'triage.json'), '{not valid json');
@@ -172,7 +309,7 @@ describe('triageSchema and triage.json loading (slice 3 auto-triage, docs/slice3
   test('triage.json round-trips through computeConfigHash: a content change changes the hash', () => {
     const tmp = fs.mkdtempSync(path.join(os.tmpdir(), 'triage-config-hash-'));
     try {
-      for (const name of ['adapters.json', 'ats-boards.json', 'exec-boards.json', 'company-aliases.json', 'alert-senders.json', 'noise-rules.json']) {
+      for (const name of ['adapters.json', 'ats-boards.json', 'ats-apply.json', 'exec-boards.json', 'company-aliases.json', 'alert-senders.json', 'noise-rules.json']) {
         fs.copyFileSync(path.join(CONFIG_DIR, name), path.join(tmp, name));
       }
       const hashWithoutFile = computeConfigHash(tmp);
