@@ -152,6 +152,46 @@ export function sourceChip(source) {
   return table[source ?? ''] ?? { label: source ?? 'Unknown', fg: '--muted-2', bg: '--tag-bg', style: O };
 }
 
+/**
+ * ATS badge chip (apply pipeline slice 2, spec-adversary amendment S12). TOTAL over the real ATS_TYPES
+ * enum (src/core/applications.js, src/apply/ats-detect.js) -- 'unknown' gets the same muted, low-key
+ * treatment as an unrecognized value everywhere else in this file, per the house rule that the job-detail
+ * page renders nothing eye-catching for an unrecognized ats. Deliberately not cross-imported from
+ * ATS_TYPES itself (this file cannot import src/core/*.js -- browser-only, no bundler, same constraint
+ * every other table in this file already documents); test/dashboard-public-chips.test.js cross-checks
+ * completeness against the real ATS_TYPES list.
+ * @param {string|null|undefined} ats
+ */
+export function atsChip(ats) {
+  /** @type {Record<string, Chip>} */
+  const table = {
+    greenhouse: { label: 'Greenhouse', fg: '--accent', bg: '--accent-dim', style: O },
+    lever: { label: 'Lever', fg: '--cyan', bg: '--cyan-dim', style: O },
+    workday: { label: 'Workday', fg: '--purple', bg: '--purple-dim', style: O },
+    dayforce: { label: 'Dayforce', fg: '--yellow', bg: '--yellow-dim', style: O },
+    indeed_easy: { label: 'Indeed Easy Apply', fg: '--yellow', bg: '--yellow-dim', style: O },
+    linkedin_easy: { label: 'LinkedIn Easy Apply', fg: '--purple', bg: '--purple-dim', style: O },
+    icims: { label: 'iCIMS', fg: '--pink', bg: '--pink-dim', style: O },
+    smartrecruiters: { label: 'SmartRecruiters', fg: '--green', bg: '--green-dim', style: O },
+    unknown: { label: 'Unknown', fg: '--muted-2', bg: '--tag-bg', style: O },
+  };
+  return table[ats ?? 'unknown'] ?? { label: 'Unknown', fg: '--muted-2', bg: '--tag-bg', style: O };
+}
+
+/**
+ * Confidence label chip for the ATS badge (S6/S12): 'exact' is the only tier eligible for the automated
+ * apply path (slice 5); 'inferred' and 'low' both always route to needs_human, so both get the same
+ * muted treatment here -- the badge's job is showing the ats and whether it is exact, not ranking
+ * 'inferred' above 'low' visually.
+ * @param {string|null|undefined} confidence
+ */
+export function atsConfidenceChip(confidence) {
+  if (confidence === 'exact') return { label: 'exact', fg: '--green', bg: '--green-dim', style: O };
+  if (confidence === 'inferred') return { label: 'inferred', fg: '--muted', bg: '--tag-bg', style: O };
+  if (confidence === 'low') return { label: 'low confidence', fg: '--muted', bg: '--tag-bg', style: O };
+  return { label: confidence ?? 'unknown', fg: '--muted-2', bg: '--tag-bg', style: O };
+}
+
 /** Turn a token slug like "--purple-dim" into the CSS class suffix "purple-dim". @param {string} token */
 function slug(token) {
   return String(token).replace(/^--/, '');

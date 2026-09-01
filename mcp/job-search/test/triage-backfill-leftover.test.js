@@ -30,7 +30,7 @@ const HERE = path.dirname(fileURLToPath(import.meta.url));
 const PKG = path.join(HERE, '..');
 const SCRIPT = path.join(PKG, 'bin', 'triage-backfill.js');
 const FAKE_CLAUDE_JS = path.join(HERE, 'fixtures', 'triage', 'fake-claude.js');
-const BASE_CONFIG_FILES = ['adapters.json', 'ats-boards.json', 'exec-boards.json', 'company-aliases.json', 'alert-senders.json', 'noise-rules.json'];
+const BASE_CONFIG_FILES = ['adapters.json', 'ats-boards.json', 'ats-apply.json', 'exec-boards.json', 'company-aliases.json', 'alert-senders.json', 'noise-rules.json'];
 
 const CO = `ZZ-TEST-TRIAGE-BACKFILL-LEFTOVER-${process.pid}`;
 const SRC = `zz-test-triage-backfill-leftover-${process.pid}`;
