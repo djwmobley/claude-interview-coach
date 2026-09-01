@@ -29,6 +29,15 @@
  * end (BEGIN before, ROLLBACK after) instead of committing, so a scheduled run can be rehearsed without
  * risk. The Gmail read itself still happens for real (read-only endpoints only, same as every other Gmail
  * caller in this codebase); nothing is ever written back to Gmail.
+ *
+ * The outer BEGIN/ROLLBACK above is passed through to runMailConfirm() as `dryRun: args.dryRun` (post-
+ * review fix), not left implicit: runMailConfirm()'s own per-message DB boundaries use a real transaction
+ * (BEGIN/COMMIT) when NOT told they are already inside one, and a SAVEPOINT when they are -- a per-message
+ * real transaction issued while already inside the outer BEGIN above would COMMIT that outer transaction
+ * early (Postgres treats a nested BEGIN as a no-op, but NOT the matching COMMIT), leaving this file's own
+ * final ROLLBACK with nothing left to undo. Never call runMailConfirm() with `dryRun: true` unless the
+ * outer BEGIN above has actually been issued on the same `client` first -- see mail-confirm.js's own
+ * module doc comment (DRY-RUN CORRECTNESS) for the full contract.
  */
 import { getEnv } from '../src/core/config.js';
 import { connectDedicated } from '../src/core/db.js';
@@ -70,6 +79,7 @@ async function main() {
       tokenFile: env.GOOGLE_TOKEN_FILE,
       log: (fields) => logger.info(fields),
       logError: (fields) => logger.error(fields),
+      dryRun: args.dryRun,
     });
     if (args.dryRun) await client.query('ROLLBACK');
     code = r.code;

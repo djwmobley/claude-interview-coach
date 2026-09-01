@@ -203,13 +203,22 @@ export async function createApplication(client, input) {
  * or one of its wrappers below -- opens it); does the row lock, the TRANSITIONS check, the
  * pending_question rule, the optional attempt increment / expected-from-state guard, and the single
  * atomic UPDATE + event insert.
+ *
+ * Exported (apply pipeline slice 7, post-review fix) for src/apply/mail-confirm.js: calling the wrapped
+ * transition() from a caller that has ALREADY opened its own transaction/savepoint boundary would issue a
+ * NESTED BEGIN/COMMIT -- Postgres treats the nested BEGIN as a harmless no-op WARNING, but the matching
+ * COMMIT is NOT a no-op, it commits the caller's OUTER boundary early. This is the exact hazard this
+ * function's own callers below (approve(), onDocumentLinked(), markSubmittedUnwrapped() via
+ * markSubmitted()/markAppliedByHand()) already avoid by calling transitionUnwrapped() directly instead of
+ * transition() from inside their own withTransaction() -- mail-confirm.js's confirmation path now follows
+ * the identical pattern rather than introducing a second, divergent way to avoid the same bug.
  * @param {import('pg').ClientBase} client
  * @param {number} id
  * @param {string} toState
  * @param {{ actor?: string, note?: string|null, meta?: unknown, pending_question?: unknown, error?: string|null }} opts
  * @param {{ incrementAttempt?: boolean, expectedFromState?: string|null, helperName?: string|null, extraSet?: Record<string, unknown> }} extra
  */
-async function transitionUnwrapped(client, id, toState, opts, extra = {}) {
+export async function transitionUnwrapped(client, id, toState, opts, extra = {}) {
   const { incrementAttempt = false, expectedFromState = null, helperName = null, extraSet = {} } = extra;
   const actor = opts.actor ?? 'mcp';
   if (!EVENT_ACTORS.includes(actor)) {

@@ -24,6 +24,13 @@ import { enqueueReview } from '../src/core/upsert.js';
 const CO = `ZZ-TEST-MAILCONFIRM-${process.pid}`;
 /** @type {pg.Client} */
 let client;
+/** A SEPARATE connection (post-review --dry-run test): verifying "nothing persisted after ROLLBACK" via
+ * the SAME connection that issued the ROLLBACK is weaker evidence -- a connection always sees its own
+ * transaction's final state, rolled back or not, but proves nothing about what an INDEPENDENT connection
+ * (a different session, e.g. the dashboard or another job run) would see in the meantime. This client
+ * never opens its own transaction; every query on it runs in its own autocommit statement. */
+/** @type {pg.Client} */
+let verifyClient;
 /** @type {number[]} */
 const listingIds = [];
 /** @type {string} */
@@ -33,6 +40,8 @@ before(async () => {
   client = new pg.Client(pgConnectionConfig());
   await client.connect();
   await ensureAuxSchema(client);
+  verifyClient = new pg.Client(pgConnectionConfig());
+  await verifyClient.connect();
   tmp = fs.mkdtempSync(path.join(os.tmpdir(), 'mail-confirm-'));
   await cleanup();
 });
@@ -40,6 +49,7 @@ before(async () => {
 after(async () => {
   await cleanup();
   await client.end();
+  await verifyClient.end();
   fs.rmSync(tmp, { recursive: true, force: true });
 });
 
@@ -348,5 +358,78 @@ describe('runMailConfirm: URL-veto classifier traps end-to-end', () => {
     assert.equal(r.outcomes.confirmed, 1);
     const app = await client.query('SELECT state FROM ic_job_applications WHERE id = $1', [appId]);
     assert.equal(app.rows[0].state, 'confirmed');
+  });
+});
+
+describe('runMailConfirm --dry-run: real Postgres rollback contract (post-review fix)', () => {
+  // Prior to this fix, a per-message withTransaction() (real BEGIN/COMMIT) issued while `client` was
+  // already inside bin/confirm.js's own outer --dry-run BEGIN committed that OUTER transaction early --
+  // Postgres treats a nested BEGIN as a harmless no-op WARNING, but the matching COMMIT is NOT a no-op.
+  // The approver reproduced this empirically on the rejected/closed path. There was previously ZERO test
+  // coverage anywhere in this suite of --dry-run's actual rollback behavior against a real Postgres
+  // transaction; both tests below close that hole for the rejected and received paths respectively
+  // (mail-confirm.js's post-review fix touched both -- see its own module doc comment).
+  //
+  // Each test opens the SAME outer BEGIN/ROLLBACK bin/confirm.js --dry-run itself opens, calls
+  // runMailConfirm() with `dryRun: true` exactly as bin/confirm.js does, then verifies via `verifyClient`
+  // -- a SEPARATE connection, never party to the transaction under test -- that nothing persisted. Using
+  // an independent connection is deliberately stronger evidence than re-querying on `client` itself: a
+  // connection always sees its own transaction's final (rolled-back) state regardless of whether an
+  // earlier, buggy inner COMMIT slipped through, so re-querying on `client` could not have caught this
+  // exact regression. A separate connection proves nothing was ever visible outside the transaction.
+
+  test('rejected path: after --dry-run + ROLLBACK, an independent connection sees no status change, no queue row, no event, and no ledger row', async () => {
+    const listingId = await insertListing({ companyNorm: 'dryrejectco', status: 'applied' });
+    const appId = await insertApplication(listingId, { state: 'submitted' });
+    const fetchFn = fakeFetch([{
+      id: 'm-dry-rej', subject: 'Update',
+      text: 'Thank you for applying to DryRejectCo. Unfortunately, we have decided to move forward with other candidates.',
+    }]);
+
+    await client.query('BEGIN');
+    try {
+      const r = await runMailConfirm({ client, tokenFile: writeToken('confirm-dry-rej.json'), fetch: fetchFn, deps: okDeps, dryRun: true });
+      // The job itself still reports the outcome it WOULD have applied -- --dry-run rehearses the
+      // decision, it just never lets it survive the final ROLLBACK.
+      assert.equal(r.outcomes.routed_review, 1);
+    } finally {
+      await client.query('ROLLBACK');
+    }
+
+    const listing = await verifyClient.query('SELECT status FROM ic_job_listings WHERE id = $1', [listingId]);
+    assert.equal(listing.rows[0].status, 'applied', 'listing status must be unchanged after --dry-run + ROLLBACK');
+    const app = await verifyClient.query('SELECT state FROM ic_job_applications WHERE id = $1', [appId]);
+    assert.equal(app.rows[0].state, 'submitted', 'application state must be unchanged');
+    const queue = await verifyClient.query('SELECT id FROM ic_job_review_queue WHERE candidate_id = $1', [listingId]);
+    assert.equal(queue.rowCount, 0, 'no review-queue row of any kind (open or resolved) may exist');
+    const events = await verifyClient.query(`SELECT id FROM ic_job_events WHERE listing_id = $1 AND kind = 'status' AND to_status = 'review'`, [listingId]);
+    assert.equal(events.rowCount, 0, 'no status event may exist');
+    const processed = await verifyClient.query('SELECT message_id FROM ic_gmail_processed_messages WHERE message_id = $1', ['m-dry-rej']);
+    assert.equal(processed.rowCount, 0, 'no ledger row may exist');
+  });
+
+  test('received path: after --dry-run + ROLLBACK, an independent connection sees no confirmation, no nudge completion, and no ledger row', async () => {
+    const listingId = await insertListing({ companyNorm: 'dryacme' });
+    const appId = await insertApplication(listingId, { state: 'submitted' });
+    await insertNudge(appId, listingId);
+    const fetchFn = fakeFetch([{
+      id: 'm-dry-recv', subject: 'Thank you for applying',
+      text: 'Thank you for applying to DryAcme. We have received your application.',
+    }]);
+
+    await client.query('BEGIN');
+    try {
+      const r = await runMailConfirm({ client, tokenFile: writeToken('confirm-dry-recv.json'), fetch: fetchFn, deps: okDeps, dryRun: true });
+      assert.equal(r.outcomes.confirmed, 1);
+    } finally {
+      await client.query('ROLLBACK');
+    }
+
+    const app = await verifyClient.query('SELECT state FROM ic_job_applications WHERE id = $1', [appId]);
+    assert.equal(app.rows[0].state, 'submitted', 'application must NOT be confirmed after --dry-run + ROLLBACK');
+    const nudge = await verifyClient.query('SELECT status FROM ic_followups WHERE created_from = $1', [`${APPLY_NUDGE_PREFIX}${appId}`]);
+    assert.equal(nudge.rows[0].status, 'open', 'the nudge follow-up must NOT be completed');
+    const processed = await verifyClient.query('SELECT message_id FROM ic_gmail_processed_messages WHERE message_id = $1', ['m-dry-recv']);
+    assert.equal(processed.rowCount, 0, 'no ledger row may exist');
   });
 });

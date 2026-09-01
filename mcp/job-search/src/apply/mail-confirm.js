@@ -30,36 +30,55 @@
  * IDEMPOTENCY (amended decision 6): ic_gmail_processed_messages is checked before a message is acted on
  * and written only once its outcome is fully applied, so a message already handled in an earlier run is
  * never re-classified or re-applied. See sql/013_confirm_mail.sql's own doc comment for the crash-safety
- * argument. The MECHANISM differs by path, because a crash between an effect committing and the ledger
- * row committing (there is no single wrapping transaction across the whole job -- messages are handled
- * one at a time, each free to commit independently) has a different consequence on each path:
- *   - received -> confirmed: the state transition (submitted -> confirmed) IS the dedup guard. Once
- *     confirmed, the application drops out of the `submitted` candidate pool loadCandidates()/
- *     matchCandidates() build for the NEXT run, so a replayed message finds zero matches and is a
- *     harmless no-op (recorded `no_match`, not a second confirmation). RESIDUAL GAP: if the crash lands
- *     between transition()'s own commit and completeNudge()'s commit, the 5-day nudge follow-up is never
- *     completed on replay either (the application already dropped out of the pool) -- a stale "check
- *     status" reminder for an application that did confirm, cosmetic, not a data-integrity violation.
+ * argument. BOTH paths (received -> confirmed and rejected/closed -> review) now commit their effects
+ * PLUS the ic_gmail_processed_messages ledger write for that message as ONE DB boundary
+ * (withTransaction/withSavepoint, chosen by `dryRun` -- see DRY-RUN CORRECTNESS below), so a genuine
+ * crash mid-message leaves NEITHER committed, not a partial state anything has to clean up after the
+ * fact:
+ *   - received -> confirmed: transitionUnwrapped() (src/core/applications.js, exported for exactly this
+ *     -- a caller that is ALREADY inside its own transaction/savepoint boundary, mirroring how that file
+ *     already calls it internally from approve()/onDocumentLinked()/markAppliedByHand() for the same
+ *     reason) + completeNudge() + recordProcessed() all commit together. The state transition itself is
+ *     ALSO a dedup guard independent of the transaction wrap: once confirmed, the application drops out
+ *     of the `submitted` candidate pool the NEXT run's loadCandidates()/matchCandidates() build, so even
+ *     a message that was somehow replayed outside this boundary would find zero matches and be a
+ *     harmless no-op (`no_match`, never a second confirmation).
  *   - rejected/closed -> review: unlike the received path, re-entering 'review' is NOT self-guarding by
  *     status alone (the listing's status is already 'review' either way). routeListingToReview() below
  *     therefore (a) skips its own status UPDATE/recordEvent when the listing is ALREADY 'review' (a
  *     replay, or an unrelated review reason already in place, both look identical from here), and (b)
  *     checks for an existing OPEN ic_job_review_queue row for the candidate before inserting a new one --
  *     mirroring bin/migrate.js's own guard for the exact same invariant (sql/004_review_queue.sql: "every
- *     status='review' listing has exactly one open queue row", checked by queueInvariant()/--check).
- *     Each message's effects PLUS its ledger write are additionally wrapped in one transaction
- *     (withTransaction below), so a genuine crash mid-message leaves NEITHER committed, not a partial
- *     state the guard has to clean up after the fact -- the guard is defense in depth for the case a
- *     message is legitimately replayed for another reason (e.g. an operator re-running a --dry-run
- *     rehearsal against a real ledger, or a future caller that does not go through this one transaction),
- *     not the only thing standing between this job and a duplicate queue row.
+ *     status='review' listing has exactly one open queue row", checked by queueInvariant()/--check). This
+ *     guard is defense in depth for a replay outside the transaction wrap, not the sole mechanism.
+ *
+ * DRY-RUN CORRECTNESS (`dryRun` option below, bin/confirm.js's `--dry-run`): the DB boundary above is
+ * DRY-RUN-AWARE, not always the same primitive. bin/confirm.js --dry-run wraps its ENTIRE call to
+ * runMailConfirm() in one outer `BEGIN ... ROLLBACK` on the same client, specifically so a rehearsal run
+ * never persists anything. A plain `withTransaction()` (BEGIN/COMMIT) issued PER MESSAGE inside that
+ * outer transaction is a real bug, not a no-op: Postgres treats a nested `BEGIN` as a no-op WARNING, but
+ * the matching `COMMIT` is NOT a no-op -- it commits the OUTER transaction early, so the caller's final
+ * `ROLLBACK` has nothing left to undo (found in review on the rejected/closed path; the approver
+ * reproduced it empirically -- status flip, review-queue row, event, and ledger row all persisted despite
+ * `--dry-run` plus `ROLLBACK`). The SAME hazard exists for the received -> confirmed path's own boundary
+ * for the identical reason, found and fixed in the same pass (not flagged in the original review, which
+ * was scoped to the rejected/closed path only -- see the PR body's "known gap found before merge" note).
+ * The fix, applied uniformly to both boundaries: `runMailConfirm({ ..., dryRun: true })` (bin/confirm.js
+ * passes its own `args.dryRun` straight through) makes handleMessage() use `withSavepoint()` instead of
+ * `withTransaction()` -- a SAVEPOINT nests correctly inside an already-open transaction and its
+ * RELEASE SAVEPOINT never commits anything the caller did not ask to commit, so the caller's outer
+ * ROLLBACK still undoes everything. `dryRun: true` is ONLY safe to pass when the caller has ALREADY
+ * opened that outer transaction itself and WILL roll it back after this call returns -- passing it
+ * without that outer transaction would make `SAVEPOINT` fail outright (Postgres refuses a SAVEPOINT
+ * outside a transaction block), which is a loud, immediate error rather than the silent
+ * commits-when-it-shouldn't failure mode this fixes.
  */
 import { classifyAndConnect } from '../core/google.js';
-import { transition, getApplication, APPLY_NUDGE_PREFIX } from '../core/applications.js';
+import { transitionUnwrapped, getApplication, APPLY_NUDGE_PREFIX } from '../core/applications.js';
 import { completeFollowup } from '../core/followups.js';
 import { recordEvent } from '../core/events.js';
 import { enqueueReview } from '../core/upsert.js';
-import { withTransaction } from '../core/db.js';
+import { withTransaction, withSavepoint } from '../core/db.js';
 import { JobSearchError } from '../core/errors.js';
 import { classifyApplicationMail, mailUrlContradictsCandidate } from './mail-classifier.js';
 
@@ -263,8 +282,13 @@ function errFieldsLite(err) {
  * @param {Awaited<ReturnType<typeof loadCandidates>>} candidates
  * @param {(fields: Record<string, unknown>) => void} log
  * @param {(fields: Record<string, unknown>) => void} logError
+ * @param {boolean} dryRun see the module doc comment's DRY-RUN CORRECTNESS section: true ONLY when
+ *   `client` is already inside an outer transaction the caller (bin/confirm.js --dry-run) will itself
+ *   roll back -- selects withSavepoint() over withTransaction() for both DB boundaries below so this
+ *   function's own commit-equivalent can never touch that outer transaction early.
  */
-async function handleMessage(client, msg, candidates, log, logError) {
+async function handleMessage(client, msg, candidates, log, logError, dryRun) {
+  const wrap = dryRun ? withSavepoint : withTransaction;
   const classified = classifyApplicationMail({ subject: msg.subject, text: msg.text, html: msg.html, fromName: msg.fromName });
   const mailText = `${msg.subject}\n${msg.text}\n${msg.html}`;
   log({ evt: 'confirm_message_classified', message_id: msg.messageId, kind: classified.kind, company_raw: classified.company_raw, company_norm: classified.company_norm });
@@ -300,13 +324,21 @@ async function handleMessage(client, msg, candidates, log, logError) {
       await recordProcessed(client, { messageId: msg.messageId, kind: 'received', companyRaw: classified.company_raw, companyNorm: classified.company_norm, applicationId, outcome: `skipped_state_${fresh.state}` });
       return `skipped_state_${fresh.state}`;
     }
-    await transition(client, applicationId, 'confirmed', {
-      actor: 'apply', note: 'confirmed via mail classifier',
-      meta: { message_id: msg.messageId, company_raw: classified.company_raw, company_norm: classified.company_norm, matched_phrase: classified.matchedPhrase },
+    // Post-review fix: transitionUnwrapped() (not transition(), which self-wraps in withTransaction) so
+    // this whole branch -- the state transition, the nudge completion, and the ledger write -- commits as
+    // ONE boundary, dry-run-aware exactly like the rejected/closed branch below. This also closes what
+    // was previously a documented residual gap (a crash between transition()'s own commit and
+    // completeNudge()'s commit used to leave the nudge open forever even though the application had
+    // confirmed) -- see the module doc comment.
+    return wrap(client, async (c) => {
+      await transitionUnwrapped(c, applicationId, 'confirmed', {
+        actor: 'apply', note: 'confirmed via mail classifier',
+        meta: { message_id: msg.messageId, company_raw: classified.company_raw, company_norm: classified.company_norm, matched_phrase: classified.matchedPhrase },
+      }, {});
+      await completeNudge(c, applicationId, logError);
+      await recordProcessed(c, { messageId: msg.messageId, kind: 'received', companyRaw: classified.company_raw, companyNorm: classified.company_norm, applicationId, outcome: 'confirmed' });
+      return 'confirmed';
     });
-    await completeNudge(client, applicationId, logError);
-    await recordProcessed(client, { messageId: msg.messageId, kind: 'received', companyRaw: classified.company_raw, companyNorm: classified.company_norm, applicationId, outcome: 'confirmed' });
-    return 'confirmed';
   }
 
   // rejected / closed (amended decision 2 and 3): pool is submitted UNION confirmed (all of `candidates`).
@@ -318,14 +350,15 @@ async function handleMessage(client, msg, candidates, log, logError) {
   }
   // Crash-safety fix (review-queue invariant, sql/004_review_queue.sql / bin/migrate.js's
   // queueInvariant()): every routeListingToReview() call PLUS the ic_gmail_processed_messages ledger
-  // write for this message are committed as ONE transaction, so a crash mid-message leaves either
-  // NOTHING committed (safely retried next run, routeListingToReview()'s own guard makes the retry a
-  // no-op even if it were not) or EVERYTHING committed (the ledger row makes the next run skip it
-  // entirely via alreadyProcessed()) -- never effects-committed-without-the-ledger-row, which is exactly
-  // the gap that let a replay insert a second open queue row for the same listing.
+  // write for this message are committed as ONE DB boundary (dry-run-aware, see `wrap` above), so a
+  // crash mid-message leaves either NOTHING committed (safely retried next run, routeListingToReview()'s
+  // own guard makes the retry a no-op even if it were not) or EVERYTHING committed (the ledger row makes
+  // the next run skip it entirely via alreadyProcessed()) -- never effects-committed-without-the-
+  // ledger-row, which is exactly the gap that let a replay insert a second open queue row for the same
+  // listing.
   if (matches.length === 1) {
     const m = matches[0];
-    return withTransaction(client, async (c) => {
+    return wrap(client, async (c) => {
       await routeListingToReview(c, { listingId: m.listing_id, reason, matches: [], note: `${reason}: ${classified.matchedPhrase ?? ''}`.slice(0, 200) });
       await recordProcessed(c, { messageId: msg.messageId, kind: classified.kind, companyRaw: classified.company_raw, companyNorm: classified.company_norm, applicationId: m.application_id, outcome: 'routed_review' });
       return 'routed_review';
@@ -333,8 +366,8 @@ async function handleMessage(client, msg, candidates, log, logError) {
   }
   // Ambiguous (amended decision 3): route EVERY candidate listing to review, each naming its siblings in
   // `matches`, so a human resolves which one the mail was actually about -- never a guess. All of it
-  // (every listing's routing plus the ledger write) is one transaction, same rationale as above.
-  return withTransaction(client, async (c) => {
+  // (every listing's routing plus the ledger write) is one boundary, same rationale as above.
+  return wrap(client, async (c) => {
     for (const m of matches) {
       const siblingListingIds = matches.filter((x) => x.listing_id !== m.listing_id).map((x) => x.listing_id);
       await routeListingToReview(c, { listingId: m.listing_id, reason, matches: siblingListingIds, note: `ambiguous ${reason} (${matches.length} candidates): ${classified.matchedPhrase ?? ''}`.slice(0, 200) });
@@ -362,11 +395,18 @@ async function handleMessage(client, msg, candidates, log, logError) {
 /**
  * @param {{ client: import('pg').ClientBase, tokenFile: string|null|undefined, fetch?: typeof fetch,
  *   now?: Date, windowDays?: number, log?: (f: Record<string, unknown>) => void, logError?: (f: Record<string, unknown>) => void,
- *   deps?: { readTokenFile?: Function, makeOAuthClient?: Function, getAccessToken?: Function } }} o
+ *   deps?: { readTokenFile?: Function, makeOAuthClient?: Function, getAccessToken?: Function },
+ *   dryRun?: boolean }} o dryRun (default false): see the module doc comment's DRY-RUN CORRECTNESS
+ *   section. Pass true ONLY when `client` is already inside an outer transaction the CALLER opened and
+ *   will itself roll back after this call returns (bin/confirm.js --dry-run) -- every per-message DB
+ *   boundary this function's helpers open then uses a SAVEPOINT instead of a real transaction, so this
+ *   call's own commits can never touch that outer transaction early. Passing true without such an outer
+ *   transaction already open makes every SAVEPOINT fail outright (a loud error, not silent data loss).
  * @returns {Promise<RunMailConfirmResult>}
  */
 export async function runMailConfirm(o) {
   const log = o.log ?? (() => {});
+  const dryRun = o.dryRun ?? false;
   const logError = o.logError ?? (() => {});
   const fetchFn = o.fetch ?? fetch;
   const windowDays = o.windowDays ?? MAILBOX_WINDOW_DAYS;
@@ -462,7 +502,7 @@ export async function runMailConfirm(o) {
       collectBodyParts(msgJson.payload, parts);
 
       try {
-        const outcome = await handleMessage(o.client, { messageId: id, subject, text: parts.text ?? '', html: parts.html ?? '', fromName }, candidates, log, logError);
+        const outcome = await handleMessage(o.client, { messageId: id, subject, text: parts.text ?? '', html: parts.html ?? '', fromName }, candidates, log, logError, dryRun);
         bump(outcome);
       } catch (err) {
         // A single message's handling failing (e.g. a state-machine VALIDATION race) never aborts the
