@@ -34,6 +34,19 @@ import { EVENT_ACTORS } from './events.js';
 import { applyMark } from '../tools/mark_jobs.js';
 import { STATUS_GROUPS } from './statuses.js';
 import { resolveOutputPath } from './documents.js';
+import { createFollowup } from './followups.js';
+
+/**
+ * `created_from` prefix for the unconditional 5-day-nudge follow-up markSubmittedUnwrapped creates below
+ * (apply pipeline slice 7, amended spec: "The 5-day nudge is created UNCONDITIONALLY on every submitted
+ * transition... Correlation via the followup's created_from field = 'apply-nudge:<application_id>'").
+ * Exported so src/apply/mail-confirm.js can look the row back up by exact prefix+id when an application
+ * confirms, without either module re-deriving or hardcoding the format twice.
+ */
+export const APPLY_NUDGE_PREFIX = 'apply-nudge:';
+
+/** Milliseconds in the nudge's 5-day window. */
+const APPLY_NUDGE_DAYS = 5;
 
 /** ic_job_applications.ats_type CHECK values (sql/012_applications.sql). */
 export const ATS_TYPES = Object.freeze([
@@ -190,13 +203,22 @@ export async function createApplication(client, input) {
  * or one of its wrappers below -- opens it); does the row lock, the TRANSITIONS check, the
  * pending_question rule, the optional attempt increment / expected-from-state guard, and the single
  * atomic UPDATE + event insert.
+ *
+ * Exported (apply pipeline slice 7, post-review fix) for src/apply/mail-confirm.js: calling the wrapped
+ * transition() from a caller that has ALREADY opened its own transaction/savepoint boundary would issue a
+ * NESTED BEGIN/COMMIT -- Postgres treats the nested BEGIN as a harmless no-op WARNING, but the matching
+ * COMMIT is NOT a no-op, it commits the caller's OUTER boundary early. This is the exact hazard this
+ * function's own callers below (approve(), onDocumentLinked(), markSubmittedUnwrapped() via
+ * markSubmitted()/markAppliedByHand()) already avoid by calling transitionUnwrapped() directly instead of
+ * transition() from inside their own withTransaction() -- mail-confirm.js's confirmation path now follows
+ * the identical pattern rather than introducing a second, divergent way to avoid the same bug.
  * @param {import('pg').ClientBase} client
  * @param {number} id
  * @param {string} toState
  * @param {{ actor?: string, note?: string|null, meta?: unknown, pending_question?: unknown, error?: string|null }} opts
  * @param {{ incrementAttempt?: boolean, expectedFromState?: string|null, helperName?: string|null, extraSet?: Record<string, unknown> }} extra
  */
-async function transitionUnwrapped(client, id, toState, opts, extra = {}) {
+export async function transitionUnwrapped(client, id, toState, opts, extra = {}) {
   const { incrementAttempt = false, expectedFromState = null, helperName = null, extraSet = {} } = extra;
   const actor = opts.actor ?? 'mcp';
   if (!EVENT_ACTORS.includes(actor)) {
@@ -354,7 +376,7 @@ async function markSubmittedUnwrapped(client, id, opts) {
   const row = await transitionUnwrapped(client, id, 'submitted', { actor, note: opts.note, meta: opts.meta }, {
     extraSet: { confirmation_ref: opts.confirmationRef ?? null },
   });
-  const listingRes = await client.query('SELECT status FROM ic_job_listings WHERE id = $1', [row.listing_id]);
+  const listingRes = await client.query('SELECT status, company, title FROM ic_job_listings WHERE id = $1', [row.listing_id]);
   const currentStatus = listingRes.rowCount ? listingRes.rows[0].status : null;
   if (isPreApplicationStatus(currentStatus)) {
     await applyMark(client, { id: row.listing_id, status: 'applied' }, { now: new Date(), explicit: true, actor: 'apply' });
@@ -364,6 +386,31 @@ async function markSubmittedUnwrapped(client, id, opts) {
       note: `listing status left at "${currentStatus}" (not pre-application); not overwritten with "applied"`,
     });
   }
+
+  // Apply pipeline slice 7, amended spec (decision 5): the 5-day nudge is created UNCONDITIONALLY on
+  // every submitted transition -- this is the documented mitigation for the mail classifier's sender/
+  // keyword-query blind spot (src/apply/mail-confirm.js): if the classifier never sees the confirmation
+  // mail, the nudge still fires. Runs inside the SAME transaction as the transition above (this function
+  // is always called from within an open transaction -- see markSubmitted()/markAppliedByHand() below --
+  // so there is never a window where an application is 'submitted' without its nudge already existing).
+  // The state machine guarantees this fires at most once per application (see TRANSITIONS: 'submitted'
+  // has no outgoing edge back to 'submitting', so an application reaches 'submitted' at most once in its
+  // lifetime), so no de-duplication guard is needed here.
+  const listingRow = listingRes.rowCount ? listingRes.rows[0] : null;
+  const company = listingRow && listingRow.company ? String(listingRow.company) : null;
+  const title = listingRow && listingRow.title ? String(listingRow.title) : null;
+  const dueAt = new Date(/** @type {Date} */ (row.submitted_at).getTime() + APPLY_NUDGE_DAYS * 24 * 60 * 60 * 1000);
+  await createFollowup(client, {
+    contact: company ?? 'Unknown company',
+    org: company ?? null,
+    listing_id: row.listing_id,
+    due_at: dueAt.toISOString(),
+    channel: 'other',
+    action: `Check application status${title ? ` for ${title}` : ''}: no confirmation email received within ${APPLY_NUDGE_DAYS} days of submitting.`,
+    notify: ['email'],
+    created_from: `${APPLY_NUDGE_PREFIX}${id}`,
+  });
+
   return row;
 }
 

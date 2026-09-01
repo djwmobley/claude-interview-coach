@@ -396,13 +396,30 @@ $t = New-ScheduledTaskTrigger -Weekly -DaysOfWeek Monday,Tuesday,Wednesday,Thurs
 $t.RandomDelay = "PT45M"
 Register-ScheduledTask -TaskName "job-search scan" -Action $a -Trigger $t -RunLevel Limited
 
+$a3 = New-ScheduledTaskAction -Execute "node" -Argument "mcp\job-search\bin\confirm.js" -WorkingDirectory $root
+$t3 = New-ScheduledTaskTrigger -Weekly -DaysOfWeek Monday,Tuesday,Wednesday,Thursday,Friday -At 07:45
+Register-ScheduledTask -TaskName "job-search confirm" -Action $a3 -Trigger $t3 -RunLevel Limited
+
 $a2 = New-ScheduledTaskAction -Execute "node" -Argument "mcp\job-search\bin\remind.js" -WorkingDirectory $root
 $t2 = New-ScheduledTaskTrigger -Weekly -DaysOfWeek Monday,Tuesday,Wednesday,Thursday,Friday -At 08:00
 Register-ScheduledTask -TaskName "job-search remind" -Action $a2 -Trigger $t2 -RunLevel Limited
 ```
 
 `Get-ScheduledTaskInfo "job-search scan"` shows the last run time and result
-code (`0`, `1`, `2` as above). Both scripts prune their own logs after 14 days.
+code (`0`, `1`, `2` as above). All three scripts prune their own logs after 14
+days. `job-search confirm` (apply pipeline slice 7, `bin/confirm.js`) is
+scheduled BEFORE `job-search remind` on purpose: it watches Gmail for
+application confirmation/rejection/position-closed mail (see
+"Apply pipeline: mail classifier and confirmation" below) and completes a
+submitted application's 5-day nudge follow-up the moment it confirms, so that
+follow-up never shows up as "due" in the same morning's `remind` digest.
+`job-search confirm` is a standalone job, not a step inside `remind.js` --
+its own failure mode (a broken Gmail query silently under-classifying mail)
+is unrelated to the digest email, it keeps its own idempotency ledger
+(`ic_gmail_processed_messages`), and every other apply-pipeline background job
+in this codebase (the Workday verify-email poll, `src/apply/gmail-verify.js`)
+is already its own self-contained module rather than threaded through
+`remind.js`.
 
 ## Daily scan report and follow-up reminders
 
@@ -932,6 +949,36 @@ detected by the test suite.
   deleted, archived out of the default view in a way `newer_than:` cannot
   reach, or that landed in Spam is invisible with no warning distinguishing
   that from "no new alerts."
+- `bin/confirm.js` / `src/apply/mail-confirm.js` (apply pipeline slice 7, mail classifier and
+  confirmation): the Gmail search query is a fixed keyword list (`subject:application`,
+  `"thank you for applying"`, `"application status"`, etc.), not a sender allow-list, but it is still a
+  blind spot of the same shape as `gmail`'s own alert-sender list above -- a confirmation/rejection mail
+  whose subject and body match none of those keywords is invisible to the classifier with no warning; the
+  unconditional 5-day nudge follow-up (`src/core/applications.js`'s `markSubmitted`/`markAppliedByHand`)
+  is the deliberate mitigation, not a fix.
+- `src/apply/mail-classifier.js`'s phrase library and company-extraction patterns were built and tested
+  against constructed fixtures, never against a real inbox's actual rejection/confirmation wording (the
+  Google refresh grant is currently `invalid_grant`, re-auth in progress separately -- there is no live
+  Gmail access in this sandboxed environment). Real-world phrasing diversity beyond the patterns in that
+  file (a rejection or confirmation that uses none of the matched clauses) classifies `unknown` and is
+  silently skipped rather than mis-classified -- safe by construction, but it means real coverage is
+  unverified until this runs against Damian's actual inbox.
+- Company extraction is best-effort regex over the subject/body text (or, failing that, the From display
+  name); an ATS whose confirmation/rejection template does not match any of the extraction patterns
+  yields `company_raw: null`, which always falls out as `no_match` (never a wrong guess) -- but it does
+  mean a real confirmation can go unmatched purely because the extraction pattern missed it, not because
+  no candidate application existed.
+- An HTML-only confirmation/rejection email is scanned via a tag-stripping pass (`stripTags`), not a real
+  HTML parser -- the same limitation `src/apply/gmail-verify.js`'s own `extractVerification` already
+  documents for the Workday verify-email flow; unusual markup (nested tables, hidden preheader text) can
+  shift or duplicate words in ways the phrase/company regexes were not tested against.
+- A withdrawn application still has an open 5-day nudge follow-up (creating it is unconditional on
+  reaching `submitted`; nothing cancels it if the application is later withdrawn) -- a minor UX rough
+  edge (a "check status" reminder for an application Damian already withdrew), not a correctness bug.
+- `ic_gmail_processed_messages`' idempotency guarantee covers THIS job's own re-runs only; it has no
+  awareness of the scan pipeline's or the dashboard's own event logs, so a message this job never saw at
+  all (outside the `MAILBOX_WINDOW_DAYS` search window, or arriving after the window has rolled past) is
+  not retried by anything -- again, the 5-day nudge is the backstop, not this table.
 - The stored `description` column holds the lowercased hash-pipeline text, not
   the original case (stage 1 behavior, flagged, not changed).
 - `render_doc` checks are lexical: tone, "supported" versus "drove" revenue

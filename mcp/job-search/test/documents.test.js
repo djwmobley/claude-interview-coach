@@ -271,6 +271,7 @@ describe('linkDocument / unlinkDocument / listDocuments (real test DB)', () => {
   after(async () => {
     await client.query('DELETE FROM ic_job_documents WHERE listing_id = $1', [listingId]);
     await client.query('DELETE FROM ic_job_events WHERE listing_id = $1', [listingId]);
+    await client.query('DELETE FROM ic_followups WHERE listing_id = $1', [listingId]);
     await client.query('DELETE FROM ic_job_listings WHERE id = $1', [listingId]);
     await client.end();
   });

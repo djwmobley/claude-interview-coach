@@ -48,6 +48,10 @@ async function seedApprovedApplication(o = {}) {
 
 async function cleanup() {
   if (listingIds.length === 0) return;
+  // Apply pipeline slice 7: markSubmitted() (called internally by the worker when an adapter reports
+  // 'submitted') now also creates a followup row (created_from = 'apply-nudge:<id>') for the listing --
+  // must be deleted before the listing itself or the FK (ic_followups_listing_id_fkey) blocks the delete.
+  await verifyClient.query('DELETE FROM ic_followups WHERE listing_id = ANY($1::int[])', [listingIds]);
   await verifyClient.query('DELETE FROM ic_job_application_events WHERE application_id IN (SELECT id FROM ic_job_applications WHERE listing_id = ANY($1::int[]))', [listingIds]);
   await verifyClient.query('DELETE FROM ic_job_applications WHERE listing_id = ANY($1::int[])', [listingIds]);
   await verifyClient.query('DELETE FROM ic_job_events WHERE listing_id = ANY($1::int[])', [listingIds]);

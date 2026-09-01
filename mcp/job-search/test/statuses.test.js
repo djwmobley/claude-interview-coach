@@ -4,7 +4,7 @@
  */
 import { test, describe } from 'node:test';
 import assert from 'node:assert/strict';
-import { PIPELINE_STATUSES, STATUS_GROUPS, STATUS_PRECEDENCE, REOPEN_REASONS, QUEUE_REASONS, UNTRIAGED, groupOf } from '../src/core/statuses.js';
+import { PIPELINE_STATUSES, STATUS_GROUPS, STATUS_PRECEDENCE, REOPEN_REASONS, QUEUE_REASONS, MAIL_REVIEW_REASONS, UNTRIAGED, groupOf } from '../src/core/statuses.js';
 import { STATUSES as MARK_JOBS_STATUSES } from '../src/tools/mark_jobs.js';
 import { z } from 'zod';
 import { schema as markJobsSchema } from '../src/tools/mark_jobs.js';
@@ -66,8 +66,15 @@ describe('REOPEN_REASONS / QUEUE_REASONS: closed lookups', () => {
     for (const [status, reason] of Object.entries(REOPEN_REASONS)) assert.equal(reason, `reopened_${status}`);
   });
 
-  test('QUEUE_REASONS is the full closed set: every REOPEN_REASONS value plus the two non-status reasons', () => {
-    const expected = new Set([...Object.values(REOPEN_REASONS), 'concurrent_review', 'unrecognized_status']);
+  test('QUEUE_REASONS is the full closed set: every REOPEN_REASONS value plus the two non-status reasons plus the two mail reasons', () => {
+    const expected = new Set([...Object.values(REOPEN_REASONS), 'concurrent_review', 'unrecognized_status', 'mail_rejected', 'mail_closed']);
     assert.deepEqual(new Set(QUEUE_REASONS), expected);
+  });
+});
+
+describe('MAIL_REVIEW_REASONS (apply pipeline slice 7)', () => {
+  test('exactly mail_rejected and mail_closed, and both are members of QUEUE_REASONS', () => {
+    assert.deepEqual([...MAIL_REVIEW_REASONS], ['mail_rejected', 'mail_closed']);
+    for (const r of MAIL_REVIEW_REASONS) assert.ok(QUEUE_REASONS.includes(r));
   });
 });

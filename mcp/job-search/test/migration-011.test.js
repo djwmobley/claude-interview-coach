@@ -44,6 +44,7 @@ async function cleanup() {
   const ids = (await client.query('SELECT id FROM ic_job_listings WHERE company = $1', [CO])).rows.map((r) => r.id);
   if (ids.length === 0) return;
   await client.query('DELETE FROM ic_job_events WHERE listing_id = ANY($1::int[])', [ids]);
+  await client.query('DELETE FROM ic_followups WHERE listing_id = ANY($1::int[])', [ids]);
   await client.query('DELETE FROM ic_job_listings WHERE id = ANY($1::int[])', [ids]);
 }
 
