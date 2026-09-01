@@ -30,13 +30,36 @@
  * IDEMPOTENCY (amended decision 6): ic_gmail_processed_messages is checked before a message is acted on
  * and written only once its outcome is fully applied, so a message already handled in an earlier run is
  * never re-classified or re-applied. See sql/013_confirm_mail.sql's own doc comment for the crash-safety
- * argument (a message is retried, never double-applied, if the process dies mid-message).
+ * argument. The MECHANISM differs by path, because a crash between an effect committing and the ledger
+ * row committing (there is no single wrapping transaction across the whole job -- messages are handled
+ * one at a time, each free to commit independently) has a different consequence on each path:
+ *   - received -> confirmed: the state transition (submitted -> confirmed) IS the dedup guard. Once
+ *     confirmed, the application drops out of the `submitted` candidate pool loadCandidates()/
+ *     matchCandidates() build for the NEXT run, so a replayed message finds zero matches and is a
+ *     harmless no-op (recorded `no_match`, not a second confirmation). RESIDUAL GAP: if the crash lands
+ *     between transition()'s own commit and completeNudge()'s commit, the 5-day nudge follow-up is never
+ *     completed on replay either (the application already dropped out of the pool) -- a stale "check
+ *     status" reminder for an application that did confirm, cosmetic, not a data-integrity violation.
+ *   - rejected/closed -> review: unlike the received path, re-entering 'review' is NOT self-guarding by
+ *     status alone (the listing's status is already 'review' either way). routeListingToReview() below
+ *     therefore (a) skips its own status UPDATE/recordEvent when the listing is ALREADY 'review' (a
+ *     replay, or an unrelated review reason already in place, both look identical from here), and (b)
+ *     checks for an existing OPEN ic_job_review_queue row for the candidate before inserting a new one --
+ *     mirroring bin/migrate.js's own guard for the exact same invariant (sql/004_review_queue.sql: "every
+ *     status='review' listing has exactly one open queue row", checked by queueInvariant()/--check).
+ *     Each message's effects PLUS its ledger write are additionally wrapped in one transaction
+ *     (withTransaction below), so a genuine crash mid-message leaves NEITHER committed, not a partial
+ *     state the guard has to clean up after the fact -- the guard is defense in depth for the case a
+ *     message is legitimately replayed for another reason (e.g. an operator re-running a --dry-run
+ *     rehearsal against a real ledger, or a future caller that does not go through this one transaction),
+ *     not the only thing standing between this job and a duplicate queue row.
  */
 import { classifyAndConnect } from '../core/google.js';
 import { transition, getApplication, APPLY_NUDGE_PREFIX } from '../core/applications.js';
 import { completeFollowup } from '../core/followups.js';
 import { recordEvent } from '../core/events.js';
 import { enqueueReview } from '../core/upsert.js';
+import { withTransaction } from '../core/db.js';
 import { JobSearchError } from '../core/errors.js';
 import { classifyApplicationMail, mailUrlContradictsCandidate } from './mail-classifier.js';
 
@@ -143,16 +166,39 @@ function matchCandidates(pool, companyNorm, mailText) {
  * here -- see the PR body's "spec deviations" section for why: that branch hardcodes reason
  * 'propagation_conflict' and only fires when the row's marked_at is already set, neither of which fits a
  * mail-sourced reason).
+ *
+ * INVARIANT GUARD (sql/004_review_queue.sql: "every status='review' listing has exactly one open queue
+ * row", enforced by bin/migrate.js's queueInvariant()/--check): two separate no-ops protect it, both
+ * mirroring bin/migrate.js's own established pattern for the identical invariant (see that file's
+ * title_renormalized and legacy_url_conflict/legacy_ext_conflict backfills) --
+ *   (1) the status UPDATE + its recordEvent are skipped entirely when the listing is ALREADY 'review'
+ *       (nothing changed, so nothing to log -- matches src/tools/mark_jobs.js's applyMark's own "one
+ *       event per field that actually changed" rule);
+ *   (2) the queue INSERT is skipped when an OPEN row already exists for this candidate_id, regardless of
+ *       ITS reason -- a row already queued for an unrelated reason (e.g. a scan-side dedup ambiguity)
+ *       must not get a second, competing queue entry either, exactly bin/migrate.js's own comment on its
+ *       identical check ("not just one with reason=X").
+ * This makes routeListingToReview() itself idempotent under replay (called twice for the same listing
+ * with the caller never checking for that itself). The caller (handleMessage) additionally wraps each
+ * message's calls here PLUS its ic_gmail_processed_messages ledger write in one transaction, so replay
+ * only happens at all if this function is invoked outside that transaction wrap for some other reason --
+ * this guard is defense in depth, not the sole mechanism (see the module doc comment's IDEMPOTENCY
+ * section).
  * @param {import('pg').ClientBase} client
  * @param {{ listingId: number, reason: 'mail_rejected'|'mail_closed', matches: number[], note: string }} o
- * @returns {Promise<number|null>} the review-queue row id, or null if the listing no longer exists
+ * @returns {Promise<number|null>} the review-queue row id (existing or newly created), or null if the
+ *   listing no longer exists
  */
 async function routeListingToReview(client, o) {
   const cur = await client.query('SELECT status FROM ic_job_listings WHERE id = $1 FOR UPDATE', [o.listingId]);
   if (cur.rowCount === 0) return null;
   const fromStatus = cur.rows[0].status ?? null;
-  await client.query(`UPDATE ic_job_listings SET status = 'review' WHERE id = $1`, [o.listingId]);
-  await recordEvent(client, { listingId: o.listingId, kind: 'status', fromStatus, toStatus: 'review', note: o.note, actor: 'apply', runId: null });
+  if (fromStatus !== 'review') {
+    await client.query(`UPDATE ic_job_listings SET status = 'review' WHERE id = $1`, [o.listingId]);
+    await recordEvent(client, { listingId: o.listingId, kind: 'status', fromStatus, toStatus: 'review', note: o.note, actor: 'apply', runId: null });
+  }
+  const already = await client.query(`SELECT id FROM ic_job_review_queue WHERE resolved_at IS NULL AND candidate_id = $1`, [o.listingId]);
+  if (already.rowCount > 0) return Number(already.rows[0].id);
   const queued = await enqueueReview(client, { runId: null, candidate: null, candidateId: o.listingId, matches: o.matches, reason: o.reason, statusAtCreate: fromStatus });
   return queued;
 }
@@ -270,23 +316,35 @@ async function handleMessage(client, msg, candidates, log, logError) {
     await recordProcessed(client, { messageId: msg.messageId, kind: classified.kind, companyRaw: classified.company_raw, companyNorm: classified.company_norm, applicationId: null, outcome: 'no_match' });
     return 'no_match';
   }
+  // Crash-safety fix (review-queue invariant, sql/004_review_queue.sql / bin/migrate.js's
+  // queueInvariant()): every routeListingToReview() call PLUS the ic_gmail_processed_messages ledger
+  // write for this message are committed as ONE transaction, so a crash mid-message leaves either
+  // NOTHING committed (safely retried next run, routeListingToReview()'s own guard makes the retry a
+  // no-op even if it were not) or EVERYTHING committed (the ledger row makes the next run skip it
+  // entirely via alreadyProcessed()) -- never effects-committed-without-the-ledger-row, which is exactly
+  // the gap that let a replay insert a second open queue row for the same listing.
   if (matches.length === 1) {
     const m = matches[0];
-    await routeListingToReview(client, { listingId: m.listing_id, reason, matches: [], note: `${reason}: ${classified.matchedPhrase ?? ''}`.slice(0, 200) });
-    await recordProcessed(client, { messageId: msg.messageId, kind: classified.kind, companyRaw: classified.company_raw, companyNorm: classified.company_norm, applicationId: m.application_id, outcome: 'routed_review' });
-    return 'routed_review';
+    return withTransaction(client, async (c) => {
+      await routeListingToReview(c, { listingId: m.listing_id, reason, matches: [], note: `${reason}: ${classified.matchedPhrase ?? ''}`.slice(0, 200) });
+      await recordProcessed(c, { messageId: msg.messageId, kind: classified.kind, companyRaw: classified.company_raw, companyNorm: classified.company_norm, applicationId: m.application_id, outcome: 'routed_review' });
+      return 'routed_review';
+    });
   }
   // Ambiguous (amended decision 3): route EVERY candidate listing to review, each naming its siblings in
-  // `matches`, so a human resolves which one the mail was actually about -- never a guess.
-  for (const m of matches) {
-    const siblingListingIds = matches.filter((x) => x.listing_id !== m.listing_id).map((x) => x.listing_id);
-    await routeListingToReview(client, { listingId: m.listing_id, reason, matches: siblingListingIds, note: `ambiguous ${reason} (${matches.length} candidates): ${classified.matchedPhrase ?? ''}`.slice(0, 200) });
-  }
-  await recordProcessed(client, {
-    messageId: msg.messageId, kind: classified.kind, companyRaw: classified.company_raw, companyNorm: classified.company_norm, applicationId: null,
-    outcome: 'ambiguous_review', note: `${matches.length} candidates: application ids ${matches.map((m) => m.application_id).join(',')}`,
+  // `matches`, so a human resolves which one the mail was actually about -- never a guess. All of it
+  // (every listing's routing plus the ledger write) is one transaction, same rationale as above.
+  return withTransaction(client, async (c) => {
+    for (const m of matches) {
+      const siblingListingIds = matches.filter((x) => x.listing_id !== m.listing_id).map((x) => x.listing_id);
+      await routeListingToReview(c, { listingId: m.listing_id, reason, matches: siblingListingIds, note: `ambiguous ${reason} (${matches.length} candidates): ${classified.matchedPhrase ?? ''}`.slice(0, 200) });
+    }
+    await recordProcessed(c, {
+      messageId: msg.messageId, kind: classified.kind, companyRaw: classified.company_raw, companyNorm: classified.company_norm, applicationId: null,
+      outcome: 'ambiguous_review', note: `${matches.length} candidates: application ids ${matches.map((m) => m.application_id).join(',')}`,
+    });
+    return 'ambiguous_review';
   });
-  return 'ambiguous_review';
 }
 
 /**

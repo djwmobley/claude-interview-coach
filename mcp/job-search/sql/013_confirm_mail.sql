@@ -7,9 +7,24 @@
 -- (the job runs daily and a message can still be in the mailbox window on the next run) never re-applies
 -- a classification decision twice: no double state transition, no duplicate review-queue entry. A message
 -- is inserted here only once its outcome has been fully applied to the database -- if the process crashes
--- mid-message, the row is simply absent and the message is safely reprocessed on the next run (every
--- downstream write this job makes, from a state transition to routing a listing to review, is itself
--- idempotent or state-guarded, so replaying one message's handling is safe; see the PR body).
+-- mid-message, the row is simply absent and the message is safely reprocessed on the next run.
+--
+-- The GUARANTEE differs by path (see mail-confirm.js's own module doc comment for the full detail):
+--   - received -> confirmed: self-guarding by the application's own state. Once confirmed, the row drops
+--     out of the `submitted` candidate pool the next run builds, so a replay finds no match and is a
+--     harmless no-op (never a second confirmation). A crash between the transition committing and the
+--     5-day nudge follow-up completing is a known, non-blocking residual gap (a stale reminder for an
+--     application that did confirm), not a data-integrity violation.
+--   - rejected/closed -> review: every routeListingToReview() call for a message PLUS this table's own
+--     insert for that message are committed as ONE transaction (withTransaction in mail-confirm.js), so a
+--     crash mid-message leaves NEITHER the review-queue effects NOR this ledger row committed -- never
+--     effects-without-ledger, which is what would let a replay insert a second open
+--     ic_job_review_queue row for the same listing and violate sql/004_review_queue.sql's invariant
+--     ("every status='review' listing has exactly one open queue row", checked by bin/migrate.js's
+--     queueInvariant()/--check). routeListingToReview() additionally guards itself against being replayed
+--     outside that transaction for any other reason (an existing open queue row for the candidate is
+--     reused, never duplicated), mirroring bin/migrate.js's own established pattern for this same
+--     invariant.
 --
 -- company_raw is stored alongside company_norm on every row (amended decision: "every classification
 -- decision logs the RAW company string from the mail alongside company_norm") so a wrong-company match

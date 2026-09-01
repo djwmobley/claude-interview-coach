@@ -18,6 +18,8 @@ import { ensureAuxSchema } from '../src/core/schema.js';
 import { SCOPE_GMAIL_READONLY } from '../src/core/google.js';
 import { runMailConfirm, GMAIL_MESSAGES_URL } from '../src/apply/mail-confirm.js';
 import { APPLY_NUDGE_PREFIX } from '../src/core/applications.js';
+import { recordEvent } from '../src/core/events.js';
+import { enqueueReview } from '../src/core/upsert.js';
 
 const CO = `ZZ-TEST-MAILCONFIRM-${process.pid}`;
 /** @type {pg.Client} */
@@ -276,6 +278,37 @@ describe('runMailConfirm: rejected/closed -> review queue only, never a state tr
     const lb = await client.query('SELECT status FROM ic_job_listings WHERE id = $1', [listingB]);
     assert.equal(la.rows[0].status, 'review');
     assert.equal(lb.rows[0].status, 'review');
+  });
+});
+
+describe('runMailConfirm: crash-safety on the rejected/closed path (review-queue invariant)', () => {
+  test('effects already applied but the ledger row is absent (simulated crash): re-running never creates a duplicate open queue row or a duplicate status event', async () => {
+    const listingId = await insertListing({ companyNorm: 'crashco', status: 'applied' });
+    const appId = await insertApplication(listingId, { state: 'submitted' });
+    // Simulate the exact state a crash between routeListingToReview()'s effects committing and
+    // ic_gmail_processed_messages' own insert committing would leave behind, BEFORE this PR's fix wrapped
+    // both in one transaction: apply the SAME effects routeListingToReview() applies (status flip, one
+    // status event, one open review-queue row) directly, but never write the ledger row for the message.
+    await client.query(`UPDATE ic_job_listings SET status = 'review' WHERE id = $1`, [listingId]);
+    await recordEvent(client, { listingId, kind: 'status', fromStatus: 'applied', toStatus: 'review', note: 'mail_rejected: simulated pre-crash effect', actor: 'apply', runId: null });
+    await enqueueReview(client, { runId: null, candidate: null, candidateId: listingId, matches: [], reason: 'mail_rejected', statusAtCreate: 'applied' });
+
+    const fetchFn = fakeFetch([{ id: 'm-crash', subject: 'Update', text: 'Thank you for applying to CrashCo. Unfortunately, we have decided to move forward with other candidates.' }]);
+    const r = await runMailConfirm({ client, tokenFile: writeToken('confirm-crash.json'), fetch: fetchFn, deps: okDeps });
+    // The message is genuinely new to the ledger (never recorded before this run), so the job still
+    // processes and reports it as handled -- the point under test is that REPLAYING the underlying
+    // effects is a no-op, not that the message gets skipped outright.
+    assert.equal(r.outcomes.routed_review, 1);
+
+    const openQueue = await client.query('SELECT id FROM ic_job_review_queue WHERE candidate_id = $1 AND resolved_at IS NULL', [listingId]);
+    assert.equal(openQueue.rowCount, 1, 'exactly one open review-queue row for this listing -- the invariant sql/004_review_queue.sql enforces and bin/migrate.js checks');
+
+    const statusEvents = await client.query(`SELECT id FROM ic_job_events WHERE listing_id = $1 AND kind = 'status' AND to_status = 'review'`, [listingId]);
+    assert.equal(statusEvents.rowCount, 1, 'exactly one status event (the pre-existing simulated one) -- the replay must not write a second');
+
+    const processed = await client.query('SELECT outcome, application_id FROM ic_gmail_processed_messages WHERE message_id = $1', ['m-crash']);
+    assert.equal(processed.rows[0].outcome, 'routed_review');
+    assert.equal(Number(processed.rows[0].application_id), appId);
   });
 });
 
