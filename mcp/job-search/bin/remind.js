@@ -18,6 +18,12 @@
  * port 9333, which this must never touch): reload an already-open dashboard tab, or open a new one in
  * that same Chrome. Falls back to the OS default browser when that CDP endpoint is unreachable or any
  * step fails. See src/core/open-dashboard.js for the full mode/fallback contract.
+ *
+ * Auth-health hardening (spec Change 3): regardless of --open-dashboard, the dashboard-open behavior
+ * ALSO fires unconditionally whenever runRemind's classification (r.google_auth_state) is
+ * broken_invalid_grant, broken_no_refresh_token, or broken_missing_scopes -- the dashboard is the one
+ * delivery channel that does not depend on the dead grant, so the operator sees the problem even though
+ * the email itself could not go out.
  */
 import { spawn } from 'node:child_process';
 import { getEnv } from '../src/core/config.js';
@@ -27,6 +33,9 @@ import { runRemind } from '../src/core/remind.js';
 import { errFields } from '../src/core/errors.js';
 import { openDashboard } from '../src/core/open-dashboard.js';
 import { resolvePort } from './dashboard.js';
+
+/** Google auth states that force the dashboard open even without --open-dashboard (spec Change 3). */
+const FORCE_DASHBOARD_STATES = new Set(['broken_invalid_grant', 'broken_no_refresh_token', 'broken_missing_scopes']);
 
 function parseArgs(argv) {
   const out = { dryRun: false, to: /** @type {string|null} */ (null), openDashboard: false };
@@ -58,6 +67,8 @@ async function main() {
     process.exit(1);
   }
   let code = 1;
+  /** @type {string|null} */
+  let googleAuthState = null;
   try {
     const r = await runRemind({
       client,
@@ -65,8 +76,10 @@ async function main() {
       to: args.to ?? env.REMINDER_TO,
       dryRun: args.dryRun,
       log: (fields) => logger.info(fields),
+      logError: (fields) => logger.error(fields),
     });
     code = r.code;
+    googleAuthState = r.google_auth_state;
     console.log(JSON.stringify({ ok: r.code === 0, ...r }));
     if (args.dryRun && r.body) {
       // The scan-report + follow-ups plain-text body a real send would carry, so the operator can see
@@ -81,12 +94,17 @@ async function main() {
     console.log(JSON.stringify({ ok: false, ...f }));
     code = 1;
   } finally {
-    if (args.openDashboard) {
+    // Auth-health hardening (spec Change 3): a broken grant/scopes/refresh-token state forces the
+    // dashboard open even without --open-dashboard -- the dashboard does not depend on the dead grant,
+    // so it is the one channel still able to surface the problem.
+    const forceDashboard = FORCE_DASHBOARD_STATES.has(googleAuthState ?? '');
+    if (args.openDashboard || forceDashboard) {
       // Runs regardless of the outcome above (sent, skipped for zero due rows, or failed) and never
       // touches `code` -- openDashboard() itself is designed to never throw, but this is wrapped anyway
       // so a defect in that contract can never take the exit code down with it or skip client.end().
       const { port, warning } = resolvePort(undefined, env.DASHBOARD_PORT, (fields) => logger.info(fields));
       if (warning) logger.info({ evt: 'open_dashboard_port_warning', message: warning });
+      if (forceDashboard && !args.openDashboard) logger.info({ evt: 'open_dashboard_forced', google_auth_state: googleAuthState });
       try {
         await openDashboard({
           dashboardUrl: `http://127.0.0.1:${port}/`,

@@ -6,6 +6,7 @@
  * show its own banner instead of treating a missing grant as a fault.
  */
 import { JobSearchError } from '../../core/errors.js';
+import { GOOGLE_TOKEN_STATE_HINTS, DEFAULT_GOOGLE_TOKEN_STATE_HINT } from '../../core/google.js';
 import { sendJson } from '../http.js';
 
 /**
@@ -18,7 +19,14 @@ export function register(router, deps) {
     if (!q.from || !q.to) throw new JobSearchError('VALIDATION', 'from and to are required (ISO datetimes)');
     const calendar = deps.calendar ? await deps.calendar() : null;
     if (!calendar) {
-      return sendJson(ctx.res, 200, { ok: true, connected: false, events: [], followups: [] });
+      // Never re-classifies here: only reads the provider's already-cached classification (auth-health
+      // hardening, spec Change 2). `deps.calendar` may be a plain test double with no `.lastState`
+      // (dashboard-server.test.js's stub) -- 'unknown' is the honest fallback for "no classification
+      // information available", never a guessed real state.
+      const lastState = deps.calendar && typeof (/** @type {any} */ (deps.calendar).lastState) === 'function' ? /** @type {any} */ (deps.calendar).lastState() : null;
+      const reason = lastState ? lastState.state : 'unknown';
+      const hint = GOOGLE_TOKEN_STATE_HINTS[reason] ?? DEFAULT_GOOGLE_TOKEN_STATE_HINT;
+      return sendJson(ctx.res, 200, { ok: true, connected: false, events: [], followups: [], reason, hint });
     }
     const fresh = q.fresh === '1' || q.fresh === 'true';
     const events = await deps.calendarCache.get({ timeMin: q.from, timeMax: q.to }, () => calendar.listEvents({ timeMin: q.from, timeMax: q.to }), { fresh });

@@ -668,6 +668,49 @@ describe('gmail', () => {
   );
 
   test(
+    'a missing-scope token file classifies to broken_missing_scopes in the AUTH_UNAVAILABLE message (auth-health hardening, spec Change 4: pre-flight only)',
+    withFakeAuth(async () => {
+      gmailAuthDeps.readTokenFile = () => ({ client_id: 'zz-cid', client_secret: 'zz-secret', refresh_token: 'zz-refresh', access_token: null, scopes: ['https://www.googleapis.com/auth/gmail.send'], expiry: null, token_uri: 'https://oauth2.googleapis.com/token' });
+      const { ctx, requests } = makeCtx();
+      const events = [];
+      const gen = gmail.search(profile, ctx);
+      for (;;) {
+        const s = await gen.next();
+        if (s.done) break;
+        events.push(s.value);
+      }
+      assert.equal(events.length, 1);
+      assert.equal(events[0].kind, 'warning');
+      assert.equal(events[0].code, 'AUTH_UNAVAILABLE');
+      assert.match(events[0].message, /broken_missing_scopes/);
+      assert.equal(requests.length, 0, 'pre-flight only: no Gmail API request when the classification is already broken');
+    }),
+  );
+
+  test(
+    'a live refresh failure (invalid_grant) classifies in the AUTH_UNAVAILABLE message; pre-flight only, no Gmail API request is ever attempted',
+    withFakeAuth(async () => {
+      gmailAuthDeps.getAccessToken = async () => {
+        throw new Error('invalid_grant');
+      };
+      const { ctx, requests } = makeCtx();
+      const events = [];
+      const gen = gmail.search(profile, ctx);
+      for (;;) {
+        const s = await gen.next();
+        if (s.done) break;
+        events.push(s.value);
+      }
+      assert.equal(events.length, 1);
+      assert.equal(events[0].kind, 'warning');
+      assert.equal(events[0].code, 'AUTH_UNAVAILABLE');
+      assert.match(events[0].message, /broken_invalid_grant/);
+      assert.equal(requests.length, 0, 'pre-flight only: no Gmail API request is attempted when the classification is already broken');
+      assert.ok(!events[0].message.includes('zz-refresh') && !events[0].message.includes('zz-test-access'), 'no token value in the warning message');
+    }),
+  );
+
+  test(
     '401 on messages.list yields exactly one AUTH_UNAVAILABLE warning and no per-message retry',
     withFakeAuth(async () => {
       const map = [{ prefix: 'https://gmail.googleapis.com/gmail/v1/users/me/messages?', file: 'adapters/gmail-list-all.json', status: 401 }];

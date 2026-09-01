@@ -456,6 +456,50 @@ marker.
 Exit codes: `0` sent or nothing to report, `1` auth or send failure (rows and
 the report marker stay un-stamped).
 
+### Google auth health (classification, caching, and where it surfaces)
+
+`src/core/google.js`'s `classifyGoogleTokenState(tokenFile, need)` turns a raw refresh failure into one
+of a fixed set of states -- `ok`, `broken_missing_file`, `broken_malformed`, `broken_no_refresh_token`,
+`broken_missing_scopes`, `broken_invalid_grant`, `broken_refresh_error` -- instead of one generic
+"not connected" banner. It never logs or returns a token value, only the classification. Every surface
+below reads the SAME single live check per invocation/request, never a duplicate refresh attempt:
+
+- **Dashboard calendar banner** (Home and Calendar pages): `GET /api/calendar/agenda`'s
+  `connected:false` response carries `reason` (the state slug) and `hint` (a fixed message per state).
+  `src/core/calendar-provider.js` caches a successful connection for up to ~50 minutes but caches a
+  BROKEN classification for only 5 minutes (`DEFAULT_BROKEN_COOLDOWN_MS`), so a dead grant is re-checked
+  far sooner than a healthy one, without hammering a refresh attempt on every dashboard poll in between.
+- **Daily report** (email and the `scan_report` tool): a "Google auth: ..." line, HTML-escaped like every
+  other report field.
+- **`bin/remind.js`**: on a broken classification, still attempts the send (there is nothing to lose by
+  trying); on failure it logs one ERROR-level `google_auth_broken` line (distinct from the ordinary
+  info-level `remind_token_failed` line) and, specifically for `broken_invalid_grant`,
+  `broken_no_refresh_token`, or `broken_missing_scopes`, opens/refreshes the dashboard tab
+  UNCONDITIONALLY (not gated on `--open-dashboard`) -- the dashboard is the one delivery channel that
+  does not depend on the dead grant.
+- **`gmail` adapter pre-flight**: a pre-flight auth failure (before any Gmail API request) carries the
+  classification in its `AUTH_UNAVAILABLE` warning. A MID-run 401 on `messages.list`/`messages.get` is
+  explicitly out of scope and keeps its existing generic treatment.
+
+**Troubleshooting a recurring broken grant** (`broken_invalid_grant`, the empirically confirmed real-world
+failure this hardening was built against -- a live expired grant, `err.response.data.error ===
+'invalid_grant'`):
+
+1. **The consent screen is in Testing mode.** A Google OAuth app left in Testing mode expires every
+   refresh token after 7 days, regardless of use -- this is the single most likely cause of a grant that
+   keeps dying on a weekly cadence. Fix: in Google Cloud Console, publish the OAuth consent screen to
+   **Production**. (Re-run the workspace-mcp auth flow once after publishing to obtain a token issued
+   under the new setting; existing Testing-mode tokens do not retroactively stop expiring.)
+2. **`redirect_uri_mismatch` after the local callback port drifts.** workspace-mcp's local OAuth callback
+   server resolves its port with a fallback range (8000-8004) when its preferred port is busy; if only
+   one exact port is registered as an authorized redirect URI in the Cloud Console OAuth client, a run
+   that falls back to a different port in that range fails the auth flow with `redirect_uri_mismatch`.
+   Fix: register `http://localhost:8000/` through `http://localhost:8004/` (all five) as authorized
+   redirect URIs on the OAuth client, not just the one port that happened to work the first time.
+
+Neither fix is made by this repository or by `workspace-mcp` automatically; both are one-time manual
+steps in Google Cloud Console.
+
 ## Dashboard
 
 A local, loopback-only HTTP server (`src/dashboard/`) so most day-to-day job-search
@@ -849,10 +893,22 @@ detected by the test suite.
 - Follow-ups are entered by hand; nothing reads Gmail to auto-close a thread
   when a contact replies.
 - The reminder job depends on the workspace-mcp OAuth grant staying valid. A
-  revoked grant shows up only as exit 1 on the next run, not as an alert. The
-  desktop-app client secret sits in plaintext in that token file (an accepted,
-  pre-existing exposure that `remind.js` now also depends on, and now
-  `gmail.js` too).
+  revoked or expired grant is now classified, cached, and surfaced loudly
+  (dashboard banner with a reason and hint, a "Google auth" report line, an
+  ERROR-level log line, and an unconditional dashboard-open trigger -- see
+  "Google auth health" above) rather than showing up only as exit 1 on the
+  next run with no explanation. The desktop-app client secret still sits in
+  plaintext in that token file (an accepted, pre-existing exposure that
+  `remind.js`, `gmail.js`, and the calendar provider all depend on); this PR
+  does not change that. Real Google endpoint behaviors beyond the one live
+  probe this PR's classifier was built against (a confirmed expired
+  `invalid_grant`) are unverified: `invalid_client`, `access_denied`, rate
+  limiting/quota errors, and any other structured OAuth error field are
+  classified by the same logic but were never observed live, only
+  constructed as test fixtures. The 5-minute broken-cooldown and ~50-minute
+  success-cache windows are not empirically tuned against Google's own
+  actual token-expiry or rate-limit behavior; they are the values the spec
+  called for.
 - `gmail`: alerts from senders not listed in `config/alert-senders.json` are
   invisible; a new job-alert source is a config edit, not a code change.
 - `gmail`: an HTML-only or restructured email whose markup no longer matches

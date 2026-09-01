@@ -16,7 +16,7 @@ import {
   buildScanReport, buildReportSubject, renderReportText, renderReportHtml, renderReportMarkdown,
   dayKeyInTz, isWeekdayInTz, escapeHtml, urlPassesRegistry, getReportState, stampReportSent,
   collectSuspectAndUnclassified, resolveReportWindow, homeLocationNormsFor, writeReportFile, wrapReportHtml,
-  renderTriageLine,
+  renderTriageLine, googleAuthLineText,
 } from '../src/core/report.js';
 import { tool as scanReport } from '../src/tools/scan_report.js';
 import { registryFrom } from '../src/core/urlguard.js';
@@ -246,6 +246,59 @@ describe('renderReportText / Html / Markdown: no em-dashes, listing text present
       assert.ok(s.includes('Chief Technology Officer'));
       assert.ok(!s.includes(String.fromCharCode(8212)), 'no em-dash in rendered report');
     }
+  });
+});
+
+describe('googleAuthLineText / the "Google auth" report line (auth-health hardening, spec Change 3)', () => {
+  test('null state (never checked) renders a distinct line from every real classification', () => {
+    assert.equal(googleAuthLineText(null), 'Google auth: not checked');
+  });
+
+  test('ok includes the expiry when present', () => {
+    assert.equal(googleAuthLineText({ state: 'ok', expiry: '2030-01-01T00:00:00.000Z' }), 'Google auth: ok (expires 2030-01-01T00:00:00.000Z)');
+    assert.equal(googleAuthLineText({ state: 'ok', expiry: null }), 'Google auth: ok');
+  });
+
+  test('every broken_* state renders a distinct, non-empty line; broken_missing_scopes lists the missing scopes; broken_refresh_error includes the code', () => {
+    const states = /** @type {import('../src/core/google.js').GoogleTokenState[]} */ ([
+      { state: 'broken_missing_file' },
+      { state: 'broken_malformed' },
+      { state: 'broken_no_refresh_token' },
+      { state: 'broken_missing_scopes', missing: ['https://www.googleapis.com/auth/gmail.send'] },
+      { state: 'broken_invalid_grant' },
+      { state: 'broken_refresh_error', code: 'ECONNRESET' },
+    ]);
+    const lines = states.map(googleAuthLineText);
+    assert.equal(new Set(lines).size, lines.length, 'every state renders a distinct line');
+    for (const l of lines) assert.ok(l.startsWith('Google auth: broken'));
+    assert.ok(lines.find((l) => l.includes('gmail.send')));
+    assert.ok(lines.find((l) => l.includes('ECONNRESET')));
+  });
+
+  test('renderReportText/Html/Markdown include the line only when a googleAuthState argument was explicitly passed (undefined = caller opted out, e.g. an existing call site that never threads one)', async () => {
+    const since = new Date(Date.now() - 5000);
+    const report = await buildScanReport(client, { sinceOverride: since, homeLocationNorms: [] });
+    const textNoArg = renderReportText(report);
+    assert.ok(!textNoArg.includes('Google auth:'));
+
+    const textNull = renderReportText(report, undefined, null);
+    const htmlNull = renderReportHtml(report, undefined, null);
+    const mdNull = renderReportMarkdown(report, undefined, null);
+    for (const s of [textNull, htmlNull, mdNull]) assert.ok(s.includes('Google auth: not checked'));
+
+    const state = /** @type {import('../src/core/google.js').GoogleTokenState} */ ({ state: 'broken_invalid_grant' });
+    const textBroken = renderReportText(report, undefined, state);
+    const htmlBroken = renderReportHtml(report, undefined, state);
+    const mdBroken = renderReportMarkdown(report, undefined, state);
+    assert.ok(textBroken.includes('Google auth: broken (invalid_grant'));
+    assert.ok(mdBroken.includes('Google auth: broken (invalid_grant'));
+    // HTML: rendered through the same escapeHtml as every other field (spec Change 3) -- prove it by
+    // round-tripping a state whose rendered text contains characters escapeHtml would change.
+    const scopeState = /** @type {import('../src/core/google.js').GoogleTokenState} */ ({ state: 'broken_missing_scopes', missing: ['<scope>', 'a & b'] });
+    const htmlEscaped = renderReportHtml(report, undefined, scopeState);
+    assert.ok(htmlEscaped.includes(escapeHtml(googleAuthLineText(scopeState))));
+    assert.ok(!htmlEscaped.includes('<scope>'), 'the raw unescaped scope text must never appear literally in the HTML');
+    assert.ok(!htmlBroken.includes(String.fromCharCode(8212)) && !mdBroken.includes(String.fromCharCode(8212)), 'no em-dash in the rendered line');
   });
 });
 

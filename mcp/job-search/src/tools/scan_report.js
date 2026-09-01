@@ -9,6 +9,7 @@ import { untrusted } from './_shared.js';
 import { buildScanReport, buildReportSubject, renderReportText, resolveReportWindow, homeLocationNormsFor } from '../core/report.js';
 import { buildRegistry } from '../core/urlguard.js';
 import { DEFAULT_REPORT_HOME_MIN_PRESCORE } from '../core/config.js';
+import { classifyGoogleTokenState } from '../core/google.js';
 
 export const schema = {
   date: z.string().regex(/^\d{4}-\d{2}-\d{2}$/).optional().describe('YYYY-MM-DD in the report timezone; defaults to the window since the last sent report'),
@@ -35,8 +36,14 @@ export const tool = {
       now, timezone, topN, homeMinPrescore, homeLocationNorms,
       ...(sinceOverride !== undefined ? { sinceOverride } : {}),
     }));
+    // Auth-health hardening (spec Change 3): the report always carries a "Google auth" line, even for
+    // this on-demand tool -- a single classification attempt per call, {gmail:true} to mirror the
+    // scheduled digest's own send-capability check (bin/remind.js). deps.env.GOOGLE_TOKEN_FILE is '' in
+    // any environment with no token file configured, which classifies deterministically to
+    // broken_missing_file rather than throwing.
+    const googleAuthState = await classifyGoogleTokenState(deps.env?.GOOGLE_TOKEN_FILE ?? '', { gmail: true });
     const subject = buildReportSubject(report, {});
-    const text = renderReportText(report, registry);
+    const text = renderReportText(report, registry, googleAuthState);
     return {
       ok: true,
       subject,
