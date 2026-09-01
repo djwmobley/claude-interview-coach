@@ -1,17 +1,16 @@
 // @ts-check
 /**
- * Application card (apply pipeline slice 3, extended by slice 4, plan
- * `let-s-brainstorm-a-bit-humble-umbrella.md` section "7. Dashboard human gate"). Slice 3 scope: create,
- * show linked docs with Open, and Approve. Slice 4 adds the needs_human rendering the plan's own section
- * 5a asks for: `pending_question.kind === 'credential'` renders credentialPrompt(); any other kind
- * (including one this dashboard has never seen -- total classification, never a throw) renders a generic
- * "needs your attention" card carrying the raw kind and page_url. Screenshot display, the free-text
- * answer box for `kind === 'question'`, and Retry from `failed` are still out of scope here -- those are
- * the slice 5+ runner's own UI (see the PR body's scope note). Rendered by pages/job-detail.js, same
- * panel styling as documents-panel / followups-panel / dedup-card / prescore-breakdown (see app.css's
- * shared `.application-card` selector).
+ * Application card (apply pipeline slice 3, extended by slice 4, extended by slice 5, plan section 7
+ * "Dashboard human gate"). Slice 5 scope: needs_human shows the latest screenshot (GET /api/applications/
+ * :id/screenshot) alongside the existing credential prompt / generic pending-question panel, adds the
+ * answer box for `pending_question.kind === 'question'` (Save promotes the label to the bank's `learned:`
+ * tier per src/apply/answers.js's save-by-default rule; an "only this once" checkbox opts out), and a
+ * universal "I applied by hand" action available from ANY needs_human kind. `failed` shows Retry.
+ * `approved`/`submitting` update live over the existing SSE 'changed'/'events' stream (the worker's own
+ * progress POSTs already trigger that broadcast; this card does not poll separately) -- see the PR body's
+ * design note on why this reuses the existing plumbing instead of a new SSE event type.
  */
-import { h } from '../lib/dom.js';
+import { h, hApplicationScreenshot } from '../lib/dom.js';
 import { postJson } from '../lib/api.js';
 import { handleOutcome } from '../lib/outcome.js';
 import { showToast } from '../lib/toast.js';
@@ -84,9 +83,6 @@ export function applicationCard(opts) {
     }),
   ]);
 
-  // Apply pipeline slice 3, orchestrator decision: an unknown ATS never blocks document drafting or
-  // Approve -- documents still need drafting, and the manual-apply routing itself is a slice 5+ runner
-  // concern. This note is the only UI consequence of an unknown ATS in this slice.
   const unknownAtsNote = ats && ats.ats === 'unknown'
     ? h('p', { className: 'application-card__note', text: 'Unknown ATS: apply by hand after approving documents.' })
     : null;
@@ -108,23 +104,102 @@ export function applicationCard(opts) {
     },
   });
 
-  // needs_human rendering (apply pipeline slice 4, plan section 5a): pending_question.kind is a total
-  // classification at the model layer (src/core/applications.js's validatePendingQuestion permits any
-  // non-empty string kind), so the UI must handle "a kind this dashboard has never seen" too, never
-  // assume it is one of the two named ones.
+  const appliedByHandButton = h('button', {
+    className: 'btn btn--small',
+    attrs: { type: 'button' },
+    text: 'I applied by hand',
+    on: {
+      click: async () => {
+        const outcome = handleOutcome(await postJson(`/api/applications/${application.id}/applied-by-hand`, {}));
+        if (outcome.kind === 'ok') {
+          showToast({ message: 'Marked applied.' });
+          opts.onChanged();
+        }
+      },
+    },
+  });
+
+  const retryButton = h('button', {
+    className: 'btn btn--primary',
+    attrs: { type: 'button' },
+    text: 'Retry',
+    on: {
+      click: async () => {
+        const outcome = handleOutcome(await postJson(`/api/applications/${application.id}/retry`, {}));
+        if (outcome.kind === 'ok') {
+          showToast({ message: 'Retrying.' });
+          opts.onChanged();
+        }
+      },
+    },
+  });
+
+  const screenshotEl = h('div', { className: 'application-card__screenshot' }, [
+    hApplicationScreenshot({ src: `/api/applications/${application.id}/screenshot`, alt: 'Latest apply-run screenshot', className: 'application-card__screenshot-img' }),
+  ]);
+
+  /** @param {{kind:string,label?:string,page_url?:string}} pq */
+  function answerBox(pq) {
+    const textInput = h('textarea', { className: 'drawer__input', attrs: { placeholder: 'Your answer', rows: 3 } });
+    const saveCheckbox = h('input', { className: 'drawer__checkbox', attrs: { type: 'checkbox' }, checked: true });
+    const saveButton = h('button', {
+      className: 'btn btn--primary',
+      attrs: { type: 'button' },
+      text: 'Save and Resume',
+      on: {
+        click: async () => {
+          const text = /** @type {HTMLTextAreaElement} */ (textInput).value.trim();
+          if (!text) {
+            showToast({ message: 'An answer is required.', tone: 'error' });
+            return;
+          }
+          const save = /** @type {HTMLInputElement} */ (saveCheckbox).checked;
+          const outcome = handleOutcome(await postJson(`/api/applications/${application.id}/answer`, { text, save }));
+          if (outcome.kind === 'ok') {
+            showToast({ message: 'Answer saved. Resuming this application.' });
+            opts.onChanged();
+          }
+        },
+      },
+    });
+    return h('div', { className: 'credential-prompt' }, [
+      h('h4', { text: 'Screening question' }),
+      h('p', { className: 'application-card__note', text: pq.label ?? '' }),
+      h('label', { className: 'drawer__field' }, [h('span', { text: 'Answer' }), textInput]),
+      h('label', { className: 'drawer__field drawer__field--inline' }, [saveCheckbox, h('span', { text: 'Save this answer for future applications' })]),
+      saveButton,
+    ]);
+  }
+
   let needsHumanPanel = null;
   if (application.state === 'needs_human' && application.pending_question) {
     const pq = application.pending_question;
+    /** @type {any} */
+    let kindPanel;
     if (pq.kind === 'credential') {
-      needsHumanPanel = credentialPrompt({ application, pendingQuestion: pq, onChanged: opts.onChanged });
+      kindPanel = credentialPrompt({ application, pendingQuestion: pq, onChanged: opts.onChanged });
+    } else if (pq.kind === 'question') {
+      kindPanel = answerBox(pq);
     } else {
-      needsHumanPanel = h('div', { className: 'credential-prompt' }, [
+      kindPanel = h('div', { className: 'credential-prompt' }, [
         h('h4', { text: 'Needs your attention' }),
-        h('p', { className: 'application-card__note', text: `Unrecognized pending question kind: ${String(pq.kind)}` }),
+        h('p', { className: 'application-card__note', text: pq.label ? String(pq.label) : `Unrecognized pending question kind: ${String(pq.kind)}` }),
         pq.page_url ? h('p', { className: 'application-card__hint', text: String(pq.page_url) }) : null,
       ]);
     }
+    needsHumanPanel = h('div', { className: 'application-card__needs-human' }, [screenshotEl, kindPanel, appliedByHandButton]);
   }
+
+  const failedPanel = application.state === 'failed'
+    ? h('div', { className: 'application-card__needs-human' }, [
+      application.error ? h('p', { className: 'application-card__note', text: String(application.error).slice(0, 300) }) : null,
+      retryButton,
+    ])
+    : null;
+
+  const progressPanel = (application.state === 'approved' || application.state === 'submitting')
+    ? h('p', { className: 'application-card__hint', text: application.state === 'submitting' ? 'Submitting -- this updates live as the run progresses.' : 'Approved -- queued to submit.' })
+    : null;
 
   return h('div', { className: 'application-card' }, [
     h('div', { className: 'application-card__header' }, [
@@ -135,7 +210,8 @@ export function applicationCard(opts) {
     h('ul', { className: 'application-card__docs' }, [docRow('Resume', application.resume_doc_id), docRow('Cover letter', application.coverletter_doc_id)]),
     unknownAtsNote,
     application.state === 'docs_ready' ? approveButton : null,
-    application.state === 'approved' ? h('p', { className: 'application-card__hint', text: 'Approved. Document hash recorded.' }) : null,
+    progressPanel,
     needsHumanPanel,
+    failedPanel,
   ]);
 }

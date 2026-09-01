@@ -125,6 +125,32 @@ export function _resetAtsOptionsCache() {
 }
 
 /**
+ * The registered host list for one ATS (apply pipeline slice 5, per-page route policy). Used by
+ * src/apply/worker.js to build the `atsHosts` argument to session.js's `attachPage({mode:'apply', ...})`
+ * -- the amended spec's "allows POST/PUT/PATCH only to that tenant or its ATS domain": an application
+ * form on a tenant-scoped host (e.g. `boards.greenhouse.io/<tenant>/jobs/<id>`) can submit cross-host
+ * within the SAME ATS's own registered domain set (e.g. `boards-api.greenhouse.io`), so the tenant host
+ * alone is too narrow. Total: an ats with no host-list registry entry (workday's tenant is itself the
+ * host and needs no widening; dayforce/icims/smartrecruiters/indeed_easy/linkedin_easy/unknown) returns
+ * an empty array rather than throwing -- the caller's own tenantHost is still always allowed regardless.
+ * @param {string} ats
+ * @returns {string[]}
+ */
+export function hostsForAts(ats) {
+  const o = getAtsOptions();
+  switch (ats) {
+    case 'greenhouse': return [...o.greenhouseHosts];
+    case 'lever': return [...o.leverHosts];
+    case 'smartrecruiters': return [...o.smartrecruitersHosts];
+    case 'icims': return [o.icimsHostSuffix];
+    case 'dayforce': return [o.dayforceHostSuffix];
+    case 'linkedin_easy': return [o.linkedinHostSuffix];
+    case 'indeed_easy': return [o.indeedHostSuffix];
+    default: return [];
+  }
+}
+
+/**
  * Dot-boundary host suffix match (identical semantics to src/core/normalize.js's private hostIs helper):
  * exact match or a `.`-delimited subdomain -- never a bare substring match, which is what a suffix-spoof
  * host like `evilicims.com` or `notdayforcehcm.com` would otherwise slip through on.

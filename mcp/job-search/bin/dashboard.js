@@ -20,6 +20,7 @@ import { startupDb } from '../src/core/startup.js';
 import { defaultDeps } from '../src/tools/_shared.js';
 import { createDashboardServer } from '../src/dashboard/server.js';
 import { createScanRunner } from '../src/dashboard/scan-runner.js';
+import { createApplyRunner } from '../src/dashboard/apply-runner.js';
 import { createCalendarCache } from '../src/dashboard/calendar-cache.js';
 
 const HERE = path.dirname(fileURLToPath(import.meta.url));
@@ -123,10 +124,18 @@ async function main() {
     spawn: nodeSpawn,
     log,
   });
+  const applyRunner = createApplyRunner({
+    env,
+    logDir: env.JOBSEARCH_LOG_DIR,
+    applyScript: path.join(PACKAGE_ROOT, 'bin', 'apply.js'),
+    spawn: nodeSpawn,
+    log,
+  });
 
   const deps = {
     ...defaultDeps({ withClient, config, env, calendar: makeCalendarProvider(env) }),
     scanRunner,
+    applyRunner,
     calendarCache: createCalendarCache(),
     credentials: createCredentials(),
     outputRoot: path.join(repoRoot(), 'output'),

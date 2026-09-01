@@ -19,6 +19,7 @@ import {
   TRANSITIONS, APPLICATION_STATES, ATS_TYPES,
   createApplication, transition, resume, retry, onDocumentLinked, markSubmitted, reconcileStale,
   getApplication, getApplicationForListing, approve, listApplicationEvents,
+  recordSubmitRequestSent, hasSubmitRequestSentThisAttempt, markAppliedByHand,
 } from '../src/core/applications.js';
 
 const CO = `ZZ-TEST-APPLICATIONS-${process.pid}`;
@@ -381,6 +382,72 @@ describe('reconcileStale', () => {
     await reconcileStale(client, { maxAgeMinutes: 10 });
     const row = await getApplication(client, id);
     assert.equal(row.state, 'submitting');
+  });
+
+  test('a stale "submitting" application that already recorded submit_request_sent goes to needs_human, never failed (apply pipeline slice 5, duplicate-application guard)', async () => {
+    // Seeded via real transitions (not the raw-SQL seedApplication helper) so the 'state' event
+    // hasSubmitRequestSentThisAttempt scopes its lookup against actually exists -- exactly how a real
+    // approved -> submitting transition always behaves in production.
+    const { id } = await seedApplication('approved');
+    await transition(client, id, 'submitting', { actor: 'apply' });
+    await recordSubmitRequestSent(client, id);
+    await client.query(`UPDATE ic_job_applications SET updated_at = now() - interval '30 minutes' WHERE id = $1`, [id]);
+    const results = await reconcileStale(client, { maxAgeMinutes: 10 });
+    assert.ok(results.some((r) => r.id === id));
+    const row = await getApplication(client, id);
+    assert.equal(row.state, 'needs_human');
+    assert.equal(row.pending_question.kind, 'post_submit_uncertain');
+  });
+
+  test('a submit_request_sent event from an EARLIER attempt never leaks into this attempt\'s stale-reconcile decision', async () => {
+    // Simulate: attempt 1 sent the submit request and then failed; attempt 2 (Retry -> approved ->
+    // submitting again) never got that far before going stale. The OLD submit_request_sent event must not
+    // cause the new stale-submitting row to be treated as "already sent" this time.
+    const { id } = await seedApplication('approved');
+    await transition(client, id, 'submitting', { actor: 'apply' });
+    await recordSubmitRequestSent(client, id);
+    await transition(client, id, 'failed', { actor: 'apply', error: 'first attempt failed' });
+    await retry(client, id, {});
+    await transition(client, id, 'submitting', { actor: 'apply' });
+    await client.query(`UPDATE ic_job_applications SET updated_at = now() - interval '30 minutes' WHERE id = $1`, [id]);
+    await reconcileStale(client, { maxAgeMinutes: 10 });
+    const row = await getApplication(client, id);
+    assert.equal(row.state, 'failed', 'the second attempt never sent a submit request, so it must be treated as a plain failure');
+  });
+});
+
+describe('recordSubmitRequestSent / hasSubmitRequestSentThisAttempt (apply pipeline slice 5)', () => {
+  test('false before any submit_request_sent event; true right after one is recorded for the current submitting attempt', async () => {
+    const { id } = await seedApplication('approved');
+    assert.equal(await hasSubmitRequestSentThisAttempt(client, id), false);
+    await transition(client, id, 'submitting', { actor: 'apply' });
+    assert.equal(await hasSubmitRequestSentThisAttempt(client, id), false);
+    await recordSubmitRequestSent(client, id);
+    assert.equal(await hasSubmitRequestSentThisAttempt(client, id), true);
+  });
+
+  test('an application that never reached submitting reports false, never throws', async () => {
+    const { id } = await seedApplication('drafting');
+    assert.equal(await hasSubmitRequestSentThisAttempt(client, id), false);
+  });
+});
+
+describe('markAppliedByHand (apply pipeline slice 5, "I applied by hand")', () => {
+  test('needs_human -> submitted, no attempt increment, listing status moves to applied when pre-application', async () => {
+    const { id, listingId } = await seedApplication('needs_human', { pending_question: { kind: 'unrecognized_page', label: 'x' } });
+    const before = await getApplication(client, id);
+    const row = await markAppliedByHand(client, id);
+    assert.equal(row.state, 'submitted');
+    assert.equal(row.attempt, before.attempt, 'markAppliedByHand must never increment attempt');
+    const listing = await client.query('SELECT status FROM ic_job_listings WHERE id = $1', [listingId]);
+    assert.equal(listing.rows[0].status, 'applied');
+    const events = await listApplicationEvents(client, id);
+    assert.ok(events.some((e) => e.kind === 'state' && e.to_state === 'submitted'));
+  });
+
+  test('rejects when the application is not currently needs_human', async () => {
+    const { id } = await seedApplication('drafting');
+    await assert.rejects(() => markAppliedByHand(client, id), /needs_human/);
   });
 });
 
