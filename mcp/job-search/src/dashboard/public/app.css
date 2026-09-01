@@ -320,6 +320,8 @@ textarea.notes-textarea { min-height: 100px; }
 .application-card__docs { list-style: none; margin: 8px 0; padding: 0; }
 .application-card__doc { display: flex; align-items: center; justify-content: space-between; gap: 8px; font-size: 12px; padding: 3px 0; }
 .application-card__doc--missing { color: var(--muted-2); }
+.credential-prompt { margin-top: 8px; }
+.credential-prompt__actions { display: flex; align-items: center; gap: 8px; margin: 8px 0; }
 .timeline__row { display: flex; gap: 8px; align-items: baseline; font-size: 12px; padding: 4px 0; border-bottom: 1px solid var(--border); }
 
 /* Prescore breakdown panel (pages/job-detail.js's prescoreBreakdownPanel): a compact list of scored parts

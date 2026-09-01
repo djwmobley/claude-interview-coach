@@ -15,6 +15,7 @@ import { withClient, closePool } from '../src/core/db.js';
 import { createLogger, dailyLogPath, pruneLogs } from '../src/core/logger.js';
 import { errFields } from '../src/core/errors.js';
 import { makeCalendarProvider } from '../src/core/calendar-provider.js';
+import { createCredentials } from '../src/core/credentials.js';
 import { startupDb } from '../src/core/startup.js';
 import { defaultDeps } from '../src/tools/_shared.js';
 import { createDashboardServer } from '../src/dashboard/server.js';
@@ -127,6 +128,7 @@ async function main() {
     ...defaultDeps({ withClient, config, env, calendar: makeCalendarProvider(env) }),
     scanRunner,
     calendarCache: createCalendarCache(),
+    credentials: createCredentials(),
     outputRoot: path.join(repoRoot(), 'output'),
     version: VERSION,
     startedAt: new Date().toISOString(),
