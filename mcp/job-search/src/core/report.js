@@ -185,6 +185,37 @@ export function escapeHtml(s) {
 }
 
 /**
+ * Plain-text "Google auth" line (auth-health hardening, spec Change 3): the daily report carries the
+ * classification bin/remind.js already obtained for its own send attempt, so a broken grant is visible
+ * in the report even when the email itself could not go out. `state` is null when the caller never
+ * attempted a classification (e.g. a scan_report call with no Google integration configured at all).
+ * Never includes a token value; broken_refresh_error's code is already capped to 80 chars by
+ * classifyRefreshError() in google.js.
+ * @param {import('./google.js').GoogleTokenState|null} state
+ */
+export function googleAuthLineText(state) {
+  if (!state) return 'Google auth: not checked';
+  switch (state.state) {
+    case 'ok':
+      return `Google auth: ok${state.expiry ? ` (expires ${state.expiry})` : ''}`;
+    case 'broken_missing_file':
+      return 'Google auth: broken (no token file)';
+    case 'broken_malformed':
+      return 'Google auth: broken (token file unreadable or malformed)';
+    case 'broken_no_refresh_token':
+      return 'Google auth: broken (no refresh token)';
+    case 'broken_missing_scopes':
+      return `Google auth: broken (missing scopes: ${state.missing.join(', ')})`;
+    case 'broken_invalid_grant':
+      return 'Google auth: broken (invalid_grant; re-run the workspace-mcp auth flow)';
+    case 'broken_refresh_error':
+      return `Google auth: broken (refresh error: ${state.code})`;
+    default:
+      return 'Google auth: unknown';
+  }
+}
+
+/**
  * Structural (registry: domain + path pattern) urlguard check for report rendering (spec R1.5): does NOT
  * perform the DNS/redirect steps classifyUrl() does for a live outbound request -- a report renders an
  * ALREADY-STORED url_normalized value, it does not fetch it, so re-resolving DNS at report time would add
@@ -586,13 +617,18 @@ export function renderTriageLine(triage) {
  * Plain-text rendering (spec R1.2, no em-dashes, US English).
  * @param {Awaited<ReturnType<typeof buildScanReport>>} data
  * @param {import('./urlguard.js').Registry} [registry] when given, a listing's url is printed if it passes urlguard (R1.5)
+ * @param {import('./google.js').GoogleTokenState|null} [googleAuthState] auth-health hardening (spec Change 3): the caller's own classification, rendered as-is
  */
-export function renderReportText(data, registry) {
+export function renderReportText(data, registry, googleAuthState) {
   const lines = [];
   lines.push(`Job scan report for ${data.dayKey} (times ${data.timezone})`);
   lines.push('');
   if (data.noScan) {
     lines.push('NO SCAN: no scan run has completed since the last report, on a day one was expected.');
+    lines.push('');
+  }
+  if (googleAuthState !== undefined) {
+    lines.push(googleAuthLineText(googleAuthState));
     lines.push('');
   }
   lines.push('== Runs since last report ==');
@@ -643,8 +679,9 @@ export function renderReportText(data, registry) {
  * HTML rendering (spec R1.2, every listing text field escaped per R1.5).
  * @param {Awaited<ReturnType<typeof buildScanReport>>} data
  * @param {import('./urlguard.js').Registry} [registry]
+ * @param {import('./google.js').GoogleTokenState|null} [googleAuthState] auth-health hardening (spec Change 3): rendered through the same escapeHtml as every other field
  */
-export function renderReportHtml(data, registry) {
+export function renderReportHtml(data, registry, googleAuthState) {
   const esc = escapeHtml;
   const reg = registry ?? { entries: [], httpAllowedHosts: new Set() };
   const linkOrText = (/** @type {any} */ r) => {
@@ -659,6 +696,7 @@ export function renderReportHtml(data, registry) {
   const parts = [];
   parts.push(`<h2>Job scan report for ${esc(data.dayKey)} (times ${esc(data.timezone)})</h2>`);
   if (data.noScan) parts.push('<p><strong>NO SCAN</strong>: no scan run has completed since the last report, on a day one was expected.</p>');
+  if (googleAuthState !== undefined) parts.push(`<p>${esc(googleAuthLineText(googleAuthState))}</p>`);
   parts.push('<h3>Runs since last report</h3>');
   if (data.runs.length === 0) parts.push('<p>(none)</p>');
   else {
@@ -693,8 +731,9 @@ export function renderReportHtml(data, registry) {
  * text rendering, in markdown headings, so it reads well both as a file and pasted into a session.
  * @param {Awaited<ReturnType<typeof buildScanReport>>} data
  * @param {import('./urlguard.js').Registry} [registry]
+ * @param {import('./google.js').GoogleTokenState|null} [googleAuthState] auth-health hardening (spec Change 3)
  */
-export function renderReportMarkdown(data, registry) {
+export function renderReportMarkdown(data, registry, googleAuthState) {
   const reg = registry ?? { entries: [], httpAllowedHosts: new Set() };
   const lines = [];
   lines.push(`# Job scan report for ${data.dayKey}`);
@@ -703,6 +742,10 @@ export function renderReportMarkdown(data, registry) {
   lines.push('');
   if (data.noScan) {
     lines.push('**NO SCAN**: no scan run has completed since the last report, on a day one was expected.');
+    lines.push('');
+  }
+  if (googleAuthState !== undefined) {
+    lines.push(googleAuthLineText(googleAuthState));
     lines.push('');
   }
   lines.push('## Runs since last report');

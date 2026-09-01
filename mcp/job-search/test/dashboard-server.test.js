@@ -32,7 +32,7 @@ let port;
 let app;
 /** @type {{ nextResult: any, nextError: any, calls: any[] }} */
 let scanRunnerState;
-/** @type {{ provider: any }} */
+/** @type {{ provider: any, lastState: import('../src/core/google.js').GoogleTokenState|null }} */
 let calendarState;
 
 function makeStubScanRunner() {
@@ -76,7 +76,12 @@ before(async () => {
   }
   fs.writeFileSync(path.join(outputRoot, 'markdown', `${CO}-notes.md`), '# fixture');
 
-  calendarState = { provider: null };
+  calendarState = { provider: null, lastState: null };
+  // A real makeCalendarProvider() return value is a function with a `.lastState()` accessor (auth-health
+  // hardening, spec Change 2); this stub carries the same shape so the calendar route's reason/hint
+  // logic (which reads deps.calendar.lastState()) is exercised the same way it is in production.
+  const calendarFn = /** @type {any} */ (async () => calendarState.provider);
+  calendarFn.lastState = () => calendarState.lastState;
   const deps = {
     withClient,
     // Loaded for real (rather than a hand-built stub): several routes read nested fields like
@@ -90,7 +95,7 @@ before(async () => {
       SCAN_CDP_URL: 'http://127.0.0.1:1', SCAN_PROFILE_DIR: outputRoot, CHROME_EXECUTABLE: null,
       JOBSEARCH_LOG_DIR: outputRoot, JOBSEARCH_CONFIG_DIR: outputRoot, LOG_LEVEL: 'silent', PG_DSN: null,
     },
-    calendar: async () => calendarState.provider,
+    calendar: calendarFn,
     calendarCache: createCalendarCache(),
     scanRunner: makeStubScanRunner(),
     outputRoot,
@@ -876,6 +881,55 @@ describe('calendar', () => {
     const r = await req('GET', '/api/calendar/agenda?from=2027-01-01T00:00:00Z&to=2027-01-08T00:00:00Z');
     assert.equal(r.status, 200);
     assert.equal(r.json.connected, false);
+  });
+
+  test('agenda connected:false with no lastState() information falls back to reason "unknown" and the default hint, never a guessed real state', async () => {
+    calendarState.lastState = null;
+    const r = await req('GET', '/api/calendar/agenda?from=2027-01-01T00:00:00Z&to=2027-01-08T00:00:00Z');
+    assert.equal(r.status, 200);
+    assert.equal(r.json.connected, false);
+    assert.equal(r.json.reason, 'unknown');
+    assert.equal(typeof r.json.hint, 'string');
+    assert.ok(r.json.hint.length > 0);
+  });
+
+  test('agenda connected:false surfaces the calendar provider\'s cached reason/hint (auth-health hardening, spec Change 2): the route reads the cached classification and never re-classifies itself', async () => {
+    calendarState.lastState = { state: 'broken_invalid_grant' };
+    const r = await req('GET', '/api/calendar/agenda?from=2027-01-01T00:00:00Z&to=2027-01-08T00:00:00Z');
+    assert.equal(r.status, 200);
+    assert.equal(r.json.connected, false);
+    assert.equal(r.json.reason, 'broken_invalid_grant');
+    assert.match(r.json.hint, /workspace-mcp auth flow/);
+    assert.match(r.json.hint, /Production/);
+    calendarState.lastState = null;
+  });
+
+  test('regression (HARD CONSTRAINT, auth-health hardening): follow-ups returned by /api/followups are identical whether the calendar is connected or not -- the follow-up data path must never move, be gated on, or be restructured relative to the connected check', async () => {
+    // listing_id-scoped so the shared test database's other (unrelated, older) due follow-ups cannot
+    // push this row past the endpoint's default 25-row page and produce a false "not found".
+    const listing = await req('POST', '/api/listings', { body: { title: 'Regression Followup Role', company: `${CO} Regression Co`, status: 'applied' } });
+    assert.equal(listing.status, 201);
+    const listingId = listing.json.id;
+    const contact = `${CO} Regression Followup`;
+    const created = await req('POST', '/api/followups', { body: { contact, listing_id: listingId, due_at: '2027-03-15', channel: 'email', action_text: 'x' } });
+    assert.equal(created.status, 201);
+
+    calendarState.provider = null;
+    calendarState.lastState = { state: 'broken_invalid_grant' };
+    const disconnected = await req('GET', `/api/followups?listing_id=${listingId}`, {});
+    const disconnectedRow = disconnected.json.rows.find((r) => r.id === created.json.row.id);
+    assert.ok(disconnectedRow, 'the follow-up is present when the calendar is disconnected');
+
+    calendarState.provider = { insertEvent: async () => 'x', deleteEvent: async () => {}, listEvents: async () => [] };
+    calendarState.lastState = { state: 'ok', expiry: null };
+    const connected = await req('GET', `/api/followups?listing_id=${listingId}`, {});
+    const connectedRow = connected.json.rows.find((r) => r.id === created.json.row.id);
+    assert.ok(connectedRow, 'the same follow-up is present when the calendar is connected');
+
+    assert.deepEqual(disconnectedRow, connectedRow, 'the follow-up row is identical regardless of calendar connectivity');
+
+    calendarState.provider = null;
+    calendarState.lastState = null;
   });
 
   test('agenda merges Google events with followups due in the window once a provider is stubbed in', async () => {

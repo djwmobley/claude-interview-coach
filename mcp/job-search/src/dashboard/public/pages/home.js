@@ -59,7 +59,7 @@ export async function render(container, params, app) {
     ].sort((a, b) => new Date(a.at).getTime() - new Date(b.at).getTime());
 
     if (agendaOutcome.kind === 'ok' && agendaOutcome.body.connected === false) {
-      setBanner('calendar-not-connected', { tone: 'warn', message: 'Google Calendar is not connected. Agenda shows follow-ups only.' });
+      setBanner('calendar-not-connected', { tone: 'warn', message: `Google Calendar is not connected. Agenda shows follow-ups only. ${agendaOutcome.body.hint ?? ''}`.trim() });
     } else {
       setBanner('calendar-not-connected', null);
     }

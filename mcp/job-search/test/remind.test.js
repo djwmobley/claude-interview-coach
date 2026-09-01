@@ -206,6 +206,100 @@ describe('remind digest selection and sending', () => {
   });
 });
 
+describe('auth-health hardening (spec Change 3): google_auth_state, the report line, and the ERROR-level broken-grant log', () => {
+  test('a successful send carries google_auth_state "ok" and the body includes the "Google auth: ok" line', async () => {
+    await client.query('DELETE FROM ic_followups WHERE contact LIKE $1', ['ZZ-TEST-%']);
+    const now = new Date('2026-08-26T12:00:00Z');
+    await createFollowup(client, { contact: `${MARK} authok`, due_at: '2026-08-26T15:00:00Z', channel: 'phone', action: 'x' });
+    const { f, calls } = fetchStub(200);
+    const r = await runRemind({ client, tokenFile: 'unused', to: 'x@example.com', now, fetch: /** @type {any} */ (f), googleHttp: /** @type {any} */ (fakeGoogle(f)) });
+    assert.equal(r.code, 0);
+    assert.equal(r.google_auth_state, 'ok');
+    assert.ok(r.body.includes('Google auth: ok'));
+    assert.equal(calls.length, 1, 'exactly one live googleHttp-driven send attempt, matching the single classification');
+  });
+
+  test('a broken classification on a real send: code 1, google_auth_state carries the classification, the ERROR-level logError channel gets exactly one google_auth_broken line (distinct from the info-level log), and no send is attempted', async () => {
+    await client.query('DELETE FROM ic_followups WHERE contact LIKE $1', ['ZZ-TEST-%']);
+    const now = new Date('2026-08-26T12:00:00Z');
+    await createFollowup(client, { contact: `${MARK} authbroken`, due_at: '2026-08-26T15:00:00Z', channel: 'phone', action: 'x' });
+    const { f, calls } = fetchStub(200);
+    /** @type {any[]} */
+    const infoLog = [];
+    /** @type {any[]} */
+    const errorLog = [];
+    const brokenGoogleHttp = /** @type {any} */ (async () => {
+      const err = /** @type {any} */ (new Error('google token refresh failed: invalid_grant (re-run the workspace-mcp auth flow if the grant was revoked)'));
+      err.tokenState = { state: 'broken_invalid_grant' };
+      throw err;
+    });
+    const r = await runRemind({
+      client, tokenFile: 'unused', to: 'x@example.com', now, fetch: /** @type {any} */ (f), googleHttp: brokenGoogleHttp,
+      log: (x) => infoLog.push(x), logError: (x) => errorLog.push(x),
+    });
+    assert.equal(r.code, 1);
+    assert.equal(r.google_auth_state, 'broken_invalid_grant');
+    assert.equal(calls.length, 0, 'gmailSend is never attempted once the single classification is broken');
+    assert.equal(errorLog.length, 1, 'exactly one ERROR-level line');
+    assert.equal(errorLog[0].evt, 'google_auth_broken');
+    assert.equal(errorLog[0].state, 'broken_invalid_grant');
+    assert.ok(!JSON.stringify(errorLog).match(/refresh_token|access_token|client_secret/i), 'never a token value in the ERROR-level line');
+    assert.ok(infoLog.some((l) => l.evt === 'remind_token_failed'), 'the ordinary info-level failure event is unaffected and still logged');
+    assert.ok(!infoLog.some((l) => l.evt === 'google_auth_broken'), 'the broken-grant line is ERROR-level only, never duplicated on the info channel');
+  });
+
+  test('logError defaults to log when omitted: a broken classification still returns code 1 without throwing', async () => {
+    await client.query('DELETE FROM ic_followups WHERE contact LIKE $1', ['ZZ-TEST-%']);
+    const now = new Date('2026-08-26T12:00:00Z');
+    await createFollowup(client, { contact: `${MARK} authbrokennolog`, due_at: '2026-08-26T15:00:00Z', channel: 'phone', action: 'x' });
+    const { f } = fetchStub(200);
+    const brokenGoogleHttp = /** @type {any} */ (async () => {
+      const err = /** @type {any} */ (new Error('nope'));
+      err.tokenState = { state: 'broken_no_refresh_token' };
+      throw err;
+    });
+    const r = await runRemind({ client, tokenFile: 'unused', to: 'x@example.com', now, fetch: /** @type {any} */ (f), googleHttp: brokenGoogleHttp });
+    assert.equal(r.code, 1);
+    assert.equal(r.google_auth_state, 'broken_no_refresh_token');
+  });
+
+  test('--dry-run with a broken classification: code 1, google_auth_state carries the classification, no live send attempted', async () => {
+    const now = new Date('2026-08-26T12:00:00Z');
+    const { f, calls } = fetchStub(200);
+    const brokenGoogleHttp = /** @type {any} */ (async () => {
+      const err = /** @type {any} */ (new Error('google token refresh failed: invalid_grant'));
+      err.tokenState = { state: 'broken_invalid_grant' };
+      throw err;
+    });
+    const r = await runRemind({ client, tokenFile: 'unused', to: 'x@example.com', now, dryRun: true, fetch: /** @type {any} */ (f), googleHttp: brokenGoogleHttp });
+    assert.equal(r.code, 1);
+    assert.equal(r.google_auth_state, 'broken_invalid_grant');
+    assert.equal(calls.length, 0);
+  });
+
+  test('a test-injected googleHttp double that never sets .tokenState (existing convention, e.g. fakeGoogle/a plain throw) still classifies to a safe generic fallback rather than throwing out of runRemind', async () => {
+    await client.query('DELETE FROM ic_followups WHERE contact LIKE $1', ['ZZ-TEST-%']);
+    const now = new Date('2026-08-26T12:00:00Z');
+    await createFollowup(client, { contact: `${MARK} notokenstate`, due_at: '2026-08-26T15:00:00Z', channel: 'phone', action: 'x' });
+    const { f } = fetchStub(200);
+    const r = await runRemind({ client, tokenFile: 'unused', to: 'x@example.com', now, fetch: /** @type {any} */ (f), googleHttp: /** @type {any} */ (async () => { throw new Error('token file lacks scope'); }) });
+    assert.equal(r.code, 1);
+    assert.equal(r.google_auth_state, 'broken_refresh_error');
+  });
+
+  test('the "nothing to report" early return never checks Google auth: google_auth_state is null', async () => {
+    await client.query('DELETE FROM ic_followups WHERE contact LIKE $1', ['ZZ-TEST-%']);
+    const { f, calls } = fetchStub(200);
+    const r = await runRemind({
+      client, tokenFile: 'unused', to: 'x@example.com', now: new Date('2000-01-02T06:00:00Z'), reportSinceOverride: new Date(),
+      fetch: /** @type {any} */ (f), googleHttp: /** @type {any} */ (async () => { throw new Error('should not be called'); }),
+    });
+    assert.equal(r.code, 0);
+    assert.equal(r.google_auth_state, null);
+    assert.equal(calls.length, 0);
+  });
+});
+
 describe('google.js helpers (synthetic token file, fake values)', () => {
   test('readTokenFile + tokenInfo + assertScopes; token values never in the info block', () => {
     const file = path.join(tmp, 'tok.json');

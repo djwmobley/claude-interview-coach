@@ -24,7 +24,9 @@ export async function render(container, params, app) {
       setChildren(container, [emptyState({ message: 'The calendar could not be loaded right now.' })]);
       return;
     }
-    setBanner('calendar-not-connected', outcome.body.connected === false ? { tone: 'warn', message: 'Google Calendar is not connected. Only follow-ups are shown.' } : null);
+    setBanner('calendar-not-connected', outcome.body.connected === false
+      ? { tone: 'warn', message: `Google Calendar is not connected. Only follow-ups are shown. ${outcome.body.hint ?? ''}`.trim() }
+      : null);
 
     // Follow-ups always come from fetchFollowupsInWindow, independent of Google Calendar connectivity
     // (see lib/followups-window.js for why the agenda endpoint's own embedded followups array is not

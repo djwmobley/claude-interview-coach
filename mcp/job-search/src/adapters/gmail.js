@@ -27,7 +27,7 @@
  */
 import { defineAdapter, titleMatches } from './base.js';
 import { normalizeTitle, htmlToText } from '../core/normalize.js';
-import { readTokenFile, makeOAuthClient, getAccessToken, assertScopes } from '../core/google.js';
+import { readTokenFile, makeOAuthClient, getAccessToken, classifyAndConnect } from '../core/google.js';
 import { errFields } from '../core/errors.js';
 import { PARSERS, PARSER_INPUT } from './gmail-parsers.js';
 
@@ -126,12 +126,24 @@ export const gmail = defineAdapter({
     /** @type {string} */
     let accessToken;
     try {
-      const t = deps.readTokenFile(tokenFile);
-      assertScopes(t, tokenFile, { gmailRead: true });
-      const client = deps.makeOAuthClient(t);
-      const r = await deps.getAccessToken(client);
-      accessToken = r.token;
+      // Pre-flight ONLY (auth-health hardening, spec Change 4): classifyAndConnect does the same
+      // read/scope-check/refresh this block always did, but the failure entry now carries the
+      // classification slug (e.g. broken_missing_scopes, broken_invalid_grant) instead of a generic
+      // message -- a MID-run 401 on messages.list/messages.get further below is explicitly out of scope
+      // and keeps its existing AUTH_UNAVAILABLE/generic treatment, never re-classified here.
+      const { state, accessToken: token } = await classifyAndConnect(tokenFile, { gmailRead: true }, deps);
+      if (state.state !== 'ok' || !token) {
+        const detail = state.state === 'broken_refresh_error' ? ` (${state.code})`
+          : state.state === 'broken_missing_scopes' ? ` (missing ${state.missing.join(', ')})`
+          : '';
+        yield { kind: 'warning', code: 'AUTH_UNAVAILABLE', message: `gmail: ${state.state}${detail}` };
+        return;
+      }
+      accessToken = token;
     } catch (err) {
+      // classifyAndConnect does not normally throw (every branch is caught internally), but a fake
+      // deps.readTokenFile/makeOAuthClient/getAccessToken injected by a test could throw synchronously
+      // outside its try/catch shape -- preserve the pre-existing generic fallback for that case.
       yield { kind: 'warning', code: 'AUTH_UNAVAILABLE', message: `gmail: ${errFields(err).err_message}` };
       return;
     }

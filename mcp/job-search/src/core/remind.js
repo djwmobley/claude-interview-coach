@@ -58,11 +58,14 @@ export function buildDigestHtml(rows, now) {
  * @param {{
  *   client: import('pg').ClientBase, tokenFile: string, to: string, from?: string, dryRun?: boolean,
  *   fetch?: typeof fetch, now?: Date, log?: (fields: Record<string, string|number|boolean|null>) => void,
- *   googleHttp?: typeof googleHttp, config?: import('./config.js').LoadedConfig, reportProfile?: string,
+ *   logError?: (fields: Record<string, string|number|boolean|null>) => void, googleHttp?: typeof googleHttp,
+ *   config?: import('./config.js').LoadedConfig, reportProfile?: string,
  *   reportSinceOverride?: Date|null, writeReportFileRoot?: string, skipReportFile?: boolean,
  * }} opts reportSinceOverride, when the key is present (including explicitly `null`), bypasses the
- *   ic_report_state marker read (test seam; see report.js's buildScanReport)
- * @returns {Promise<{ code: number, due: number, flipped: number, sent: boolean, stamped: number, subject: string|null, body: string|null, reason: string|null, scopes_ok: boolean|null, expiry: string|null, report_file: string|null, no_scan: boolean, worst_status: string|null }>}
+ *   ic_report_state marker read (test seam; see report.js's buildScanReport). logError defaults to `log`
+ *   when omitted; bin/remind.js wires it to logger.error so the auth-health broken-grant line (see
+ *   below) is distinguishable from the ordinary info-level events.
+ * @returns {Promise<{ code: number, due: number, flipped: number, sent: boolean, stamped: number, subject: string|null, body: string|null, reason: string|null, scopes_ok: boolean|null, expiry: string|null, report_file: string|null, no_scan: boolean, worst_status: string|null, google_auth_state: string|null }>}
  */
 export async function runRemind(opts) {
   if (!opts.tokenFile) {
@@ -73,6 +76,7 @@ export async function runRemind(opts) {
   }
   const now = opts.now ?? new Date();
   const say = opts.log ?? (() => {});
+  const sayError = opts.logError ?? say;
   const config = opts.config ?? (() => {
     try {
       return loadConfig();
@@ -101,17 +105,53 @@ export async function runRemind(opts) {
   // report OR (decision 26) it is a weekday and no run has been recorded at all.
   const shouldReport = rows.length > 0 || report.runs.length > 0 || report.noScan;
   if (!shouldReport && !opts.dryRun) {
-    return { code: 0, due: 0, flipped: flippedIds.length, sent: false, stamped: 0, subject: null, body: null, reason: 'nothing_to_report', scopes_ok: null, expiry: null, report_file: null, no_scan: false, worst_status: null };
+    // The token layer is not even consulted here (unchanged from before the auth-health hardening): the
+    // single Google auth attempt below only runs once shouldReport (or dryRun) is confirmed.
+    return { code: 0, due: 0, flipped: flippedIds.length, sent: false, stamped: 0, subject: null, body: null, reason: 'nothing_to_report', scopes_ok: null, expiry: null, report_file: null, no_scan: false, worst_status: null, google_auth_state: null };
+  }
+
+  // Single live Google auth attempt per invocation (auth-health hardening, spec Change 3): its outcome
+  // feeds the report's "Google auth" line rendered below AND the dry-run/real-send branches further
+  // down -- never a second live refresh in this call. googleHttp()'s own success return and thrown
+  // errors both carry a `tokenState` classification built from this SAME attempt (see google.js); a
+  // test-injected `opts.googleHttp` double that does not set `.tokenState` falls back to a generic
+  // classification rather than throwing.
+  /** @type {import('./google.js').HttpDeps|null} */
+  let googleDeps = null;
+  /** @type {boolean|null} */
+  let googleScopesOk = null;
+  /** @type {string|null} */
+  let googleExpiry = null;
+  /** @type {import('./google.js').GoogleTokenState} */
+  let googleAuthState;
+  /** @type {{ err_code: string, err_message: string }|null} */
+  let googleAuthError = null;
+  try {
+    const g = await (opts.googleHttp ?? googleHttp)({ tokenFile: opts.tokenFile, fetch: opts.fetch, need: { gmail: true } });
+    googleDeps = g.deps;
+    googleScopesOk = g.info.gmail_send_ok;
+    googleExpiry = g.expiry;
+    googleAuthState = /** @type {any} */ (g).tokenState ?? { state: 'ok', expiry: g.expiry };
+    say({ evt: 'remind_token_ok', scopes_ok: googleScopesOk, expiry: googleExpiry, has_refresh_token: g.info.has_refresh_token });
+  } catch (err) {
+    googleAuthError = errFields(err);
+    googleAuthState = /** @type {any} */ (err)?.tokenState ?? { state: 'broken_refresh_error', code: 'unknown' };
+    try {
+      googleScopesOk = tokenInfo(readTokenFile(opts.tokenFile)).gmail_send_ok;
+    } catch {
+      googleScopesOk = null;
+    }
+    say({ evt: 'remind_token_failed', ...googleAuthError, scopes_ok: googleScopesOk, state: googleAuthState.state });
   }
 
   const followupsDigest = buildDigest(rows, now);
   const followupsHtml = buildDigestHtml(rows, now);
   const subject = buildReportSubject(report, { followupsDue: rows.length });
-  const reportText = renderReportText(report, registry);
-  const reportHtml = renderReportHtml(report, registry);
+  const reportText = renderReportText(report, registry, googleAuthState);
+  const reportHtml = renderReportHtml(report, registry, googleAuthState);
   const text = [reportText, '', followupsDigest.body].join('\n');
   const html = [reportHtml, followupsHtml].join('\n');
-  const markdown = [renderReportMarkdown(report, registry), '', `## Follow-ups due: ${rows.length}`, '', ...rows.map((r) => `- ${formatFollowup(r)}`)].join('\n');
+  const markdown = [renderReportMarkdown(report, registry, googleAuthState), '', `## Follow-ups due: ${rows.length}`, '', ...rows.map((r) => `- ${formatFollowup(r)}`)].join('\n');
 
   /** @type {string|null} */
   let reportFile = null;
@@ -127,51 +167,36 @@ export async function runRemind(opts) {
     // A dry run always exercises the token file (load + in-memory refresh) even with nothing due, so the
     // scheduled job can be proven healthy without sending anything. The marker is never advanced here
     // (decision 23: only a confirmed send advances it).
-    let scopesOk = null;
-    let expiry = null;
-    try {
-      const g = await (opts.googleHttp ?? googleHttp)({ tokenFile: opts.tokenFile, fetch: opts.fetch, need: { gmail: true } });
-      scopesOk = g.info.gmail_send_ok;
-      expiry = g.expiry;
-      say({ evt: 'remind_token_ok', scopes_ok: scopesOk, expiry, has_refresh_token: g.info.has_refresh_token });
-    } catch (err) {
-      const f = errFields(err);
-      try {
-        scopesOk = tokenInfo(readTokenFile(opts.tokenFile)).gmail_send_ok;
-      } catch {
-        scopesOk = null;
-      }
-      say({ evt: 'remind_token_failed', ...f, scopes_ok: scopesOk });
-      return { code: 1, due: rows.length, flipped: flippedIds.length, sent: false, stamped: 0, subject, body: text, reason: f.err_message, scopes_ok: scopesOk, expiry, report_file: reportFile, no_scan: report.noScan, worst_status: report.worstStatus };
+    if (googleAuthError) {
+      return { code: 1, due: rows.length, flipped: flippedIds.length, sent: false, stamped: 0, subject, body: text, reason: googleAuthError.err_message, scopes_ok: googleScopesOk, expiry: googleExpiry, report_file: reportFile, no_scan: report.noScan, worst_status: report.worstStatus, google_auth_state: googleAuthState.state };
     }
-    return { code: 0, due: rows.length, flipped: flippedIds.length, sent: false, stamped: 0, subject, body: text, reason: 'dry_run', scopes_ok: scopesOk, expiry, report_file: reportFile, no_scan: report.noScan, worst_status: report.worstStatus };
+    return { code: 0, due: rows.length, flipped: flippedIds.length, sent: false, stamped: 0, subject, body: text, reason: 'dry_run', scopes_ok: googleScopesOk, expiry: googleExpiry, report_file: reportFile, no_scan: report.noScan, worst_status: report.worstStatus, google_auth_state: googleAuthState.state };
   }
 
-  let deps;
-  let info;
-  let expiry = null;
-  try {
-    const g = await (opts.googleHttp ?? googleHttp)({ tokenFile: opts.tokenFile, fetch: opts.fetch, need: { gmail: true } });
-    deps = g.deps;
-    info = g.info;
-    expiry = g.expiry;
-    say({ evt: 'remind_token_ok', scopes_ok: info.gmail_send_ok, expiry, has_refresh_token: info.has_refresh_token });
-  } catch (err) {
-    const f = errFields(err);
-    say({ evt: 'remind_token_failed', ...f });
-    return { code: 1, due: rows.length, flipped: flippedIds.length, sent: false, stamped: 0, subject, body: text, reason: f.err_message, scopes_ok: false, expiry, report_file: reportFile, no_scan: report.noScan, worst_status: report.worstStatus };
+  if (googleAuthError || !googleDeps) {
+    // Auth-health hardening (spec Change 3): a broken classification here still attempted the send (this
+    // WAS the live attempt) and gets a dedicated ERROR-level line, distinct from the info-level
+    // remind_token_failed event above -- never a token value, only the classification.
+    if (googleAuthState.state !== 'ok') {
+      sayError({
+        evt: 'google_auth_broken', state: googleAuthState.state,
+        code: googleAuthState.state === 'broken_refresh_error' ? googleAuthState.code : null,
+        missing_scopes: googleAuthState.state === 'broken_missing_scopes' ? googleAuthState.missing.join(',') : null,
+      });
+    }
+    return { code: 1, due: rows.length, flipped: flippedIds.length, sent: false, stamped: 0, subject, body: text, reason: googleAuthError ? googleAuthError.err_message : 'google auth unavailable', scopes_ok: false, expiry: googleExpiry, report_file: reportFile, no_scan: report.noScan, worst_status: report.worstStatus, google_auth_state: googleAuthState.state };
   }
   try {
     const msg = buildRfc2822Multipart({ to: opts.to, from: opts.from, subject, text, html, date: now });
-    const id = await gmailSend(deps, msg);
+    const id = await gmailSend(googleDeps, msg);
     say({ evt: 'remind_sent', message_id: id, due: rows.length, scan_runs: report.runs.length });
   } catch (err) {
     const f = errFields(err);
     say({ evt: 'remind_send_failed', ...f });
-    return { code: 1, due: rows.length, flipped: flippedIds.length, sent: false, stamped: 0, subject, body: text, reason: f.err_message, scopes_ok: info.gmail_send_ok, expiry, report_file: reportFile, no_scan: report.noScan, worst_status: report.worstStatus };
+    return { code: 1, due: rows.length, flipped: flippedIds.length, sent: false, stamped: 0, subject, body: text, reason: f.err_message, scopes_ok: googleScopesOk, expiry: googleExpiry, report_file: reportFile, no_scan: report.noScan, worst_status: report.worstStatus, google_auth_state: googleAuthState.state };
   }
   const stamped = await stampReminded(opts.client, rows.map((r) => r.id), now);
   // Decision 23: the marker advances only after the confirmed send above, mirroring stampReminded.
   await stampReportSent(opts.client, now, report.lastRunIdIncluded);
-  return { code: 0, due: rows.length, flipped: flippedIds.length, sent: true, stamped, subject, body: text, reason: null, scopes_ok: info.gmail_send_ok, expiry, report_file: reportFile, no_scan: report.noScan, worst_status: report.worstStatus };
+  return { code: 0, due: rows.length, flipped: flippedIds.length, sent: true, stamped, subject, body: text, reason: null, scopes_ok: googleScopesOk, expiry: googleExpiry, report_file: reportFile, no_scan: report.noScan, worst_status: report.worstStatus, google_auth_state: googleAuthState.state };
 }

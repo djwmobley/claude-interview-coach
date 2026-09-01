@@ -83,7 +83,11 @@ export function readTokenFile(file) {
     client_secret: j.client_secret,
     refresh_token: typeof j.refresh_token === 'string' ? j.refresh_token : null,
     access_token: typeof j.token === 'string' ? j.token : typeof j.access_token === 'string' ? j.access_token : null,
-    scopes: Array.isArray(j.scopes) ? j.scopes.map(String) : typeof j.scope === 'string' ? j.scope.split(/\s+/) : [],
+    // .filter(Boolean): a scope string like " a  b " (leading space, double space) splits to
+    // ['', 'a', 'b'] -- the empty leading element must never survive into a "stored scopes" array that
+    // classifyGoogleTokenState/assertScopes treat as authoritative (health-check spec, token state
+    // classification).
+    scopes: Array.isArray(j.scopes) ? j.scopes.map(String).filter(Boolean) : typeof j.scope === 'string' ? j.scope.split(/\s+/).filter(Boolean) : [],
     expiry: typeof j.expiry === 'string' ? j.expiry : null,
     token_uri: typeof j.token_uri === 'string' ? j.token_uri : 'https://oauth2.googleapis.com/token',
   };
@@ -118,6 +122,190 @@ export function assertScopes(t, file, need) {
   if (need.gmail && !info.gmail_send_ok) throw new JobSearchError('VALIDATION', `google token file lacks scope ${SCOPE_GMAIL_SEND}: ${file}`);
   if (need.gmailRead && !info.gmail_read_ok) throw new JobSearchError('VALIDATION', `google token file lacks scope ${SCOPE_GMAIL_READONLY} or ${SCOPE_GMAIL_MODIFY}: ${file}`);
   if (need.calendar && !info.calendar_ok) throw new JobSearchError('VALIDATION', `google token file lacks scope ${SCOPE_CALENDAR_EVENTS}: ${file}`);
+}
+
+// ---------------------------------------------------------------------------
+// Token state classification (auth-health hardening): a total classification of the current Google
+// auth state for a caller's `need`, so a dead refresh grant, a missing scope, or an unreadable token
+// file are distinguished from each other instead of collapsing into one generic "not connected" state.
+// Never logs or returns token values -- only the classification slug, an expiry, a scope list, or an
+// 80-char-capped diagnostic code.
+// ---------------------------------------------------------------------------
+
+/** Cap for any raw-error-derived diagnostic string surfaced in a classification (never a token value). */
+const OAUTH_FIELD_MAX = 80;
+
+/**
+ * @typedef {
+ *   | { state: 'ok', expiry: string|null }
+ *   | { state: 'broken_missing_file' }
+ *   | { state: 'broken_malformed' }
+ *   | { state: 'broken_no_refresh_token' }
+ *   | { state: 'broken_missing_scopes', missing: string[] }
+ *   | { state: 'broken_invalid_grant' }
+ *   | { state: 'broken_refresh_error', code: string }
+ * } GoogleTokenState
+ */
+
+/** Fixed, code-authored hint text per classification branch -- NEVER built from raw error text. */
+export const GOOGLE_TOKEN_STATE_HINTS = Object.freeze({
+  broken_missing_file: 'Run the workspace-mcp auth flow so the token file exists.',
+  broken_malformed: 'The token file is unreadable or missing required fields; re-run the workspace-mcp auth flow to regenerate it.',
+  broken_no_refresh_token: 'The token file has no refresh token; re-run the workspace-mcp auth flow to obtain one.',
+  broken_missing_scopes: 'The token is missing required scopes; re-run the workspace-mcp auth flow to re-consent with the full scope set.',
+  broken_invalid_grant: 'The refresh grant was revoked or expired. Re-run the workspace-mcp auth flow to re-authorize; if this recurs weekly, publish the OAuth app to Production in Google Cloud Console (a Testing-mode consent screen expires refresh tokens after 7 days).',
+  broken_refresh_error: 'Google token refresh failed unexpectedly; check connectivity and retry, or re-run the workspace-mcp auth flow if it persists.',
+});
+/** Fallback hint for a classification slug this map does not recognize (defensive; every real state above is covered). */
+export const DEFAULT_GOOGLE_TOKEN_STATE_HINT = 'Google Calendar is not connected; re-run the workspace-mcp auth flow.';
+
+/**
+ * Missing raw scope URIs (post readTokenFile normalization, i.e. already .filter(Boolean)'d) for
+ * `need`, relative to `t.scopes`. `gmailRead` and `calendar` are either-of pairs: both alternative
+ * scope URIs are listed when neither is present, so the caller sees exactly what would satisfy the
+ * requirement.
+ * @param {TokenFile} t
+ * @param {{ gmail?: boolean, gmailRead?: boolean, calendar?: boolean }} need
+ * @returns {string[]}
+ */
+function computeMissingScopes(t, need) {
+  const info = tokenInfo(t);
+  /** @type {string[]} */
+  const missing = [];
+  if (need.gmail && !info.gmail_send_ok) missing.push(SCOPE_GMAIL_SEND);
+  if (need.gmailRead && !info.gmail_read_ok) missing.push(SCOPE_GMAIL_READONLY, SCOPE_GMAIL_MODIFY);
+  if (need.calendar && !info.calendar_ok) missing.push(SCOPE_CALENDAR_EVENTS, SCOPE_CALENDAR_FULL);
+  return missing;
+}
+
+/**
+ * The structured OAuth error field from a live refresh failure, read before any substring fallback
+ * (empirically confirmed against a real expired grant: a Gaxios-shaped err.response.data.error of
+ * "invalid_grant" -- see the probe referenced in this PR's description). Two shapes are checked: a
+ * JobSearchError thrown by this module's own getAccessToken() (details.oauth_error, set below) and a
+ * raw, unwrapped Gaxios-shaped error (response.data.error) for callers/tests that inject a refresh
+ * function throwing the raw shape directly.
+ * @param {unknown} err
+ * @returns {string|null}
+ */
+function structuredOAuthError(err) {
+  if (!err || typeof err !== 'object') return null;
+  const anyErr = /** @type {any} */ (err);
+  if (anyErr.details && typeof anyErr.details.oauth_error === 'string' && anyErr.details.oauth_error) return anyErr.details.oauth_error;
+  const field = anyErr.response && anyErr.response.data && anyErr.response.data.error;
+  return typeof field === 'string' && field ? field : null;
+}
+
+/**
+ * Transport-level error code (e.g. ECONNRESET), read from the same two shapes structuredOAuthError()
+ * checks: a JobSearchError's details.err_code (this module's getAccessToken() puts the raw err.code
+ * there, since JobSearchError's own `.code` is always the fixed literal 'VALIDATION'), or a raw error's
+ * own `.code`.
+ * @param {unknown} err
+ * @returns {string|number|null}
+ */
+function transportCode(err) {
+  if (!err || typeof err !== 'object') return null;
+  const anyErr = /** @type {any} */ (err);
+  if (anyErr.details && anyErr.details.err_code !== undefined && anyErr.details.err_code !== null) return anyErr.details.err_code;
+  if (anyErr.code !== undefined && anyErr.code !== null) return anyErr.code;
+  return null;
+}
+
+/**
+ * Classify a live refresh failure (spec: checking order's final step). The structured OAuth error
+ * field is authoritative when present (so invalid_client, access_denied, etc. are visible in
+ * broken_refresh_error.code rather than being silently bucketed away); a bare substring match on
+ * err.message is the fallback ONLY when no structured field exists.
+ * @param {unknown} err
+ * @returns {GoogleTokenState}
+ */
+function classifyRefreshError(err) {
+  const structured = structuredOAuthError(err);
+  if (structured === 'invalid_grant') return { state: 'broken_invalid_grant' };
+  if (structured) return { state: 'broken_refresh_error', code: structured.slice(0, OAUTH_FIELD_MAX) };
+  const message = err && typeof err === 'object' && typeof (/** @type {any} */ (err).message) === 'string' ? /** @type {any} */ (err).message : '';
+  if (/invalid_grant/.test(message)) return { state: 'broken_invalid_grant' };
+  const code = transportCode(err);
+  const codeStr = code !== null && code !== undefined ? String(code) : 'unknown';
+  return { state: 'broken_refresh_error', code: codeStr.slice(0, OAUTH_FIELD_MAX) };
+}
+
+/**
+ * File-shape and scope checks only (spec checking order: broken_missing_file -> broken_malformed ->
+ * broken_no_refresh_token -> broken_missing_scopes), before any network call. Returns either an early
+ * broken_* state or the parsed TokenFile to proceed with a live refresh.
+ * @param {string} tokenFile
+ * @param {{ gmail?: boolean, gmailRead?: boolean, calendar?: boolean }} need
+ * @param {{ readTokenFile?: typeof readTokenFile }} [deps]
+ * @returns {{ early: GoogleTokenState } | { t: TokenFile }}
+ */
+function preflightTokenState(tokenFile, need, deps = {}) {
+  const _readTokenFile = deps.readTokenFile ?? readTokenFile;
+  /** @type {TokenFile} */
+  let t;
+  try {
+    t = _readTokenFile(tokenFile);
+  } catch (err) {
+    if (err instanceof JobSearchError && err.code === 'NOT_FOUND') return { early: { state: 'broken_missing_file' } };
+    return { early: { state: 'broken_malformed' } };
+  }
+  const rt = t.refresh_token;
+  if (rt === null || rt === undefined || (typeof rt === 'string' && rt.trim() === '')) {
+    return { early: { state: 'broken_no_refresh_token' } };
+  }
+  const missing = computeMissingScopes(t, need);
+  if (missing.length) return { early: { state: 'broken_missing_scopes', missing } };
+  return { t };
+}
+
+/**
+ * Like classifyGoogleTokenState, but also returns the live access token on state 'ok' so a single live
+ * refresh attempt serves both the classification and the actual API deps a caller needs (e.g.
+ * calendar-provider.js, gmail.js's pre-flight): avoids a second live refresh in the same call.
+ * classifyGoogleTokenState itself is a thin wrapper around this that drops the token, since the spec's
+ * return type for that function is the classification only.
+ * @param {string} tokenFile
+ * @param {{ gmail?: boolean, gmailRead?: boolean, calendar?: boolean }} need
+ * @param {{ readTokenFile?: typeof readTokenFile, makeOAuthClient?: typeof makeOAuthClient, getAccessToken?: typeof getAccessToken }} [deps] test seam
+ * @returns {Promise<{ state: GoogleTokenState, accessToken: string|null }>}
+ */
+export async function classifyAndConnect(tokenFile, need, deps = {}) {
+  const pre = preflightTokenState(tokenFile, need, deps);
+  if ('early' in pre) return { state: pre.early, accessToken: null };
+  const _makeOAuthClient = deps.makeOAuthClient ?? makeOAuthClient;
+  const _getAccessToken = deps.getAccessToken ?? getAccessToken;
+  /** @type {OAuth2Client} */
+  let client;
+  try {
+    client = _makeOAuthClient(pre.t);
+  } catch (err) {
+    // makeOAuthClient never throws for a TokenFile that already passed preflightTokenState's field
+    // checks in production; this only guards a test-injected fake deps.makeOAuthClient that throws --
+    // classified the same as any other pre-refresh shape problem rather than an unhandled rejection.
+    return { state: { state: 'broken_malformed' }, accessToken: null };
+  }
+  try {
+    const { token, expiry } = await _getAccessToken(client);
+    return { state: { state: 'ok', expiry }, accessToken: token };
+  } catch (err) {
+    return { state: classifyRefreshError(err), accessToken: null };
+  }
+}
+
+/**
+ * Classify the current Google auth state for `need` (health-check spec, "token state classification").
+ * No live network call happens unless the file-shape and scope checks all pass (preflightTokenState);
+ * the live refresh, when it happens, is the SAME single attempt classifyAndConnect makes. Never logs or
+ * returns token values.
+ * @param {string} tokenFile
+ * @param {{ gmail?: boolean, gmailRead?: boolean, calendar?: boolean }} need
+ * @param {{ readTokenFile?: typeof readTokenFile, makeOAuthClient?: typeof makeOAuthClient, getAccessToken?: typeof getAccessToken }} [deps] test seam
+ * @returns {Promise<GoogleTokenState>}
+ */
+export async function classifyGoogleTokenState(tokenFile, need, deps = {}) {
+  const { state } = await classifyAndConnect(tokenFile, need, deps);
+  return state;
 }
 
 /**
@@ -160,9 +348,14 @@ export async function getAccessToken(client) {
     token = r.token ?? null;
   } catch (err) {
     // Google's error string (e.g. invalid_grant) is diagnostic, not secret; token values never appear in it.
-    const why = err && typeof err === 'object' && 'message' in err ? String(/** @type {{ message: unknown }} */ (err).message).slice(0, 80) : 'unknown';
+    const anyErr = /** @type {any} */ (err ?? {});
+    const why = err && typeof err === 'object' && 'message' in err ? String(anyErr.message).slice(0, 80) : 'unknown';
+    // oauth_error preserves the structured Gaxios error body (response.data.error, e.g. "invalid_grant"
+    // or "invalid_client") so classifyRefreshError() in this module can classify precisely instead of
+    // falling back to a substring match on the message text above.
+    const oauthError = anyErr.response && anyErr.response.data && typeof anyErr.response.data.error === 'string' ? anyErr.response.data.error : null;
     throw new JobSearchError('VALIDATION', `google token refresh failed: ${why} (re-run the workspace-mcp auth flow if the grant was revoked)`, {
-      details: { err_code: /** @type {{ code?: string }} */ (err ?? {}).code ?? null },
+      details: { err_code: anyErr.code ?? null, oauth_error: oauthError },
     });
   }
   if (!token) throw new JobSearchError('VALIDATION', 'google token refresh returned no access token');
@@ -350,15 +543,51 @@ export async function calendarDeleteEvent(deps, eventId) {
 }
 
 /**
- * Convenience: load the token file, check scopes, and return the HTTP deps
- * plus a scalar info block. Used by remind.js and the followups tool.
+ * Attach a GoogleTokenState classification to a thrown error as a non-enumerable-ish plain property
+ * (`.tokenState`), so a caller that already has its own try/catch around googleHttp() (remind.js,
+ * calendar-provider.js) can read the classification off the SAME error instead of re-deriving it or
+ * making a second live network attempt. Never changes the error's own code/message -- purely additive.
+ * @template {Error} E
+ * @param {E} err
+ * @param {GoogleTokenState} state
+ * @returns {E}
+ */
+function attachTokenState(err, state) {
+  /** @type {any} */ (err).tokenState = state;
+  return err;
+}
+
+/**
+ * Convenience: load the token file, check scopes, and return the HTTP deps plus a scalar info block.
+ * Used by remind.js and the followups tool. Every thrown error and the success return also carry a
+ * `tokenState` (GoogleTokenState) classification -- see attachTokenState() -- built from the SAME
+ * read/scope-check/refresh attempt this function already makes, so a caller never needs a second live
+ * refresh just to classify the outcome. Thrown error codes/messages are unchanged from before this
+ * classification was added (readTokenFile/assertScopes/getAccessToken still throw exactly as they did).
  * @param {{ tokenFile: string, fetch?: typeof fetch, need: { gmail?: boolean, gmailRead?: boolean, calendar?: boolean } }} opts
- * @returns {Promise<{ deps: HttpDeps, info: TokenInfo, expiry: string|null }>}
+ * @returns {Promise<{ deps: HttpDeps, info: TokenInfo, expiry: string|null, tokenState: GoogleTokenState }>}
  */
 export async function googleHttp(opts) {
-  const t = readTokenFile(opts.tokenFile);
-  assertScopes(t, opts.tokenFile, opts.need);
+  /** @type {TokenFile} */
+  let t;
+  try {
+    t = readTokenFile(opts.tokenFile);
+  } catch (err) {
+    throw attachTokenState(/** @type {Error} */ (err), err instanceof JobSearchError && err.code === 'NOT_FOUND' ? { state: 'broken_missing_file' } : { state: 'broken_malformed' });
+  }
+  const rt = t.refresh_token;
+  const noRefreshToken = rt === null || rt === undefined || (typeof rt === 'string' && rt.trim() === '');
+  const missing = computeMissingScopes(t, opts.need);
+  try {
+    assertScopes(t, opts.tokenFile, opts.need);
+  } catch (err) {
+    throw attachTokenState(/** @type {Error} */ (err), noRefreshToken ? { state: 'broken_no_refresh_token' } : { state: 'broken_missing_scopes', missing });
+  }
   const client = makeOAuthClient(t);
-  const { token, expiry } = await getAccessToken(client);
-  return { deps: { fetch: opts.fetch ?? fetch, accessToken: token }, info: tokenInfo(t), expiry };
+  try {
+    const { token, expiry } = await getAccessToken(client);
+    return { deps: { fetch: opts.fetch ?? fetch, accessToken: token }, info: tokenInfo(t), expiry, tokenState: { state: 'ok', expiry } };
+  } catch (err) {
+    throw attachTokenState(/** @type {Error} */ (err), classifyRefreshError(err));
+  }
 }
