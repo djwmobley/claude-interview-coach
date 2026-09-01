@@ -19,6 +19,7 @@ import { register as registerScans } from './routes/scans.js';
 import { register as registerReport } from './routes/report.js';
 import { register as registerCalendar } from './routes/calendar.js';
 import { register as registerDocuments } from './routes/documents.js';
+import { register as registerApplications } from './routes/applications.js';
 import { register as registerMemory } from './routes/memory.js';
 import { register as registerAnalytics } from './routes/analytics.js';
 import { register as registerSources } from './routes/sources.js';
@@ -212,6 +213,7 @@ export function createDashboardServer(deps, opts = {}) {
   registerReport(router, deps);
   registerCalendar(router, deps);
   registerDocuments(router, deps);
+  registerApplications(router, deps, streamHub);
   registerMemory(router, deps);
   registerAnalytics(router, deps);
   registerSources(router, deps);

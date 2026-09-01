@@ -10,6 +10,7 @@ import { showToast, showUndoToast } from '../lib/toast.js';
 import { stageButtons, DIGIT_STAGE_ORDER } from '../components/stage-buttons.js';
 import { timeline } from '../components/timeline.js';
 import { documentChip, chipClassName, atsChip, atsConfidenceChip } from '../components/chips.js';
+import { applicationCard } from '../components/application-card.js';
 import { skeleton, emptyState } from '../components/empty-state.js';
 import { salaryRange, shortDate } from '../lib/format.js';
 import { on, off } from '../lib/bus.js';
@@ -179,6 +180,12 @@ export async function render(container, params, app) {
       duplicates.length ? h('ul', {}, duplicates.map((d) => h('li', { text: `${d.title} at ${d.company} (#${d.id})` }))) : null,
     ]) : null;
 
+    // Apply pipeline slice 3 (application card, plan section 7): GET /api/listings/:id nests the
+    // application row (or null) the same way it already nests documents/followups/prescore_breakdown.
+    const applicationPanel = applicationCard({
+      listing, application: outcome.body.application ?? null, ats: outcome.body.ats, documents: docs, onChanged: load,
+    });
+
     const prescoreBreakdownCard = prescoreBreakdownPanel(outcome.body.prescore_breakdown, listing);
     // Apply pipeline slice 2 (ATS badge, spec-adversary amendment S12): 'unknown' renders nothing here,
     // matching the house dashboard UI-restraint preference (thin accent, no color for the common case --
@@ -206,6 +213,7 @@ export async function render(container, params, app) {
           notesArea,
           descriptionPanel,
           documentsPanel,
+          applicationPanel,
           followupsPanel,
         ]),
         h('div', { className: 'job-detail-side' }, [

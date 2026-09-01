@@ -48,6 +48,12 @@ describe('classify(): section 4 table, one case per named branch', () => {
     assert.deepEqual(r.candidates, [{ id: 1 }]);
   });
 
+  test('409 DUPLICATE_APPLICATION (apply pipeline slice 3) carries the message through', () => {
+    const r = classify(409, { ok: false, code: 'DUPLICATE_APPLICATION', message: 'an active application already exists for listing 1' });
+    assert.equal(r.kind, 'duplicate_application');
+    assert.equal(r.message, 'an active application already exists for listing 1');
+  });
+
   test('413 PAYLOAD_TOO_LARGE', () => {
     assert.equal(classify(413, { ok: false, code: 'PAYLOAD_TOO_LARGE', message: 'x' }).kind, 'payload_too_large');
   });

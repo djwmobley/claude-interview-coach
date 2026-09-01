@@ -26,11 +26,14 @@
  * `SELECT ... FOR UPDATE` before validating, so two concurrent callers (e.g. a dashboard click racing a
  * worker tick) serialize on the row rather than corrupting it.
  */
+import crypto from 'node:crypto';
+import fs from 'node:fs';
 import { withTransaction, isUniqueViolation } from './db.js';
 import { JobSearchError } from './errors.js';
 import { EVENT_ACTORS } from './events.js';
 import { applyMark } from '../tools/mark_jobs.js';
 import { STATUS_GROUPS } from './statuses.js';
+import { resolveOutputPath } from './documents.js';
 
 /** ic_job_applications.ats_type CHECK values (sql/012_applications.sql). */
 export const ATS_TYPES = Object.freeze([
@@ -397,6 +400,85 @@ export async function getApplication(client, id) {
   const r = await client.query(`SELECT ${APPLICATION_COLS} FROM ic_job_applications WHERE id = $1`, [id]);
   if (r.rowCount === 0) throw new JobSearchError('NOT_FOUND', `application ${id} not found`);
   return r.rows[0];
+}
+
+/**
+ * The application a listing detail page (or the Approve route) cares about: the most recent non-
+ * withdrawn application for the listing, or null when none exists. Mirrors onDocumentLinked's own
+ * "most recent non-withdrawn" lookup (A6's partial unique index only ever allows one active application
+ * per listing at a time, but a withdrawn-then-recreated history can leave more than one row).
+ * @param {import('pg').ClientBase} client
+ * @param {number} listingId
+ * @returns {Promise<any|null>}
+ */
+export async function getApplicationForListing(client, listingId) {
+  const r = await client.query(
+    `SELECT ${APPLICATION_COLS} FROM ic_job_applications WHERE listing_id = $1 AND state <> 'withdrawn' ORDER BY id DESC LIMIT 1`,
+    [listingId],
+  );
+  return r.rowCount === 0 ? null : r.rows[0];
+}
+
+/**
+ * sha256 hex digest of a document already linked under outputRoot, resolved through
+ * documents.resolveOutputPath's own safe-path rules (never a raw fs.readFileSync on a caller-supplied
+ * path). Used only by approve() below.
+ * @param {string} outputRoot
+ * @param {string} relPath
+ * @returns {string}
+ */
+function hashOutputFile(outputRoot, relPath) {
+  const resolved = resolveOutputPath(outputRoot, relPath);
+  if (!resolved.ok) throw new JobSearchError('VALIDATION', `cannot hash document: ${resolved.reason}`, { details: { reason: resolved.reason } });
+  return crypto.createHash('sha256').update(fs.readFileSync(resolved.absPath)).digest('hex');
+}
+
+/**
+ * docs_ready -> approved ("Approve" in the dashboard, plan section 7 / section 1's "Store the DOCX hash
+ * at Approve"). Everything happens inside ONE transaction (the plan's explicit requirement): validate
+ * the application is in docs_ready with a linked resume, hash the linked resume DOCX (and cover letter,
+ * if linked) via documents.resolveOutputPath's safe path resolution, transition to 'approved', and store
+ * resume_hash/coverletter_hash/approved_at on the SAME row UPDATE the transition itself performs (via
+ * transitionUnwrapped's extraSet -- never a second, separately-committed UPDATE after the transition).
+ *
+ * This slice ships the only writer of approved_at in the whole apply pipeline: transitionUnwrapped's own
+ * doc comment on submitted_at/confirmed_at notes "approved_at is deliberately NOT touched by this slice
+ * -- the column exists so a later slice's Approve action has somewhere to write it." This is that slice.
+ *
+ * Deliberately calls transitionUnwrapped directly rather than the exported transition() helper:
+ * transition() opens its own withTransaction, which would nest a second BEGIN inside this function's
+ * own and break the "same transaction" requirement for the hash writes.
+ * @param {import('pg').ClientBase} client
+ * @param {number} id
+ * @param {{ outputRoot: string, actor?: string, note?: string|null }} opts
+ */
+export async function approve(client, id, opts) {
+  const actor = opts.actor ?? 'dashboard';
+  return withTransaction(client, async (c) => {
+    const cur = await c.query(`SELECT ${APPLICATION_COLS} FROM ic_job_applications WHERE id = $1 FOR UPDATE`, [id]);
+    if (cur.rowCount === 0) throw new JobSearchError('NOT_FOUND', `application ${id} not found`);
+    const row = cur.rows[0];
+    if (row.state !== 'docs_ready') {
+      throw new JobSearchError('VALIDATION', `approve() requires application ${id} to be in state "docs_ready", it is "${row.state}"`, {
+        details: { from: row.state, expected: 'docs_ready' },
+      });
+    }
+    if (!row.resume_doc_id) {
+      throw new JobSearchError('VALIDATION', `approve() requires application ${id} to have a linked resume document`);
+    }
+    const resumeDoc = await c.query('SELECT rel_path FROM ic_job_documents WHERE id = $1', [row.resume_doc_id]);
+    if (resumeDoc.rowCount === 0) throw new JobSearchError('NOT_FOUND', `document ${row.resume_doc_id} not found`);
+    const resumeHash = hashOutputFile(opts.outputRoot, resumeDoc.rows[0].rel_path);
+    let coverletterHash = null;
+    if (row.coverletter_doc_id) {
+      const clDoc = await c.query('SELECT rel_path FROM ic_job_documents WHERE id = $1', [row.coverletter_doc_id]);
+      if (clDoc.rowCount === 0) throw new JobSearchError('NOT_FOUND', `document ${row.coverletter_doc_id} not found`);
+      coverletterHash = hashOutputFile(opts.outputRoot, clDoc.rows[0].rel_path);
+    }
+    return transitionUnwrapped(c, id, 'approved', { actor, note: opts.note ?? 'approved in dashboard' }, {
+      extraSet: { resume_hash: resumeHash, coverletter_hash: coverletterHash, approved_at: new Date() },
+    });
+  });
 }
 
 /**

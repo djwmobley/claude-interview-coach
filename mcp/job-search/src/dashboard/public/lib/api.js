@@ -33,6 +33,7 @@ export function classify(status, body) {
   if (status === 409 && code === 'LOCKED') return { kind: 'locked', message: b.message };
   if (status === 409 && code === 'CONFIG_LOCK_MISMATCH') return { kind: 'config_lock_mismatch', message: b.message };
   if (status === 409 && code === 'DUPLICATE_CANDIDATE') return { kind: 'duplicate_candidate', candidates: b.candidates ?? [] };
+  if (status === 409 && code === 'DUPLICATE_APPLICATION') return { kind: 'duplicate_application', message: b.message };
   if (status === 413 && code === 'PAYLOAD_TOO_LARGE') return { kind: 'payload_too_large', message: b.message };
   if (status === 415 && code === 'UNSUPPORTED_MEDIA_TYPE') return { kind: 'client_bug', code, message: b.message };
   if (status === 503 && code === 'DB_UNAVAILABLE') return { kind: 'db_unavailable', message: b.message };

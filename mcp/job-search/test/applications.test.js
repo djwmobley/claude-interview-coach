@@ -8,13 +8,17 @@
  */
 import { test, describe, before, after } from 'node:test';
 import assert from 'node:assert/strict';
+import crypto from 'node:crypto';
+import fs from 'node:fs';
+import os from 'node:os';
+import path from 'node:path';
 import pg from 'pg';
 import { pgConnectionConfig } from '../src/core/config.js';
 import { ensureAuxSchema } from '../src/core/schema.js';
 import {
   TRANSITIONS, APPLICATION_STATES, ATS_TYPES,
   createApplication, transition, resume, retry, onDocumentLinked, markSubmitted, reconcileStale,
-  getApplication, listApplicationEvents,
+  getApplication, getApplicationForListing, approve, listApplicationEvents,
 } from '../src/core/applications.js';
 
 const CO = `ZZ-TEST-APPLICATIONS-${process.pid}`;
@@ -385,5 +389,96 @@ describe('ATS_TYPES / APPLICATION_STATES are exported, closed lists', () => {
     for (const t of ['greenhouse', 'lever', 'workday', 'dayforce', 'indeed_easy', 'linkedin_easy', 'icims', 'smartrecruiters', 'unknown']) {
       assert.ok(ATS_TYPES.includes(t));
     }
+  });
+});
+
+describe('getApplicationForListing (apply pipeline slice 3)', () => {
+  test('returns null when the listing has no application', async () => {
+    const listingId = await insertListing();
+    assert.equal(await getApplicationForListing(client, listingId), null);
+  });
+
+  test('returns the most recent non-withdrawn application, never a withdrawn one', async () => {
+    const listingId = await insertListing();
+    const first = await createApplication(client, { listingId });
+    await transition(client, first.id, 'withdrawn', { actor: 'mcp' });
+    const second = await createApplication(client, { listingId });
+    const found = await getApplicationForListing(client, listingId);
+    assert.equal(found.id, second.id);
+    assert.equal(found.state, 'drafting');
+  });
+});
+
+describe('approve() (apply pipeline slice 3): docs_ready -> approved, hashes stored in one transaction', () => {
+  /** @type {string} */
+  let outputRoot;
+  const RESUME_REL = 'resumes/ZZ-Approve-Test.docx';
+  const COVER_REL = 'coverletters/ZZ-Approve-Test-Cover.docx';
+  const RESUME_BYTES = 'resume-fixture-bytes';
+  const COVER_BYTES = 'coverletter-fixture-bytes';
+
+  before(() => {
+    outputRoot = fs.mkdtempSync(path.join(os.tmpdir(), 'jobsearch-approve-'));
+    fs.mkdirSync(path.join(outputRoot, 'resumes'), { recursive: true });
+    fs.mkdirSync(path.join(outputRoot, 'coverletters'), { recursive: true });
+    fs.writeFileSync(path.join(outputRoot, 'resumes', 'ZZ-Approve-Test.docx'), RESUME_BYTES);
+    fs.writeFileSync(path.join(outputRoot, 'coverletters', 'ZZ-Approve-Test-Cover.docx'), COVER_BYTES);
+  });
+  after(() => {
+    fs.rmSync(outputRoot, { recursive: true, force: true });
+  });
+
+  /** @param {string} state @param {{ resumeRelPath?: string, coverletterRelPath?: string }} [docs] */
+  async function seedWithDocs(state, docs = {}) {
+    const listingId = await insertListing();
+    const resumeDocId = docs.resumeRelPath ? await insertDocument(listingId, 'resume', docs.resumeRelPath) : null;
+    const coverletterDocId = docs.coverletterRelPath ? await insertDocument(listingId, 'coverletter', docs.coverletterRelPath) : null;
+    const r = await client.query(
+      `INSERT INTO ic_job_applications (listing_id, state, resume_doc_id, coverletter_doc_id) VALUES ($1, $2, $3, $4) RETURNING id`,
+      [listingId, state, resumeDocId, coverletterDocId],
+    );
+    return { id: Number(r.rows[0].id), listingId, resumeDocId, coverletterDocId };
+  }
+
+  test('happy path: resume + cover letter both linked, both hashes stored, approved_at set, state -> approved', async () => {
+    const { id } = await seedWithDocs('docs_ready', { resumeRelPath: RESUME_REL, coverletterRelPath: COVER_REL });
+    const row = await approve(client, id, { outputRoot, actor: 'dashboard' });
+    assert.equal(row.state, 'approved');
+    assert.equal(row.resume_hash, crypto.createHash('sha256').update(RESUME_BYTES).digest('hex'));
+    assert.equal(row.coverletter_hash, crypto.createHash('sha256').update(COVER_BYTES).digest('hex'));
+    assert.ok(row.approved_at, 'approved_at must be set by approve()');
+    const events = await listApplicationEvents(client, id);
+    const last = events[events.length - 1];
+    assert.equal(last.kind, 'state');
+    assert.equal(last.from_state, 'docs_ready');
+    assert.equal(last.to_state, 'approved');
+  });
+
+  test('resume only: coverletter_hash stays null, resume_hash is still stored', async () => {
+    const { id } = await seedWithDocs('docs_ready', { resumeRelPath: RESUME_REL });
+    const row = await approve(client, id, { outputRoot });
+    assert.equal(row.state, 'approved');
+    assert.equal(row.resume_hash, crypto.createHash('sha256').update(RESUME_BYTES).digest('hex'));
+    assert.equal(row.coverletter_hash, null);
+  });
+
+  test('blocked from a state other than docs_ready, row left unchanged', async () => {
+    const { id } = await seedWithDocs('drafting', { resumeRelPath: RESUME_REL });
+    await assert.rejects(approve(client, id, { outputRoot }), /requires application \d+ to be in state "docs_ready"/);
+    const row = await getApplication(client, id);
+    assert.equal(row.state, 'drafting');
+    assert.equal(row.resume_hash, null);
+  });
+
+  test('blocked without a linked resume document, even in docs_ready', async () => {
+    const { id } = await seedWithDocs('docs_ready', {});
+    await assert.rejects(approve(client, id, { outputRoot }), /requires application \d+ to have a linked resume document/);
+  });
+
+  test('a nonexistent application raises NOT_FOUND', async () => {
+    await assert.rejects(approve(client, 999999999, { outputRoot }), (err) => {
+      assert.equal(/** @type {any} */ (err).code, 'NOT_FOUND');
+      return true;
+    });
   });
 });

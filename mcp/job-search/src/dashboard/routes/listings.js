@@ -18,6 +18,7 @@ import { urlPassesRegistry } from '../../core/report.js';
 import { prescoreParts } from '../../core/prescore.js';
 import { weightedPrescore, getDefaultNoiseRules } from '../../core/noise.js';
 import { classifyApplyUrl } from '../../apply/ats-detect.js';
+import { getApplicationForListing } from '../../core/applications.js';
 import { sendJson } from '../http.js';
 
 /** @param {Record<string,string>} q @param {string} key */
@@ -157,7 +158,7 @@ export function register(router, deps, streamHub) {
     ));
     if (row.rowCount === 0) throw new JobSearchError('NOT_FOUND', `listing ${id} not found`);
     const listing = row.rows[0];
-    const [events, documents, followups, openReview, duplicates, alsoPosted, runSightings] = await deps.withClient((c) => Promise.all([
+    const [events, documents, followups, openReview, duplicates, alsoPosted, runSightings, application] = await deps.withClient((c) => Promise.all([
       listEvents(c, id, { limit: 50 }),
       listDocuments(c, id),
       // Scoped in SQL via listingId (not an in-memory filter after a system-wide LIMIT) so a listing's own
@@ -169,6 +170,7 @@ export function register(router, deps, streamHub) {
       c.query('SELECT id, title, company, source, status FROM ic_job_listings WHERE duplicate_of = $1', [id]),
       c.query('SELECT id, source, location FROM ic_job_listings WHERE duplicate_of = $1 OR repost_of = $1', [id]),
       c.query('SELECT run_id FROM ic_scan_run_items WHERE listing_id = $1 ORDER BY run_id DESC LIMIT 10', [id]),
+      getApplicationForListing(c, id),
     ]));
     const files = listOutputFiles(deps.outputRoot);
     const aliases = deps.config?.companyAliases ?? {};
@@ -192,6 +194,11 @@ export function register(router, deps, streamHub) {
       run_sightings: runSightings.rows.map((r2) => Number(r2.run_id)),
       prescore_breakdown: prescoreBreakdown,
       ats,
+      // Apply pipeline slice 3 (application card, plan section 7): the most recent non-withdrawn
+      // application for this listing, or null when none has been started yet. Nested here (like `ats`
+      // above) so the job-detail page assembles the whole application card from this one GET, matching
+      // the existing pattern for documents/followups/prescore_breakdown.
+      application,
     });
   });
 
