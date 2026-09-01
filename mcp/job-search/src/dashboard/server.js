@@ -20,6 +20,7 @@ import { register as registerReport } from './routes/report.js';
 import { register as registerCalendar } from './routes/calendar.js';
 import { register as registerDocuments } from './routes/documents.js';
 import { register as registerApplications } from './routes/applications.js';
+import { register as registerCredentials } from './routes/credentials.js';
 import { register as registerMemory } from './routes/memory.js';
 import { register as registerAnalytics } from './routes/analytics.js';
 import { register as registerSources } from './routes/sources.js';
@@ -44,6 +45,9 @@ import { register as registerSources } from './routes/sources.js';
  * @property {ReturnType<typeof import('./calendar-cache.js').createCalendarCache>} calendarCache
  * @property {ReturnType<typeof import('./scan-runner.js').createScanRunner>} scanRunner
  * @property {string} outputRoot absolute path to output/
+ * @property {{ read: (target: string) => Promise<{username:string,password:string}|null>, write: (target: string, username: string, password: string) => Promise<void>, delete: (target: string) => Promise<boolean>, list: () => Promise<string[]> }} [credentials]
+ *   apply pipeline slice 4 (src/core/credentials.js's createCredentials()). bin/dashboard.js always wires
+ *   a real one; route/tick tests inject a fake the same way deps.scanRunner/deps.calendar are stubbed.
  * @property {typeof fetch} [fetch]
  * @property {string} [version]
  * @property {string} [startedAt] ISO, set once at process start
@@ -214,6 +218,7 @@ export function createDashboardServer(deps, opts = {}) {
   registerCalendar(router, deps);
   registerDocuments(router, deps);
   registerApplications(router, deps, streamHub);
+  registerCredentials(router, deps, streamHub);
   registerMemory(router, deps);
   registerAnalytics(router, deps);
   registerSources(router, deps);
