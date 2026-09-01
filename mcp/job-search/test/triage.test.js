@@ -114,6 +114,7 @@ async function cleanup() {
     await client.query('DELETE FROM ic_job_review_queue WHERE candidate_id = ANY($1::int[])', [ids]);
     await client.query('DELETE FROM ic_scan_run_items WHERE listing_id = ANY($1::int[])', [ids]);
     await client.query('UPDATE ic_job_listings SET duplicate_of = NULL WHERE id = ANY($1::int[])', [ids]);
+    await client.query('DELETE FROM ic_followups WHERE listing_id = ANY($1::int[])', [ids]);
     await client.query('DELETE FROM ic_job_listings WHERE id = ANY($1::int[])', [ids]);
   }
   await client.query('DELETE FROM ic_scan_runs WHERE profile = $1', [PROFILE]);

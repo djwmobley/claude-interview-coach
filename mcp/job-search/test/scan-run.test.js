@@ -312,6 +312,7 @@ describe('runScan persisted', () => {
       await client.query(`DELETE FROM ic_job_review_queue WHERE candidate_id IN (SELECT id FROM ic_job_listings WHERE company = $1)`, [CO4]);
       await client.query(`DELETE FROM ic_scan_run_items WHERE listing_id IN (SELECT id FROM ic_job_listings WHERE company = $1)`, [CO4]);
       await client.query(`UPDATE ic_job_listings SET duplicate_of = NULL, repost_of = NULL WHERE company = $1`, [CO4]);
+      await client.query(`DELETE FROM ic_followups WHERE listing_id IN (SELECT id FROM ic_job_listings WHERE company = $1)`, [CO4]);
       await client.query(`DELETE FROM ic_job_listings WHERE company = $1`, [CO4]);
     }
   });

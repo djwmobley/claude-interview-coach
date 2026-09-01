@@ -19,7 +19,7 @@ import {
   TRANSITIONS, APPLICATION_STATES, ATS_TYPES,
   createApplication, transition, resume, retry, onDocumentLinked, markSubmitted, reconcileStale,
   getApplication, getApplicationForListing, approve, listApplicationEvents,
-  recordSubmitRequestSent, hasSubmitRequestSentThisAttempt, markAppliedByHand,
+  recordSubmitRequestSent, hasSubmitRequestSentThisAttempt, markAppliedByHand, APPLY_NUDGE_PREFIX,
 } from '../src/core/applications.js';
 
 const CO = `ZZ-TEST-APPLICATIONS-${process.pid}`;
@@ -69,6 +69,9 @@ async function insertDocument(listingId, kind, relPath) {
 
 async function cleanup() {
   if (listingIds.length === 0) return;
+  // Apply pipeline slice 7: markSubmitted()/markAppliedByHand() now also create a followup row
+  // (created_from = 'apply-nudge:<id>') for every listing this file's tests submit an application for.
+  await client.query('DELETE FROM ic_followups WHERE listing_id = ANY($1::int[])', [listingIds]);
   await client.query('DELETE FROM ic_job_application_events WHERE application_id IN (SELECT id FROM ic_job_applications WHERE listing_id = ANY($1::int[]))', [listingIds]);
   await client.query('DELETE FROM ic_job_applications WHERE listing_id = ANY($1::int[])', [listingIds]);
   await client.query('DELETE FROM ic_job_documents WHERE listing_id = ANY($1::int[])', [listingIds]);
@@ -363,6 +366,40 @@ describe('markSubmitted: listing status guard', () => {
     await markSubmitted(client, id, {});
     const listing = await client.query('SELECT status FROM ic_job_listings WHERE id = $1', [listingId]);
     assert.equal(listing.rows[0].status, 'interviewing');
+  });
+});
+
+describe('markSubmittedUnwrapped: unconditional 5-day nudge follow-up (apply pipeline slice 7)', () => {
+  test('markSubmitted() creates a followup due 5 days later, correlated by created_from', async () => {
+    const { id, listingId } = await seedApplication('submitting');
+    const before = new Date();
+    const row = await markSubmitted(client, id, {});
+    const f = await client.query(`SELECT * FROM ic_followups WHERE created_from = $1`, [`${APPLY_NUDGE_PREFIX}${id}`]);
+    assert.equal(f.rowCount, 1);
+    const followup = f.rows[0];
+    assert.equal(followup.listing_id, listingId);
+    assert.equal(followup.status, 'open');
+    const expectedDue = new Date(new Date(row.submitted_at).getTime() + 5 * 24 * 60 * 60 * 1000);
+    assert.ok(Math.abs(new Date(followup.due_at).getTime() - expectedDue.getTime()) < 5000);
+    assert.ok(new Date(followup.due_at).getTime() > before.getTime());
+  });
+
+  test('markAppliedByHand() ("I applied by hand") ALSO creates the nudge -- every submitted transition, not just the worker path', async () => {
+    const { id } = await seedApplication('needs_human', { pending_question: { kind: 'credential', target: 'x', username: 'y' } });
+    await markAppliedByHand(client, id, {});
+    const f = await client.query(`SELECT id FROM ic_followups WHERE created_from = $1`, [`${APPLY_NUDGE_PREFIX}${id}`]);
+    assert.equal(f.rowCount, 1);
+  });
+
+  test('the nudge is created exactly once per application (the state machine cannot re-enter "submitted")', async () => {
+    const { id } = await seedApplication('submitting');
+    await markSubmitted(client, id, {});
+    const f = await client.query(`SELECT id FROM ic_followups WHERE created_from = $1`, [`${APPLY_NUDGE_PREFIX}${id}`]);
+    assert.equal(f.rowCount, 1);
+    // 'submitted' has no outgoing edge back to 'submitting' in TRANSITIONS, so there is no legal way to
+    // route this same application through markSubmittedUnwrapped a second time -- this assertion documents
+    // that invariant rather than attempting (and failing) a second call.
+    assert.deepEqual(TRANSITIONS.submitted, ['confirmed', 'withdrawn']);
   });
 });
 

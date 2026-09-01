@@ -20,6 +20,7 @@ async function cleanup() {
   if (ids.length === 0) return;
   await client.query('DELETE FROM ic_job_review_queue WHERE candidate_id = ANY($1::int[])', [ids]);
   await client.query('DELETE FROM ic_job_events WHERE listing_id = ANY($1::int[])', [ids]);
+  await client.query('DELETE FROM ic_followups WHERE listing_id = ANY($1::int[])', [ids]);
   await client.query('DELETE FROM ic_job_listings WHERE id = ANY($1::int[])', [ids]);
 }
 

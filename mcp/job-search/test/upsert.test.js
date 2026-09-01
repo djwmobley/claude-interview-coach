@@ -41,6 +41,7 @@ after(async () => {
   // the exact scenario under test), so clearing duplicate_of alone re-triggers the very unique-index
   // collision the fix exists to avoid. Matches test/helpers/scan-fixtures.js's cleanupScan.
   await client.query(`UPDATE ic_job_listings SET url_normalized = NULL, external_id = NULL, duplicate_of = NULL, repost_of = NULL WHERE company = $1`, [CO]);
+  await client.query(`DELETE FROM ic_followups WHERE listing_id IN (SELECT id FROM ic_job_listings WHERE company = $1)`, [CO]);
   await client.query(`DELETE FROM ic_job_listings WHERE company = $1`, [CO]);
   await client.end();
 });

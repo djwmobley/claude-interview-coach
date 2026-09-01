@@ -66,11 +66,23 @@ export const REOPEN_REASONS = Object.freeze({
 });
 
 /**
- * The full closed set of review-queue reasons inheritStatus can produce: every REOPEN_REASONS value plus
- * the two reasons that are not status-specific.
+ * Review-queue reasons the apply pipeline's mail classifier can produce (apply pipeline slice 7,
+ * amended spec: "using NEW review reasons mail_rejected and mail_closed"). A rejection or
+ * position-closed mail NEVER writes a status transition itself -- it only ever routes the listing to
+ * review with one of these two reasons (src/apply/mail-confirm.js) -- so they are listed here
+ * separately from REOPEN_REASONS (which is keyed by the FROM status a re-arrival left) rather than
+ * folded into it: neither reason corresponds to a listing status at all.
+ */
+export const MAIL_REVIEW_REASONS = Object.freeze(['mail_rejected', 'mail_closed']);
+
+/**
+ * The full closed set of review-queue reasons inheritStatus and the apply pipeline's mail classifier can
+ * produce: every REOPEN_REASONS value, the two reasons that are not status-specific, and the two mail
+ * reasons above.
  */
 export const QUEUE_REASONS = Object.freeze([
   ...Object.values(REOPEN_REASONS),
   'concurrent_review',
   'unrecognized_status',
+  ...MAIL_REVIEW_REASONS,
 ]);
