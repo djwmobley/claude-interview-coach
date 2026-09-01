@@ -89,6 +89,45 @@ export function fitBucket(score) {
 }
 
 /**
+ * Total classification of a listing's fit-score DISPLAY state (jobs-unscored-visibility PR, Change 3):
+ * every visible row maps to EXACTLY one state, so a bare/blank unscored state is impossible. Precedence:
+ *   1. `fit_score` IS NOT NULL always wins, regardless of status/noise/prescore -- the number itself is
+ *      shown, using fitBucket()'s existing thresholds.
+ *   2. `noise_class` not in (ok, ok_manual) -> 'noise'.
+ *   3. `status === 'review'` AND (prescore is in [floor, ceiling] OR prescore IS NULL) -> 'pending
+ *      review'.
+ *   4. otherwise -> 'below floor' (covers prescore < floor, prescore IS NULL outside pending-review,
+ *      and the rare case of an in-band model_band row that has not reached the model step yet on this
+ *      scan -- an accepted, documented imprecision for that last case: model_band rows are normally
+ *      fit-scored within the same scan they are found in, so this label only shows if the model step is
+ *      disabled or a batch failed; see this PR's blind-spot note).
+ * Every unscored sub-state (2, 3, 4) reuses fitBucket()'s existing neutral 'not-scored' CSS bucket --
+ * this function only changes the LABEL text shown/tooltipped, never the color/class, and adds no new
+ * column.
+ * @param {{ fit_score?: number|null, noise_class?: string|null, status?: string|null, prescore?: number|null }} row
+ * @param {{ floor: number, ceiling: number }|null|undefined} [triageBand] the dashboard's own
+ *   config.triage.deterministic floor/ceiling (see GET /api/listings' `triage` field). Unavailable (the
+ *   server has no config/triage.json loaded) means "in-band" can never be proven, so a non-null prescore
+ *   on a review row falls to 'below floor' rather than 'pending review' -- see this PR's blind-spot note.
+ * @returns {{ label: string, bucket: string, scored: boolean }}
+ */
+export function fitDisplayState(row, triageBand) {
+  const fitScore = row.fit_score;
+  if (fitScore !== null && fitScore !== undefined) {
+    return { label: String(fitScore), bucket: fitBucket(fitScore), scored: true };
+  }
+  const noiseOk = row.noise_class === 'ok' || row.noise_class === 'ok_manual';
+  if (!noiseOk) return { label: 'noise', bucket: 'not-scored', scored: false };
+  const prescore = row.prescore;
+  const prescoreKnown = typeof prescore === 'number' && !Number.isNaN(prescore);
+  const inBand = Boolean(triageBand) && prescoreKnown && /** @type {number} */ (prescore) >= /** @type {{floor:number}} */ (triageBand).floor && /** @type {number} */ (prescore) <= /** @type {{ceiling:number}} */ (triageBand).ceiling;
+  if (row.status === 'review' && (inBand || !prescoreKnown)) {
+    return { label: 'pending review', bucket: 'not-scored', scored: false };
+  }
+  return { label: 'below floor', bucket: 'not-scored', scored: false };
+}
+
+/**
  * Format an ISO date/datetime string as a short human date, e.g. "Aug 27". Invalid/missing input
  * renders as a placeholder dash-free string, never throws.
  * @param {string|Date|null|undefined} value

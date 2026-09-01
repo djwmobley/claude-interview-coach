@@ -31,8 +31,8 @@ describe('DEFAULT_FILTER_STATE (single source of truth for the default Jobs view
   // shared constant's exact shape. A future literal reintroduced at either call site instead of this
   // constant would not be caught by this test, but a change to the constant's shape not reflected here
   // would be.
-  test('is exactly { hideDuplicates: true, hideSkip: true }', () => {
-    assert.deepEqual(DEFAULT_FILTER_STATE, { hideDuplicates: true, hideSkip: true });
+  test('is exactly { hideDuplicates: true, hideSkip: true, hideReview: true }', () => {
+    assert.deepEqual(DEFAULT_FILTER_STATE, { hideDuplicates: true, hideSkip: true, hideReview: true });
   });
 
   test('is frozen (Object.freeze), so a caller cannot mutate the shared default in place', () => {

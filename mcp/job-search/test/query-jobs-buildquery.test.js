@@ -243,6 +243,61 @@ describe('buildQuery(): hideSkip (default Jobs view hides status=skip rows)', ()
   });
 });
 
+describe('buildQuery(): hideReview (jobs-unscored-visibility PR, Change 4 -- mirrors hideSkip exactly)', () => {
+  test('hideReview alone adds the IS-NULL-OR-not-review predicate, keeping untriaged rows matchable', () => {
+    const { sql } = buildQuery({ ...BASE, hideReview: true });
+    assert.match(sql, /\(l\.status IS NULL OR l\.status <> 'review'\)/);
+  });
+
+  test('hideReview absent or false adds no predicate', () => {
+    for (const hideReview of [undefined, false]) {
+      const { sql } = buildQuery({ ...BASE, hideReview });
+      assert.doesNotMatch(sql, /l\.status <> 'review'/, `hideReview=${JSON.stringify(hideReview)}`);
+    }
+  });
+
+  test('hideReview + status containing "review": suppressed (explicit request to see review rows wins)', () => {
+    const { sql } = buildQuery({ ...BASE, hideReview: true, status: ['review', 'dead'] });
+    assert.doesNotMatch(sql, /l\.status <> 'review'/);
+    assert.match(sql, /l\.status = ANY\(\$\d+::text\[\]\)/);
+  });
+
+  test('hideReview + status NOT containing "review": applied alongside the status filter', () => {
+    const { sql } = buildQuery({ ...BASE, hideReview: true, status: ['dead', 'lost'] });
+    assert.match(sql, /l\.status <> 'review'/);
+    assert.match(sql, /l\.status = ANY\(\$\d+::text\[\]\)/);
+  });
+
+  test('every real STATUS_GROUPS group: hideReview is suppressed only for a group whose members include "review"', () => {
+    for (const [group, members] of Object.entries(STATUS_GROUPS)) {
+      const { sql } = buildQuery({ ...BASE, hideReview: true, group });
+      if (/** @type {readonly string[]} */ (members).includes('review')) {
+        assert.doesNotMatch(sql, /l\.status <> 'review'/, `group=${group} includes review, predicate must be suppressed`);
+      } else {
+        assert.match(sql, /l\.status <> 'review'/, `group=${group} does not include review, predicate must apply`);
+      }
+    }
+  });
+
+  test('hideReview + untriaged=1: applied (untriaged discards group entirely, hideReview is harmless there)', () => {
+    const { sql } = buildQuery({ ...BASE, hideReview: true, untriaged: true });
+    assert.match(sql, /l\.status <> 'review'/);
+    assert.match(sql, /l\.status IS NULL/);
+  });
+
+  test('hideReview and hideSkip together both apply, independently -- neither predicate suppresses the other', () => {
+    const { sql } = buildQuery({ ...BASE, hideReview: true, hideSkip: true });
+    assert.match(sql, /l\.status <> 'skip'/);
+    assert.match(sql, /l\.status <> 'review'/);
+  });
+
+  test('a bogus group with hideReview set does not throw', () => {
+    assert.doesNotThrow(() => buildQuery({ ...BASE, hideReview: true, group: 'bogus' }));
+    const { sql } = buildQuery({ ...BASE, hideReview: true, group: 'bogus' });
+    assert.match(sql, /l\.status <> 'review'/);
+  });
+});
+
 describe('buildQuery(): triagedBy=auto (slice 3 auto-triage spec section 7)', () => {
   test('triagedBy: "auto" adds the latest-status-event-actor correlated subquery clause', () => {
     const { sql } = buildQuery({ ...BASE, triagedBy: 'auto' });

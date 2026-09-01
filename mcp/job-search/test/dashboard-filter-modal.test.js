@@ -49,6 +49,18 @@ describe('filterStateToQuery(): hideSkip (bar-owned, deliberately opposite polar
   });
 });
 
+describe('filterStateToQuery(): hideReview (jobs-unscored-visibility PR, Change 4 -- same bar ownership and polarity as hideSkip)', () => {
+  test('true -> hideReview=1 (checked/default state DOES send a param, unlike the includeDuplicates polarity)', () => {
+    assert.equal(filterStateToQuery({ hideReview: true }).hideReview, '1');
+  });
+  test('false -> absent', () => {
+    assert.equal(Object.prototype.hasOwnProperty.call(filterStateToQuery({ hideReview: false }), 'hideReview'), false);
+  });
+  test('absent from state -> absent from query (server default stays unfiltered for MCP callers)', () => {
+    assert.equal(Object.prototype.hasOwnProperty.call(filterStateToQuery({}), 'hideReview'), false);
+  });
+});
+
 describe('filterStateToQuery(): postedAfter precedence (modal exact date wins over the bar\'s rolling window)', () => {
   test('postedAfterExact set, firstSeenDays also set: the exact date wins outright, not merged', () => {
     const q = filterStateToQuery({ postedAfterExact: '2026-01-15', firstSeenDays: '7' });
@@ -109,8 +121,8 @@ describe('activeFilterCount(): counts each modal-owned dimension once, using fil
     assert.equal(activeFilterCount(state), 11);
   });
 
-  test('bar-owned fields (search, location, firstSeenDays, hideDuplicates, hideSkip) never count toward n', () => {
-    assert.equal(activeFilterCount({ search: 'cto', location: 'Houston, TX', firstSeenDays: '7', hideDuplicates: false, hideSkip: false }), 0);
+  test('bar-owned fields (search, location, firstSeenDays, hideDuplicates, hideSkip, hideReview) never count toward n', () => {
+    assert.equal(activeFilterCount({ search: 'cto', location: 'Houston, TX', firstSeenDays: '7', hideDuplicates: false, hideSkip: false, hideReview: false }), 0);
   });
 
   test('an empty multi-select array does not count', () => {

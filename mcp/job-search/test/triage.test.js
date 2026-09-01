@@ -202,6 +202,64 @@ describe('classifyForTriage: total classification (spec section 2)', () => {
 });
 
 // ---------------------------------------------------------------------------
+// classifyForTriage: status='review' branches (jobs-unscored-visibility PR, Change 1). Closes the
+// dead-code trap the spec-adversary pass found: the old TRIAGE_CANDIDATE_QUERY excluded every real
+// status='review' row (an open review-queue item always accompanies it), so classifyForTriage's own
+// has_open_review branch could never actually fire in production even though a unit test exercised it
+// directly. review_band/review_other are the real classification for a review row now.
+// ---------------------------------------------------------------------------
+
+describe("classifyForTriage: status='review' branches (dead-code-trap fix)", () => {
+  const cfg = cfgFor();
+
+  test('noise ok, prescore in band -> review_band, action fit_only', () => {
+    const r = classifyForTriage({ status: 'review', noise_class: 'ok', prescore: 55, duplicate_of: null, expired_at: null }, cfg);
+    assert.equal(r.branch, 'review_band');
+    assert.equal(r.action, 'fit_only');
+  });
+
+  test('noise ok, prescore exactly at floor or ceiling -> review_band (inclusive both ends)', () => {
+    const atFloor = classifyForTriage({ status: 'review', noise_class: 'ok', prescore: 40, duplicate_of: null, expired_at: null }, cfg);
+    const atCeiling = classifyForTriage({ status: 'review', noise_class: 'ok', prescore: 70, duplicate_of: null, expired_at: null }, cfg);
+    assert.equal(atFloor.branch, 'review_band');
+    assert.equal(atCeiling.branch, 'review_band');
+  });
+
+  test('ok_manual counts as ok noise for review rows too', () => {
+    const r = classifyForTriage({ status: 'review', noise_class: 'ok_manual', prescore: 55, duplicate_of: null, expired_at: null }, cfg);
+    assert.equal(r.branch, 'review_band');
+  });
+
+  test('noise NOT ok (suspect) -> review_other, never scored, even with an in-band prescore', () => {
+    const r = classifyForTriage({ status: 'review', noise_class: 'suspect', prescore: 55, duplicate_of: null, expired_at: null }, cfg);
+    assert.equal(r.branch, 'review_other');
+    assert.equal(r.action, 'none');
+  });
+
+  test('noise ok, prescore below floor -> review_other, never scored', () => {
+    const r = classifyForTriage({ status: 'review', noise_class: 'ok', prescore: 20, duplicate_of: null, expired_at: null }, cfg);
+    assert.equal(r.branch, 'review_other');
+  });
+
+  test('noise ok, prescore above ceiling -> review_other, never scored (the auto_new range is not auto-scored for a review row)', () => {
+    const r = classifyForTriage({ status: 'review', noise_class: 'ok', prescore: 95, duplicate_of: null, expired_at: null }, cfg);
+    assert.equal(r.branch, 'review_other');
+  });
+
+  test('noise ok, prescore NULL -> review_other: never scored without a known prescore (the display layer still shows "pending review" for this case -- see test/dashboard-public-format.test.js)', () => {
+    const r = classifyForTriage({ status: 'review', noise_class: 'ok', prescore: null, duplicate_of: null, expired_at: null }, cfg);
+    assert.equal(r.branch, 'review_other');
+  });
+
+  test('duplicate_of and expired_at are checked BEFORE status===review, so those branches still win for a review row', () => {
+    const dup = classifyForTriage({ status: 'review', noise_class: 'ok', prescore: 55, duplicate_of: 42, expired_at: null }, cfg);
+    assert.equal(dup.branch, 'duplicate');
+    const expired = classifyForTriage({ status: 'review', noise_class: 'ok', prescore: 55, duplicate_of: null, expired_at: new Date() }, cfg);
+    assert.equal(expired.branch, 'expired');
+  });
+});
+
+// ---------------------------------------------------------------------------
 // triageSchema
 // ---------------------------------------------------------------------------
 
@@ -346,11 +404,46 @@ describe('runDeterministicTriage', () => {
     const id = await insertListing({ prescore: 95 });
     await recordRunItem(runId, id, 'greenhouse');
     const counts = await runDeterministicTriage(client, runId, cfgFor({ deterministic: { enabled: false } }));
-    assert.deepEqual(counts, { skip_noise: 0, skip_low: 0, auto_new: 0, model_band: 0, has_open_review: 0, autoNewIds: [] });
+    assert.deepEqual(counts, {
+      skip_noise: 0, skip_low: 0, auto_new: 0, model_band: 0, has_open_review: 0, review_band: 0, review_other: 0,
+      autoNewIds: [], reviewBandIds: [],
+    });
     const row = await client.query('SELECT status FROM ic_job_listings WHERE id = $1', [id]);
     assert.equal(row.rows[0].status, null);
     const band = await loadModelBandIds(client, runId, cfgFor({ deterministic: { enabled: false } }));
     assert.deepEqual(band.ids, []);
+  });
+
+  // -------------------------------------------------------------------------
+  // status='review' rows (jobs-unscored-visibility PR, Change 1): the deterministic step collects
+  // review_band ids for the model step's fit-only apply, but never itself writes status for a review
+  // row -- status stays owned by the dedup review workflow (src/tools/review.js).
+  // -------------------------------------------------------------------------
+
+  test("a real status='review' row is classified review_band and collected into reviewBandIds -- proves the dead-code-trap fix end to end against the real candidate query", async () => {
+    const runId = await insertRun();
+    const id = await insertListing({ status: 'review', prescore: 55 }); // noise_class 'ok' by default
+    await enqueueOpenReview(id); // real-world invariant: status='review' always has an open review-queue row
+    await recordRunItem(runId, id, 'greenhouse');
+    const counts = await runDeterministicTriage(client, runId, cfgFor());
+    assert.equal(counts.review_band, 1);
+    assert.deepEqual(counts.reviewBandIds, [id]);
+    const row = await client.query('SELECT status, fit_score FROM ic_job_listings WHERE id = $1', [id]);
+    assert.equal(row.rows[0].status, 'review', 'the deterministic step never writes status for a review row');
+    assert.equal(row.rows[0].fit_score, null, 'the deterministic step never writes fit_score either -- that is the model step\'s job');
+  });
+
+  test("a status='review' row that is noisy or out of band lands in review_other, counted, never scored", async () => {
+    const runId = await insertRun();
+    const outOfBand = await insertListing({ status: 'review', prescore: 10 });
+    const noisy = await insertListing({ status: 'review', prescore: 55, noiseClass: 'suspect' });
+    const unknownPrescore = await insertListing({ status: 'review', prescore: null });
+    for (const id of [outOfBand, noisy, unknownPrescore]) await enqueueOpenReview(id);
+    for (const id of [outOfBand, noisy, unknownPrescore]) await recordRunItem(runId, id, 'greenhouse');
+    const counts = await runDeterministicTriage(client, runId, cfgFor());
+    assert.equal(counts.review_other, 3);
+    assert.equal(counts.review_band, 0);
+    assert.deepEqual(counts.reviewBandIds, []);
   });
 });
 
@@ -710,6 +803,84 @@ describe('runModelTriage: auto_new fit-only apply path (auto_new band model scor
 });
 
 // ---------------------------------------------------------------------------
+// runModelTriage: review_band fit-only apply path (jobs-unscored-visibility PR, Change 1). Mirrors the
+// auto_new describe block immediately above, one-for-one, but exercises the SEPARATE review_fit_*
+// counters and confirms a review row's status is never touched by this pass.
+// ---------------------------------------------------------------------------
+
+describe('runModelTriage: review_band fit-only apply path (jobs-unscored-visibility PR)', () => {
+  const configDir = testConfig().configDir;
+
+  test('a review_band id gets fit_score only: status recommendation is discarded, never applied, counted review_fit_scored (never fit_only_scored or scored)', async () => {
+    const runId = await insertRun();
+    const id = await insertListing({ status: 'review', prescore: 55 });
+    const fakeExecFile = async () => ({ stdout: JSON.stringify({ type: 'result', is_error: false, structured_output: { results: [{ id, fit_score: 68, status: 'new', reason: 'model recommendation, discarded' }] } }) });
+    const stats = await runModelTriage(client, runId, [id], cfgFor({ model: { enabled: true } }), configDir, 'candidate summary text', { keywords: [] }, { execFile: fakeExecFile }, [], [id]);
+    assert.equal(stats.review_fit_scored, 1);
+    assert.equal(stats.fit_only_scored, 0, 'a review_band apply is never counted as an auto_new fit_only apply');
+    assert.equal(stats.scored, 0, 'a review_band apply is never counted as a model_band scored apply');
+    const row = await client.query('SELECT status, fit_score FROM ic_job_listings WHERE id = $1', [id]);
+    assert.equal(row.rows[0].status, 'review', 'the status recommendation is discarded -- status stays review, never overwritten to new');
+    assert.equal(row.rows[0].fit_score, 68);
+  });
+
+  test('a review_band id whose fit_score is already non-NULL, INCLUDING fit_score=0, is never overwritten, counted review_fit_already_scored', async () => {
+    const runId = await insertRun();
+    const id = await insertListing({ status: 'review', prescore: 55 });
+    await client.query('UPDATE ic_job_listings SET fit_score = 0 WHERE id = $1', [id]); // a real score of 0, never a falsy "unset"
+    const fakeExecFile = async () => ({ stdout: JSON.stringify({ type: 'result', is_error: false, structured_output: { results: [{ id, fit_score: 80, status: 'new', reason: 'model would rescore' }] } }) });
+    const stats = await runModelTriage(client, runId, [id], cfgFor({ model: { enabled: true } }), configDir, 'candidate summary text', { keywords: [] }, { execFile: fakeExecFile }, [], [id]);
+    assert.equal(stats.review_fit_already_scored, 1);
+    assert.equal(stats.review_fit_scored, 0);
+    const row = await client.query('SELECT fit_score FROM ic_job_listings WHERE id = $1', [id]);
+    assert.equal(row.rows[0].fit_score, 0, 'the real fit_score=0 is never overwritten by an automated fit-only apply');
+  });
+
+  test('a vanished review_band row is skipped gracefully, counted review_fit_unscored, the batch is not aborted', async () => {
+    const runId = await insertRun();
+    const id = await insertListing({ status: 'review', prescore: 55 });
+    const other = await insertListing({ status: 'review', prescore: 55 }); // a second review_band id in the SAME batch
+    await client.query('DELETE FROM ic_job_listings WHERE id = $1', [id]); // simulate the row vanishing mid-run
+    const fakeExecFile = async () => ({
+      stdout: JSON.stringify({
+        type: 'result', is_error: false,
+        structured_output: { results: [{ id, fit_score: 62, status: 'new', reason: 'x' }, { id: other, fit_score: 63, status: 'new', reason: 'y' }] },
+      }),
+    });
+    const stats = await runModelTriage(client, runId, [id, other], cfgFor({ model: { enabled: true } }), configDir, 'candidate summary text', { keywords: [] }, { execFile: fakeExecFile }, [], [id, other]);
+    assert.equal(stats.batches_ok, 1, 'a vanished row never fails the whole batch');
+    assert.equal(stats.review_fit_unscored, 1, 'the vanished id is counted review_fit_unscored, never thrown');
+    assert.equal(stats.review_fit_scored, 1, 'the other review_band id in the same batch is still applied normally');
+    const row = await client.query('SELECT fit_score FROM ic_job_listings WHERE id = $1', [other]);
+    assert.equal(row.rows[0].fit_score, 63);
+  });
+
+  test('a requested review_band id never appearing in a successful batch is counted review_fit_unscored, not model_band unscored', async () => {
+    const runId = await insertRun();
+    const id = await insertListing({ status: 'review', prescore: 55 });
+    const fakeExecFile = async () => ({ stdout: JSON.stringify({ type: 'result', is_error: false, structured_output: { results: [] } }) });
+    const stats = await runModelTriage(client, runId, [id], cfgFor({ model: { enabled: true } }), configDir, 'candidate summary text', { keywords: [] }, { execFile: fakeExecFile }, [], [id]);
+    assert.equal(stats.review_fit_unscored, 1);
+    assert.equal(stats.unscored, 0, 'a review_band omission is never counted in the model_band unscored bucket');
+  });
+
+  test('a failed batch (non-zero exit) counts review_band ids review_fit_unscored, never nowhere', async () => {
+    const runId = await insertRun();
+    const id = await insertListing({ status: 'review', prescore: 55 });
+    const fakeExecFile = async () => {
+      const err = new Error('claude exited 1');
+      // @ts-ignore test-only error shape
+      err.code = 1;
+      throw err;
+    };
+    const stats = await runModelTriage(client, runId, [id], cfgFor({ model: { enabled: true } }), configDir, 'candidate summary text', { keywords: [] }, { execFile: fakeExecFile }, [], [id]);
+    assert.equal(stats.batches_failed, 1);
+    assert.equal(stats.review_fit_unscored, 1);
+    assert.equal(stats.review_fit_scored, 0);
+  });
+});
+
+// ---------------------------------------------------------------------------
 // runTriage: combined model_band + auto_new list capped ONCE at maxListingsPerRun (MUST-FIX B1)
 // ---------------------------------------------------------------------------
 
@@ -773,6 +944,45 @@ describe('runTriage: combined model_band + auto_new list, capped once (MUST-FIX 
     const stats = await runTriage(client, runId, config, { keywords: [] }, { execFile: fakeExecFile });
     assert.equal(stats.model.fit_only_scored, 2);
     assert.equal(stats.model.capped, 1);
+  });
+
+  test('cap-spike priority (jobs-unscored-visibility PR): model_band first, then auto_new, then review_band LAST -- review_band starves first under a cap spike', async () => {
+    const runId = await insertRun();
+    const bandIds = [];
+    for (let i = 0; i < 2; i++) bandIds.push(await insertListing({ prescore: 55 })); // model_band
+    const autoIds = [];
+    for (let i = 0; i < 2; i++) autoIds.push(await insertListing({ prescore: 90 })); // auto_new
+    const reviewIds = [];
+    for (let i = 0; i < 2; i++) {
+      const id = await insertListing({ status: 'review', prescore: 55 });
+      await enqueueOpenReview(id);
+      reviewIds.push(id);
+    }
+    for (const id of [...bandIds, ...autoIds, ...reviewIds]) await recordRunItem(runId, id, 'greenhouse');
+    const triageCfg = {
+      present: true,
+      deterministic: { enabled: true, floor: 40, ceiling: 70 },
+      model: { enabled: true, modelName: 'x', batchSize: 10, skipMaxFit: 30, timeoutMs: 5000, maxListingsPerRun: 5, maxBatchesPerRun: 5, descriptionTruncateChars: 1200 },
+    };
+    const seenIds = /** @type {number[]} */ ([]);
+    const fakeExecFile = async (/** @type {string} */ _bin, /** @type {string[]} */ _args, /** @type {any} */ opts) => {
+      const requested = JSON.parse(String(opts.input).split('\n').pop());
+      seenIds.push(...requested.listings.map((/** @type {any} */ l) => l.id));
+      const results = requested.listings.map((/** @type {any} */ l) => ({ id: l.id, fit_score: 50, status: 'maybe', reason: 'ok' }));
+      return { stdout: JSON.stringify({ type: 'result', is_error: false, structured_output: { results } }) };
+    };
+    const config = { ...testConfig(), configDir, triage: triageCfg };
+    const stats = await runTriage(client, runId, config, { keywords: [] }, { execFile: fakeExecFile });
+    // maxListingsPerRun=5: 2 model_band + 2 auto_new + only 1 of the 2 review_band ids fit; the second
+    // review_band id is capped by the SAME combined ceiling, never an independent review_band cap.
+    assert.equal(seenIds.length, 5, 'exactly 5 ids reach the model, the combined per-run ceiling');
+    assert.equal(stats.model.capped, 1, 'exactly one id (the review_band overflow) is capped');
+    assert.ok(bandIds.every((id) => seenIds.includes(id)), 'every model_band id is sent');
+    assert.ok(autoIds.every((id) => seenIds.includes(id)), 'every auto_new id is sent');
+    assert.equal(seenIds.filter((id) => reviewIds.includes(id)).length, 1, 'only one review_band id fits after model_band + auto_new -- it starves first');
+    assert.equal(stats.model.scored, 2, 'the 2 model_band ids are scored');
+    assert.equal(stats.model.fit_only_scored, 2, 'the 2 admitted auto_new ids are fit-scored');
+    assert.equal(stats.model.review_fit_scored, 1, 'the 1 admitted review_band id is fit-scored');
   });
 });
 

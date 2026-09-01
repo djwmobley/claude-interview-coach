@@ -11,7 +11,14 @@ import { sendJson } from '../http.js';
 
 const DIFF_FIELDS = Object.freeze(['title', 'company', 'location', 'salary_min', 'salary_max', 'posted_at', 'source', 'status']);
 
-/** @param {import('pg').ClientBase} c @param {number|null} id */
+/**
+ * @param {import('pg').ClientBase} c @param {number|null} id
+ * `fit_score` is deliberately NOT in the SELECT list (jobs-unscored-visibility PR, cross-cutting note):
+ * the dedup review view compares a candidate against its matches on the DIFF_FIELDS below, and a fit
+ * score (a judgment call, unrelated to whether two rows are the same listing) must never bias a human's
+ * merge/separate decision. This omission predates review-band fit-only scoring and is unaffected by it
+ * -- a review row CAN carry a fit_score now, this view still never shows it here.
+ */
 async function loadListingBrief(c, id) {
   if (id == null) return null;
   const r = await c.query('SELECT id, title, company, location, salary_min, salary_max, posted_at, source, status, url_normalized, url FROM ic_job_listings WHERE id = $1', [id]);

@@ -114,6 +114,15 @@ export function buildQuery(a) {
   const statusArrayHasSkip = hasStatus && a.status.includes('skip');
   const groupHasSkip = !a.untriaged && a.group && Object.prototype.hasOwnProperty.call(STATUS_GROUPS, a.group) && STATUS_GROUPS[a.group].includes('skip');
   if (a.hideSkip && !statusArrayHasSkip && !groupHasSkip) where.push(`(l.status IS NULL OR l.status <> 'skip')`);
+  // Dashboard-only extension (jobs-unscored-visibility PR, Change 4): default Jobs view hides
+  // status='review' rows -- mirrors hideSkip immediately above, exact same shape and exact same
+  // precedence rules (suppressed when the caller's own `status` array names 'review' explicitly, or
+  // when a non-untriaged `group` whose members include 'review' is requested -- today only 'system'
+  // does). Like hideSkip, never part of the MCP tool's zod schema, so it never applies for an MCP
+  // caller.
+  const statusArrayHasReview = hasStatus && a.status.includes('review');
+  const groupHasReview = !a.untriaged && a.group && Object.prototype.hasOwnProperty.call(STATUS_GROUPS, a.group) && STATUS_GROUPS[a.group].includes('review');
+  if (a.hideReview && !statusArrayHasReview && !groupHasReview) where.push(`(l.status IS NULL OR l.status <> 'review')`);
   // Dashboard-only extension (slice 3 auto-triage spec section 7, like `group`/`untriaged` above):
   // narrows to rows whose most recent 'status' event was written by the automated triage step. A
   // correlated subquery per row is cheap enough at this project's scale (hundreds to low thousands of

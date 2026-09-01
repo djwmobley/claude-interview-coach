@@ -50,6 +50,21 @@
  * zero writes, `runModelTriage()` is never called, so no `claude` process is ever spawned. Idempotent
  * for the same reason as the primary loop: once a row's `fit_score` is set, it no longer matches
  * `LEFTOVER_FIT_QUERY`.
+ *
+ * **Review-band leftover fit-scoring pass (jobs-unscored-visibility PR, Change 2), added after the
+ * auto_new leftover pass above.** A THIRD, independent pass, run after both passes above complete:
+ * fit-scores historical `status='review'` rows that are noise-ok and prescore-in-band but never got a
+ * `fit_score` -- backlog rows neither the primary replay loop nor the auto_new leftover pass above can
+ * ever reach, since a review row's status is never `IS NULL` (excluded by `RUN_IDS_QUERY`) and is never
+ * `'new'` (excluded by `LEFTOVER_FIT_QUERY`). See `LEFTOVER_REVIEW_FIT_QUERY`'s own doc comment for the
+ * exact predicate. Reuses `runModelTriage()` the SAME way the auto_new leftover pass does: the same id
+ * list as both `ids` and `reviewBandIds` (never `autoNewIds` -- review-band ids use their own
+ * `review_fit_*` counters, see src/core/triage.js), so every candidate takes the review-band fit-only
+ * apply path, never a bespoke UPDATE (that call shape inherits the FOR-UPDATE guard that makes
+ * concurrent scan+backfill safe). `--dry-run` gates this pass exactly like the one above: it prints the
+ * candidate count/ids and performs zero writes, `runModelTriage()` is never called, so no `claude`
+ * process is ever spawned. Idempotent for the same reason: once a row's `fit_score` is set, it no
+ * longer matches `LEFTOVER_REVIEW_FIT_QUERY`.
  */
 import { connectDedicated } from '../src/core/db.js';
 import { loadConfig, loadTriageCandidateSummary } from '../src/core/config.js';
@@ -103,8 +118,43 @@ const LEFTOVER_FIT_QUERY = `
   ORDER BY l.id
 `;
 
+/**
+ * Historical `status='review'` rows that are noise-ok and prescore-in-band but never got a `fit_score`
+ * (jobs-unscored-visibility PR, Change 2) -- a SEPARATE leftover pass from both `RUN_IDS_QUERY`'s replay
+ * loop and `LEFTOVER_FIT_QUERY`'s auto_new pass above: a review row's status is never `IS NULL` (so the
+ * replay loop's own `l.status IS NULL` guard excludes it) and never `'new'` (so `LEFTOVER_FIT_QUERY`'s
+ * own `l.status = 'new'` guard excludes it too). Neither existing pass can ever reach it no matter how
+ * many times either runs.
+ *
+ * The noise/prescore predicate mirrors `classifyForTriage()`'s own `review_band` branch
+ * (src/core/triage.js) exactly: `noise_class` in the same `noiseOk` set that function checks
+ * (`'ok'`/`'ok_manual'`), and `prescore` between the SAME `config.triage.deterministic.floor`/`ceiling`
+ * values passed in as `$1`/`$2` -- never a hardcoded 40/70, so a future config edit changes this query's
+ * behavior identically to a live scan's. The liveness guards (`coalesce(record_kind,'listing') =
+ * 'listing'`, `duplicate_of IS NULL`, `expired_at IS NULL`) mirror `TRIAGE_CANDIDATE_QUERY`'s own guards
+ * for the same reason SHOULD-FIX B8 gave `LEFTOVER_FIT_QUERY` its own copies: this pass never
+ * fit-scores a note, a since-merged duplicate, or a since-expired posting.
+ *
+ * Idempotent: once a row's `fit_score` is set (by this pass, a later scan's own review-band fit-scoring,
+ * or a human), `fit_score IS NULL` excludes it from the next run of this query, so re-running this
+ * script is always safe.
+ */
+const LEFTOVER_REVIEW_FIT_QUERY = `
+  SELECT l.id
+  FROM ic_job_listings l
+  WHERE l.status = 'review'
+    AND l.fit_score IS NULL
+    AND coalesce(l.record_kind,'listing') = 'listing'
+    AND l.duplicate_of IS NULL
+    AND l.expired_at IS NULL
+    AND (l.noise_class = 'ok' OR l.noise_class = 'ok_manual')
+    AND l.prescore >= $1
+    AND l.prescore <= $2
+  ORDER BY l.id
+`;
+
 /** Branches loadTriageCandidates() can return that are worth a named bucket in the dry-run report. */
-const KNOWN_BRANCHES = ['skip_noise', 'skip_low', 'auto_new', 'model_band', 'has_open_review'];
+const KNOWN_BRANCHES = ['skip_noise', 'skip_low', 'auto_new', 'model_band', 'has_open_review', 'review_band', 'review_other'];
 
 /** @param {string[]} argv */
 function parseArgs(argv) {
@@ -250,6 +300,30 @@ async function main() {
       const candidateSummary = loadTriageCandidateSummary(config.configDir);
       const leftoverStats = await runModelTriage(client, null, leftoverIds, config.triage, config.configDir, candidateSummary, profile, {}, leftoverIds);
       process.stdout.write(`triage-backfill: leftover fit-scoring pass stats: ${JSON.stringify(leftoverStats)}\n`);
+    }
+
+    // Review-band leftover fit-scoring pass (jobs-unscored-visibility PR, Change 2), AFTER the auto_new
+    // leftover pass above: historical status='review' rows that are noise-ok and prescore-in-band but
+    // never got a fit score. --dry-run gates this pass exactly like the one above: only the candidate
+    // count/ids are printed, runModelTriage() is never called, so zero writes happen and no `claude`
+    // process is ever spawned.
+    const { floor, ceiling } = config.triage.deterministic;
+    const leftoverReviewResult = await client.query(LEFTOVER_REVIEW_FIT_QUERY, [floor, ceiling]);
+    const leftoverReviewIds = leftoverReviewResult.rows.map((row) => Number(row.id));
+    process.stdout.write(`triage-backfill: review-band leftover fit-scoring pass: ${leftoverReviewIds.length} candidate(s): ${JSON.stringify(leftoverReviewIds)}\n`);
+    if (args.dryRun) {
+      process.stdout.write('triage-backfill: review-band leftover fit-scoring pass: dry-run, no writes performed.\n');
+    } else if (leftoverReviewIds.length === 0) {
+      process.stdout.write('triage-backfill: review-band leftover fit-scoring pass: nothing to do.\n');
+    } else {
+      // Reuses runModelTriage() the SAME way the auto_new leftover pass above does: zero new triage
+      // logic. Passing `leftoverReviewIds` as BOTH the `ids` array and the `reviewBandIds` set (NEVER
+      // `autoNewIds`) makes every id in this pass take the review-band fit-only apply path
+      // (src/core/triage.js), the same path a normal scan's own review-band ids take. `runId: null` is
+      // legal (`ic_job_events.run_id` is nullable): no single run_id owns this cross-run pass.
+      const candidateSummary = loadTriageCandidateSummary(config.configDir);
+      const leftoverReviewStats = await runModelTriage(client, null, leftoverReviewIds, config.triage, config.configDir, candidateSummary, profile, {}, [], leftoverReviewIds);
+      process.stdout.write(`triage-backfill: review-band leftover fit-scoring pass stats: ${JSON.stringify(leftoverReviewStats)}\n`);
     }
   } catch (err) {
     const f = errFields(err);
