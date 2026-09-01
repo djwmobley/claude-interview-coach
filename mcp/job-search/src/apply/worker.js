@@ -35,6 +35,8 @@ import { buildRegistry, guardUrl } from '../core/urlguard.js';
 import { connectSession as defaultConnectSession, applyTargetMarkerPath } from '../browser/session.js';
 import { makeApplyCapability } from './apply-capability.js';
 import { ADAPTERS } from './adapters/index.js';
+import { credentialTarget, readCredential, writeCredential, generatePassword } from '../core/credentials.js';
+import { findVerificationMessage } from './gmail-verify.js';
 
 /** Same numeric key as src/core/scan-run.js's LOCK_KEY -- see the module doc comment. Never a different key. */
 export const LOCK_KEY = 730193001;
@@ -100,6 +102,17 @@ function hashLinkedFile(outputRoot, relPath) {
  *   (src/browser/session.js's reconcileTargets/writeTargetMarker) -- when present, a stale target left by
  *   a killed prior run is closed at the START of this run, and this run's own opened page is recorded for
  *   the NEXT run to reconcile in turn. Omitted entirely by tests that do not exercise this path.
+ * @property {{ read: (tenantHost: string) => Promise<{username: string, password: string}|null>, write: (tenantHost: string, username: string, password: string) => Promise<void>, generatePassword: () => string }} [credentials]
+ *   apply pipeline slice 6 test seam: override the whole per-tenant credential surface an adapter reaches
+ *   through ctx.credentials (backed by src/core/credentials.js's Windows Credential Manager wrapper by
+ *   default). Adapters that need an account (e.g. Workday) read/write through this, never import
+ *   src/core/credentials.js directly.
+ * @property {(o: { tenantHost: string, sentAfter: Date }) => Promise<import('./gmail-verify.js').VerifyResult>} [gmailVerify]
+ *   apply pipeline slice 6 test seam: override ctx.gmailVerify (backed by src/apply/gmail-verify.js's
+ *   findVerificationMessage, reusing the SAME Gmail auth path src/adapters/gmail.js already uses, by
+ *   default). An adapter never touches env.GOOGLE_TOKEN_FILE or google.js directly.
+ * @property {(ms: number) => Promise<void>} [sleep] apply pipeline slice 6 test seam: ctx.sleep, used by an
+ *   adapter's own bounded poll loop (e.g. Workday's verify-email wait). Real `setTimeout` by default.
  */
 
 /**
@@ -117,6 +130,13 @@ export async function runApplyWorker(applicationId, deps = {}) {
   const adapters = deps.adapters ?? ADAPTERS;
   const outputRoot = deps.outputRoot ?? path.join(repoRoot(), 'output');
   const bank = deps.answerBank ?? loadAnswerBank();
+  const credentials = deps.credentials ?? {
+    read: (/** @type {string} */ tenantHost) => readCredential(credentialTarget(tenantHost)),
+    write: (/** @type {string} */ tenantHost, /** @type {string} */ username, /** @type {string} */ password) => writeCredential(credentialTarget(tenantHost), username, password),
+    generatePassword,
+  };
+  const gmailVerify = deps.gmailVerify ?? ((/** @type {{ tenantHost: string, sentAfter: Date }} */ o) => findVerificationMessage({ tokenFile: env.GOOGLE_TOKEN_FILE, tenantHost: o.tenantHost, sentAfter: o.sentAfter }));
+  const sleep = deps.sleep ?? ((/** @type {number} */ ms) => new Promise((resolve) => { setTimeout(resolve, ms); }));
   // Stable, well-known path (NOT the per-run --run-marker apply-runner.js uses to detect this process
   // started -- that one is fresh-per-run, mirroring scan-runner.js's own correlation marker). This one is
   // the SAME path every run, by design: it is how a crashed run's own leftover page gets found and closed
@@ -153,7 +173,7 @@ export async function runApplyWorker(applicationId, deps = {}) {
     let result;
     try {
       result = await runOneApplication({
-        client, app, controller, adapters, outputRoot, bank, env, config, connectSession, progress, log, lookup: deps.lookup, targetMarkerFile,
+        client, app, controller, adapters, outputRoot, bank, env, config, connectSession, progress, log, lookup: deps.lookup, targetMarkerFile, credentials, gmailVerify, sleep,
       });
     } catch (err) {
       clearTimeout(timeout);
@@ -218,7 +238,7 @@ export async function runApplyWorker(applicationId, deps = {}) {
   }
 
   /**
-   * @param {{ client: import('pg').Client, app: any, controller: AbortController, adapters: Record<string, any>, outputRoot: string, bank: import('./answers.js').AnswerBank, env: any, config: any, connectSession: typeof defaultConnectSession, progress: (f: any) => void, log: (f: any) => void, lookup?: import('../core/urlguard.js').Lookup, targetMarkerFile?: string }} p
+   * @param {{ client: import('pg').Client, app: any, controller: AbortController, adapters: Record<string, any>, outputRoot: string, bank: import('./answers.js').AnswerBank, env: any, config: any, connectSession: typeof defaultConnectSession, progress: (f: any) => void, log: (f: any) => void, lookup?: import('../core/urlguard.js').Lookup, targetMarkerFile?: string, credentials: WorkerDeps['credentials'], gmailVerify: WorkerDeps['gmailVerify'], sleep: WorkerDeps['sleep'] }} p
    */
   async function runOneApplication(p) {
     const { client: c, app, controller, adapters: adapterRegistry, outputRoot: outRoot, bank: b, env: e, config: cfg, connectSession: connectSess, progress: prog, log: lg } = p;
@@ -291,6 +311,18 @@ export async function runApplyWorker(applicationId, deps = {}) {
         await recordSubmitRequestSent(c, app.id);
         lg({ evt: 'apply_submit_request_sent', application_id: app.id });
       },
+      // apply pipeline slice 6: account-holding adapters (Workday) reach credentials and Gmail
+      // verify-email ONLY through these two ctx members -- never by importing src/core/credentials.js or
+      // src/apply/gmail-verify.js directly, mirroring how every adapter already reaches the browser only
+      // through `cap`, never through `page`/session directly.
+      credentials: {
+        read: () => p.credentials.read(tenantHost),
+        write: (/** @type {string} */ username, /** @type {string} */ password) => p.credentials.write(tenantHost, username, password),
+        generatePassword: p.credentials.generatePassword,
+        target: credentialTarget(tenantHost),
+      },
+      gmailVerify: (/** @type {{ sentAfter: Date }} */ o) => p.gmailVerify({ tenantHost, sentAfter: o.sentAfter }),
+      sleep: p.sleep,
     };
 
     return adapter.run(cap, ctx);

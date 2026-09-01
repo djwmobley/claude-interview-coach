@@ -119,7 +119,9 @@ describe('runApplyWorker: totality', () => {
   });
 
   test('an unsupported ATS (no registered adapter) parks in needs_human, never touches the browser session', async () => {
-    const id = await seedApprovedApplication({ atsType: 'workday', applyUrl: 'https://acme.wd5.myworkdayjobs.com/careers/job/1' });
+    // icims has no registered adapter as of slice 6 (workday now does -- see test/workday-adapter.test.js
+    // and the worker-level workday coverage below, which is why this test no longer uses workday itself).
+    const id = await seedApprovedApplication({ atsType: 'icims', applyUrl: 'https://acme.icims.com/jobs/1/apply' });
     let sessionTouched = false;
     const result = await runApplyWorker(id, baseDeps({ connectSession: async () => { sessionTouched = true; return fakeSession(); } }));
     assert.equal(result.status, 'needs_human');
@@ -220,5 +222,64 @@ describe('runApplyWorker: totality', () => {
       await lockHolder.query('SELECT pg_advisory_unlock($1::bigint)', [APPLY_LOCK_KEY]);
       await lockHolder.end();
     }
+  });
+});
+
+describe('runApplyWorker: apply pipeline slice 6 ctx wiring (credentials, gmailVerify, sleep)', () => {
+  test('ctx.credentials is tenant-scoped to the application\'s own apply_url host; generatePassword and target pass through from deps.credentials', async () => {
+    const id = await seedApprovedApplication({ atsType: 'workday', applyUrl: 'https://acme.wd5.myworkdayjobs.com/careers/job/1' });
+    /** @type {any[]} */
+    const credCalls = [];
+    const fakeCredentials = {
+      read: async (/** @type {string} */ tenantHost) => { credCalls.push(['read', tenantHost]); return null; },
+      write: async (/** @type {string} */ tenantHost, /** @type {string} */ username, /** @type {string} */ password) => { credCalls.push(['write', tenantHost, username, password]); },
+      generatePassword: () => 'zz-worker-level-generated-password',
+    };
+    /** @type {any} */
+    let seenCtx = null;
+    const fakeAdapters = {
+      workday: {
+        ats: 'workday', requires: ['credential'], classifyOnly: false, uploadHosts: [],
+        async run(cap, ctx) {
+          seenCtx = ctx;
+          await ctx.credentials.read();
+          await ctx.credentials.write('someone@example.com', ctx.credentials.generatePassword());
+          return { outcome: 'needs_human', pendingQuestion: { kind: 'credential', target: ctx.credentials.target, username: 'someone@example.com' } };
+        },
+      },
+    };
+    const result = await runApplyWorker(id, baseDeps({ adapters: fakeAdapters, credentials: fakeCredentials }));
+    assert.equal(result.status, 'needs_human');
+    assert.equal(credCalls[0][0], 'read');
+    assert.equal(credCalls[0][1], 'acme.wd5.myworkdayjobs.com', 'read is scoped to the apply_url host, never a caller-supplied host');
+    assert.equal(credCalls[1][0], 'write');
+    assert.equal(credCalls[1][1], 'acme.wd5.myworkdayjobs.com');
+    assert.equal(credCalls[1][3], 'zz-worker-level-generated-password', 'ctx.credentials.generatePassword is the SAME function deps.credentials.generatePassword provided');
+    assert.equal(seenCtx.credentials.target, 'ic-jobsearch/acme.wd5.myworkdayjobs.com');
+  });
+
+  test('ctx.gmailVerify and ctx.sleep are threaded from deps into ctx, gmailVerify auto-scoped to the tenant host', async () => {
+    const id = await seedApprovedApplication({ atsType: 'workday', applyUrl: 'https://acme.wd5.myworkdayjobs.com/careers/job/1' });
+    /** @type {any[]} */
+    const gmailCalls = [];
+    const fakeGmailVerify = async (/** @type {{ tenantHost: string, sentAfter: Date }} */ o) => { gmailCalls.push(o); return { ok: true, code: '000000', link: null }; };
+    /** @type {any[]} */
+    const sleepCalls = [];
+    const fakeSleep = async (/** @type {number} */ ms) => { sleepCalls.push(ms); };
+    const fakeAdapters = {
+      workday: {
+        ats: 'workday', requires: ['credential'], classifyOnly: false, uploadHosts: [],
+        async run(cap, ctx) {
+          await ctx.gmailVerify({ sentAfter: new Date('2026-09-01T00:00:00Z') });
+          await ctx.sleep(1234);
+          return { outcome: 'needs_human', pendingQuestion: { kind: 'email_verification', label: 'test probe' } };
+        },
+      },
+    };
+    const result = await runApplyWorker(id, baseDeps({ adapters: fakeAdapters, gmailVerify: fakeGmailVerify, sleep: fakeSleep, credentials: { read: async () => null, write: async () => {}, generatePassword: () => 'x' } }));
+    assert.equal(result.status, 'needs_human');
+    assert.equal(gmailCalls.length, 1);
+    assert.equal(gmailCalls[0].tenantHost, 'acme.wd5.myworkdayjobs.com', 'the worker fills in tenantHost -- the adapter never has to pass it itself');
+    assert.equal(sleepCalls[0], 1234);
   });
 });
