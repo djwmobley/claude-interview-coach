@@ -16,7 +16,7 @@ const DEFAULT_WATERMARK_MS = 10000;
 const DEFAULT_RUN_POLL_MS = 2000;
 
 /**
- * @param {{ withClient: <T>(fn: (c: import('pg').PoolClient) => Promise<T>) => Promise<T>, scanRunner?: { status: () => { running: boolean, runId: number|null } }, credentials?: { read: (target: string) => Promise<{username:string,password:string}|null> } }} deps
+ * @param {{ withClient: <T>(fn: (c: import('pg').PoolClient) => Promise<T>) => Promise<T>, scanRunner?: { status: () => { running: boolean, runId: number|null } }, credentials?: { read: (target: string) => Promise<{username:string,password:string}|null> }, applyRunner?: { start: (applicationId: number) => Promise<any> } }} deps
  * @param {{ pingMs?: number, watermarkMs?: number, runPollMs?: number }} [opts]
  */
 export function createStreamHub(deps, opts = {}) {
@@ -144,6 +144,14 @@ export function createStreamHub(deps, opts = {}) {
         try {
           await deps.withClient((c) => resume(c, Number(row.id), { actor: 'apply', note: `credential found for ${target}, auto-resumed` }));
           broadcast('changed', { kind: 'events' });
+          // Apply pipeline slice 5: this poll is the OTHER half of the "resume seam" slice 4 built (the
+          // dashboard credential route is the first half) -- start the runner right away instead of
+          // leaving the newly-approved application to wait for a manual nudge. Non-fatal.
+          if (deps.applyRunner) {
+            Promise.resolve(deps.applyRunner.start(Number(row.id))).catch((err) => {
+              log.warn({ evt: 'apply_runner_start_failed', application_id: Number(row.id), ...errFields(err) });
+            });
+          }
         } catch (err) {
           log.warn({ evt: 'dashboard_credential_resume_failed', application_id: Number(row.id), ...errFields(err) });
         }

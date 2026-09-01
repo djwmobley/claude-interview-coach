@@ -64,6 +64,24 @@ export function classifyPage(s) {
 }
 
 /**
+ * reCAPTCHA v3 script-presence signal (apply pipeline slice 5, amended spec: "add a reCAPTCHA v3
+ * script-presence signal to wall.js (detect, never solve; captcha wall -> needs_human)"). Independent of
+ * classifyPage()/recordWall() above -- those are scan-specific (login-wall backoff bookkeeping written to
+ * ic_source_state) and are left untouched. This is a small, pure, total function the apply worker/adapters
+ * call directly on a fetched page's HTML: it looks for the v3 script-loader URL (`.../recaptcha/api.js?
+ * render=<site-key>`, the shape v3 always uses, distinct from v2's checkbox widget) or a `grecaptcha.
+ * execute(...)` call site (the v3 JS API invocation every v3 integration makes to obtain a token). Detect
+ * only -- there is no solve path anywhere in this codebase; a true hit is the apply worker's own signal to
+ * park the run in needs_human rather than attempt to submit past a live challenge.
+ * @param {unknown} html
+ * @returns {boolean}
+ */
+export function detectRecaptchaV3Script(html) {
+  if (typeof html !== 'string' || !html) return false;
+  return /https:\/\/www\.google\.com\/recaptcha\/api\.js\?render=/i.test(html) || /grecaptcha\.execute\s*\(/i.test(html);
+}
+
+/**
  * Page-1 throttle heuristic: count under ratio x historical median.
  * With no history (median null or 0) there is nothing to compare against.
  * @param {number} count

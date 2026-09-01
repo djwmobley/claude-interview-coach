@@ -58,6 +58,14 @@ export function register(router, deps, streamHub) {
     }));
 
     streamHub?.notifyChanged('events');
+    // Apply pipeline slice 5: the resume seam this route was built for (slice 4's own module doc comment)
+    // now actually starts the runner, instead of leaving the application sitting in 'approved' until the
+    // next tick. Non-fatal: a start failure is logged, never turns this successful resume into an error.
+    if (deps.applyRunner) {
+      Promise.resolve(deps.applyRunner.start(applicationId)).catch((err) => {
+        deps.log?.({ evt: 'apply_runner_start_failed', application_id: applicationId, err_message: err instanceof Error ? err.message.slice(0, 300) : String(err).slice(0, 300) });
+      });
+    }
     sendJson(ctx.res, 200, { ok: true, row });
   });
 }

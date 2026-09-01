@@ -2,7 +2,7 @@
 import { test, describe, before, after } from 'node:test';
 import assert from 'node:assert/strict';
 import pg from 'pg';
-import { classifyPage, suspectedThrottle, backoffFor, recordWall, recordClean, sourceEnabled, KINDS } from '../src/browser/wall.js';
+import { classifyPage, suspectedThrottle, backoffFor, recordWall, recordClean, sourceEnabled, KINDS, detectRecaptchaV3Script } from '../src/browser/wall.js';
 import { routeDecision } from '../src/browser/session.js';
 import { pgConnectionConfig } from '../src/core/config.js';
 
@@ -80,6 +80,27 @@ describe('route decision (page.route handler policy)', () => {
     assert.equal(routeDecision({ method: 'POST', resourceType: 'xhr', url: 'https://evil.example/voyager/api/graphql' }).allow, false);
     assert.equal(routeDecision({ method: 'PUT', resourceType: 'xhr', url: 'https://www.linkedin.com/voyager/api/graphql' }).allow, false);
     assert.equal(routeDecision({ method: 'DELETE', resourceType: 'xhr', url: 'https://www.indeed.com/x' }).allow, false);
+  });
+});
+
+describe('detectRecaptchaV3Script (apply pipeline slice 5, detect never solve)', () => {
+  test('detects the v3 script-loader URL shape', () => {
+    assert.equal(detectRecaptchaV3Script('<script src="https://www.google.com/recaptcha/api.js?render=6Lc..."></script>'), true);
+  });
+  test('detects a grecaptcha.execute( call site', () => {
+    assert.equal(detectRecaptchaV3Script('<script>grecaptcha.execute("site-key", {action: "submit"});</script>'), true);
+  });
+  test('a plain page with neither signal is false', () => {
+    assert.equal(detectRecaptchaV3Script('<html><body>hello</body></html>'), false);
+  });
+  test('a v2 checkbox widget script (no render= param) does not trip the v3-specific detector', () => {
+    assert.equal(detectRecaptchaV3Script('<script src="https://www.google.com/recaptcha/api.js"></script>'), false);
+  });
+  test('non-string / empty input is false, never throws', () => {
+    assert.equal(detectRecaptchaV3Script(null), false);
+    assert.equal(detectRecaptchaV3Script(undefined), false);
+    assert.equal(detectRecaptchaV3Script(''), false);
+    assert.equal(detectRecaptchaV3Script(42), false);
   });
 });
 

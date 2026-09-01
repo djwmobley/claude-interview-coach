@@ -203,10 +203,15 @@ export function hostNameProblem(host) {
 }
 
 /**
+ * Dot-boundary host suffix match: exact match or a `.`-delimited subdomain, never a bare substring match
+ * (so `greenhouse.io.example.com` never matches `greenhouse.io`). Exported (apply pipeline slice 5) so
+ * src/browser/session.js's apply-mode route policy reuses this exact function rather than re-implementing
+ * its own suffix-matching logic -- the amended spec's explicit instruction ("Reuse urlguard's hostMatches
+ * for all host comparisons; no new suffix-matching code").
  * @param {string} host
  * @param {string} domain
  */
-function hostMatches(host, domain) {
+export function hostMatches(host, domain) {
   return host === domain || host.endsWith('.' + domain);
 }
 

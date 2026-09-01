@@ -339,6 +339,35 @@ export async function onDocumentLinked(client, listingId, docKind, docId, opts =
 }
 
 /**
+ * Core of markSubmitted() (below) and markAppliedByHand() (apply pipeline slice 5): both need the SAME
+ * "transition to submitted + conditionally mark the listing applied" logic to run inside ONE already-open
+ * transaction (markAppliedByHand additionally validates its own from-state before this runs) -- the same
+ * "call the *Unwrapped core directly, never the withTransaction-wrapped export, from inside an existing
+ * transaction" pattern approve() above uses for the identical reason (a nested BEGIN would otherwise
+ * silently create a savepoint-less sub-transaction and break atomicity).
+ * @param {import('pg').ClientBase} client already inside a transaction
+ * @param {number} id
+ * @param {{ confirmationRef?: string|null, actor?: string, note?: string|null, meta?: unknown }} opts
+ */
+async function markSubmittedUnwrapped(client, id, opts) {
+  const actor = opts.actor ?? 'apply';
+  const row = await transitionUnwrapped(client, id, 'submitted', { actor, note: opts.note, meta: opts.meta }, {
+    extraSet: { confirmation_ref: opts.confirmationRef ?? null },
+  });
+  const listingRes = await client.query('SELECT status FROM ic_job_listings WHERE id = $1', [row.listing_id]);
+  const currentStatus = listingRes.rowCount ? listingRes.rows[0].status : null;
+  if (isPreApplicationStatus(currentStatus)) {
+    await applyMark(client, { id: row.listing_id, status: 'applied' }, { now: new Date(), explicit: true, actor: 'apply' });
+  } else {
+    await insertApplicationEvent(client, {
+      applicationId: id, kind: 'note', actor,
+      note: `listing status left at "${currentStatus}" (not pre-application); not overwritten with "applied"`,
+    });
+  }
+  return row;
+}
+
+/**
  * submitting -> submitted (A12). After the state transition, updates the listing's own status to
  * 'applied' via the same applyMark() helper the dashboard uses (actor 'apply', explicit: true) -- but
  * ONLY when the listing's current status is a pre-application status (see isPreApplicationStatus above).
@@ -349,29 +378,62 @@ export async function onDocumentLinked(client, listingId, docKind, docId, opts =
  * @param {{ confirmationRef?: string|null, actor?: string, note?: string|null, meta?: unknown }} [opts]
  */
 export async function markSubmitted(client, id, opts = {}) {
-  const actor = opts.actor ?? 'apply';
-  return withTransaction(client, async (c) => {
-    const row = await transitionUnwrapped(c, id, 'submitted', { actor, note: opts.note, meta: opts.meta }, {
-      extraSet: { confirmation_ref: opts.confirmationRef ?? null },
-    });
-    const listingRes = await c.query('SELECT status FROM ic_job_listings WHERE id = $1', [row.listing_id]);
-    const currentStatus = listingRes.rowCount ? listingRes.rows[0].status : null;
-    if (isPreApplicationStatus(currentStatus)) {
-      await applyMark(c, { id: row.listing_id, status: 'applied' }, { now: new Date(), explicit: true, actor: 'apply' });
-    } else {
-      await insertApplicationEvent(c, {
-        applicationId: id, kind: 'note', actor,
-        note: `listing status left at "${currentStatus}" (not pre-application); not overwritten with "applied"`,
-      });
-    }
-    return row;
-  });
+  return withTransaction(client, (c) => markSubmittedUnwrapped(c, id, opts));
 }
 
 /**
- * Moves every application stuck in 'submitting' for longer than `maxAgeMinutes` to 'failed' (A13),
- * via the normal transition path (actor 'apply'), recording why. Ships now with this test coverage;
- * bin/apply.js calling it at worker startup is a later slice.
+ * Records the durable "submit_request_sent" marker (apply pipeline slice 5, amended spec: "Record a
+ * submit_request_sent event BEFORE the final submit POST leaves. Any abort/crash after that event ->
+ * needs_human, NEVER a retryable failed (duplicate-application guard)"). A plain 'progress' event
+ * (APPLICATION_EVENT_KINDS already includes it), written on its own -- NOT wrapped in withTransaction --
+ * so the write commits immediately and independently of whatever happens next in the worker: a hard crash
+ * a millisecond after this call still leaves the durable row behind for hasSubmitRequestSentThisAttempt()/
+ * reconcileStale() to find on the next process start. Called by src/apply/worker.js immediately before an
+ * adapter's final submit click.
+ * @param {import('pg').ClientBase} client
+ * @param {number} applicationId
+ */
+export async function recordSubmitRequestSent(client, applicationId) {
+  await client.query(
+    `INSERT INTO ic_job_application_events (application_id, kind, actor, note) VALUES ($1, 'progress', 'apply', 'submit_request_sent')`,
+    [applicationId],
+  );
+}
+
+/**
+ * Whether recordSubmitRequestSent() fired during the application's CURRENT 'submitting' attempt --
+ * scoped to events created at or after the most recent state-transition-into-submitting event, so a stale
+ * submit_request_sent event left over from an EARLIER attempt (Retry/Resume increments `attempt` and
+ * re-enters 'submitting' from scratch) never leaks into this attempt's crash-safety decision. No rows in
+ * ic_job_application_events at all for this application -> false (an application that never reached
+ * 'submitting' obviously never sent a submit request).
+ * @param {import('pg').ClientBase} client
+ * @param {number} applicationId
+ * @returns {Promise<boolean>}
+ */
+export async function hasSubmitRequestSentThisAttempt(client, applicationId) {
+  const since = await client.query(
+    `SELECT created_at FROM ic_job_application_events WHERE application_id = $1 AND kind = 'state' AND to_state = 'submitting' ORDER BY created_at DESC, id DESC LIMIT 1`,
+    [applicationId],
+  );
+  if (since.rowCount === 0) return false;
+  const r = await client.query(
+    `SELECT 1 FROM ic_job_application_events WHERE application_id = $1 AND kind = 'progress' AND note = 'submit_request_sent' AND created_at >= $2 LIMIT 1`,
+    [applicationId, since.rows[0].created_at],
+  );
+  return r.rowCount > 0;
+}
+
+/**
+ * Moves every application stuck in 'submitting' for longer than `maxAgeMinutes` on (A13). Amended by
+ * apply pipeline slice 5's duplicate-application guard: a stale row whose CURRENT attempt already recorded
+ * "submit_request_sent" (hasSubmitRequestSentThisAttempt above) goes to 'needs_human' with a
+ * pending_question asking Damian to verify manually, never 'failed' -- retrying a 'failed' application
+ * resubmits the form from scratch, which after a submit request has actually left the browser risks a
+ * second, duplicate application at the ATS. A stale row that never got that far (worker died, or was
+ * still filling the form) goes to 'failed' exactly as before this slice -- the pre-existing test coverage
+ * for that path (test/applications.test.js) is unchanged by this addition. bin/apply.js calls this at
+ * worker startup (this is that "later slice" the original doc comment referred to).
  * @param {import('pg').ClientBase} client
  * @param {{ maxAgeMinutes?: number }} [opts]
  */
@@ -384,11 +446,47 @@ export async function reconcileStale(client, opts = {}) {
     );
     const results = [];
     for (const staleRow of stale.rows) {
-      results.push(await transitionUnwrapped(c, staleRow.id, 'failed', {
-        actor: 'apply', note: 'stale submitting reconciled', error: 'stale submitting reconciled',
-      }, {}));
+      const sent = await hasSubmitRequestSentThisAttempt(c, staleRow.id);
+      if (sent) {
+        results.push(await transitionUnwrapped(c, staleRow.id, 'needs_human', {
+          actor: 'apply',
+          note: 'stale submitting reconciled after submit request was sent; verify manually before retrying',
+          pending_question: {
+            kind: 'post_submit_uncertain',
+            label: 'The submit request was sent but the run did not confirm completion (crash or timeout). Check the site or your email for a confirmation before retrying, to avoid a duplicate application.',
+          },
+        }, {}));
+      } else {
+        results.push(await transitionUnwrapped(c, staleRow.id, 'failed', {
+          actor: 'apply', note: 'stale submitting reconciled', error: 'stale submitting reconciled',
+        }, {}));
+      }
     }
     return results;
+  });
+}
+
+/**
+ * needs_human -> submitted ("I applied by hand" in the dashboard's needs_human card, plan section 7 /
+ * src/core/applications.js's own module doc comment on this exact edge). Rejects with VALIDATION if the
+ * application is not currently 'needs_human'. Does NOT increment `attempt` (unlike resume()/retry()): this
+ * is not a re-entry into the automated flow, it is the human declaring the flow finished outside it.
+ * markSubmitted()'s own listing-status side effect (mark the listing 'applied' when it is still in a
+ * pre-application status) applies here identically, via the same helper.
+ * @param {import('pg').ClientBase} client
+ * @param {number} id
+ * @param {{ actor?: string, note?: string|null }} [opts]
+ */
+export async function markAppliedByHand(client, id, opts = {}) {
+  return withTransaction(client, async (c) => {
+    const cur = await c.query(`SELECT ${APPLICATION_COLS} FROM ic_job_applications WHERE id = $1 FOR UPDATE`, [id]);
+    if (cur.rowCount === 0) throw new JobSearchError('NOT_FOUND', `application ${id} not found`);
+    if (cur.rows[0].state !== 'needs_human') {
+      throw new JobSearchError('VALIDATION', `markAppliedByHand() requires application ${id} to be in state "needs_human", it is "${cur.rows[0].state}"`, {
+        details: { from: cur.rows[0].state, expected: 'needs_human' },
+      });
+    }
+    return markSubmittedUnwrapped(c, id, { ...opts, note: opts.note ?? 'marked applied by hand' });
   });
 }
 

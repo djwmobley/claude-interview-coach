@@ -65,8 +65,10 @@ describe('structural safety', () => {
     }
   });
 
-  test('no forbidden call surface anywhere in src/', () => {
+  test('no forbidden call surface anywhere in src/, EXCEPT src/apply/ (apply pipeline slice 5: a second, deliberately write-capable path, reviewed and scoped separately -- see src/browser/session.js\'s per-page route policy and src/apply/apply-capability.js\'s own frozen {fill,select,click,upload,screenshot,waitFor} surface, which is exactly this list of previously-forbidden calls, now intentionally exposed through ONE reviewed module rather than forbidden outright). The scan side (src/adapters/, src/browser/capability.js, src/core/scan-run.js, and everything else under src/) remains held to the original read-only guarantee unchanged.', () => {
+    const applyDir = path.join(SRC, 'apply');
     for (const f of files) {
+      if (f.startsWith(applyDir + path.sep)) continue;
       const src = stripComments(fs.readFileSync(f, 'utf8'));
       for (const needle of FORBIDDEN) {
         assert.ok(!src.includes(needle), `${path.relative(SRC, f)} contains ${needle}`);

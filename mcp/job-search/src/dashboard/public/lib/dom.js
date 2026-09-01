@@ -14,7 +14,7 @@
 /** Attribute names `h()` will call setAttribute with directly (section 1's ALLOWED-sink attribute list). */
 const SAFE_ATTR_NAMES = new Set([
   'class', 'id', 'type', 'name', 'placeholder', 'title', 'for', 'tabindex', 'role',
-  'colspan', 'rowspan', 'min', 'max', 'step', 'pattern', 'disabled', 'readonly',
+  'colspan', 'rowspan', 'rows', 'min', 'max', 'step', 'pattern', 'disabled', 'readonly',
   'aria-label', 'aria-hidden', 'aria-expanded', 'aria-current', 'aria-live', 'aria-describedby',
   'aria-selected', 'aria-checked', 'aria-controls', 'aria-haspopup', 'aria-disabled', 'aria-pressed', 'aria-modal',
   'aria-sort',
@@ -176,6 +176,23 @@ export function hSandboxedIframe(opts) {
   el.setAttribute('sandbox', '');
   el.setAttribute('src', opts.src);
   el.setAttribute('title', opts.title);
+  if (opts.className) el.className = opts.className;
+  return el;
+}
+
+/**
+ * The only `<img src>` construction path (apply pipeline slice 5, needs_human screenshot display),
+ * mirroring hSandboxedIframe's discipline: `src` must be a same-origin, closed-prefix API path this
+ * dashboard itself constructs (`/api/applications/:id/screenshot`), never an arbitrary caller-supplied URL.
+ * @param {{ src: string, alt: string, className?: string }} opts
+ */
+export function hApplicationScreenshot(opts) {
+  if (!/^\/api\/applications\/\d+\/screenshot$/.test(opts.src)) {
+    throw new Error('hApplicationScreenshot(): src must be a same-origin /api/applications/:id/screenshot path');
+  }
+  const el = document.createElement('img');
+  el.setAttribute('src', opts.src);
+  el.setAttribute('alt', opts.alt);
   if (opts.className) el.className = opts.className;
   return el;
 }

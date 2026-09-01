@@ -48,6 +48,11 @@ import { register as registerSources } from './routes/sources.js';
  * @property {{ read: (target: string) => Promise<{username:string,password:string}|null>, write: (target: string, username: string, password: string) => Promise<void>, delete: (target: string) => Promise<boolean>, list: () => Promise<string[]> }} [credentials]
  *   apply pipeline slice 4 (src/core/credentials.js's createCredentials()). bin/dashboard.js always wires
  *   a real one; route/tick tests inject a fake the same way deps.scanRunner/deps.calendar are stubbed.
+ * @property {{ start: (applicationId: number) => Promise<{applicationId: number, pid: number|null}>, status: () => any, armCancelBackstop: (applicationId: number) => {forced_kill_available: boolean} }} [applyRunner]
+ *   apply pipeline slice 5 (src/dashboard/apply-runner.js's createApplyRunner()). bin/dashboard.js always
+ *   wires a real one; route tests inject a fake the same way deps.scanRunner is stubbed. Every route that
+ *   lands an application in 'approved' calls `.start(id)` right after (routes/applications.js's
+ *   kickApplyRunner, routes/credentials.js's resume, stream.js's pollCredentialResume).
  * @property {typeof fetch} [fetch]
  * @property {string} [version]
  * @property {string} [startedAt] ISO, set once at process start

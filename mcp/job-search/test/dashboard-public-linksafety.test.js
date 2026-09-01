@@ -6,7 +6,7 @@
  */
 import { test, describe } from 'node:test';
 import assert from 'node:assert/strict';
-import { isSafeHttpUrl, isLinkSafe } from '../src/dashboard/public/lib/dom.js';
+import { isSafeHttpUrl, isLinkSafe, hApplicationScreenshot } from '../src/dashboard/public/lib/dom.js';
 
 describe('isSafeHttpUrl(): scheme allow-list is exactly http/https', () => {
   test('allows http and https URLs', () => {
@@ -58,5 +58,20 @@ describe('isLinkSafe(): the full guarded href/src decision', () => {
 
   test('a truthy but non-boolean urlOk (e.g. the string "true") is never treated as true', () => {
     assert.equal(isLinkSafe({ url: 'https://example.com', urlOk: /** @type {any} */ ('true') }), false);
+  });
+});
+
+describe('hApplicationScreenshot() guard (apply pipeline slice 5): src must be the exact same-origin application-screenshot path shape', () => {
+  // These assertions never reach document.createElement (the guard throws first), so they run fine
+  // without a DOM environment -- same testing boundary this file's own precedent (isSafeHttpUrl/
+  // isLinkSafe are pure) already establishes; lib/dom.js's actual DOM-construction functions
+  // (h/hSvg/hSandboxedIframe/hApplicationScreenshot) have no functional DOM test elsewhere in this repo
+  // either, only the grep-based lint check (test/dashboard-lint.test.js) that they are the only callers
+  // of document.createElement.
+  test('rejects any src not matching /^\\/api\\/applications\\/\\d+\\/screenshot$/', () => {
+    assert.throws(() => hApplicationScreenshot({ src: '/api/applications/abc/screenshot', alt: 'x' }), /same-origin/);
+    assert.throws(() => hApplicationScreenshot({ src: '/api/applications/1/screenshot?x=1', alt: 'x' }), /same-origin/);
+    assert.throws(() => hApplicationScreenshot({ src: 'https://evil.example/api/applications/1/screenshot', alt: 'x' }), /same-origin/);
+    assert.throws(() => hApplicationScreenshot({ src: '/api/documents/file?path=x', alt: 'x' }), /same-origin/);
   });
 });

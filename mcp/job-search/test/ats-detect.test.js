@@ -8,7 +8,7 @@
  */
 import { test, describe } from 'node:test';
 import assert from 'node:assert/strict';
-import { classifyApplyUrl, CONFIDENCE_LEVELS, _resetAtsOptionsCache } from '../src/apply/ats-detect.js';
+import { classifyApplyUrl, CONFIDENCE_LEVELS, _resetAtsOptionsCache, hostsForAts } from '../src/apply/ats-detect.js';
 import { ATS_TYPES } from '../src/core/applications.js';
 
 /** @param {string} url @param {{html?:string}} [opts] */
@@ -264,5 +264,17 @@ describe('classifyApplyUrl(): _resetAtsOptionsCache test hook exists and is call
   test('does not throw and does not change built-in classification results', () => {
     assert.doesNotThrow(() => _resetAtsOptionsCache());
     assert.deepEqual(classify('https://boards.greenhouse.io/acme/jobs/1'), { ats: 'greenhouse', tenant: 'acme', confidence: 'exact' });
+  });
+});
+
+describe('hostsForAts (apply pipeline slice 5, per-page route policy widening)', () => {
+  test('greenhouse and lever return their full registered host lists', () => {
+    assert.deepEqual(hostsForAts('greenhouse'), ['boards.greenhouse.io', 'job-boards.greenhouse.io', 'boards.eu.greenhouse.io', 'boards-api.greenhouse.io', 'my.greenhouse.io']);
+    assert.deepEqual(hostsForAts('lever'), ['jobs.lever.co', 'api.lever.co']);
+  });
+  test('an ATS with no registry entry (workday, unknown) returns an empty array, never throws', () => {
+    assert.deepEqual(hostsForAts('workday'), []);
+    assert.deepEqual(hostsForAts('unknown'), []);
+    assert.deepEqual(hostsForAts(/** @type {any} */ ('not-a-real-ats')), []);
   });
 });
