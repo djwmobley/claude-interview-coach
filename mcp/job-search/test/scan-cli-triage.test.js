@@ -15,7 +15,7 @@ import os from 'node:os';
 import path from 'node:path';
 import { spawn } from 'node:child_process';
 import { fileURLToPath } from 'node:url';
-import { newClient, upsertTestProfile, cleanupScan, CONFIG_DIR } from './helpers/scan-fixtures.js';
+import { newClient, upsertTestProfile, cleanupScan, CONFIG_DIR, FIXTURE_NOW } from './helpers/scan-fixtures.js';
 import { computeConfigHash } from '../src/core/config.js';
 
 const HERE = path.dirname(fileURLToPath(import.meta.url));
@@ -118,6 +118,7 @@ describe('bin/scan.js with slice 3 auto-triage enabled', () => {
     const env = {
       ...process.env,
       JOBSEARCH_FIXTURE_MAP: MAP,
+      JOBSEARCH_FIXTURE_NOW: FIXTURE_NOW.toISOString(),
       JOBSEARCH_CONFIG_DIR: tmpConfigDir,
       JOBSEARCH_CONFIG_LOCK: lockPath,
       JOBSEARCH_LOG_DIR: logDir,

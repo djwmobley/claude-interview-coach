@@ -1,17 +1,21 @@
 // @ts-check
 /**
- * Greenhouse and Lever apply adapters (apply pipeline slice 5), against a fully SCRIPTED FAKE capability
- * -- no real Chrome, no network, no live DOM. Covers the amended spec's required flows: happy path,
- * captcha wall, an unmatched REQUIRED question parking with a screenshot + pending_question, and an
- * unconfirmed resume upload refusing to proceed to submit. See each adapter module's own doc comment for
- * the honest caveat: the CSS selectors these adapters target are unverified against a live page in this
- * sandboxed environment -- this test verifies the CONTROL FLOW is correct given whatever the capability
- * reports, not that the real selectors match a real Greenhouse/Lever DOM.
+ * Greenhouse, Lever, and SmartRecruiters apply adapters (apply pipeline slices 5-6), against a fully
+ * SCRIPTED FAKE capability -- no real Chrome, no network, no live DOM. SmartRecruiters was added in slice
+ * 6 (assessed as genuinely small: no account, single form, no new state-machine state -- a structural copy
+ * of Greenhouse/Lever's own shape) and folds into this same shared test loop for exactly that reason.
+ * Covers the amended spec's required flows: happy path, captcha wall, an unmatched REQUIRED question
+ * parking with a screenshot + pending_question, and an unconfirmed resume upload refusing to proceed to
+ * submit. See each adapter module's own doc comment for the honest caveat: the CSS selectors these
+ * adapters target are unverified against a live page in this sandboxed environment -- this test verifies
+ * the CONTROL FLOW is correct given whatever the capability reports, not that the real selectors match a
+ * real Greenhouse/Lever/SmartRecruiters DOM.
  */
 import { test, describe } from 'node:test';
 import assert from 'node:assert/strict';
 import { greenhouse, SELECTORS as GH_SEL } from '../src/apply/adapters/greenhouse.js';
 import { lever, SELECTORS as LV_SEL } from '../src/apply/adapters/lever.js';
+import { smartrecruiters, SELECTORS as SR_SEL } from '../src/apply/adapters/smartrecruiters.js';
 
 /**
  * @param {{ waitFor?: Record<string, any>, uploadResult?: string|null }} responses
@@ -51,7 +55,7 @@ function makeCtx(overrides = {}) {
   };
 }
 
-for (const [name, adapter, SEL] of [['greenhouse', greenhouse, GH_SEL], ['lever', lever, LV_SEL]]) {
+for (const [name, adapter, SEL] of [['greenhouse', greenhouse, GH_SEL], ['lever', lever, LV_SEL], ['smartrecruiters', smartrecruiters, SR_SEL]]) {
   describe(`${name} adapter`, () => {
     test('happy path: fills, uploads, no custom fields, submits, confirms by heading -> submitted', async () => {
       const cap = makeFakeCap({

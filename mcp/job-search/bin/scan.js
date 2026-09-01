@@ -18,6 +18,11 @@
  *
  * JOBSEARCH_FIXTURE_MAP=<file.json> replaces the network with recorded
  * responses ({"<url prefix>": "<fixture path>"}); used by test/scan-cli.test.js.
+ *
+ * JOBSEARCH_FIXTURE_NOW=<ISO date> pins runScan's freshness clock (opts.now) to a fixed instant
+ * instead of the real clock, so fixture postings with hardcoded dates never drift stale as real time
+ * advances. Test-only seam, mirrors JOBSEARCH_FIXTURE_MAP; used by test/scan-cli.test.js and
+ * test/scan-cli-triage.test.js via test/helpers/scan-fixtures.js's FIXTURE_NOW.
  */
 import fs from 'node:fs';
 import path from 'node:path';
@@ -215,6 +220,13 @@ async function main() {
     log({ evt: 'fixture_transport_active', map: path.basename(process.env.JOBSEARCH_FIXTURE_MAP) });
   }
 
+  /** @type {Date|undefined} */
+  let fixedNow;
+  if (process.env.JOBSEARCH_FIXTURE_NOW) {
+    fixedNow = new Date(process.env.JOBSEARCH_FIXTURE_NOW);
+    log({ evt: 'fixture_now_active', now: fixedNow.toISOString() });
+  }
+
   const controller = new AbortController();
   const onSignal = (/** @type {string} */ sig) => {
     log({ evt: 'signal', signal: sig });
@@ -235,6 +247,7 @@ async function main() {
         signal: controller.signal,
         log,
         progress: (f) => log({ evt: 'progress', ...f }),
+        ...(fixedNow ? { now: fixedNow } : {}),
         ...(args.runMarker ? { onRunStarted: (runId) => writeRunMarker(/** @type {string} */ (args.runMarker), runId) } : {}),
       },
     );

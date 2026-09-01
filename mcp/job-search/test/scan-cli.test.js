@@ -12,7 +12,7 @@ import os from 'node:os';
 import path from 'node:path';
 import { spawn } from 'node:child_process';
 import { fileURLToPath } from 'node:url';
-import { newClient, upsertTestProfile, cleanupScan, CONFIG_DIR } from './helpers/scan-fixtures.js';
+import { newClient, upsertTestProfile, cleanupScan, CONFIG_DIR, FIXTURE_NOW } from './helpers/scan-fixtures.js';
 import { parseArgs, launchChrome, cdpReachable } from '../bin/scan.js';
 import { computeConfigHash } from '../src/core/config.js';
 
@@ -34,7 +34,7 @@ function runCli(args, env = {}) {
   return new Promise((resolve) => {
     const child = spawn(process.execPath, [SCAN, ...args], {
       cwd: PKG,
-      env: { ...process.env, JOBSEARCH_FIXTURE_MAP: MAP, JOBSEARCH_CONFIG_DIR: CONFIG_DIR, JOBSEARCH_LOG_DIR: logDir, ...env },
+      env: { ...process.env, JOBSEARCH_FIXTURE_MAP: MAP, JOBSEARCH_FIXTURE_NOW: FIXTURE_NOW.toISOString(), JOBSEARCH_CONFIG_DIR: CONFIG_DIR, JOBSEARCH_LOG_DIR: logDir, ...env },
       stdio: ['ignore', 'pipe', 'pipe'],
     });
     let out = '';

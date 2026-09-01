@@ -10,8 +10,7 @@
  *   node bin/cred.js list
  *   node bin/cred.js delete <target>
  */
-import crypto from 'node:crypto';
-import { credentialTarget, createCredentials } from '../src/core/credentials.js';
+import { credentialTarget, createCredentials, generatePassword } from '../src/core/credentials.js';
 import { errFields } from '../src/core/errors.js';
 
 const USAGE = [
@@ -22,18 +21,12 @@ const USAGE = [
 
 const DEFAULT_ACCOUNT_EMAIL = 'djwmobley@gmail.com';
 
-/** 24 chars, letters + digits + a small safe symbol set (spec: "letters/digits/symbols"). Mirrors the
- * client-side generator in components/credential-prompt.js so both surfaces produce comparable passwords. */
-const GENERATE_CHARSET = 'ABCDEFGHJKLMNPQRSTUVWXYZabcdefghijkmnopqrstuvwxyz23456789!@#$%^&*-_+=';
-const GENERATE_LENGTH = 24;
-
-/** @returns {string} */
-export function generatePassword() {
-  const bytes = crypto.randomBytes(GENERATE_LENGTH);
-  let out = '';
-  for (let i = 0; i < GENERATE_LENGTH; i++) out += GENERATE_CHARSET[bytes[i] % GENERATE_CHARSET.length];
-  return out;
-}
+/**
+ * Re-exported from src/core/credentials.js (moved there in apply pipeline slice 6, single source of
+ * truth) so this CLI's own generate flag and test/cred-cli.test.js's existing import both keep working.
+ * src/apply/worker.js's ctx.credentials.generatePassword calls the same underlying function directly.
+ */
+export { generatePassword };
 
 /**
  * Read one line from stdin with terminal echo suppressed (a hidden password prompt), Windows-console

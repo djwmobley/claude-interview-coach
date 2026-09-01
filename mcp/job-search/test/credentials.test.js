@@ -9,8 +9,29 @@
 import { test, describe } from 'node:test';
 import assert from 'node:assert/strict';
 import {
-  credentialTarget, readCredential, writeCredential, deleteCredential, listCredentials, createCredentials, CREDENTIAL_PREFIX,
+  credentialTarget, readCredential, writeCredential, deleteCredential, listCredentials, createCredentials, CREDENTIAL_PREFIX, generatePassword,
 } from '../src/core/credentials.js';
+
+/**
+ * generatePassword moved here in apply pipeline slice 6 (single source of truth): bin/cred.js's
+ * `--generate` flag re-exports it (test/cred-cli.test.js covers that re-export), and
+ * src/apply/worker.js's ctx.credentials.generatePassword (Workday account self-registration) calls the
+ * SAME function directly.
+ */
+describe('generatePassword', () => {
+  test('produces a 24-character string', () => {
+    assert.equal(generatePassword().length, 24);
+  });
+
+  test('two calls never produce the same password', () => {
+    assert.notEqual(generatePassword(), generatePassword());
+  });
+
+  test('never contains characters outside the declared safe charset', () => {
+    const pw = generatePassword();
+    assert.match(pw, /^[ABCDEFGHJKLMNPQRSTUVWXYZabcdefghijkmnopqrstuvwxyz23456789!@#$%^&*\-_+=]+$/);
+  });
+});
 
 /**
  * Build a fake execFileFn backed by an in-memory Map<target, {username,password}>, mimicking cred.ps1's

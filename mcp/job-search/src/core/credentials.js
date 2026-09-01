@@ -12,12 +12,32 @@
  * run (spec: "never invoke real PowerShell in default test runs").
  */
 import { execFile as nodeExecFile } from 'node:child_process';
+import crypto from 'node:crypto';
 import path from 'node:path';
 import { packageRoot } from './config.js';
 import { JobSearchError } from './errors.js';
 
 /** Every credential target this pipeline ever touches lives under this prefix. */
 export const CREDENTIAL_PREFIX = 'ic-jobsearch/';
+
+/**
+ * 24 chars, letters + digits + a small safe symbol set (plan section 5a: "generated 24-char password").
+ * Single source of truth for password generation: bin/cred.js's `--generate` flag re-exports this, and
+ * apply pipeline slice 6's Workday adapter (via src/apply/worker.js's ctx.credentials.generatePassword)
+ * calls it directly to self-register a new tenant account before ever touching the browser -- both
+ * surfaces produce comparable passwords, mirroring the client-side generator in
+ * components/credential-prompt.js.
+ */
+const GENERATE_CHARSET = 'ABCDEFGHJKLMNPQRSTUVWXYZabcdefghijkmnopqrstuvwxyz23456789!@#$%^&*-_+=';
+const GENERATE_LENGTH = 24;
+
+/** @returns {string} */
+export function generatePassword() {
+  const bytes = crypto.randomBytes(GENERATE_LENGTH);
+  let out = '';
+  for (let i = 0; i < GENERATE_LENGTH; i++) out += GENERATE_CHARSET[bytes[i] % GENERATE_CHARSET.length];
+  return out;
+}
 
 const TENANT_HOST_RE = /^[a-z0-9]([a-z0-9-]{0,61}[a-z0-9])?(\.[a-z0-9]([a-z0-9-]{0,61}[a-z0-9])?)+$/i;
 const TARGET_RE = /^ic-jobsearch\/[A-Za-z0-9.-]+$/;
