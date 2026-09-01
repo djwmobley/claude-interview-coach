@@ -44,7 +44,7 @@ import { planPages, assertPlanWithinCap, reserveBudget } from './budget.js';
 import { makeRateLimiter } from './ratelimit.js';
 import { runSearch } from './scheduler.js';
 import { classifyPage, recordWall, recordClean, sourceEnabled } from '../browser/wall.js';
-import { connectSession as defaultConnectSession } from '../browser/session.js';
+import { connectSession as defaultConnectSession, applyTargetMarkerPath } from '../browser/session.js';
 import { makeCapability } from '../browser/capability.js';
 import { ADAPTERS, getAdapter } from '../adapters/index.js';
 import { runTriage } from './triage.js';
@@ -330,6 +330,20 @@ async function executeRun(p) {
     if (sessionFailed) return null;
     try {
       session = await p.connectSession({ cdpUrl: env.SCAN_CDP_URL });
+      // Apply pipeline slice 5 fix (orchestrator review): reconcile CDP targets a crashed apply run left
+      // open in this SAME shared scan Chrome, using the SAME stable marker file src/apply/worker.js
+      // writes to (applyTargetMarkerPath). This must run at the start of every scan session too, not only
+      // every apply run -- otherwise a crashed apply page sits alongside whatever pages this scan run
+      // opens indefinitely, until an operator notices. Deliberately a SEPARATE try/catch from the one
+      // around this whole function: reconcileTargets() only ever closes target ids it reads back from
+      // that one marker file (never an arbitrary open page), and any failure here is swallowed and logged
+      // rather than marking the scan Chrome itself unavailable -- a target-reconcile hiccup is pure
+      // housekeeping, not a reason to degrade this scan to 'partial'.
+      try {
+        await session.reconcileTargets(applyTargetMarkerPath(env.JOBSEARCH_LOG_DIR));
+      } catch (err) {
+        log({ evt: 'scan_target_reconcile_failed', ...errFields(err) });
+      }
       await session.reconcile();
       return session;
     } catch (err) {

@@ -32,7 +32,7 @@ import { resolveOutputPath } from '../core/documents.js';
 import { hostsForAts } from './ats-detect.js';
 import { parseAnswerBank, matchQuestion } from './answers.js';
 import { buildRegistry, guardUrl } from '../core/urlguard.js';
-import { connectSession as defaultConnectSession } from '../browser/session.js';
+import { connectSession as defaultConnectSession, applyTargetMarkerPath } from '../browser/session.js';
 import { makeApplyCapability } from './apply-capability.js';
 import { ADAPTERS } from './adapters/index.js';
 
@@ -121,7 +121,7 @@ export async function runApplyWorker(applicationId, deps = {}) {
   // started -- that one is fresh-per-run, mirroring scan-runner.js's own correlation marker). This one is
   // the SAME path every run, by design: it is how a crashed run's own leftover page gets found and closed
   // by the NEXT run (session.js's reconcileTargets/writeTargetMarker).
-  const targetMarkerFile = deps.targetMarkerFile ?? path.join(env.JOBSEARCH_LOG_DIR, 'apply-page-targets.json');
+  const targetMarkerFile = deps.targetMarkerFile ?? applyTargetMarkerPath(env.JOBSEARCH_LOG_DIR);
 
   const client = await connectDedicated();
   let locked = false;

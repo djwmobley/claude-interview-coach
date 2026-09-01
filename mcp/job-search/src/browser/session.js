@@ -163,6 +163,19 @@ export function routeDecision(req, policy = { mode: 'scan', blockedCount: 0 }) {
 export const PAGE_MARKER = 'ic-job-search';
 
 /**
+ * Stable, well-known marker file path for the CDP target-id mechanism (apply pipeline slice 5,
+ * orchestrator review fix): the SAME path across every apply run (so a crashed run's leftover page is
+ * found by the next one) AND read by the scan session startup path too -- a crashed apply page sits in
+ * the SAME shared scan Chrome a scan run is about to attach new pages to, so the scan side must reconcile
+ * it as well, not only the next apply run. Centralized here (not duplicated as a literal in both
+ * src/apply/worker.js and src/core/scan-run.js) so the two call sites can never disagree on the path.
+ * @param {string} logDir
+ */
+export function applyTargetMarkerPath(logDir) {
+  return path.join(logDir, 'apply-page-targets.json');
+}
+
+/**
  * Connect to the scan Chrome. Throws BROWSER_UNAVAILABLE when the CDP
  * endpoint is down so the run degrades to `partial`.
  * @param {{ cdpUrl?: string, timeoutMs?: number, chromium?: { connectOverCDP: (url: string, opts?: any) => Promise<any> } }} [opts]
