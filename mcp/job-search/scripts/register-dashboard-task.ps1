@@ -91,7 +91,7 @@ $psArgument = "-NoLogo -NoProfile -WindowStyle Hidden -Command `"& '$($nodeCmd.S
 $action = New-ScheduledTaskAction -Execute "powershell.exe" -Argument $psArgument -WorkingDirectory $RepoRoot
 $trigger = @(
   New-ScheduledTaskTrigger -AtLogOn
-  New-ScheduledTaskTrigger -Once -At (Get-Date) -RepetitionInterval (New-TimeSpan -Minutes 5) -RepetitionDuration ([TimeSpan]::MaxValue)
+  New-ScheduledTaskTrigger -Once -At (Get-Date) -RepetitionInterval (New-TimeSpan -Minutes 5) -RepetitionDuration (New-TimeSpan -Days 3650)
 )
 $settings = New-ScheduledTaskSettingsSet `
   -ExecutionTimeLimit (New-TimeSpan -Seconds 0) `
