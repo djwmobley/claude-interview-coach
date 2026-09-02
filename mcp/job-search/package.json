@@ -20,6 +20,7 @@
     "dashboard": "node bin/dashboard.js",
     "dashboard:open": "node bin/dashboard.js --open",
     "dashboard:register": "powershell -File scripts/register-dashboard-task.ps1",
+    "watchdog": "node bin/watchdog.js",
     "seed-opportunities": "node bin/seed-opportunities.js"
   },
   "dependencies": {

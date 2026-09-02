@@ -12,7 +12,8 @@ import { googleHttp, gmailSend, buildRfc2822, buildRfc2822Multipart, readTokenFi
 import { errFields, JobSearchError } from './errors.js';
 import { loadConfig, DEFAULT_REPORT_HOME_MIN_PRESCORE } from './config.js';
 import { buildRegistry } from './urlguard.js';
-import { buildScanReport, buildReportSubject, renderReportText, renderReportHtml, renderReportMarkdown, writeReportFile, stampReportSent, escapeHtml, homeLocationNormsFor } from './report.js';
+import { buildScanReport, buildReportSubject, renderReportText, renderReportHtml, renderReportMarkdown, writeReportFile, stampReportSent, escapeHtml, homeLocationNormsFor, dashboardHealthLineText } from './report.js';
+import { readWatchdogState, ackWatchdogRestarts } from './watchdog-state.js';
 
 /**
  * One line per item, plain text.
@@ -61,10 +62,15 @@ export function buildDigestHtml(rows, now) {
  *   logError?: (fields: Record<string, string|number|boolean|null>) => void, googleHttp?: typeof googleHttp,
  *   config?: import('./config.js').LoadedConfig, reportProfile?: string,
  *   reportSinceOverride?: Date|null, writeReportFileRoot?: string, skipReportFile?: boolean,
+ *   watchdogStateFile?: string|null,
  * }} opts reportSinceOverride, when the key is present (including explicitly `null`), bypasses the
  *   ic_report_state marker read (test seam; see report.js's buildScanReport). logError defaults to `log`
  *   when omitted; bin/remind.js wires it to logger.error so the auth-health broken-grant line (see
- *   below) is distinguishable from the ordinary info-level events.
+ *   below) is distinguishable from the ordinary info-level events. watchdogStateFile (self-healing
+ *   watchdog feature): absolute path to bin/watchdog.js's JSON state file; bin/remind.js wires it to
+ *   defaultWatchdogStateFile(env.JOBSEARCH_LOG_DIR). Omitted or unreadable means "no watchdog state to
+ *   report" (readWatchdogState already returns null for a missing/corrupt file), never a fabricated
+ *   healthy status.
  * @returns {Promise<{ code: number, due: number, flipped: number, sent: boolean, stamped: number, subject: string|null, body: string|null, reason: string|null, scopes_ok: boolean|null, expiry: string|null, report_file: string|null, no_scan: boolean, worst_status: string|null, google_auth_state: string|null }>}
  */
 export async function runRemind(opts) {
@@ -101,9 +107,21 @@ export async function runRemind(opts) {
     scan_runs: report.runs.length, no_scan: report.noScan, worst_status: report.worstStatus,
   });
 
+  // Self-healing watchdog feature: read bin/watchdog.js's state file (I/O lives here, not in report.js,
+  // which stays pure) and pre-compute whether it has anything worth a banner line. dashboardHealthLine
+  // being non-null is itself a reason to send today's email even with nothing else due (down/stuck/error
+  // is a real operator-facing problem, and a nonzero restart count is exactly what this feature exists to
+  // surface) -- see the shouldReport check just below.
+  const dashboardHealthState = opts.watchdogStateFile ? readWatchdogState(opts.watchdogStateFile) : null;
+  const dashboardHealthLine = dashboardHealthLineText(dashboardHealthState);
+  if (dashboardHealthLine) say({ evt: 'remind_dashboard_health', line: dashboardHealthLine, status: dashboardHealthState?.status ?? null });
+
   // Spec R1.1: sent whenever EITHER follow-ups are due OR at least one scan run finished since the last
-  // report OR (decision 26) it is a weekday and no run has been recorded at all.
-  const shouldReport = rows.length > 0 || report.runs.length > 0 || report.noScan;
+  // report OR (decision 26) it is a weekday and no run has been recorded at all OR (self-healing watchdog
+  // feature) the dashboard watchdog has something to report (down, stuck, error, or unacknowledged
+  // restarts) -- "healthy, no restarts" already renders as a null line above, so this never fires a send
+  // on a quiet watchdog day.
+  const shouldReport = rows.length > 0 || report.runs.length > 0 || report.noScan || Boolean(dashboardHealthLine);
   if (!shouldReport && !opts.dryRun) {
     // The token layer is not even consulted here (unchanged from before the auth-health hardening): the
     // single Google auth attempt below only runs once shouldReport (or dryRun) is confirmed.
@@ -147,11 +165,11 @@ export async function runRemind(opts) {
   const followupsDigest = buildDigest(rows, now);
   const followupsHtml = buildDigestHtml(rows, now);
   const subject = buildReportSubject(report, { followupsDue: rows.length });
-  const reportText = renderReportText(report, registry, googleAuthState);
-  const reportHtml = renderReportHtml(report, registry, googleAuthState);
+  const reportText = renderReportText(report, registry, googleAuthState, dashboardHealthState);
+  const reportHtml = renderReportHtml(report, registry, googleAuthState, dashboardHealthState);
   const text = [reportText, '', followupsDigest.body].join('\n');
   const html = [reportHtml, followupsHtml].join('\n');
-  const markdown = [renderReportMarkdown(report, registry, googleAuthState), '', `## Follow-ups due: ${rows.length}`, '', ...rows.map((r) => `- ${formatFollowup(r)}`)].join('\n');
+  const markdown = [renderReportMarkdown(report, registry, googleAuthState, dashboardHealthState), '', `## Follow-ups due: ${rows.length}`, '', ...rows.map((r) => `- ${formatFollowup(r)}`)].join('\n');
 
   /** @type {string|null} */
   let reportFile = null;
@@ -198,5 +216,11 @@ export async function runRemind(opts) {
   const stamped = await stampReminded(opts.client, rows.map((r) => r.id), now);
   // Decision 23: the marker advances only after the confirmed send above, mirroring stampReminded.
   await stampReportSent(opts.client, now, report.lastRunIdIncluded);
+  // Self-healing watchdog feature: the restarts_since_ack count just rendered above in the confirmed send
+  // is acknowledged here, the same "only after a confirmed send" rule stampReportSent follows -- a send
+  // failure above already returned before this line, leaving the count intact for tomorrow's attempt.
+  if (opts.watchdogStateFile && dashboardHealthState && dashboardHealthState.restarts_since_ack > 0) {
+    ackWatchdogRestarts(opts.watchdogStateFile, now);
+  }
   return { code: 0, due: rows.length, flipped: flippedIds.length, sent: true, stamped, subject, body: text, reason: null, scopes_ok: googleScopesOk, expiry: googleExpiry, report_file: reportFile, no_scan: report.noScan, worst_status: report.worstStatus, google_auth_state: googleAuthState.state };
 }

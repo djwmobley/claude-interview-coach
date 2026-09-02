@@ -32,6 +32,7 @@ import { createLogger, dailyLogPath, pruneLogs } from '../src/core/logger.js';
 import { runRemind } from '../src/core/remind.js';
 import { errFields } from '../src/core/errors.js';
 import { openDashboard } from '../src/core/open-dashboard.js';
+import { defaultWatchdogStateFile } from '../src/core/watchdog-state.js';
 import { resolvePort } from './dashboard.js';
 
 /** Google auth states that force the dashboard open even without --open-dashboard (spec Change 3). */
@@ -77,6 +78,11 @@ async function main() {
       dryRun: args.dryRun,
       log: (fields) => logger.info(fields),
       logError: (fields) => logger.error(fields),
+      // Self-healing watchdog feature: the same JOBSEARCH_LOG_DIR-relative path bin/watchdog.js writes
+      // to, so the daily digest can surface a down/stuck/error dashboard or an unacknowledged restart
+      // count. A missing/corrupt file just means "no watchdog state to report" (readWatchdogState
+      // already handles that), so this is safe on a machine where the watchdog has never run.
+      watchdogStateFile: defaultWatchdogStateFile(env.JOBSEARCH_LOG_DIR),
     });
     code = r.code;
     googleAuthState = r.google_auth_state;

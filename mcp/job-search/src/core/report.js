@@ -216,6 +216,38 @@ export function googleAuthLineText(state) {
 }
 
 /**
+ * Plain-text "Dashboard watchdog" banner line (self-healing watchdog + logging feature): the
+ * operator-facing surface for bin/watchdog.js's JSON state file (src/core/watchdog-state.js), rendered
+ * the same way googleAuthLineText() above surfaces the Google auth classification -- via a caller-passed
+ * value, never re-read from disk by report.js itself (this module stays pure data collection +
+ * rendering; bin/remind.js does the file I/O). Returns null when there is nothing worth a line: no
+ * watchdog has ever run (state is null -- omitted rather than claimed healthy, since a printed line here
+ * would look like an active check that never actually happened), or the last run was healthy with zero
+ * restarts left to report since the last acknowledged send. Total classification of `state.status`
+ * (default branch makes an unrecognized value visible rather than silently dropped).
+ * @param {import('./watchdog-state.js').WatchdogState|null} state
+ */
+export function dashboardHealthLineText(state) {
+  if (!state) return null;
+  switch (state.status) {
+    case 'down':
+      return `Dashboard watchdog: DOWN (${state.consecutive_failures} consecutive failed check${state.consecutive_failures === 1 ? '' : 's'}; ${state.detail ?? 'no detail'}; last checked ${state.ts})`;
+    case 'stuck_foreign_process':
+      return `Dashboard watchdog: STUCK (port held by an unrecognized process; ${state.detail ?? 'no detail'}; manual intervention required; last checked ${state.ts})`;
+    case 'error':
+      return `Dashboard watchdog: ERROR (${state.detail ?? 'unexpected failure'}; last checked ${state.ts})`;
+    case 'ok':
+    case 'restarted':
+      if (state.restarts_since_ack > 0) {
+        return `Dashboard watchdog: restarted the dashboard ${state.restarts_since_ack} time${state.restarts_since_ack === 1 ? '' : 's'} since yesterday`;
+      }
+      return null;
+    default:
+      return `Dashboard watchdog: unrecognized status "${state.status}" in state file; last checked ${state.ts}`;
+  }
+}
+
+/**
  * Structural (registry: domain + path pattern) urlguard check for report rendering (spec R1.5): does NOT
  * perform the DNS/redirect steps classifyUrl() does for a live outbound request -- a report renders an
  * ALREADY-STORED url_normalized value, it does not fetch it, so re-resolving DNS at report time would add
@@ -644,8 +676,9 @@ export function renderTriageLine(triage) {
  * @param {Awaited<ReturnType<typeof buildScanReport>>} data
  * @param {import('./urlguard.js').Registry} [registry] when given, a listing's url is printed if it passes urlguard (R1.5)
  * @param {import('./google.js').GoogleTokenState|null} [googleAuthState] auth-health hardening (spec Change 3): the caller's own classification, rendered as-is
+ * @param {import('./watchdog-state.js').WatchdogState|null} [dashboardHealthState] self-healing watchdog feature: the caller's own read of the watchdog state file, rendered as-is via dashboardHealthLineText()
  */
-export function renderReportText(data, registry, googleAuthState) {
+export function renderReportText(data, registry, googleAuthState, dashboardHealthState) {
   const lines = [];
   lines.push(`Job scan report for ${data.dayKey} (times ${data.timezone})`);
   lines.push('');
@@ -655,6 +688,11 @@ export function renderReportText(data, registry, googleAuthState) {
   }
   if (googleAuthState !== undefined) {
     lines.push(googleAuthLineText(googleAuthState));
+    lines.push('');
+  }
+  const dashboardLine = dashboardHealthLineText(dashboardHealthState ?? null);
+  if (dashboardLine) {
+    lines.push(dashboardLine);
     lines.push('');
   }
   lines.push('== Runs since last report ==');
@@ -706,8 +744,9 @@ export function renderReportText(data, registry, googleAuthState) {
  * @param {Awaited<ReturnType<typeof buildScanReport>>} data
  * @param {import('./urlguard.js').Registry} [registry]
  * @param {import('./google.js').GoogleTokenState|null} [googleAuthState] auth-health hardening (spec Change 3): rendered through the same escapeHtml as every other field
+ * @param {import('./watchdog-state.js').WatchdogState|null} [dashboardHealthState] self-healing watchdog feature
  */
-export function renderReportHtml(data, registry, googleAuthState) {
+export function renderReportHtml(data, registry, googleAuthState, dashboardHealthState) {
   const esc = escapeHtml;
   const reg = registry ?? { entries: [], httpAllowedHosts: new Set() };
   const linkOrText = (/** @type {any} */ r) => {
@@ -723,6 +762,8 @@ export function renderReportHtml(data, registry, googleAuthState) {
   parts.push(`<h2>Job scan report for ${esc(data.dayKey)} (times ${esc(data.timezone)})</h2>`);
   if (data.noScan) parts.push('<p><strong>NO SCAN</strong>: no scan run has completed since the last report, on a day one was expected.</p>');
   if (googleAuthState !== undefined) parts.push(`<p>${esc(googleAuthLineText(googleAuthState))}</p>`);
+  const dashboardLineHtml = dashboardHealthLineText(dashboardHealthState ?? null);
+  if (dashboardLineHtml) parts.push(`<p>${esc(dashboardLineHtml)}</p>`);
   parts.push('<h3>Runs since last report</h3>');
   if (data.runs.length === 0) parts.push('<p>(none)</p>');
   else {
@@ -758,8 +799,9 @@ export function renderReportHtml(data, registry, googleAuthState) {
  * @param {Awaited<ReturnType<typeof buildScanReport>>} data
  * @param {import('./urlguard.js').Registry} [registry]
  * @param {import('./google.js').GoogleTokenState|null} [googleAuthState] auth-health hardening (spec Change 3)
+ * @param {import('./watchdog-state.js').WatchdogState|null} [dashboardHealthState] self-healing watchdog feature
  */
-export function renderReportMarkdown(data, registry, googleAuthState) {
+export function renderReportMarkdown(data, registry, googleAuthState, dashboardHealthState) {
   const reg = registry ?? { entries: [], httpAllowedHosts: new Set() };
   const lines = [];
   lines.push(`# Job scan report for ${data.dayKey}`);
@@ -772,6 +814,11 @@ export function renderReportMarkdown(data, registry, googleAuthState) {
   }
   if (googleAuthState !== undefined) {
     lines.push(googleAuthLineText(googleAuthState));
+    lines.push('');
+  }
+  const dashboardLineMd = dashboardHealthLineText(dashboardHealthState ?? null);
+  if (dashboardLineMd) {
+    lines.push(dashboardLineMd);
     lines.push('');
   }
   lines.push('## Runs since last report');
