@@ -14,6 +14,7 @@ import { pgConnectionConfig } from '../src/core/config.js';
 import { ensureAuxSchema } from '../src/core/schema.js';
 import { createFollowup, snoozeFollowup, stampReminded } from '../src/core/followups.js';
 import { runRemind, buildDigest } from '../src/core/remind.js';
+import { recordWatchdogRun, readWatchdogState } from '../src/core/watchdog-state.js';
 import { readTokenFile, tokenInfo, assertScopes, buildRfc2822, base64url, gmailSend, calendarInsertEvent, calendarDeleteEvent, calendarListEvents, expiryMs, SCOPE_GMAIL_SEND, SCOPE_GMAIL_READONLY, SCOPE_GMAIL_MODIFY, GMAIL_SEND_URL } from '../src/core/google.js';
 
 const MARK = `ZZ-TEST-RM-${process.pid}`;
@@ -297,6 +298,92 @@ describe('auth-health hardening (spec Change 3): google_auth_state, the report l
     assert.equal(r.code, 0);
     assert.equal(r.google_auth_state, null);
     assert.equal(calls.length, 0);
+  });
+});
+
+describe('self-healing watchdog feature: dashboard health banner threaded through runRemind', () => {
+  test('a down watchdog state forces a send even on an otherwise-quiet weekend (zero due, zero scan runs, no NO SCAN weekday trigger), and the body carries the DOWN line', async () => {
+    await client.query('DELETE FROM ic_followups WHERE contact LIKE $1', ['ZZ-TEST-%']);
+    const stateFile = path.join(tmp, 'watchdog-down.json');
+    recordWatchdogRun(stateFile, { status: 'down', detail: 'connection refused' }, new Date('2026-08-25T00:00:00Z'));
+    const { f, calls } = fetchStub(200);
+    const r = await runRemind({
+      client, tokenFile: 'unused', to: 'x@example.com', now: new Date('2000-01-02T06:00:00Z'), reportSinceOverride: new Date(),
+      fetch: /** @type {any} */ (f), googleHttp: /** @type {any} */ (fakeGoogle(f)), watchdogStateFile: stateFile,
+    });
+    assert.equal(r.code, 0);
+    assert.equal(r.sent, true, 'a down dashboard is itself a reason to send, even with nothing else due');
+    assert.equal(calls.length, 1);
+    assert.ok(r.body.includes('Dashboard watchdog: DOWN'));
+  });
+
+  test('a healthy watchdog state with zero unacknowledged restarts adds no line and forces no extra send: the existing "nothing to report" quiet path is unaffected', async () => {
+    await client.query('DELETE FROM ic_followups WHERE contact LIKE $1', ['ZZ-TEST-%']);
+    const stateFile = path.join(tmp, 'watchdog-quiet.json');
+    recordWatchdogRun(stateFile, { status: 'ok', detail: null }, new Date('2026-08-25T00:00:00Z'));
+    const { f, calls } = fetchStub(200);
+    const r = await runRemind({
+      client, tokenFile: 'unused', to: 'x@example.com', now: new Date('2000-01-02T06:00:00Z'), reportSinceOverride: new Date(),
+      fetch: /** @type {any} */ (f), googleHttp: /** @type {any} */ (async () => { throw new Error('should not be called'); }), watchdogStateFile: stateFile,
+    });
+    assert.equal(r.code, 0);
+    assert.equal(r.sent, false);
+    assert.equal(calls.length, 0);
+  });
+
+  test('an unreadable/missing watchdogStateFile behaves exactly like the feature not existing: no line, no forced send', async () => {
+    await client.query('DELETE FROM ic_followups WHERE contact LIKE $1', ['ZZ-TEST-%']);
+    const { f, calls } = fetchStub(200);
+    const r = await runRemind({
+      client, tokenFile: 'unused', to: 'x@example.com', now: new Date('2000-01-02T06:00:00Z'), reportSinceOverride: new Date(),
+      fetch: /** @type {any} */ (f), googleHttp: /** @type {any} */ (async () => { throw new Error('should not be called'); }),
+      watchdogStateFile: path.join(tmp, 'does-not-exist.json'),
+    });
+    assert.equal(r.code, 0);
+    assert.equal(r.sent, false);
+    assert.equal(calls.length, 0);
+  });
+
+  test('a nonzero restarts_since_ack surfaces "restarted the dashboard N times since yesterday" in the body and is acknowledged (reset to 0) ONLY after a confirmed send; a failed send leaves it intact', async () => {
+    await client.query('DELETE FROM ic_followups WHERE contact LIKE $1', ['ZZ-TEST-%']);
+    const stateFile = path.join(tmp, 'watchdog-restarts.json');
+    recordWatchdogRun(stateFile, { status: 'restarted', detail: null }, new Date('2026-08-25T00:00:00Z'));
+    recordWatchdogRun(stateFile, { status: 'restarted', detail: null }, new Date('2026-08-25T06:00:00Z'));
+    assert.equal(readWatchdogState(stateFile)?.restarts_since_ack, 2);
+
+    // A failed send: the ack must NOT fire.
+    const failing = fetchStub(500);
+    const failResult = await runRemind({
+      client, tokenFile: 'unused', to: 'x@example.com', now: new Date('2000-01-02T06:00:00Z'), reportSinceOverride: new Date(),
+      fetch: /** @type {any} */ (failing.f), googleHttp: /** @type {any} */ (fakeGoogle(failing.f)), watchdogStateFile: stateFile,
+    });
+    assert.equal(failResult.code, 1);
+    assert.ok(failResult.body.includes('restarted the dashboard 2 times since yesterday'));
+    assert.equal(readWatchdogState(stateFile)?.restarts_since_ack, 2, 'a failed send never consumes the counter');
+
+    // A confirmed send: the ack fires.
+    const succeeding = fetchStub(200);
+    const okResult = await runRemind({
+      client, tokenFile: 'unused', to: 'x@example.com', now: new Date('2000-01-02T06:00:00Z'), reportSinceOverride: new Date(),
+      fetch: /** @type {any} */ (succeeding.f), googleHttp: /** @type {any} */ (fakeGoogle(succeeding.f)), watchdogStateFile: stateFile,
+    });
+    assert.equal(okResult.code, 0);
+    assert.equal(okResult.sent, true);
+    assert.ok(okResult.body.includes('restarted the dashboard 2 times since yesterday'));
+    assert.equal(readWatchdogState(stateFile)?.restarts_since_ack, 0, 'a confirmed send acknowledges (resets) the counter');
+  });
+
+  test('--dry-run never acknowledges restarts (mirrors decision 23: only a confirmed send advances any marker)', async () => {
+    await client.query('DELETE FROM ic_followups WHERE contact LIKE $1', ['ZZ-TEST-%']);
+    const stateFile = path.join(tmp, 'watchdog-dryrun.json');
+    recordWatchdogRun(stateFile, { status: 'restarted', detail: null }, new Date('2026-08-25T00:00:00Z'));
+    const { f } = fetchStub(200);
+    const r = await runRemind({
+      client, tokenFile: 'unused', to: 'x@example.com', now: new Date('2000-01-02T06:00:00Z'), reportSinceOverride: new Date(), dryRun: true,
+      fetch: /** @type {any} */ (f), googleHttp: /** @type {any} */ (fakeGoogle(f)), watchdogStateFile: stateFile,
+    });
+    assert.equal(r.sent, false);
+    assert.equal(readWatchdogState(stateFile)?.restarts_since_ack, 1);
   });
 });
 

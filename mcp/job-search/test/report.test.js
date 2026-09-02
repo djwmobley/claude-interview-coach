@@ -16,7 +16,7 @@ import {
   buildScanReport, buildReportSubject, renderReportText, renderReportHtml, renderReportMarkdown,
   dayKeyInTz, isWeekdayInTz, escapeHtml, urlPassesRegistry, getReportState, stampReportSent,
   collectSuspectAndUnclassified, resolveReportWindow, homeLocationNormsFor, writeReportFile, wrapReportHtml,
-  renderTriageLine, googleAuthLineText,
+  renderTriageLine, googleAuthLineText, dashboardHealthLineText,
 } from '../src/core/report.js';
 import { tool as scanReport } from '../src/tools/scan_report.js';
 import { registryFrom } from '../src/core/urlguard.js';
@@ -300,6 +300,83 @@ describe('googleAuthLineText / the "Google auth" report line (auth-health harden
     assert.ok(htmlEscaped.includes(escapeHtml(googleAuthLineText(scopeState))));
     assert.ok(!htmlEscaped.includes('<scope>'), 'the raw unescaped scope text must never appear literally in the HTML');
     assert.ok(!htmlBroken.includes(String.fromCharCode(8212)) && !mdBroken.includes(String.fromCharCode(8212)), 'no em-dash in the rendered line');
+  });
+});
+
+describe('dashboardHealthLineText / the "Dashboard watchdog" report line (self-healing watchdog + logging feature)', () => {
+  test('null state (no watchdog has ever run) renders no line at all, never a fabricated healthy claim', () => {
+    assert.equal(dashboardHealthLineText(null), null);
+  });
+
+  test('ok / restarted status with restarts_since_ack 0 renders no line (a quiet watchdog day adds no noise)', () => {
+    assert.equal(dashboardHealthLineText({ ts: 'x', status: 'ok', consecutive_failures: 0, last_restart_at: null, restarts_since_ack: 0, detail: null }), null);
+    assert.equal(dashboardHealthLineText({ ts: 'x', status: 'restarted', consecutive_failures: 0, last_restart_at: 'x', restarts_since_ack: 0, detail: null }), null);
+  });
+
+  test('ok / restarted status with restarts_since_ack > 0 renders the "restarted N times since yesterday" line, singular vs plural', () => {
+    const one = dashboardHealthLineText({ ts: 'x', status: 'ok', consecutive_failures: 0, last_restart_at: 'x', restarts_since_ack: 1, detail: null });
+    assert.equal(one, 'Dashboard watchdog: restarted the dashboard 1 time since yesterday');
+    const many = dashboardHealthLineText({ ts: 'x', status: 'restarted', consecutive_failures: 0, last_restart_at: 'x', restarts_since_ack: 3, detail: null });
+    assert.equal(many, 'Dashboard watchdog: restarted the dashboard 3 times since yesterday');
+  });
+
+  test('down includes the consecutive failure count (singular vs plural) and the detail', () => {
+    const one = dashboardHealthLineText({ ts: '2026-09-02T00:00:00.000Z', status: 'down', consecutive_failures: 1, last_restart_at: null, restarts_since_ack: 0, detail: 'dashboard did not become healthy after restart: connection refused' });
+    assert.ok(one.startsWith('Dashboard watchdog: DOWN (1 consecutive failed check;'));
+    assert.ok(one.includes('connection refused'));
+    const many = dashboardHealthLineText({ ts: 'x', status: 'down', consecutive_failures: 4, last_restart_at: null, restarts_since_ack: 0, detail: null });
+    assert.ok(many.includes('4 consecutive failed checks;'));
+    assert.ok(many.includes('no detail'), 'a null detail still renders a readable line, never "null" or "undefined" literally');
+  });
+
+  test('stuck_foreign_process renders a distinct STUCK line calling for manual intervention', () => {
+    const line = dashboardHealthLineText({ ts: 'x', status: 'stuck_foreign_process', consecutive_failures: 2, last_restart_at: null, restarts_since_ack: 0, detail: 'pid 4321 (chrome.exe) does not match the guard' });
+    assert.ok(line.startsWith('Dashboard watchdog: STUCK'));
+    assert.ok(line.includes('manual intervention'));
+    assert.ok(line.includes('chrome.exe'));
+  });
+
+  test('error renders a distinct ERROR line', () => {
+    const line = dashboardHealthLineText({ ts: 'x', status: 'error', consecutive_failures: 1, last_restart_at: null, restarts_since_ack: 0, detail: 'unexpected: TypeError: boom' });
+    assert.ok(line.startsWith('Dashboard watchdog: ERROR'));
+    assert.ok(line.includes('boom'));
+  });
+
+  test('every real status renders a distinct line from every other (total classification, no collisions)', () => {
+    const lines = [
+      dashboardHealthLineText({ ts: 'x', status: 'down', consecutive_failures: 1, last_restart_at: null, restarts_since_ack: 0, detail: 'd' }),
+      dashboardHealthLineText({ ts: 'x', status: 'stuck_foreign_process', consecutive_failures: 1, last_restart_at: null, restarts_since_ack: 0, detail: 'd' }),
+      dashboardHealthLineText({ ts: 'x', status: 'error', consecutive_failures: 1, last_restart_at: null, restarts_since_ack: 0, detail: 'd' }),
+      dashboardHealthLineText({ ts: 'x', status: 'ok', consecutive_failures: 0, last_restart_at: 'x', restarts_since_ack: 1, detail: null }),
+    ];
+    assert.equal(new Set(lines).size, lines.length);
+  });
+
+  test('an unrecognized status string still renders a visible line (default branch), never silently dropped', () => {
+    const line = dashboardHealthLineText(/** @type {any} */ ({ ts: 'x', status: 'not_a_real_status', consecutive_failures: 0, last_restart_at: null, restarts_since_ack: 0, detail: null }));
+    assert.ok(line.includes('unrecognized status "not_a_real_status"'));
+  });
+
+  test('renderReportText/Html/Markdown thread the dashboard health line only when non-null, without disturbing the existing Google auth line', async () => {
+    const since = new Date(Date.now() - 5000);
+    const report = await buildScanReport(client, { sinceOverride: since, homeLocationNorms: [] });
+    const textNoState = renderReportText(report, undefined, undefined, null);
+    assert.ok(!textNoState.includes('Dashboard watchdog:'));
+
+    const downState = /** @type {import('../src/core/watchdog-state.js').WatchdogState} */ ({ ts: 'x', status: 'down', consecutive_failures: 2, last_restart_at: null, restarts_since_ack: 0, detail: 'connection refused' });
+    const text = renderReportText(report, undefined, null, downState);
+    const html = renderReportHtml(report, undefined, null, downState);
+    const md = renderReportMarkdown(report, undefined, null, downState);
+    assert.ok(text.includes('Google auth: not checked'), 'the existing Google auth line is unaffected');
+    assert.ok(text.includes('Dashboard watchdog: DOWN'));
+    assert.ok(html.includes('Dashboard watchdog: DOWN'));
+    assert.ok(md.includes('Dashboard watchdog: DOWN'));
+
+    // HTML escaping applies to the dashboard line the same as every other rendered field.
+    const escapyState = /** @type {import('../src/core/watchdog-state.js').WatchdogState} */ ({ ts: 'x', status: 'stuck_foreign_process', consecutive_failures: 1, last_restart_at: null, restarts_since_ack: 0, detail: '<script>alert(1)</script>' });
+    const htmlEscaped = renderReportHtml(report, undefined, null, escapyState);
+    assert.ok(!htmlEscaped.includes('<script>alert(1)</script>'));
+    assert.ok(htmlEscaped.includes('&lt;script&gt;'));
   });
 });
 
