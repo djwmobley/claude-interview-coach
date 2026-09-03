@@ -600,15 +600,51 @@ const HOURLY_RE = /\bhour(?:ly)?\b|\/\s*hr\b/i;
 const ANNUAL_RE = /\bannual(?:ly)?\b|\byear(?:ly)?\b|\/\s*yr\b|\bsalary\b/i;
 
 /**
- * Apply pipeline slice 8: a label is salary-related whenever it matches either unit regex above (there was
- * no single pre-existing "is this a salary question" regex to reuse -- only the two unit-detection regexes
- * -- so this combines them, per the amended spec's own fallback instruction). Every adapter that answers a
- * custom screening field checks this BEFORE the generic bank matcher/text fill, so a salary-shaped question
- * always routes through resolveSalaryAnswer() and never falls through to an unrelated alias/synonym match
- * or a guessed plain-text fill. Exported so every adapter (present and future) shares the exact same
- * detection regex rather than a private per-adapter copy that could silently drift.
+ * Apply pipeline slice 8 (widened post-review, same slice): a label is salary-related whenever it matches
+ * either unit regex above OR one of the unit-less compensation words/phrases below -- there was no single
+ * pre-existing "is this a salary question" regex to reuse, only the two unit-detection regexes, so this
+ * combines them per the amended spec's own fallback instruction. A real screening question routinely asks
+ * for compensation with no "salary"/"hourly"/"annual" keyword at all ("Desired compensation", "What are
+ * your pay expectations", "Base + bonus target", "OTE expectation"), and those must never fall through to
+ * the generic bank matcher or a guessed plain-text fill just because they used different wording.
+ *
+ * Every alternative below is word-boundary-anchored so it never fires on "pay" as a mere substring of an
+ * unrelated word ("PayPal", "payload") -- `\bpay\b` requires a non-word character (or string edge) on both
+ * sides, which "PayPal"/"payload" never provide immediately after "pay".
+ *   - `compensation`, `remuneration`, `wages?`, `OTE`, `pay`: bare, unambiguous compensation nouns.
+ *   - `base ... bonus` / `bonus ... base` (up to 4 intervening words either order): "base salary plus
+ *     bonus" phrasing, e.g. "Base + bonus target".
+ *   - `rate ... expectation` / `expectation ... rate` (up to 4 intervening words either order): "rate
+ *     expectation" phrasing, without requiring the word "pay" to appear too.
+ *   - `(expected|desired|target)` followed within a few words by `(compensation|pay|salary|wage(s)|
+ *     remuneration|OTE|rate|range)`: the proximity rule the amended spec calls for by name, so a bare
+ *     "range" or "rate" only counts when explicitly framed as a compensation ask (an unqualified "range" or
+ *     "rate" alone is too generic -- "date range", "conversion rate" -- to treat as salary-related on its
+ *     own).
+ *
+ * Every adapter that answers a custom screening field checks this BEFORE the generic bank matcher/text
+ * fill, so a salary-shaped question always routes through resolveSalaryAnswer() and never falls through to
+ * an unrelated alias/synonym match or a guessed plain-text fill. Exported so every adapter (present and
+ * future) shares the exact same detection regex rather than a private per-adapter copy that could silently
+ * drift.
  */
-export const SALARY_LABEL_RE = new RegExp(`${HOURLY_RE.source}|${ANNUAL_RE.source}`, 'i');
+export const SALARY_LABEL_RE = new RegExp(
+  [
+    HOURLY_RE.source,
+    ANNUAL_RE.source,
+    '\\bcompensation\\b',
+    '\\bremuneration\\b',
+    '\\bwages?\\b',
+    '\\bOTE\\b',
+    '\\bpay\\b',
+    '\\bbase\\b(?:\\s+\\S+){0,4}\\s*\\bbonus\\b',
+    '\\bbonus\\b(?:\\s+\\S+){0,4}\\s*\\bbase\\b',
+    '\\brate\\b(?:\\s+\\S+){0,4}\\s*\\bexpectations?\\b',
+    '\\bexpectations?\\b(?:\\s+\\S+){0,4}\\s*\\brate\\b',
+    '\\b(?:expected|desired|target)\\b(?:\\s+\\S+){0,4}\\s*\\b(?:compensation|pay|salary|wages?|remuneration|OTE|rate|range)\\b',
+  ].join('|'),
+  'i',
+);
 
 /**
  * @typedef {Object} SalaryResult
