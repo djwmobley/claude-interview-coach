@@ -89,7 +89,7 @@ These rules apply to every generated CV. They prevent recurring issues that redu
 
 - **No native-language calques.** If the candidate writes in a non-native language, check `data/profile.md` for the candidate's native language, then watch for false friends and literal translations (e.g. German: "reconception" → redesign; French: "résumé" → summary; Spanish: "actually" → currently; Dutch: "eventually" → possibly). Verify any unusual word choices.
 - **British/American English consistency** must be verified. Choose the variant that matches the target market convention or the job posting's language. Don't mix within a single CV (e.g., "optimisation" and "organization" in the same document).
-- **Tense must match engagement status.** Present tense for ongoing engagements (an end date of "present," as in "2013 to present," demands "Design, build, and operate..."). Past tense for completed engagements.
+- **Tense must match engagement status.** Present tense for ongoing engagements ("2013 – present" demands "Design, build, and operate..."). Past tense for completed engagements.
 - **Use standard modern compound forms** (e.g. "subcontractors" not "sub-contractors", "freelancer" not "free-lancer").
 
 ## Pre-Output Checklist

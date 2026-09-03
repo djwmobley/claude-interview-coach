@@ -15,10 +15,12 @@
  * fictional sample data, left untouched by decision).
  *
  * Failure rule: any U+2014 (em-dash) anywhere in scope fails, no exceptions. Any U+2013 (en-dash)
- * fails UNLESS it sits directly between two digits (each side optionally separated by a single
- * space) -- the year-range / number-range form, e.g. "2019-2021" or "2019 - 2021" (real dash
+ * fails UNLESS its left side is a digit and its right side is a digit or the word Present/present
+ * (each side optionally separated by a single space) -- the year-range / number-range form, e.g.
+ * "2019-2021" or "2019 - 2021", or the resume format's open-ended "2019 - Present" form (real dash
  * characters below, not the literal glyph, to avoid this file itself looking like what it scans
- * for to a naive substring search).
+ * for to a naive substring search). The Present/present exemption mirrors render.js's own
+ * YEAR_RANGE regex, which already treats a trailing Present the same as a trailing year.
  */
 import { test, describe } from 'node:test';
 import assert from 'node:assert/strict';
@@ -37,7 +39,7 @@ const EM_DASH = String.fromCharCode(0x2014);
 const EN_DASH = String.fromCharCode(0x2013);
 
 // The digit-digit exemption for en-dash: a real number/year range, spaced or unspaced.
-const EN_DASH_NUMBER_RANGE_RE = new RegExp(`\\d\\s?${EN_DASH}\\s?\\d`);
+const EN_DASH_NUMBER_RANGE_RE = new RegExp(`\\d\\s?${EN_DASH}\\s?(\\d|present)`, 'i');
 
 const EXTENSIONS = new Set(['.md', '.py', '.js', '.mjs', '.json', '.txt', '.yml', '.yaml']);
 
@@ -92,8 +94,10 @@ function findViolations(relPath) {
     if (ch === EM_DASH) {
       violations.push({ file: relPath, line, col, char: 'U+2014' });
     } else if (ch === EN_DASH) {
+      // Window sized to fit the widest exempt right-hand side ("present"/"Present", 7 chars)
+      // plus an optional single space, on either side of the dash.
       const windowStart = Math.max(0, i - 2);
-      const windowEnd = Math.min(text.length, i + 3);
+      const windowEnd = Math.min(text.length, i + 9);
       const window = text.slice(windowStart, windowEnd);
       if (!EN_DASH_NUMBER_RANGE_RE.test(window)) {
         violations.push({ file: relPath, line, col, char: 'U+2013' });
@@ -150,12 +154,26 @@ describe('no-em-dash: en-dash number-range exemption regex (fixture-free)', () =
     assert.ok(EN_DASH_NUMBER_RANGE_RE.test(`read the 3${EN_DASH}6 most relevant projects`));
   });
 
+  // The resume format's open-ended "Year - Present" notation (render.js's own YEAR_RANGE
+  // regex already treats a trailing Present/present the same as a trailing year).
+  test('matches a digit followed by "Present" (capitalized)', () => {
+    assert.ok(EN_DASH_NUMBER_RANGE_RE.test(`2019 ${EN_DASH} Present`));
+  });
+
+  test('matches a digit followed by "present" (lowercase)', () => {
+    assert.ok(EN_DASH_NUMBER_RANGE_RE.test(`2019 ${EN_DASH} present`));
+  });
+
+  test('matches an unspaced year range (explicit "2019-2021" case)', () => {
+    assert.ok(EN_DASH_NUMBER_RANGE_RE.test(`2019${EN_DASH}2021`));
+  });
+
   test('does NOT match a sentence-break en-dash (no digit on either side)', () => {
     assert.equal(EN_DASH_NUMBER_RANGE_RE.test(`the plan works ${EN_DASH} mostly`), false);
   });
 
-  test('does NOT match a dash between a digit and a non-digit word (e.g. "2013 - present")', () => {
-    assert.equal(EN_DASH_NUMBER_RANGE_RE.test(`2013 ${EN_DASH} present`), false);
+  test('does NOT match a dash between two ordinary words (e.g. "word - word")', () => {
+    assert.equal(EN_DASH_NUMBER_RANGE_RE.test(`word ${EN_DASH} word`), false);
   });
 
   test('does NOT match a dash between a non-digit label and a digit (e.g. "Year - 2021")', () => {
