@@ -73,8 +73,49 @@ describe('urlguard sync classification (total)', () => {
   test('buildRegistry from the real config registers every adapter with domains and every exec board', () => {
     const r = buildRegistry(loadConfig());
     const names = r.entries.map((e) => e.source);
-    for (const n of ['indeed', 'linkedin', 'greenhouse', 'lever', 'workday', 'dayforce', 'exec:east57th', 'exec:kornferry']) assert.ok(names.includes(n), n);
+    for (const n of ['indeed', 'linkedin', 'greenhouse', 'lever', 'workday', 'dayforce', 'icims', 'smartrecruiters', 'exec:east57th', 'exec:kornferry']) assert.ok(names.includes(n), n);
     assert.ok(!names.includes('exec'), 'exec adapter has no domains and registers nothing by itself');
+  });
+});
+
+describe('SmartRecruiters + iCIMS guardUrl (real config, not a names-includes check)', () => {
+  // Both adapters are registered only so worker.js's guardUrl() call has a matching entry before
+  // navigating to an apply_url (see the adapters.json _comment on each block); the registry loop test
+  // above checks names are present but never exercises classifyUrl against real URLs for either one.
+  const realReg = buildRegistry(loadConfig());
+
+  const allowed = [
+    'https://jobs.smartrecruiters.com/Acme/743999842967-marketing-manager?trid=104&external=1',
+    'https://careers.smartrecruiters.com/Acme/12345',
+    'https://jobs.smartrecruiters.com/Acme-Corp/12345/',
+  ];
+  for (const url of allowed) {
+    test(`ALLOW ${url}`, () => {
+      const v = classifyUrl(url, realReg);
+      assert.equal(v.allowed, true, v.reason);
+      assert.equal(v.source, 'smartrecruiters');
+    });
+  }
+
+  const rejected = [
+    'https://jobs.smartrecruiters.com/Acme/../../12345',
+    'https://smartrecruiters.com.evil.com/Acme/12345',
+    'https://evil.com/?u=jobs.smartrecruiters.com',
+    'https://acme.smartrecruiters.com/Acme/12345',
+    'https://jobs.smartrecruiters.com/Acme/notanumber',
+    'https://jobs.smartrecruiters.com/',
+  ];
+  for (const url of rejected) {
+    test(`REJECT ${url}`, () => {
+      const v = classifyUrl(url, realReg);
+      assert.equal(v.allowed, false, `expected ${url} to be rejected but it matched source ${v.source}`);
+    });
+  }
+
+  test('ALLOW a real iCIMS posting URL (the registry loop above silently omits icims)', () => {
+    const v = classifyUrl('https://acme.icims.com/jobs/123456/software-engineer/job', realReg);
+    assert.equal(v.allowed, true, v.reason);
+    assert.equal(v.source, 'icims');
   });
 });
 

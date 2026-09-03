@@ -757,6 +757,10 @@ throw or an assumed-ok skip -- `unknown` is the only value that will never get o
 | Dayforce | per-tenant, sign-in only, never self-registers | multi-step wizard | `dayforce.js` (slice 8) |
 | Indeed / LinkedIn Easy Apply | n/a | classify-only, deliberately never automated | `indeed-easy.js` / `linkedin-easy.js` |
 
+SmartRecruiters detection and the `urlguard` registry both match only the two exact hosts
+`jobs.smartrecruiters.com` and `careers.smartrecruiters.com`; company-branded subdomains (e.g.
+`acme.smartrecruiters.com`) are a documented shared limitation and are neither classified nor guarded.
+
 Every browser-driving adapter's CSS/data-attribute selectors are this build's best understanding of that
 ATS's public DOM, written and tested against a SCRIPTED FAKE page (see each adapter's own test file) --
 none has been verified against a live tenant in this sandboxed environment (no real Chrome/network
