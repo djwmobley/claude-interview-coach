@@ -530,11 +530,27 @@ export async function collectHomeLocations(client, since, locationNorms, minPres
   return { rows: r.rows, excludedCount: excluded.rows[0].n };
 }
 
-/** @param {import('pg').ClientBase} client */
-export async function collectReviewQueueSummary(client) {
+/**
+ * @param {import('pg').ClientBase} client
+ * @param {Date|null} [since] when given, also tallies today's bulk-separate activity (review-bulk spec
+ *   S3d) by mode, from the 'resolved:separate:bulk:<mode>[:<reason>]' event note bulkResolve() writes
+ *   (src/tools/review.js). `split_part(note, ':', 4)` reads the mode segment regardless of whether a
+ *   reason-mode note carries a 5th `:<reason>` segment after it. `since` omitted/null reports no bulk
+ *   activity (an empty array), matching every other digest section's own "no lower bound" convention.
+ */
+export async function collectReviewQueueSummary(client, since) {
   const total = await client.query(`SELECT count(*)::int AS n FROM ic_job_review_queue WHERE resolved_at IS NULL`);
   const reasons = await client.query(`SELECT reason, count(*)::int AS n FROM ic_job_review_queue WHERE resolved_at IS NULL GROUP BY reason ORDER BY n DESC LIMIT 5`);
-  return { total: total.rows[0].n, topReasons: reasons.rows.map((r) => ({ reason: r.reason, count: r.n })) };
+  let bulkToday = [];
+  if (since) {
+    const bulk = await client.query(
+      `SELECT split_part(note, ':', 4) AS mode, count(*)::int AS n FROM ic_job_events
+       WHERE at > $1 AND note LIKE 'resolved:separate:bulk:%' GROUP BY split_part(note, ':', 4) ORDER BY n DESC`,
+      [since],
+    );
+    bulkToday = bulk.rows.map((r) => ({ mode: r.mode, count: r.n }));
+  }
+  return { total: total.rows[0].n, topReasons: reasons.rows.map((r) => ({ reason: r.reason, count: r.n })), bulkToday };
 }
 
 /** @param {import('pg').ClientBase} client */
@@ -581,7 +597,7 @@ export async function buildScanReport(client, opts = {}) {
   const lookAtThese = await collectLookAtThese(client, since, topN);
   const suspectUnclassified = await collectSuspectAndUnclassified(client, since, 10);
   const homeLocations = await collectHomeLocations(client, since, homeLocationNorms, homeMinPrescore);
-  const reviewQueue = await collectReviewQueueSummary(client);
+  const reviewQueue = await collectReviewQueueSummary(client, effectiveSince ? since : null);
   const disabledSources = await collectDisabledSources(client);
   const worstStatus = runs.reduce((worst, r) => (REPORT_STATUS_PRIORITY[r.status] ?? 0) > (REPORT_STATUS_PRIORITY[worst] ?? 0) ? r.status : worst, 'ok');
   return {
@@ -803,6 +819,7 @@ export function renderReportText(data, registry, googleAuthState, dashboardHealt
   lines.push('');
   lines.push(`== Review queue: ${data.reviewQueue.total} open ==`);
   for (const t of data.reviewQueue.topReasons) lines.push(`  ${t.reason}: ${t.count}`);
+  for (const b of data.reviewQueue.bulkToday ?? []) lines.push(`Review queue: ${b.count} returned to untriaged by bulk ${b.mode}`);
   lines.push('');
   lines.push('== Disabled sources ==');
   if (data.disabledSources.length === 0) lines.push('(none)');
@@ -862,6 +879,7 @@ export function renderReportHtml(data, registry, googleAuthState, dashboardHealt
   parts.push(data.homeLocations.rows.length ? `<ul>${data.homeLocations.rows.map((r) => rowLi(r, false)).join('')}</ul>` : '<p>(none)</p>');
   parts.push(`<h3>Review queue: ${data.reviewQueue.total} open</h3>`);
   parts.push(data.reviewQueue.topReasons.length ? `<ul>${data.reviewQueue.topReasons.map((t) => `<li>${esc(t.reason)}: ${t.count}</li>`).join('')}</ul>` : '<p>(none)</p>');
+  for (const b of data.reviewQueue.bulkToday ?? []) parts.push(`<p>Review queue: ${b.count} returned to untriaged by bulk ${esc(b.mode)}</p>`);
   parts.push('<h3>Disabled sources</h3>');
   parts.push(data.disabledSources.length ? `<ul>${data.disabledSources.map((s) => `<li>${esc(s.source)}: ${s.manual ? 'manual disable' : `until ${esc(s.until)}`}</li>`).join('')}</ul>` : '<p>(none)</p>');
   return parts.join('\n');
@@ -941,6 +959,7 @@ export function renderReportMarkdown(data, registry, googleAuthState, dashboardH
   lines.push(`## Review queue: ${data.reviewQueue.total} open`);
   lines.push('');
   for (const t of data.reviewQueue.topReasons) lines.push(`- ${t.reason}: ${t.count}`);
+  for (const b of data.reviewQueue.bulkToday ?? []) lines.push(`- Review queue: ${b.count} returned to untriaged by bulk ${b.mode}`);
   lines.push('');
   lines.push('## Disabled sources');
   lines.push('');

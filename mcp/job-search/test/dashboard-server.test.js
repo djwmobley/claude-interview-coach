@@ -21,6 +21,7 @@ import { createDashboardServer } from '../src/dashboard/server.js';
 import { createCalendarCache } from '../src/dashboard/calendar-cache.js';
 
 const CO = `ZZ-TEST-DASHBOARD-${process.pid}`;
+const SRC = `zz-test-dashboard-${process.pid}`;
 
 /** @type {pg.Client} */
 let verifyClient;
@@ -771,6 +772,23 @@ describe('sources enable', () => {
   });
 });
 
+/** @param {Partial<{ status: string|null, reason: string }>} o */
+async function insertReviewCandidate(o = {}) {
+  const n = Math.floor(Math.random() * 1e9);
+  const url = `https://example.test/${SRC}/${n}`;
+  const listing = await verifyClient.query(
+    `INSERT INTO ic_job_listings (title, company, status, url, url_normalized, source, external_id, record_kind, location, posted_at, company_norm, title_norm, location_norm, dedup_hash, last_seen)
+     VALUES ('Bulk Route Test',$1,$2,$3,$3,$4,$5,'listing','Houston, TX',current_date,'zz dashboard bulk co','bulk route test','houston-tx',md5($3),now()) RETURNING id`,
+    [CO, o.status ?? 'review', url, SRC, `${SRC}:${n}`],
+  );
+  const candidateId = Number(listing.rows[0].id);
+  const q = await verifyClient.query(
+    `INSERT INTO ic_job_review_queue (candidate_id, matches, reason, status_at_create) VALUES ($1, '{}', $2, 'review') RETURNING id`,
+    [candidateId, o.reason ?? 'branch1_conflict'],
+  );
+  return { candidateId, queueId: Number(q.rows[0].id) };
+}
+
 describe('review', () => {
   test('GET /api/review returns a well-shaped, possibly-empty list', async () => {
     const r = await req('GET', '/api/review');
@@ -787,6 +805,48 @@ describe('review', () => {
   test('an invalid resolution value is rejected before touching the DB', async () => {
     const r = await req('POST', '/api/review/1/resolve', { body: { resolution: 'not-a-resolution' } });
     assert.equal(r.status, 400);
+  });
+
+  test('GET /api/review/reasons returns the DB universe of open reasons, not whatever page of rows a client already loaded', async () => {
+    const { queueId } = await insertReviewCandidate({ reason: 'hash_location_unknown' });
+    const r = await req('GET', '/api/review/reasons');
+    assert.equal(r.status, 200);
+    assert.ok(Array.isArray(r.json.reasons));
+    assert.ok(r.json.reasons.includes('hash_location_unknown'));
+    await verifyClient.query('UPDATE ic_job_review_queue SET resolution = $2, resolved_at = now() WHERE id = $1', [queueId, 'separate']);
+  });
+
+  test('POST /api/review/bulk requires mode', async () => {
+    const r = await req('POST', '/api/review/bulk', { body: {} });
+    assert.equal(r.status, 400);
+  });
+
+  test('POST /api/review/bulk without confirm on a live (dry_run:false) request is refused, never writes', async () => {
+    const { candidateId } = await insertReviewCandidate({ reason: 'branch1_conflict' });
+    const r = await req('POST', '/api/review/bulk', { body: { mode: 'reason', reason: 'branch1_conflict', dry_run: false } });
+    assert.equal(r.status, 400);
+    const row = await verifyClient.query('SELECT status FROM ic_job_listings WHERE id = $1', [candidateId]);
+    assert.equal(row.rows[0].status, 'review', 'no write happened');
+  });
+
+  test('POST /api/review/bulk dry_run:"false" (a string, not a boolean) is rejected, never coerced', async () => {
+    const r = await req('POST', '/api/review/bulk', { body: { mode: 'stale', dry_run: 'false', confirm: true } });
+    assert.equal(r.status, 400);
+  });
+
+  test('POST /api/review/bulk dry-run preview, then a live confirmed run, separates the matching item', async () => {
+    const { candidateId, queueId } = await insertReviewCandidate({ reason: 'company_similar_same_title' });
+    const preview = await req('POST', '/api/review/bulk', { body: { mode: 'reason', reason: 'company_similar_same_title', dry_run: true } });
+    assert.equal(preview.status, 200);
+    assert.ok(preview.json.ids.separated.includes(queueId));
+    const stillOpen = await verifyClient.query('SELECT status FROM ic_job_listings WHERE id = $1', [candidateId]);
+    assert.equal(stillOpen.rows[0].status, 'review');
+
+    const live = await req('POST', '/api/review/bulk', { body: { mode: 'reason', reason: 'company_similar_same_title', dry_run: false, confirm: true } });
+    assert.equal(live.status, 200);
+    assert.equal(live.json.counts.separate, 1);
+    const resolved = await verifyClient.query('SELECT status FROM ic_job_listings WHERE id = $1', [candidateId]);
+    assert.equal(resolved.rows[0].status, null);
   });
 });
 

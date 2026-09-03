@@ -16,8 +16,9 @@ import {
   buildScanReport, buildReportSubject, renderReportText, renderReportHtml, renderReportMarkdown,
   dayKeyInTz, isWeekdayInTz, escapeHtml, urlPassesRegistry, getReportState, stampReportSent,
   collectSuspectAndUnclassified, resolveReportWindow, homeLocationNormsFor, writeReportFile, wrapReportHtml,
-  renderTriageLine, googleAuthLineText, dashboardHealthLineText,
+  renderTriageLine, googleAuthLineText, dashboardHealthLineText, collectReviewQueueSummary,
 } from '../src/core/report.js';
+import { recordEvent } from '../src/core/events.js';
 import { tool as scanReport } from '../src/tools/scan_report.js';
 import { registryFrom } from '../src/core/urlguard.js';
 import { testConfig } from './helpers/scan-fixtures.js';
@@ -46,6 +47,7 @@ async function cleanup() {
   if (ids.length) {
     await client.query('DELETE FROM ic_job_review_queue WHERE candidate_id = ANY($1::int[])', [ids]);
     await client.query('DELETE FROM ic_followups WHERE listing_id = ANY($1::int[])', [ids]);
+    await client.query('DELETE FROM ic_job_events WHERE listing_id = ANY($1::int[])', [ids]);
     await client.query('DELETE FROM ic_job_listings WHERE id = ANY($1::int[])', [ids]);
   }
   await client.query(`DELETE FROM ic_scan_runs WHERE profile = $1`, [`zz-test-report-profile-${process.pid}`]);
@@ -330,6 +332,58 @@ describe('renderReportText / Html / Markdown: no em-dashes, listing text present
     for (const s of [text, html, md]) {
       assert.ok(s.includes('Chief Technology Officer'));
       assert.ok(!s.includes(String.fromCharCode(8212)), 'no em-dash in rendered report');
+    }
+  });
+});
+
+describe('collectReviewQueueSummary / bulk-separate digest line (review-bulk spec S3d)', () => {
+  test('a "since" with no matching events reports an empty bulkToday, and no line renders in any format', async () => {
+    const summary = await collectReviewQueueSummary(client, new Date());
+    assert.deepEqual(summary.bulkToday, []);
+  });
+
+  test('collectReviewQueueSummary(client) with no `since` argument at all also reports an empty bulkToday', async () => {
+    const summary = await collectReviewQueueSummary(client);
+    assert.deepEqual(summary.bulkToday, []);
+  });
+
+  test('bulkResolve\'s own event note ("resolved:separate:bulk:<mode>[:<reason>]") tallies into bulkToday by mode, and the digest line appears in text, html, and markdown', async () => {
+    const since = new Date(Date.now() - 5000);
+    const listingId = await insertListing({ title: 'Bulk Digest Rule Test' });
+    await recordEvent(client, { listingId, kind: 'status', fromStatus: 'review', toStatus: null, note: 'resolved:separate:bulk:rule', actor: 'mcp', at: new Date() });
+    const listingId2 = await insertListing({ title: 'Bulk Digest Reason Test' });
+    await recordEvent(client, { listingId: listingId2, kind: 'status', fromStatus: 'review', toStatus: null, note: 'resolved:separate:bulk:reason:title_similar_same_company', actor: 'cli', at: new Date() });
+
+    const report = await buildScanReport(client, { sinceOverride: since, homeLocationNorms: [] });
+    const ruleEntry = report.reviewQueue.bulkToday.find((b) => b.mode === 'rule');
+    const reasonEntry = report.reviewQueue.bulkToday.find((b) => b.mode === 'reason');
+    assert.ok(ruleEntry && ruleEntry.count >= 1, 'a rule-mode bulk separation is tallied under mode "rule"');
+    assert.ok(reasonEntry && reasonEntry.count >= 1, 'a reason-mode bulk separation (with its own :<reason> suffix) still tallies under mode "reason", not the full note string');
+
+    const text = renderReportText(report);
+    const html = renderReportHtml(report);
+    const md = renderReportMarkdown(report);
+    for (const s of [text, html, md]) {
+      assert.match(s, /Review queue: \d+ returned to untriaged by bulk rule/);
+      assert.match(s, /Review queue: \d+ returned to untriaged by bulk reason/);
+    }
+  });
+
+  test('an event from before `since` is excluded from bulkToday', async () => {
+    const listingId = await insertListing({ title: 'Bulk Digest Stale Excluded' });
+    const old = new Date(Date.now() - 10 * 24 * 3600000);
+    await recordEvent(client, { listingId, kind: 'status', toStatus: null, note: 'resolved:separate:bulk:stale', actor: 'mcp', at: old });
+    const since = new Date(Date.now() - 5000);
+    const summary = await collectReviewQueueSummary(client, since);
+    assert.ok(!summary.bulkToday.some((b) => b.mode === 'stale'), 'an event older than `since` must not be counted');
+  });
+
+  test('when no bulk separation happened, no "returned to untriaged" line appears in any format', async () => {
+    const since = new Date();
+    const report = await buildScanReport(client, { sinceOverride: since, homeLocationNorms: [] });
+    assert.deepEqual(report.reviewQueue.bulkToday, []);
+    for (const s of [renderReportText(report), renderReportHtml(report), renderReportMarkdown(report)]) {
+      assert.ok(!/returned to untriaged/.test(s));
     }
   });
 });

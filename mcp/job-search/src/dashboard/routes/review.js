@@ -6,7 +6,7 @@
  * plan's "Review" page description.
  */
 import { JobSearchError } from '../../core/errors.js';
-import { resolveItem, autoSeparate } from '../../tools/review.js';
+import { resolveItem, autoSeparate, bulkResolve, REVIEW_BULK_MODES } from '../../tools/review.js';
 import { sendJson } from '../http.js';
 
 const DIFF_FIELDS = Object.freeze(['title', 'company', 'location', 'salary_min', 'salary_max', 'posted_at', 'source', 'status']);
@@ -65,6 +65,34 @@ export function register(router, deps, streamHub) {
       return { rows: out, autoN };
     });
     sendJson(ctx.res, 200, { ok: true, total: result.rows.length, auto_separated: result.autoN, rows: result.rows });
+  });
+
+  // Reason filter options for the dashboard bulk bar: the DB universe of currently-open reasons, never
+  // derived from whatever page of rows the client already loaded (dashboard UI restraint rule).
+  router.register('GET', '/api/review/reasons', async (ctx) => {
+    const r = await deps.withClient((c) => c.query(`SELECT DISTINCT reason FROM ic_job_review_queue WHERE resolved_at IS NULL ORDER BY reason`));
+    sendJson(ctx.res, 200, { ok: true, reasons: r.rows.map((row) => row.reason) });
+  });
+
+  // Bulk-separate (review-bulk spec S3b). dry_run defaults true; a live run (dry_run:false) requires
+  // confirm:true, enforced inside bulkResolve() itself -- this route does not duplicate that check, it
+  // only shapes/validates the request body before handing off.
+  router.register('POST', '/api/review/bulk', async (ctx) => {
+    const b = /** @type {any} */ (ctx.body);
+    if (!REVIEW_BULK_MODES.includes(b.mode)) throw new JobSearchError('VALIDATION', `mode must be one of ${REVIEW_BULK_MODES.join(', ')}`);
+    const dryRun = Object.prototype.hasOwnProperty.call(b, 'dry_run') ? b.dry_run : true;
+    if (typeof dryRun !== 'boolean') throw new JobSearchError('VALIDATION', 'dry_run must be a boolean');
+    const confirm = Object.prototype.hasOwnProperty.call(b, 'confirm') ? b.confirm : false;
+    if (typeof confirm !== 'boolean') throw new JobSearchError('VALIDATION', 'confirm must be a boolean');
+    const out = await bulkResolve(deps, {
+      mode: b.mode,
+      reason: typeof b.reason === 'string' ? b.reason : undefined,
+      dryRun,
+      confirm,
+      actor: 'dashboard',
+    });
+    if (!dryRun && out.counts.separate > 0) streamHub?.notifyChanged('events');
+    sendJson(ctx.res, 200, { ok: true, ...out });
   });
 
   router.register('POST', '/api/review/:queueId/resolve', async (ctx) => {
