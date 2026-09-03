@@ -106,8 +106,10 @@ function baseDeps(extra = {}) {
   };
 }
 
-const PASS_BLOCK = `## CV Quality Gate report\n\nOverall: PASS\n\nVERDICT: PASS\n\`\`\`json\n${JSON.stringify({ verdict: 'PASS', critical_count: 0, important_count: 1, minor_count: 0, findings: [{ severity: 'IMPORTANT', text: 'x' }] })}\n\`\`\`\n`;
-const FAIL_BLOCK = `## CV Quality Gate report\n\nOverall: FAIL\n\nVERDICT: FAIL\n\`\`\`json\n${JSON.stringify({ verdict: 'FAIL', critical_count: 1, important_count: 0, minor_count: 0, findings: [{ severity: 'CRITICAL', text: 'missing keyword' }] })}\n\`\`\`\n`;
+const PASS_JSON = { verdict: 'PASS', critical_count: 0, important_count: 1, minor_count: 0, findings: [{ severity: 'IMPORTANT', text: 'x' }] };
+const FAIL_JSON = { verdict: 'FAIL', critical_count: 1, important_count: 0, minor_count: 0, findings: [{ severity: 'CRITICAL', text: 'missing keyword' }] };
+const PASS_BLOCK = `## CV Quality Gate report\n\nOverall: PASS\n\nVERDICT: PASS\n\`\`\`json\n${JSON.stringify(PASS_JSON)}\n\`\`\`\n`;
+const FAIL_BLOCK = `## CV Quality Gate report\n\nOverall: FAIL\n\nVERDICT: FAIL\n\`\`\`json\n${JSON.stringify(FAIL_JSON)}\n\`\`\`\n`;
 
 describe('parseReviewResult: total classification over the machine block (pure function)', () => {
   test('a well-formed VERDICT: PASS block parses', () => {
@@ -123,9 +125,9 @@ describe('parseReviewResult: total classification over the machine block (pure f
     assert.equal(/** @type {any} */ (r).verdict, 'FAIL');
   });
 
-  test('no VERDICT line at all -> review_unparseable', () => {
+  test('no VERDICT line at all -> no_verdict', () => {
     const r = parseReviewResult('Just a report, no machine block.');
-    assert.deepEqual(r, { ok: false, reason: 'review_unparseable' });
+    assert.deepEqual(r, { ok: false, reason: 'no_verdict' });
   });
 
   test('a VERDICT line with no following json block -> review_unparseable', () => {
@@ -143,10 +145,66 @@ describe('parseReviewResult: total classification over the machine block (pure f
     assert.deepEqual(r, { ok: false, reason: 'review_unparseable' });
   });
 
-  test('VERDICT is case-insensitive on the label but the captured value is normalized to uppercase', () => {
+  test('VERDICT is case-sensitive -- lowercase "verdict: pass" never matches (no "i" flag)', () => {
     const r = parseReviewResult('verdict: pass\n```json\n{"verdict":"PASS"}\n```\n');
+    assert.deepEqual(r, { ok: false, reason: 'no_verdict' });
+  });
+
+  test('PASS then a later real FAIL -> the LAST surviving verdict (FAIL) wins', () => {
+    const text = `VERDICT: PASS\n\`\`\`json\n${JSON.stringify(PASS_JSON)}\n\`\`\`\n\nSome more prose.\n\nVERDICT: FAIL\n\`\`\`json\n${JSON.stringify(FAIL_JSON)}\n\`\`\`\n`;
+    const r = parseReviewResult(text);
+    assert.equal(r.ok, true);
+    assert.equal(/** @type {any} */ (r).verdict, 'FAIL');
+    assert.equal(/** @type {any} */ (r).findings.critical_count, 1);
+  });
+
+  test('FAIL then a later real PASS -> the LAST surviving verdict (PASS) wins', () => {
+    const text = `VERDICT: FAIL\n\`\`\`json\n${JSON.stringify(FAIL_JSON)}\n\`\`\`\n\nSome more prose.\n\nVERDICT: PASS\n\`\`\`json\n${JSON.stringify(PASS_JSON)}\n\`\`\`\n`;
+    const r = parseReviewResult(text);
     assert.equal(r.ok, true);
     assert.equal(/** @type {any} */ (r).verdict, 'PASS');
+    assert.equal(/** @type {any} */ (r).findings.critical_count, 0);
+  });
+
+  test('a VERDICT: PASS quoted inside a fenced example block is ignored; the real VERDICT: FAIL after it wins', () => {
+    const text = `Here is the expected shape:\n\`\`\`\nVERDICT: PASS\n\`\`\`\n\nVERDICT: FAIL\n\`\`\`json\n${JSON.stringify(FAIL_JSON)}\n\`\`\`\n`;
+    const r = parseReviewResult(text);
+    assert.equal(r.ok, true);
+    assert.equal(/** @type {any} */ (r).verdict, 'FAIL');
+  });
+
+  test('a quoted lowercase "verdict: pass" in prose is never a candidate; the real VERDICT: FAIL wins', () => {
+    const text = `The report should say something like \`verdict: pass\` in prose.\n\nVERDICT: FAIL\n\`\`\`json\n${JSON.stringify(FAIL_JSON)}\n\`\`\`\n`;
+    const r = parseReviewResult(text);
+    assert.equal(r.ok, true);
+    assert.equal(/** @type {any} */ (r).verdict, 'FAIL');
+  });
+
+  test('"VERDICT:PASSED" is not a match (not exactly PASS or FAIL) -> no_verdict', () => {
+    const r = parseReviewResult('VERDICT:PASSED\n```json\n{}\n```\n');
+    assert.deepEqual(r, { ok: false, reason: 'no_verdict' });
+  });
+
+  test('CRLF line endings are tolerated', () => {
+    const text = `Report\r\n\r\nVERDICT: PASS\r\n\`\`\`json\r\n${JSON.stringify(PASS_JSON)}\r\n\`\`\`\r\n`;
+    const r = parseReviewResult(text);
+    assert.equal(r.ok, true);
+    assert.equal(/** @type {any} */ (r).verdict, 'PASS');
+  });
+
+  test('leading whitespace before VERDICT is not tolerated (must be at column 0) -> no_verdict', () => {
+    const r = parseReviewResult('  VERDICT: PASS\n```json\n{}\n```\n');
+    assert.deepEqual(r, { ok: false, reason: 'no_verdict' });
+  });
+
+  test('two verdict+json pairs: the findings json is attached to the correct (last) verdict', () => {
+    const firstJson = { verdict: 'PASS', tag: 'first' };
+    const lastJson = { verdict: 'FAIL', tag: 'second' };
+    const text = `VERDICT: PASS\n\`\`\`json\n${JSON.stringify(firstJson)}\n\`\`\`\n\nVERDICT: FAIL\n\`\`\`json\n${JSON.stringify(lastJson)}\n\`\`\`\n`;
+    const r = parseReviewResult(text);
+    assert.equal(r.ok, true);
+    assert.equal(/** @type {any} */ (r).verdict, 'FAIL');
+    assert.equal(/** @type {any} */ (r).findings.tag, 'second');
   });
 });
 
@@ -176,18 +234,40 @@ describe('createReviewRunner: DB storage and runner return value', () => {
     assert.equal(row.review_findings.findings[0].severity, 'CRITICAL');
   });
 
-  test('a missing machine block parks with review_unparseable, review_verdict left NULL', async () => {
+  test('a missing machine block parks with no_verdict, review_verdict left NULL', async () => {
     const listingId = await insertListing();
     const app = await createApplication(client, { listingId });
     const spawnFn = makeFakeSpawn({ onSpawn: (child) => finishChild(child, { result: 'No machine block here.', exitCode: 0 }) });
     const runner = createReviewRunner(baseDeps({ spawn: spawnFn }));
     const result = await runner.run(app.id, 'output/markdown/x.md', listingId);
     assert.equal(result.ok, false);
-    assert.equal(result.reason, 'review_unparseable');
+    assert.equal(result.reason, 'no_verdict');
     const row = await getApplication(client, app.id);
     assert.equal(row.review_verdict, null);
     const events = await listApplicationEvents(client, app.id);
-    assert.ok(events.some((e) => e.kind === 'error' && /review_unparseable/.test(e.note ?? '')));
+    assert.ok(events.some((e) => e.kind === 'error' && /no_verdict/.test(e.note ?? '')));
+  });
+
+  test('an unparseable --output-format json wrapper never falls back to raw stdout -- distinct reason json_wrapper_unparseable', async () => {
+    const listingId = await insertListing();
+    const app = await createApplication(client, { listingId });
+    // Raw stdout that is NOT the expected {result: "..."} JSON wrapper -- e.g. truncated/corrupted CLI
+    // output. It happens to contain a VERDICT-shaped line; if the runner ever fell back to raw stdout for
+    // verdict matching, this would incorrectly parse as PASS instead of failing on the broken wrapper.
+    const spawnFn = makeFakeSpawn({
+      onSpawn: (child) => {
+        child.stdout.emit('data', Buffer.from('not valid json at all\nVERDICT: PASS\n```json\n{}\n```\n'));
+        child.emit('exit', 0);
+      },
+    });
+    const runner = createReviewRunner(baseDeps({ spawn: spawnFn }));
+    const result = await runner.run(app.id, 'output/markdown/x.md', listingId);
+    assert.equal(result.ok, false);
+    assert.equal(result.reason, 'json_wrapper_unparseable');
+    const row = await getApplication(client, app.id);
+    assert.equal(row.review_verdict, null);
+    const events = await listApplicationEvents(client, app.id);
+    assert.ok(events.some((e) => e.kind === 'error' && /json_wrapper_unparseable/.test(e.note ?? '')));
   });
 });
 

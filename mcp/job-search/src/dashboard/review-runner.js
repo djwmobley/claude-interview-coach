@@ -8,10 +8,15 @@
  *
  * Parses ONLY the `VERDICT: PASS`/`VERDICT: FAIL` line and the fenced json block that follows it
  * (.claude/skills/review-cv/SKILL.md's own machine-block contract) -- never the human-readable report
- * text around it. Anything unparseable (no VERDICT line, no json block, malformed json) is FAIL with
- * reason 'review_unparseable': the same "friction over silent escape" total-classification rule that
- * governs every validation gate in this codebase (CLAUDE.md) -- an ambiguous review result must never be
- * read as a pass.
+ * text around it. A VERDICT line is only a candidate outside any fenced code block, must sit at column 0
+ * (case-sensitive `VERDICT:`, no leading whitespace), and when several survive, the LAST one wins -- the
+ * findings json block is then located by searching forward from that winning line only, within a bounded
+ * window, never an unanchored whole-string search. No surviving VERDICT line at all is FAIL with reason
+ * 'no_verdict'; a VERDICT line found but no json block / malformed json / non-object json is FAIL with
+ * reason 'review_unparseable'; a broken --output-format json wrapper (never falls back to raw stdout) is
+ * FAIL with reason 'json_wrapper_unparseable'. This is the same "friction over silent escape"
+ * total-classification rule that governs every validation gate in this codebase (CLAUDE.md) -- an
+ * ambiguous review result must never be read as a pass.
  *
  * Only VERDICT: PASS lets the caller (POST /api/listings/:id/apply-now, routes/applications.js) proceed
  * to approve(); FAIL or unparseable leaves the application at 'docs_ready' with review_verdict/
@@ -28,24 +33,68 @@ import { recordApplicationEvent } from '../core/applications.js';
 
 const STRIP_ENV_VARS = Object.freeze(['CLAUDECODE', 'CLAUDE_CODE_ENTRYPOINT', 'CLAUDE_AGENT_ID']);
 
-const VERDICT_RE = /^VERDICT:\s*(PASS|FAIL)\s*$/mi;
+// Case-sensitive, no leading whitespace tolerated (SKILL.md requires the VERDICT line at column 0), CRLF
+// tolerant via the explicit optional \r before the end-of-line anchor. Global + multiline so every
+// candidate line in the text can be found and evaluated, not just the first.
+const VERDICT_RE = /^VERDICT:[ \t]*(PASS|FAIL)[ \t]*\r?$/gm;
+// Fenced code block ranges (``` ... ```), CRLF tolerant, non-greedy so back-to-back fences pair up
+// correctly rather than spanning from the first opening fence to the last closing one.
+const FENCE_RE = /```[^\r\n]*\r?\n[\s\S]*?```/g;
 const JSON_BLOCK_RE = /```(?:json)?\s*\n([\s\S]*?)```/;
+// The findings json block must immediately follow the winning VERDICT line; searching is bounded to this
+// many characters forward from that line so a stray ``` fence anywhere later in a long result text can
+// never be mistaken for the machine block (never an unanchored whole-string search).
+const JSON_SEARCH_WINDOW = 20000;
+
+/**
+ * @param {string} text
+ * @returns {[number, number][]} half-open [start, end) ranges covering every fenced code block in `text`
+ */
+function computeFenceRanges(text) {
+  /** @type {[number, number][]} */
+  const ranges = [];
+  let m;
+  FENCE_RE.lastIndex = 0;
+  while ((m = FENCE_RE.exec(text)) !== null) {
+    ranges.push([m.index, m.index + m[0].length]);
+    if (m[0].length === 0) FENCE_RE.lastIndex += 1; // guard against zero-length match infinite loop
+  }
+  return ranges;
+}
 
 /**
  * Parses the review-cv skill's machine block out of the CLI result text (spec item 6's contract: a
- * VERDICT line, then a fenced json block). Total classification over the shape of `text`: either both
- * pieces are found and the json parses to a plain object, or the whole thing is 'review_unparseable' --
- * there is no partial-credit branch (a VERDICT line with an unparseable json block is still
- * 'review_unparseable', never "trust the VERDICT line alone").
+ * VERDICT line, then a fenced json block). Total classification over the shape of `text`:
+ *   - No VERDICT line survives outside a fenced code block anywhere in the text -> 'no_verdict'.
+ *   - A surviving VERDICT line exists but no json block is found in the bounded window after it, or the
+ *     json block fails to parse, or it parses to something other than a plain object -> 'review_unparseable'
+ *     (there is no partial-credit branch -- an unparseable json block is never "trust the VERDICT line
+ *     alone").
+ *   - Otherwise: the LAST surviving VERDICT line (outside any fence) wins, paired with the json block
+ *     found by searching forward from that line only.
+ * A VERDICT-shaped line that falls inside a fenced code block (e.g. quoted in an example, or shown as
+ * prose inside a ```code``` block) is never a candidate -- only lines outside all fences are considered.
  * @param {string} text
- * @returns {{ ok: true, verdict: 'PASS'|'FAIL', findings: any } | { ok: false, reason: 'review_unparseable' }}
+ * @returns {{ ok: true, verdict: 'PASS'|'FAIL', findings: any } | { ok: false, reason: 'no_verdict'|'review_unparseable' }}
  */
 export function parseReviewResult(text) {
-  const verdictMatch = VERDICT_RE.exec(text);
-  if (!verdictMatch) return { ok: false, reason: 'review_unparseable' };
-  const verdict = /** @type {'PASS'|'FAIL'} */ (verdictMatch[1].toUpperCase());
-  const afterVerdict = text.slice(verdictMatch.index + verdictMatch[0].length);
-  const jsonBlockMatch = JSON_BLOCK_RE.exec(afterVerdict);
+  const fenceRanges = computeFenceRanges(text);
+  const isFenced = (/** @type {number} */ idx) => fenceRanges.some(([s, e]) => idx >= s && idx < e);
+
+  VERDICT_RE.lastIndex = 0;
+  /** @type {RegExpExecArray|null} */
+  let lastMatch = null;
+  /** @type {RegExpExecArray|null} */
+  let m;
+  while ((m = VERDICT_RE.exec(text)) !== null) {
+    if (!isFenced(m.index)) lastMatch = m;
+  }
+  if (!lastMatch) return { ok: false, reason: 'no_verdict' };
+
+  const verdict = /** @type {'PASS'|'FAIL'} */ (lastMatch[1]);
+  const searchStart = lastMatch.index + lastMatch[0].length;
+  const window = text.slice(searchStart, searchStart + JSON_SEARCH_WINDOW);
+  const jsonBlockMatch = JSON_BLOCK_RE.exec(window);
   if (!jsonBlockMatch) return { ok: false, reason: 'review_unparseable' };
   /** @type {any} */
   let parsed;
@@ -185,14 +234,22 @@ export function createReviewRunner(deps) {
         return await fail(applicationId, 'spawn_failed');
       }
 
+      // Invoked with --output-format json, so stdout is always expected to be a JSON wrapper whose
+      // `result` field carries the CLI's text output. If the wrapper itself does not parse, or parses but
+      // lacks a string `result`, that is a distinct failure from an unparseable/missing machine block --
+      // it means the CLI process's own output contract was violated, not that the model forgot the
+      // VERDICT line. Never fall back to raw `stdout` for verdict matching in that case: raw stdout may
+      // contain streaming/log noise that could spuriously match VERDICT_RE.
       /** @type {any} */
       let resultJson = null;
+      let wrapperOk = true;
       try {
         resultJson = JSON.parse(stdout);
       } catch {
-        resultJson = null;
+        wrapperOk = false;
       }
-      const resultText = resultJson && typeof resultJson.result === 'string' ? resultJson.result : stdout;
+      if (wrapperOk && (!resultJson || typeof resultJson.result !== 'string')) wrapperOk = false;
+
       await deps.withClient((c) => recordApplicationEvent(c, {
         applicationId, kind: 'progress', actor: 'apply', note: 'review runner CLI result',
         meta: {
@@ -205,6 +262,12 @@ export function createReviewRunner(deps) {
         },
       }));
 
+      if (!wrapperOk) {
+        await storeReview(applicationId, null, null);
+        return await fail(applicationId, 'json_wrapper_unparseable');
+      }
+
+      const resultText = resultJson.result;
       const parsed = parseReviewResult(resultText);
       if (!parsed.ok) {
         await storeReview(applicationId, null, null);

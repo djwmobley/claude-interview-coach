@@ -154,7 +154,10 @@ After the human-readable report above, append a machine-readable block: a
 line reading exactly `VERDICT: PASS` or `VERDICT: FAIL` (PASS iff zero
 CRITICAL issues, matching the PASS/FAIL criteria above), followed immediately
 by a fenced json block. The VERDICT line itself is plain text, NOT inside a
-code fence -- only the json below it is fenced:
+code fence -- only the json below it is fenced. **The VERDICT line must start
+at column 0 (no leading spaces or indentation)** -- an indented `  VERDICT:
+PASS` is not recognized by the parser and is treated the same as no verdict
+line at all:
 
 VERDICT: PASS
 ```json
