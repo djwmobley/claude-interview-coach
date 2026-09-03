@@ -1,12 +1,12 @@
-# Playwright MCP — Setup Guide
+# Playwright MCP: Setup Guide
 
 Playwright MCP allows Claude Code to drive a real browser, enabling it to read
 job portals and career pages that return JavaScript shells to standard HTTP
 requests (WebFetch). Without it, portals like LinkedIn, Oracle HCM, and many
 enterprise ATS systems are unreadable.
 
-Skills that fetch live URLs — `/scan-jobs`, `/review-cv`, `/voice-export`,
-`/skill-gap` — use WebFetch by default and fall back to Playwright automatically
+Skills that fetch live URLs: `/scan-jobs`, `/review-cv`, `/voice-export`,
+`/skill-gap`: use WebFetch by default and fall back to Playwright automatically
 when a JS shell is detected, provided Playwright is configured.
 
 ---
@@ -76,12 +76,12 @@ method was used.
 
 | Portal | Requires Playwright |
 |---|---|
-| LinkedIn Jobs | Yes — always JS-rendered |
+| LinkedIn Jobs | Yes: always JS-rendered |
 | Oracle HCM (company career portals) | Yes |
 | Greenhouse, Lever, Workday | Usually |
 | Taleo, iCIMS | Usually |
-| Indeed (public search) | No — works with WebFetch |
-| Upwork | No — works with WebFetch |
+| Indeed (public search) | No: works with WebFetch |
+| Upwork | No: works with WebFetch |
 | Most public job board listing pages | No |
 
 If a portal requires login, Playwright can navigate to it but will stop at the

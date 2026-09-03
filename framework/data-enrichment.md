@@ -1,4 +1,4 @@
-# Data Enrichment — Session Wrap-Up
+# Data Enrichment: Session Wrap-Up
 
 After every coaching session, simulation, or debrief, check whether the candidate revealed information that should be captured in the data files. This is the last step before the session is fully closed.
 
@@ -10,12 +10,12 @@ During coaching, candidates talk freely about their work. They mention achieveme
 
 Scan the session transcript (or conversation) for information the candidate mentioned that falls into these categories:
 
-1. **Project details** — responsibilities, scope, team size, architecture decisions, business context not already in the project file
-2. **Achievements** — measurable outcomes, problems solved, impact delivered (the hardest category to get from candidates, and the most valuable for CVs)
-3. **Technologies** — tools, frameworks, platforms, cloud services mentioned in context that aren't in the project's technology list or in `data/skills.md`
-4. **Skills** — new skills or higher proficiency evidence (e.g., candidate demonstrated deep knowledge of something listed at a lower level)
-5. **Certifications or education** — anything mentioned but not tracked
-6. **TODO resolution** — information that fills gaps marked with `<!-- TODO: ... -->` in existing data files
+1. **Project details**: responsibilities, scope, team size, architecture decisions, business context not already in the project file
+2. **Achievements**: measurable outcomes, problems solved, impact delivered (the hardest category to get from candidates, and the most valuable for CVs)
+3. **Technologies**: tools, frameworks, platforms, cloud services mentioned in context that aren't in the project's technology list or in `data/skills.md`
+4. **Skills**: new skills or higher proficiency evidence (e.g., candidate demonstrated deep knowledge of something listed at a lower level)
+5. **Certifications or education**: anything mentioned but not tracked
+6. **TODO resolution**: information that fills gaps marked with `<!-- TODO: ... -->` in existing data files
 
 ## How to Do It
 
@@ -45,11 +45,11 @@ Wait for the candidate to confirm before writing anything. They may want to adju
 
 When approved:
 
-- **Project files** (`data/projects/*.md`) — add achievements, responsibilities, technologies, description details
-- **Skills** (`data/skills.md`) — add new skills or adjust experience levels
-- **Certifications** (`data/certifications.md`) — add newly mentioned certifications
-- **Project index** (`data/project-index.md`) — update if project descriptions changed significantly
-- **TODO markers** — replace `<!-- TODO: ... -->` with the actual information, removing the TODO comment entirely
+- **Project files** (`data/projects/*.md`): add achievements, responsibilities, technologies, description details
+- **Skills** (`data/skills.md`): add new skills or adjust experience levels
+- **Certifications** (`data/certifications.md`): add newly mentioned certifications
+- **Project index** (`data/project-index.md`): update if project descriptions changed significantly
+- **TODO markers**: replace `<!-- TODO: ... -->` with the actual information, removing the TODO comment entirely
 
 ### 5. Keep It Brief
 
@@ -57,7 +57,7 @@ This step should take 1-2 minutes, not become a second session. If the enrichmen
 
 ## Voice Capture Update
 
-Update `memory/voice.md` as the **final step** — after all data file updates
+Update `memory/voice.md` as the **final step**: after all data file updates
 are complete. Voice capture runs every session; no opt-in is required.
 
 Follow the full procedure in `framework/voice-capture.md`: review the session for

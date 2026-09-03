@@ -1,4 +1,4 @@
-# Question-Back Technique — Turn Questions Around
+# Question-Back Technique: Turn Questions Around
 
 ## What Is a Question-Back?
 
@@ -61,7 +61,7 @@ A well-placed question-back:
 **Pattern:** Answer → context → question back
 
 **Example:**
-> "Not [X] directly, but I [adjacent experience that's genuinely close — be specific]. **Does the client need [X] specifically, or someone with [broader skill you have]?**"
+> "Not [X] directly, but I [adjacent experience that's genuinely close: be specific]. **Does the client need [X] specifically, or someone with [broader skill you have]?**"
 
 **Why:** Reframes the gap as a clarification of their actual need.
 
@@ -80,7 +80,7 @@ A well-placed question-back:
 
 **Why:**
 - Buys you 20-30 seconds while they clarify
-- **Narrows the scope, which makes recall MUCH easier** — "disagreement" (too broad) becomes "team disagreement" (specific)
+- **Narrows the scope, which makes recall MUCH easier**: "disagreement" (too broad) becomes "team disagreement" (specific)
 - Shows engagement
 
 **Key insight:** Having a more specific situation to recall makes it easier to find a concrete example in your memory.
@@ -108,7 +108,7 @@ A well-placed question-back:
 **Pattern:** Explain how you manage it → question back about their specific concern
 
 **Example:**
-> "[Explain your setup — how you handle the situation concretely, referencing real precedents from your projects]. **Are there critical phases in this project where the client needs dedicated availability? Then we can plan around those specifically.**"
+> "[Explain your setup: how you handle the situation concretely, referencing real precedents from your projects]. **Are there critical phases in this project where the client needs dedicated availability? Then we can plan around those specifically.**"
 
 **Why:**
 - Acknowledges the concern
@@ -172,11 +172,11 @@ A well-placed question-back:
 
 | Situation | Question-Back |
 |-----------|---------------|
-| After expressing interest | "What does the next step look like — is there a technical interview with the client?" |
+| After expressing interest | "What does the next step look like: is there a technical interview with the client?" |
 | When unsure about fit | "Is there anything specific you'd like me to highlight in my profile?" |
 | Multiple candidates | "How many profiles are you presenting to the client?" |
 
-*Adapt these to the conversation language. For non-English calls, translate naturally — e.g. German: "Liegt das im Budget?", "Braucht der Kunde [X] speziell?"*
+*Adapt these to the conversation language. For non-English calls, translate naturally: e.g. German: "Liegt das im Budget?", "Braucht der Kunde [X] speziell?"*
 
 ---
 
@@ -239,12 +239,12 @@ Add these to your cheat sheets.
 
 ## Building Your Own Examples
 
-As you practise (via coaching sessions or `/debrief`), strong question-back moments get saved to `coaching/coached-answers.md`. Review those for real examples that worked in your voice — they're more useful than generic templates.
+As you practise (via coaching sessions or `/debrief`), strong question-back moments get saved to `coaching/coached-answers.md`. Review those for real examples that worked in your voice: they're more useful than generic templates.
 
 ## Key Principles
 
-1. **Always answer first, then question back** — Never use question-back to dodge
-2. **One question-back per answer** — Don't interrogate
-3. **Make it about their needs, not your gaps** — Frame as clarification, not defense
-4. **Stop talking after the question** — Let them answer
-5. **Confident, not defensive** — You're helping them clarify, not challenging them
+1. **Always answer first, then question back**: Never use question-back to dodge
+2. **One question-back per answer**: Don't interrogate
+3. **Make it about their needs, not your gaps**: Frame as clarification, not defense
+4. **Stop talking after the question**: Let them answer
+5. **Confident, not defensive**: You're helping them clarify, not challenging them

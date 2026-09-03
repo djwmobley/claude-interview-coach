@@ -2,22 +2,22 @@
 Store company research into ic_company_research (pgvector).
 Creates the table if it doesn't exist.
 
-Usage — pipe JSON to stdin or pass a JSON file:
+Usage: pipe JSON to stdin or pass a JSON file:
   echo '[{"company":"Sultans", ...}]' | python tools/store_company_research.py
   python tools/store_company_research.py research.json
 
 JSON fields per company:
-  company          (str, required) — company name
-  context          (str, required) — why researching (e.g., "meeting intro via Eduardo")
-  summary          (str, required) — full research summary text
-  key_people       (list[dict])   — [{name, title, background, linkedin}]
-  key_phrases      (list[str])    — talking points to use in conversation
-  client_base      (list[str])    — known clients
-  tech_stack       (list[str])    — technologies / platforms
-  flags            (list[str])    — cautions or contextual notes
-  research_date    (str YYYY-MM-DD) — defaults to today
-  html_path        (str)          — relative path to HTML briefing file
-  tags             (list[str])    — for retrieval filtering
+  company          (str, required): company name
+  context          (str, required): why researching (e.g., "meeting intro via Eduardo")
+  summary          (str, required): full research summary text
+  key_people       (list[dict])  : [{name, title, background, linkedin}]
+  key_phrases      (list[str])   : talking points to use in conversation
+  client_base      (list[str])   : known clients
+  tech_stack       (list[str])   : technologies / platforms
+  flags            (list[str])   : cautions or contextual notes
+  research_date    (str YYYY-MM-DD): defaults to today
+  html_path        (str)         : relative path to HTML briefing file
+  tags             (list[str])   : for retrieval filtering
 """
 
 import json
@@ -62,7 +62,7 @@ def _ensure_table(conn):
 
 
 def _build_embed_text(entry: dict) -> str:
-    """Build a rich text blob for embedding — company + context + summary + key phrases."""
+    """Build a rich text blob for embedding: company + context + summary + key phrases."""
     parts = [
         f"Company: {entry['company']}",
         f"Context: {entry.get('context', '')}",

@@ -24,19 +24,19 @@ Examples:
 ```
 
 If referral call notes or insider corrections have been shared in this session,
-flag them — they will be incorporated into a Referral Intelligence section that
+flag them: they will be incorporated into a Referral Intelligence section that
 overrides conflicting web research.
 
 ---
 
 ## Orchestration Architecture
 
-You are the orchestrator. You run at Sonnet quality — you synthesize, judge, and write.
+You are the orchestrator. You run at Sonnet quality: you synthesize, judge, and write.
 Sub-agents run in parallel and return structured data dumps. You do not run any web
 research yourself. You read local files and generate the final HTML.
 
 ```
-ORCHESTRATOR (you — Sonnet)
+ORCHESTRATOR (you: Sonnet)
 ├── Agent A: Company Research        [general-purpose, background]
 ├── Agent B: Tech Stack Research     [general-purpose, background]
 ├── Agent C: People Research         [general-purpose, background]
@@ -55,24 +55,24 @@ ORCHESTRATOR: read candidate files → synthesize → generate HTML
 
 ---
 
-## Step 0 — Parse inputs and load session context
+## Step 0: Parse inputs and load session context
 
 Before spawning agents:
 1. Extract company name and website from the invocation argument
 2. Note the job ad URL if provided
-3. Note any referral call intel shared in this session — capture verbatim
+3. Note any referral call intel shared in this session: capture verbatim
 4. Confirm `output/research/` directory exists (create if not)
 
 ---
 
-## Step 1 — Spawn all four agents simultaneously
+## Step 1: Spawn all four agents simultaneously
 
 Launch all four as Agent tool calls with `run_in_background: true`.
 Do NOT wait for one before launching the next. All four fire at the same time.
 
 ---
 
-### Agent A — Company Research
+### Agent A: Company Research
 
 **Subagent type:** general-purpose
 **Run in background:** true
@@ -81,13 +81,13 @@ Do NOT wait for one before launching the next. All four fire at the same time.
 ```
 Research [COMPANY NAME] ([COMPANY URL]) for a job interview.
 
-Return a structured report covering ALL of these — be specific, use real numbers:
+Return a structured report covering ALL of these: be specific, use real numbers:
 
 COMPANY FUNDAMENTALS:
 - Full legal name, HQ location, founded year
 - Core business: what they sell, who buys it, how they make money
 - Revenue, employee count, number of locations (most recent public figures)
-- Public/private/PE-backed/subsidiary status — who owns them
+- Public/private/PE-backed/subsidiary status: who owns them
 - Any parent company or notable investor
 
 RECENT STRATEGIC EVENTS (last 24 months):
@@ -110,12 +110,12 @@ CURRENT HIRING CONTEXT:
 
 Use WebFetch and Playwright as needed. Check: company website, LinkedIn company page,
 recent press releases, news articles (Google News search), and the company's own
-newsroom/blog. Do not guess or extrapolate — if a fact is unconfirmed, say so.
+newsroom/blog. Do not guess or extrapolate: if a fact is unconfirmed, say so.
 ```
 
 ---
 
-### Agent B — Tech Stack Research
+### Agent B: Tech Stack Research
 
 **Subagent type:** general-purpose
 **Run in background:** true
@@ -123,7 +123,7 @@ newsroom/blog. Do not guess or extrapolate — if a fact is unconfirmed, say so.
 **Prompt template:**
 ```
 Research the technology stack used by [COMPANY NAME] ([COMPANY URL]).
-The candidate is interviewing for: [ROLE TITLE — or "a senior IT leadership role" if unknown].
+The candidate is interviewing for: [ROLE TITLE: or "a senior IT leadership role" if unknown].
 
 Return a structured tech stack report:
 
@@ -138,7 +138,7 @@ CONFIRMED STACK (sources for each):
 - AI or automation tools named publicly
 
 HOW TO FIND IT:
-1. Job postings on the company's careers page — filter for IT/engineering roles.
+1. Job postings on the company's careers page: filter for IT/engineering roles.
    Tech requirements in postings are more accurate than press releases.
 2. LinkedIn employee profiles with "skills" or "experience" sections mentioning platforms
 3. Vendor case studies: search "[company name] case study" on SAP, Salesforce, Oracle,
@@ -152,7 +152,7 @@ Flag any discrepancy between sources (e.g. two sources name different ERPs).
 
 ---
 
-### Agent C — People Research
+### Agent C: People Research
 
 **Subagent type:** general-purpose
 **Run in background:** true
@@ -178,7 +178,7 @@ Tenure at this company (years):
 Prior companies (last 2-3 roles):
 Industry background:
 Education (if visible):
-Public content (LinkedIn posts, conference talks, press quotes — summarise themes):
+Public content (LinkedIn posts, conference talks, press quotes: summarise themes):
 Shared background with a candidate from [CANDIDATE LOCATION] with background in
   [enterprise IT, ERP implementations, direct sales industry]:
 
@@ -188,7 +188,7 @@ conference speaker bios. Note if a profile is sparse or unverifiable.
 
 ---
 
-### Agent D — Culture and Context Research
+### Agent D: Culture and Context Research
 
 **Subagent type:** general-purpose
 **Run in background:** true
@@ -223,26 +223,26 @@ INDUSTRY ENVIRONMENT:
 - Any macro tailwinds or headwinds that are likely to come up in conversation?
 
 Use Glassdoor via Playwright, LinkedIn company posts, news articles, and
-any public executive interviews. Be specific about timing — note when reviews
+any public executive interviews. Be specific about timing: note when reviews
 or quotes are from.
 ```
 
 ---
 
-## Step 2 — Read candidate context (while agents run)
+## Step 2: Read candidate context (while agents run)
 
 While the four agents are running, read local files:
 
-1. `data/profile.md` — comp target, location, current situation
-2. `data/project-index.md` — all projects for relevance scanning
-3. `data/professional-identity.md` — if it exists, how candidate frames their value
-4. `data/skills.md` — technology inventory
-5. `output/resumes/` — check for any existing resume for this company
+1. `data/profile.md`: comp target, location, current situation
+2. `data/project-index.md`: all projects for relevance scanning
+3. `data/professional-identity.md`: if it exists, how candidate frames their value
+4. `data/skills.md`: technology inventory
+5. `output/resumes/`: check for any existing resume for this company
 6. The job ad URL if provided (WebFetch it directly)
 
 ---
 
-## Step 3 — Synthesize all agent returns
+## Step 3: Synthesize all agent returns
 
 When all four agents have returned, synthesize:
 
@@ -273,12 +273,12 @@ If the session contains referral call notes, create a dedicated section that:
 **Scripted openers:**
 Generate 2–3 "Lead With This" scripted openers. Each must:
 - Reference a real company event (specific acquisition, named AI tool, specific metric)
-- Not be generic — if it could apply to any company, rewrite it
+- Not be generic: if it could apply to any company, rewrite it
 - Be written as the candidate would actually speak it (first person, natural)
 
 ---
 
-## Step 4 — Generate the HTML brief
+## Step 4: Generate the HTML brief
 
 Produce a single self-contained HTML file with all CSS inline or in a `<style>` block.
 
@@ -312,7 +312,7 @@ body {
 
 **1. Header**
 - `<h1>` company name
-- Subtitle: website · HQ · Role title — req number if known
+- Subtitle: website · HQ · Role title: req number if known
 - Badge row: company type (colour-coded by risk/opportunity), interview date if known
 - Meta row: research date, role level, comp target (from profile.md), location, travel %
 
@@ -322,9 +322,9 @@ body {
 - Red banner: critical risk or confirmed negative
 
 **3. Referral Intelligence** (only if referral intel exists in session)
-- Blue-bordered section titled "Referral Call Intelligence — [date] (Confirmed)"
+- Blue-bordered section titled "Referral Call Intelligence: [date] (Confirmed)"
 - Each bullet: bold the key fact, plain text the implication
-- Corrections to web research marked: "Earlier research had X — confirmed Y. Do not use X."
+- Corrections to web research marked: "Earlier research had X: confirmed Y. Do not use X."
 
 **4. Situation Brief**
 - 4–6 bullets: what the company does, what drove this hire, key platform facts,
@@ -342,14 +342,14 @@ body {
 
 **7. Proof Points**
 - `<ul class="proof-list">` with left-bordered green items
-- Each: label (Company — Achievement), paragraph connecting to this role's requirement
+- Each: label (Company: Achievement), paragraph connecting to this role's requirement
 
 **8. Lead With This**
 - 2–3 scripted opener blocks
 - Blue left border (`border-left: 3px solid var(--accent)`)
 - Label in accent colour, scripted text in italic
 
-**9. Pressure Points — DO / DO NOT**
+**9. Pressure Points: DO / DO NOT**
 - Question in red italic
 - Green DO block with scripted answer
 - Red DO NOT block with the trap
@@ -375,22 +375,22 @@ Where company-slug is lowercase, hyphenated (e.g. `srs-distribution`, `acme-corp
 
 ---
 
-## Step 5 — Confirm and offer next steps
+## Step 5: Confirm and offer next steps
 
 ```
 Research brief saved: output/research/YYYY-MM-DD-<company-slug>.html
 
 Open in a browser to review. Things to verify:
-  · People section — confirm names and titles are current
-  · Tech stack — correct anything that looks wrong
-  · Proof point framing — adjust if any example needs tightening
+  · People section: confirm names and titles are current
+  · Tech stack: correct anything that looks wrong
+  · Proof point framing: adjust if any example needs tightening
 
 To update with referral intel: paste your call notes and I'll regenerate
 the Referral Intelligence section and update affected pressure points.
 
 Suggested next steps:
-  /coaching  — run a recruiter screening using this brief as prep context
-  /write-resume [job-ad-url]  — if not already done
+  /coaching : run a recruiter screening using this brief as prep context
+  /write-resume [job-ad-url] : if not already done
 ```
 
 ---
@@ -398,13 +398,13 @@ Suggested next steps:
 ## Quality Rules
 
 - Never invent company details. Unconfirmed = say so or omit.
-- Job ad text is ground truth for tech stack — more accurate than press releases.
+- Job ad text is ground truth for tech stack: more accurate than press releases.
 - Pressure point answers must use the candidate's ACTUAL projects and outcomes.
-  No hypothetical answers. If no direct credential exists, write the bridge — not fiction.
+  No hypothetical answers. If no direct credential exists, write the bridge: not fiction.
 - Scripted openers must name real events: actual acquisition, actual AI tool, actual metric.
   Generic framing that could apply to any company must be rewritten.
 - Referral intelligence always overrides web research. Once corrected, the wrong fact
-  must not appear anywhere in the brief — not even as "previously believed to be X."
+  must not appear anywhere in the brief: not even as "previously believed to be X."
 - Glassdoor culture intel: include as "read the room" positioning guidance only.
   Do not include it as a fact to recite in the interview.
 - Everything is reviewable. This is prep material. The candidate reads and corrects

@@ -1,22 +1,22 @@
-# Behavioral Questions — The Blank Mind Protocol
+# Behavioral Questions: The Blank Mind Protocol
 
 ## The Problem
 
 Behavioral questions ("Tell me about a time when...") require **concrete STAR stories** (Situation-Action-Result).
 
-A common pressure point: **cold recall of specifics under pressure** — not a confidence issue, a memory retrieval issue.
+A common pressure point: **cold recall of specifics under pressure**: not a confidence issue, a memory retrieval issue.
 
 **Best prevention:** Prepare 3-5 concrete examples per major project in advance (see cheat sheets).
 
 **But when the question hits and nothing comes to mind:**
 
-Use this protocol. It's a single linear path — no decisions required.
+Use this protocol. It's a single linear path: no decisions required.
 
 > **Note:** Examples are shown in English. Translate to your interview language as needed.
 
 ---
 
-## Quick Overview — The Four Paths
+## Quick Overview: The Four Paths
 
 After buying thinking time with your prepared phrase and scanning your memory, you'll land in one of these states:
 
@@ -30,7 +30,7 @@ After buying thinking time with your prepared phrase and scanning your memory, y
 **How to apply:** Use STAR format immediately (Situation-Action-Result).
 
 **Example:**
-> "At [Client A] there was a discussion about [technical topic] — the team wanted [approach A], I recommended [approach B] because of [concrete reason]. I documented the risks, and the team went with [approach B]."
+> "At [Client A] there was a discussion about [technical topic]: the team wanted [approach A], I recommended [approach B] because of [concrete reason]. I documented the risks, and the team went with [approach B]."
 
 ---
 
@@ -41,7 +41,7 @@ After buying thinking time with your prepared phrase and scanning your memory, y
 **How to apply:** Frame it as repeated experience across multiple projects. Name 2 projects + technical domain, then describe your typical approach.
 
 **Example:**
-> "I've encountered this multiple times, especially at [Client A] and [Client B] — typically around [technical domain]. My approach was: document technical concerns, propose an alternative, discuss with the team, and then either convince them or commit to the team's decision."
+> "I've encountered this multiple times, especially at [Client A] and [Client B]: typically around [technical domain]. My approach was: document technical concerns, propose an alternative, discuss with the team, and then either convince them or commit to the team's decision."
 
 **Why this works:** Reframes memory failure as evidence of repeated experience (actually stronger than one example).
 
@@ -49,7 +49,7 @@ After buying thinking time with your prepared phrase and scanning your memory, y
 
 ### **Path C: Honest Pivot (Complete Blank)**
 
-**What it is:** Nothing came up during your memory scan — your mind is completely blank.
+**What it is:** Nothing came up during your memory scan: your mind is completely blank.
 
 **How to apply:** Admit you can't recall specifics, but give your process framework. Reference vague project context if possible.
 
@@ -69,7 +69,7 @@ After buying thinking time with your prepared phrase and scanning your memory, y
 **Example:**
 > **Interviewer:** "Tell me about a time you disagreed with technical standards."
 >
-> **You:** "When you say 'technical standards' — do you mean architecture decisions, or more like processes and naming conventions?"
+> **You:** "When you say 'technical standards': do you mean architecture decisions, or more like processes and naming conventions?"
 >
 > *(30 seconds gained while they clarify, plus narrower target for recall)*
 
@@ -83,8 +83,8 @@ After buying thinking time with your prepared phrase and scanning your memory, y
 
 *Mental state: "My mind just went blank"*
 
-- **Don't panic** — This is memory retrieval failure, not incompetence
-- **Auto-execute next step** — No thinking required
+- **Don't panic**: This is memory retrieval failure, not incompetence
+- **Auto-execute next step**: No thinking required
 
 ---
 
@@ -126,7 +126,7 @@ After your memory scan, you're in one of three states:
 > "At [project], [situation], I [action], the result was [result]."
 
 **Example:**
-> "At [Client A] there was a discussion about [technical topic] — the team wanted [approach A], I recommended [approach B] because of [concrete reason]. I did a brief assessment, documented the risks, and the team went with [approach B]. That worked well later during the audit."
+> "At [Client A] there was a discussion about [technical topic]: the team wanted [approach A], I recommended [approach B] because of [concrete reason]. I did a brief assessment, documented the risks, and the team went with [approach B]. That worked well later during the audit."
 
 ---
 
@@ -139,20 +139,20 @@ After your memory scan, you're in one of three states:
 #### **Template 1: "Multiple times across projects"**
 
 **EN:**
-> "I've encountered this multiple times, especially at [Project A] and [Project B] — typically around [technical domain]. My approach was: [process pattern], which typically resulted in [outcome pattern]."
+> "I've encountered this multiple times, especially at [Project A] and [Project B]: typically around [technical domain]. My approach was: [process pattern], which typically resulted in [outcome pattern]."
 
 **DE:**
-> "Das ist mir mehrfach begegnet, besonders bei [Project A] und [Project B] — typischerweise rund um [technical domain]. Mein Vorgehen war: [process pattern], was typischerweise zu [outcome pattern] geführt hat."
+> "Das ist mir mehrfach begegnet, besonders bei [Project A] und [Project B]: typischerweise rund um [technical domain]. Mein Vorgehen war: [process pattern], was typischerweise zu [outcome pattern] geführt hat."
 
 ---
 
 #### **Template 2: "This came up several times"**
 
 **EN:**
-> "This came up several times, especially at [Project A] and [Project B] — mostly around [technical domain]. Let me describe the typical pattern: [situation type], then I would [action pattern], which typically [outcome pattern]."
+> "This came up several times, especially at [Project A] and [Project B]: mostly around [technical domain]. Let me describe the typical pattern: [situation type], then I would [action pattern], which typically [outcome pattern]."
 
 **DE:**
-> "Das kam mehrfach vor, besonders bei [Project A] und [Project B] — hauptsächlich rund um [technical domain]. Das typische Muster war: [situation type], dann habe ich [action pattern], was typischerweise [outcome pattern]."
+> "Das kam mehrfach vor, besonders bei [Project A] und [Project B]: hauptsächlich rund um [technical domain]. Das typische Muster war: [situation type], dann habe ich [action pattern], was typischerweise [outcome pattern]."
 
 ---
 
@@ -161,10 +161,10 @@ After your memory scan, you're in one of three states:
 **Question:** "Tell me about a time you disagreed with a technical decision."
 
 **EN:**
-> "I've encountered this multiple times, especially at [Client A] and [Client B] — typically around security decisions or architecture boundaries. My approach was: document technical concerns with concrete risks, propose an alternative, discuss with the team, and then either convince them or commit to the decision. That usually worked well — either the decision was adjusted, or I understood in hindsight why the other approach made sense."
+> "I've encountered this multiple times, especially at [Client A] and [Client B]: typically around security decisions or architecture boundaries. My approach was: document technical concerns with concrete risks, propose an alternative, discuss with the team, and then either convince them or commit to the decision. That usually worked well: either the decision was adjusted, or I understood in hindsight why the other approach made sense."
 
 **DE:**
-> "Das ist mir mehrfach begegnet, besonders bei [Client A] und [Client B] — typischerweise bei Security-Entscheidungen oder Architektur-Grenzen. Mein Vorgehen war: technische Bedenken mit konkreten Risiken dokumentieren, eine Alternative vorschlagen, mit dem Team besprechen, und dann entweder überzeugen oder die Entscheidung mittragen. Das hat meistens gut funktioniert — entweder wurde die Entscheidung angepasst, oder ich habe im Nachhinein verstanden, warum der andere Ansatz sinnvoll war."
+> "Das ist mir mehrfach begegnet, besonders bei [Client A] und [Client B]: typischerweise bei Security-Entscheidungen oder Architektur-Grenzen. Mein Vorgehen war: technische Bedenken mit konkreten Risiken dokumentieren, eine Alternative vorschlagen, mit dem Team besprechen, und dann entweder überzeugen oder die Entscheidung mittragen. Das hat meistens gut funktioniert: entweder wurde die Entscheidung angepasst, oder ich habe im Nachhinein verstanden, warum der andere Ansatz sinnvoll war."
 
 ### **Why This Works**
 
@@ -198,7 +198,7 @@ After your memory scan, you're in one of three states:
 **Question:** "Tell me about a time you had to follow standards you disagreed with."
 
 **Answer:**
-> "I can't recall a specific example right now, but at [Client B] I was part of a larger team — there were several decisions I would have made differently, but that I committed to. My approach was always: give feedback once on why I'd do it differently, then execute as agreed. The details aren't fresh in my mind."
+> "I can't recall a specific example right now, but at [Client B] I was part of a larger team: there were several decisions I would have made differently, but that I committed to. My approach was always: give feedback once on why I'd do it differently, then execute as agreed. The details aren't fresh in my mind."
 
 ---
 
@@ -220,10 +220,10 @@ If you've bought 10 seconds and STILL have nothing, you can narrow the question 
 
 **Clarifying question template:**
 
-> "When you say [keyword from question] — do you mean [option A], or more like [option B]?"
+> "When you say [keyword from question]: do you mean [option A], or more like [option B]?"
 
 **Examples:**
-> "When you say 'technical standards' — do you mean architecture decisions, or more like processes and naming conventions?"
+> "When you say 'technical standards': do you mean architecture decisions, or more like processes and naming conventions?"
 
 > "Do you mean a situation within the team, or with the client?"
 
@@ -299,9 +299,9 @@ Don't think out loud without direction. If you're going to speak, use the templa
 
 ## **Next Steps**
 
-1. **Memorize the templates** — especially Pattern Answer Template 1 and Honest Pivot
-2. **Practice the flow** in mock sessions — recognize when you're about to philosophize, and switch to the protocol
-3. **Prepare STAR examples** for common behavioral questions (see cheat sheets) — prevention is better than protocol
+1. **Memorize the templates**: especially Pattern Answer Template 1 and Honest Pivot
+2. **Practice the flow** in mock sessions: recognize when you're about to philosophize, and switch to the protocol
+3. **Prepare STAR examples** for common behavioral questions (see cheat sheets): prevention is better than protocol
 
 ---
 
@@ -312,10 +312,10 @@ Don't think out loud without direction. If you're going to speak, use the templa
 → **DE:** "Gute Frage, lassen Sie mich kurz überlegen..."
 
 **Pattern Answer (fuzzy memory):**
-→ "I've encountered this multiple times, especially at [projects] — typically around [domain]. My approach was: [process], which typically resulted in [outcome]."
+→ "I've encountered this multiple times, especially at [projects]: typically around [domain]. My approach was: [process], which typically resulted in [outcome]."
 
 **Honest Pivot (complete blank):**
 → "I can't recall a specific example, but my approach in those situations is: [process framework]. I had this at [vague project], but the details aren't fresh in my mind."
 
 **Clarifying question (buy MORE time):**
-→ "When you say [keyword] — do you mean [option A], or more like [option B]?"
+→ "When you say [keyword]: do you mean [option A], or more like [option B]?"

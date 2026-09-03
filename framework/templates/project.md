@@ -1,9 +1,9 @@
-# [Role Title] — [Short Description]
+# [Role Title]: [Short Description]
 
-- **Period:** [MM/YYYY – MM/YYYY or "ongoing"]
+- **Period:** [03/2019 – 09/2021 or "ongoing"]
 - **Role:** [Your Role]
 - **Client:** [Client Name]
-- **Intermediary:** [If applicable — staffing agency or consulting firm]
+- **Intermediary:** [If applicable: staffing agency or consulting firm]
 - **Industry:** [Industry / Sector]
 - **Location:** [Country (CODE), e.g. "US", "UK", "DE", "Remote"]
 - **Type:** [flagship | consulting | contract | employment | co-founded | internship | side-project]

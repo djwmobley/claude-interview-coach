@@ -1,6 +1,6 @@
 ---
 name: learn-today
-description: Daily learning prompt — surfaces today's module from the active learning plan, links to it, adapts to available time, and quizzes on completed material
+description: Daily learning prompt (surfaces today's module from the active learning plan, links to it, adapts to available time, and quizzes on completed material)
 argument-hint: [<time>] [sprint [<Xh>]] [quiz [week1|week2|<module-id>]] [done [<module-id>]] [plan]
 user-invocable: true
 allowed-tools: Read(*), Edit(data/learning-plan.md), Glob(*)
@@ -16,8 +16,8 @@ and logs progress.
 ## Arguments
 
 - **No argument**: show today's module with guidance
-- **`<time>`**: adapt to available time — e.g., `/learn-today 15min`, `/learn-today 1h`, `/learn-today 3h`
-- **`sprint`** or **`sprint <Xh>`**: full-day or timed session — chain multiple modules in sequence
+- **`<time>`**: adapt to available time: e.g., `/learn-today 15min`, `/learn-today 1h`, `/learn-today 3h`
+- **`sprint`** or **`sprint <Xh>`**: full-day or timed session: chain multiple modules in sequence
 - **`quiz`** or **`test`**: quiz on the most recently completed module
 - **`quiz week1`** / **`quiz week2`**: quiz on all completed modules from that week
 - **`quiz <module-id>`**: quiz on a specific module (e.g., `quiz A1`)
@@ -50,7 +50,7 @@ to personalise the guidance to the candidate's background.
 
 ---
 
-#### Mode: Default (no argument) — Show Today's Module
+#### Mode: Default (no argument): Show Today's Module
 
 1. Scan the Day-by-Day Schedule in order (Week 1 Day 1, Day 2, ... Week 2 Day 8, etc.)
 2. Find the first non-QUIZ day where the referenced module ID has Status = `pending`
@@ -60,7 +60,7 @@ to personalise the guidance to the candidate's background.
 **Display today's module:**
 
 ```
-## Today's Learning Module — [Day X of plan]
+## Today's Learning Module: [Day X of plan]
 
 **[Module Name]**
 Platform: [Platform] ([Free / LinkedIn Learning subscription / Paid])
@@ -78,7 +78,7 @@ Focus on concepts that will come up in the JPMC interviews for the active roles.
 
 ### Why This Matters for Your Applications
 
-[1-3 sentences: exactly how this topic connects to the JPMC interviews. Be specific —
+[1-3 sentences: exactly how this topic connects to the JPMC interviews. Be specific:
 e.g., "The treasury centralization concept from this module is directly what the
 Executive Director role is consulting on. If asked how you'd approach a treasury
 transformation engagement, this gives you the vocabulary to speak the client's language."]
@@ -90,7 +90,7 @@ To quiz yourself on this module later: type `/learn-today quiz [module-id]`
 
 ---
 
-#### Mode: Time-Aware — `/learn-today <time>`
+#### Mode: Time-Aware: `/learn-today <time>`
 
 Parse the time argument: `15min`, `30min`, `45min`, `1h`, `2h`, `3h`, etc.
 
@@ -101,14 +101,14 @@ on most courses. Instead, pick the highest-value activity for the available time
 
 1. **If there is a completed module with no test score**: run a quick quiz
    (5 questions, ~10 minutes). Tell the candidate this is the best use of
-   15 minutes — reinforcement, not new content.
+   15 minutes: reinforcement, not new content.
 2. **If all completed modules have been quizzed**: surface one targeted
    concept from the next pending module. Pick the single most interview-
    relevant idea from that module's topic area and explain it in 2–3
-   paragraphs — enough to talk about it intelligently in the JPMC interview,
+   paragraphs: enough to talk about it intelligently in the JPMC interview,
    not enough to claim mastery. Frame it as "a preview, not a substitute
    for the full module."
-3. **If no modules done yet**: give a 15-minute orientation — summarise what
+3. **If no modules done yet**: give a 15-minute orientation: summarise what
    the full learning plan is building toward, which gap each track closes
    against the JPMC roles, and what the first module covers.
 
@@ -125,12 +125,12 @@ Surface the next pending module but scope it to one section:
 
 Treat the same as default mode but calculate how many full modules fit in the
 available time. If more than one fits, preview the second module at the end:
-> "After [Module A], you have ~[Xmin] left — enough to start [Module B].
+> "After [Module A], you have ~[Xmin] left: enough to start [Module B].
 > Run `/learn-today done` after [Module A] and I'll queue it up."
 
 ---
 
-#### Mode: Sprint — `/learn-today sprint` or `/learn-today sprint <Xh>`
+#### Mode: Sprint: `/learn-today sprint` or `/learn-today sprint <Xh>`
 
 For when the candidate has a significant block of time and wants to make
 maximum progress toward the JPMC interviews.
@@ -144,25 +144,25 @@ maximum progress toward the JPMC interviews.
 1. Start from the next pending module in the schedule
 2. Stack modules in order until the time budget is filled
 3. For the last module that partially fits, include it with a note:
-   "Start this today — aim for the first [X] sections."
+   "Start this today: aim for the first [X] sections."
 4. Insert recommended break points (every 90 minutes of content)
 
 **Display the full sprint plan:**
 
 ```
-## Sprint Plan — [Xh] Session
+## Sprint Plan: [Xh] Session
 
 Target role(s): [Active roles from learning plan]
 Modules queued: [N]   |   Estimated total: [Xh Ym]
 
 ---
 
-### Block 1 — [Module Name]  ([duration])
+### Block 1: [Module Name]  ([duration])
 
 Gap it closes: [gap from JPMC skill-gap analysis]
 Link: [URL]
 What to watch for: [2–3 focused bullets connecting content to candidate's background
-                   and the JPMC role — same standard as default mode]
+                   and the JPMC role: same standard as default mode]
 
 ---
 
@@ -170,7 +170,7 @@ What to watch for: [2–3 focused bullets connecting content to candidate's back
 
 ---
 
-### Block 2 — [Module Name]  ([duration])
+### Block 2: [Module Name]  ([duration])
 
 Gap it closes: [gap from JPMC skill-gap analysis]
 Link: [URL]
@@ -213,7 +213,7 @@ If they confirm, update the module's Test Score in `data/learning-plan.md` using
 
 ---
 
-#### Mode: Done — Mark Module Complete
+#### Mode: Done: Mark Module Complete
 
 **`done` (no module ID):** Mark the next pending module in the schedule as complete.
 **`done <module-id>`:** Mark that specific module as complete.
@@ -225,7 +225,7 @@ If they confirm, update the module's Test Score in `data/learning-plan.md` using
 4. Display:
 
 ```
-Logged: [Module Name] — [done / partial] as of [date]
+Logged: [Module Name]: [done / partial] as of [date]
 Progress: [X of Y] modules complete
 
 Next up: [next pending module name and link]
@@ -233,16 +233,16 @@ Or quiz yourself: `/learn-today quiz [completed-module-id]`
 ```
 
 Use the Edit tool to update both the module table row and the progress log in `data/learning-plan.md`.
-Apply updates precisely — do not rewrite sections that haven't changed.
+Apply updates precisely: do not rewrite sections that haven't changed.
 
 ---
 
-#### Mode: Plan — Show Full Status
+#### Mode: Plan: Show Full Status
 
 Display a summary of the complete learning plan:
 
 ```
-## Learning Plan Status — [date]
+## Learning Plan Status: [date]
 
 Roles: [active roles from the plan]
 Progress: [X of Y modules complete]
@@ -262,7 +262,7 @@ Progress: [X of Y modules complete]
 
 ---
 
-### Step 3: Guidance Generation — Quality Rules
+### Step 3: Guidance Generation: Quality Rules
 
 When generating "What to Watch For" content:
 

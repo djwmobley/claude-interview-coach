@@ -1,4 +1,4 @@
-# Gap Reframing — Handling Missing Experience/Skills
+# Gap Reframing: Handling Missing Experience/Skills
 
 ## What Is Gap Reframing?
 
@@ -7,7 +7,7 @@ When the recruiter asks about experience/skills you don't have, **gap reframing*
 2. Pivoting to adjacent/transferable strengths
 3. Making it about outcomes (what the client needs) instead of checkboxes (what you lack)
 
-This is NOT lying or dodging — it's helping the recruiter understand whether the gap actually matters.
+This is NOT lying or dodging: it's helping the recruiter understand whether the gap actually matters.
 
 ---
 
@@ -67,7 +67,7 @@ If you can do the job, the specific tool/tech/industry often doesn't matter.
 > Recruiter: "Do you have React experience?"
 > You: "Not really, no."
 
-**Why this fails:** This is the worst possible answer. You just disqualified yourself with zero attempt to reframe. (This is the most damaging anti-pattern — track it in your anti-pattern scorecard.)
+**Why this fails:** This is the worst possible answer. You just disqualified yourself with zero attempt to reframe. (This is the most damaging anti-pattern: track it in your anti-pattern scorecard.)
 
 ---
 
@@ -79,9 +79,9 @@ If you can do the job, the specific tool/tech/industry often doesn't matter.
 
 ### Structure
 
-1. **Acknowledge the gap** — Be honest, don't apologize
-2. **Pivot to what you DO have** — Adjacent skill, transferable experience, or relevant outcome
-3. **Reframe to outcomes or question back** — Make it about their needs, not your resume
+1. **Acknowledge the gap**: Be honest, don't apologize
+2. **Pivot to what you DO have**: Adjacent skill, transferable experience, or relevant outcome
+3. **Reframe to outcomes or question back**: Make it about their needs, not your resume
 
 ---
 
@@ -95,9 +95,9 @@ If you can do the job, the specific tool/tech/industry often doesn't matter.
 
 | Gap | Reframe |
 |-----|---------|
-| No [framework B] | "Not [framework B] specifically, but I've built production apps with [framework A] for 4+ years — same patterns, same tooling ecosystem. Does the client need [framework B] specifically, or someone productive in [domain]?" |
+| No [framework B] | "Not [framework B] specifically, but I've built production apps with [framework A] for 4+ years: same patterns, same tooling ecosystem. Does the client need [framework B] specifically, or someone productive in [domain]?" |
 | No [tool B] | "Not [tool B], but I manage [N] environments end-to-end with [tool A]. Since both solve the same problem, the thinking transfers. Does the client need [tool B] specifically, or [capability] experience?" |
-| No [specific product] | "Not extensively, but I've solved the same underlying problem at [your project] — [concrete examples]. Is the client looking for someone who knows [product], or someone who delivers [outcome]?" |
+| No [specific product] | "Not extensively, but I've solved the same underlying problem at [your project]: [concrete examples]. Is the client looking for someone who knows [product], or someone who delivers [outcome]?" |
 
 **Key:** Acknowledge → Pivot to adjacent → Question back
 
@@ -111,7 +111,7 @@ If you can do the job, the specific tool/tech/industry often doesn't matter.
 
 | Gap | Reframe |
 |-----|---------|
-| [Cert X] expired | "[Status]. Renewal planned for [date]. [Active related certs] are current until [year]. And the practical experience the cert validates — like [concrete project work from your data] — doesn't expire. Is the certification a hard client requirement?" |
+| [Cert X] expired | "[Status]. Renewal planned for [date]. [Active related certs] are current until [year]. And the practical experience the cert validates (like [concrete project work from your data]) doesn't expire. Is the certification a hard client requirement?" |
 | No [DevOps cert] | "Not certified yet, but I have [N]+ [CI/CD platform] pipelines in production and the practical experience the cert validates. Does the client need the certification, or DevOps experience?" |
 | No PMP | "Not PMP-certified, but I've managed projects for [N]+ years. Is that a client requirement, or is it about project management experience?" |
 
@@ -127,12 +127,12 @@ If you can do the job, the specific tool/tech/industry often doesn't matter.
 
 | Gap | Reframe |
 |-----|---------|
-| No FinTech | **EN:** "Not FinTech directly, but I've worked in regulated industries — healthcare, energy — with compliance requirements and audit trails. Does the role need FinTech domain knowledge, or experience in regulated environments?" |
-| | **DE:** "Nicht direkt FinTech, aber ich habe in regulierten Branchen gearbeitet — Gesundheitswesen, Energie — mit Compliance-Anforderungen und Audit-Trails. Braucht die Rolle FinTech-Domänenwissen, oder Erfahrung in regulierten Umgebungen?" |
+| No FinTech | **EN:** "Not FinTech directly, but I've worked in regulated industries (healthcare, energy) with compliance requirements and audit trails. Does the role need FinTech domain knowledge, or experience in regulated environments?" |
+| | **DE:** "Nicht direkt FinTech, aber ich habe in regulierten Branchen gearbeitet (Gesundheitswesen, Energie) mit Compliance-Anforderungen und Audit-Trails. Braucht die Rolle FinTech-Domänenwissen, oder Erfahrung in regulierten Umgebungen?" |
 | No Retail | **EN:** "Not retail, but I've built high-volume customer-facing platforms. Does the client need retail domain knowledge, or experience with transaction-heavy systems?" |
 | | **DE:** "Nicht direkt Retail, aber ich habe hochvolumige, kundenorientierte Plattformen gebaut. Braucht der Kunde Retail-Domänenwissen, oder Erfahrung mit transaktionsintensiven Systemen?" |
-| No Manufacturing | **EN:** "Not manufacturing directly, but I've integrated IoT devices with backend systems — real-time data processing, device management, monitoring. Does the role need manufacturing expertise, or IoT integration experience?" |
-| | **DE:** "Nicht direkt Manufacturing, aber ich habe IoT-Geräte mit Backend-Systemen integriert — Echtzeit-Datenverarbeitung, Gerätemanagement, Monitoring. Braucht die Rolle Manufacturing-Expertise, oder IoT-Integrationserfahrung?" |
+| No Manufacturing | **EN:** "Not manufacturing directly, but I've integrated IoT devices with backend systems: real-time data processing, device management, monitoring. Does the role need manufacturing expertise, or IoT integration experience?" |
+| | **DE:** "Nicht direkt Manufacturing, aber ich habe IoT-Geräte mit Backend-Systemen integriert: Echtzeit-Datenverarbeitung, Gerätemanagement, Monitoring. Braucht die Rolle Manufacturing-Expertise, oder IoT-Integrationserfahrung?" |
 
 **Key:** Adjacent domain → Transferable skills → Question if domain knowledge is required
 
@@ -146,18 +146,18 @@ If you can do the job, the specific tool/tech/industry often doesn't matter.
 
 Job ad says: "Nice to have: [nice-to-have tool/skill]"
 
-**If asked — technology-neutral pattern:**
+**If asked: technology-neutral pattern:**
 > "[Nice-to-have tool] I haven't used in production, but I've worked extensively with [your related tools in the same domain]. Does the client need [tool] specifically, or [broader capability]?"
 
-**Filled example — Azure integration stack:**
+**Filled example: Azure integration stack:**
 
 Job ad says: "Nice to have: Experience with Azure Logic Apps"
 
 **EN:**
-> "Azure Logic Apps I haven't used in production, but I've worked with event-driven architectures for years — Azure Functions, Service Bus, and similar integration patterns. Does the client need Logic Apps specifically, or event-based integration experience?"
+> "Azure Logic Apps I haven't used in production, but I've worked with event-driven architectures for years: Azure Functions, Service Bus, and similar integration patterns. Does the client need Logic Apps specifically, or event-based integration experience?"
 
 **DE:**
-> "Azure Logic Apps habe ich noch nicht produktiv eingesetzt, aber ich arbeite seit Jahren mit event-driven Architekturen — Azure Functions, Service Bus und ähnlichen Integrationsmustern. Braucht der Kunde Logic Apps konkret, oder event-basierte Integrationserfahrung?"
+> "Azure Logic Apps habe ich noch nicht produktiv eingesetzt, aber ich arbeite seit Jahren mit event-driven Architekturen: Azure Functions, Service Bus und ähnlichen Integrationsmustern. Braucht der Kunde Logic Apps konkret, oder event-basierte Integrationserfahrung?"
 
 **If NOT asked:**
 Don't bring it up. Recruiters forget half the nice-to-haves. Only address gaps they explicitly probe.
@@ -172,8 +172,8 @@ Don't bring it up. Recruiters forget half the nice-to-haves. Only address gaps t
 
 | Gap | Reframe |
 |-----|---------|
-| "Your [technology X] experience is from [year]" | "Last direct work was [year], but the fundamentals — [core skills that transfer] — haven't changed. And I currently work with [related modern technology]. Does the client need cutting-edge [X] features, or solid [domain] experience?" |
-| "No recent [language Y]" | "Last used [Y] in production in [year], but I've been a [your primary language] developer for [N]+ years — the concepts transfer. Does the client need [Y] experience, or an experienced backend developer who ramps up quickly?" |
+| "Your [technology X] experience is from [year]" | "Last direct work was [year], but the fundamentals, [core skills that transfer], haven't changed. And I currently work with [related modern technology]. Does the client need cutting-edge [X] features, or solid [domain] experience?" |
+| "No recent [language Y]" | "Last used [Y] in production in [year], but I've been a [your primary language] developer for [N]+ years: the concepts transfer. Does the client need [Y] experience, or an experienced backend developer who ramps up quickly?" |
 
 **Key:** Acknowledge recency → Core skills still valid → Question if cutting-edge knowledge is needed
 
@@ -181,7 +181,7 @@ Don't bring it up. Recruiters forget half the nice-to-haves. Only address gaps t
 
 ## Real-World Examples from Coaching Sessions
 
-As you practise with `/debrief` and coaching sessions, strong reframes get saved to `coaching/coached-answers.md`. Below is the structure of a good example — replace the placeholders with your own after sessions.
+As you practise with `/debrief` and coaching sessions, strong reframes get saved to `coaching/coached-answers.md`. Below is the structure of a good example: replace the placeholders with your own after sessions.
 
 ### Example Structure
 
@@ -194,7 +194,7 @@ As you practise with `/debrief` and coaching sessions, strong reframes get saved
 - ✅ Honest about the gap (no pretending)
 - ✅ Pivots to adjacent skills the role actually needs
 - ✅ Question-back reframes the requirement (tooling vs. outcome, specific product vs. underlying skill)
-- ✅ Confident framing — states what you *have* done, not what you haven't
+- ✅ Confident framing: states what you *have* done, not what you haven't
 
 **Scoring:** After each session, rate your reframes 1-5 and save the best ones to `coaching/coached-answers.md` for reuse.
 
@@ -247,8 +247,8 @@ Add these to your cheat sheets for quick reference during calls.
 
 ## Key Principles
 
-1. **Acknowledge the gap honestly** — Don't apologize, don't deny
-2. **Pivot to what you DO have** — Adjacent skill, transferable experience, outcome
-3. **Make it about their needs** — Not "I lack X" but "Do you need X or Y?"
-4. **One reframe, then stop** — Don't over-explain
-5. **Confident, not defensive** — You're helping them clarify requirements
+1. **Acknowledge the gap honestly**: Don't apologize, don't deny
+2. **Pivot to what you DO have**: Adjacent skill, transferable experience, outcome
+3. **Make it about their needs**: Not "I lack X" but "Do you need X or Y?"
+4. **One reframe, then stop**: Don't over-explain
+5. **Confident, not defensive**: You're helping them clarify requirements

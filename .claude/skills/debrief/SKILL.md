@@ -1,12 +1,12 @@
 ---
 name: debrief
-description: Debrief a voice simulation — analyze transcript against coached answers, track anti-patterns, log session
+description: Debrief a voice simulation, analyze transcript against coached answers, track anti-patterns, log session
 argument-hint: <path-to-cv>
 user-invocable: true
 allowed-tools: Read(*), Glob(*), Grep(*), Write(coaching/**), Edit(coaching/**), Bash(python tools/store_session_moments.py *), Bash(python tools/load_coached_answers.py)
 ---
 
-# Debrief — Voice Simulation Post-Session Analysis
+# Debrief: Voice Simulation Post-Session Analysis
 
 Analyze a recruiter screening transcript from a Claude App voice simulation. Compare the candidate's answers against coached answers, identify anti-patterns, rate performance, and log the session to the progress tracker.
 
@@ -21,7 +21,7 @@ The user has:
 
 - `$ARGUMENTS` (required): Path to the CV file used for the simulation (e.g. `output/20260210-target-role-slug.md`)
 
-The transcript is expected to be in the conversation context — the user pastes it before or after invoking the skill.
+The transcript is expected to be in the conversation context: the user pastes it before or after invoking the skill.
 
 ## Instructions
 
@@ -29,22 +29,22 @@ The transcript is expected to be in the conversation context — the user pastes
 
 Load these files in parallel using the CV path to derive filenames:
 
-1. **Cheat sheet** — `*-cheatsheet.md` matching CV filename (full file — this IS the coaching side, coached answers are needed here)
-2. **Coached answers** — `coaching/coached-answers.md` (general coached phrasings)
-3. **Deep review** — `*-DEEP-REVIEW.md` matching CV filename (to know what tough questions were expected)
-4. **Anti-pattern scorecard** — `coaching/progress-recruiter/_summary.md`
-5. **Anti-pattern tracker** — `coaching/anti-pattern-tracker.md` (global pattern status — which are resolved, which to watch for)
-6. **Voice profile** — `memory/voice.md` (candidate's communication style and avoidances)
-7. **Session template** — `framework/templates/recruiter-session.md`
+1. **Cheat sheet**: `*-cheatsheet.md` matching CV filename (full file, this IS the coaching side, coached answers are needed here)
+2. **Coached answers**: `coaching/coached-answers.md` (general coached phrasings)
+3. **Deep review**: `*-DEEP-REVIEW.md` matching CV filename (to know what tough questions were expected)
+4. **Anti-pattern scorecard**: `coaching/progress-recruiter/_summary.md`
+5. **Anti-pattern tracker**: `coaching/anti-pattern-tracker.md` (global pattern status, which are resolved, which to watch for)
+6. **Voice profile**: `memory/voice.md` (candidate's communication style and avoidances)
+7. **Session template**: `framework/templates/recruiter-session.md`
 
 If the transcript is not yet in the conversation, ask the user to paste it.
 
 ### Step 2: Parse Transcript
 
 Break the transcript into Q&A pairs:
-- **Recruiter question** — what was asked
-- **Candidate answer** — what the candidate said
-- **Topic** — categorize (pitch, technical, compensation, availability, experience, team fit, logistics, closing)
+- **Recruiter question**: what was asked
+- **Candidate answer**: what the candidate said
+- **Topic**: categorize (pitch, technical, compensation, availability, experience, team fit, logistics, closing)
 
 Note which deep review probing questions were actually asked by the recruiter, and which were skipped.
 
@@ -53,11 +53,11 @@ Note which deep review probing questions were actually asked by the recruiter, a
 For each Q&A pair, assess:
 
 #### A. Answer Quality (1-5)
-- **5** — Strong, close to or better than coached version. Concise, direct, memorable.
-- **4** — Good, minor improvements possible. Got the point across.
-- **3** — Adequate but missed opportunities. Could have been stronger.
-- **2** — Weak. Rambling, defensive, or missed the point.
-- **1** — Harmful. Volunteered a negative, contradicted self, or failed to answer.
+- **5**: Strong, close to or better than coached version. Concise, direct, memorable.
+- **4**: Good, minor improvements possible. Got the point across.
+- **3**: Adequate but missed opportunities. Could have been stronger.
+- **2**: Weak. Rambling, defensive, or missed the point.
+- **1**: Harmful. Volunteered a negative, contradicted self, or failed to answer.
 
 #### B. Trust/Credibility Impact
 **Key insight:** Real recruiters don't understand technical details, but they DO notice evasiveness, dodging, and red flags that signal "this person might embarrass me in the client interview."
@@ -68,7 +68,7 @@ For each answer, assess trust impact:
 - ❌ **Damages trust:** Dodged question, vague when pressed for specifics, inconsistent, defensive
 
 **Special attention to:**
-- "Didn't answer the actual question" — even non-technical recruiters notice this
+- "Didn't answer the actual question": even non-technical recruiters notice this
 - Being asked the same question twice because the first answer was too vague
 - Any moment where the recruiter might think "is this person hiding something?"
 
@@ -76,23 +76,23 @@ For each answer, assess trust impact:
 - If a coached answer exists (in cheat sheet or coached-answers.md) for this topic, compare:
   - What was the coached phrasing?
   - How close did the candidate get?
-  - What was different — better or worse?
+  - What was different: better or worse?
 
 #### D. Anti-Pattern Check
-Scan each answer for known anti-patterns. Load the full pattern list from `coaching/anti-pattern-tracker.md` § "Known Anti-Patterns Reference" — that file is the single source of truth for which patterns exist and their numbering. If the tracker has no patterns yet (new user), use these universal seed patterns:
+Scan each answer for known anti-patterns. Load the full pattern list from `coaching/anti-pattern-tracker.md` § "Known Anti-Patterns Reference": that file is the single source of truth for which patterns exist and their numbering. If the tracker has no patterns yet (new user), use these universal seed patterns:
 - Volunteered a negative unprompted
 - Over-explained technical details
 - Hesitated or waffled on compensation/availability
 - Didn't answer the actual question
 - Essay structure (verdict last)
 
-Also watch for any NEW anti-patterns not yet tracked — add them to the tracker after the debrief.
+Also watch for any NEW anti-patterns not yet tracked: add them to the tracker after the debrief.
 
 #### E. Voice Profile Cross-Reference
 
 After identifying triggered anti-patterns, scan voice.md "Things to Avoid":
 - If a triggered anti-pattern also appears in voice.md, flag it as a deep-rooted
-  pattern (shows up in both writing and delivery) — note this in the debrief report.
+  pattern (shows up in both writing and delivery): note this in the debrief report.
 - If a newly discovered anti-pattern reflects a fundamental communication style
   (not a one-off performance mistake), add it to voice.md "Things to Avoid"
   with a note that it was first observed in a debrief session.
@@ -106,7 +106,7 @@ Triggered section of the report so the candidate knows the issue spans writing a
 Present the analysis to the user in this structure:
 
 ```markdown
-## Debrief — [Role Title] (Voice Simulation)
+## Debrief: [Role Title] (Voice Simulation)
 
 **Date:** [today]
 **Questions asked:** [count]
@@ -125,24 +125,24 @@ Real recruiter screening has two dimensions:
 | **Checkbox Match** | [1-5] | Did you hit the technical keywords from the job ad? |
 | **Trust/Credibility** | [1-5] | "Will this candidate embarrass me if I send them to the client?" |
 
-**Checkbox match:** [X/5] — [brief summary: e.g., "Hit all primary keywords, minor gap on [specific requirement]"]
-**Trust/credibility:** [X/5] — [brief summary: e.g., "Strong except for dodging a concrete example on [topic]"]
+**Checkbox match:** [X/5]: [brief summary: e.g., "Hit all primary keywords, minor gap on [specific requirement]"]
+**Trust/credibility:** [X/5]: [brief summary: e.g., "Strong except for dodging a concrete example on [topic]"]
 
-**Likelihood of being forwarded:** [X/5] — Checkbox × Trust = overall outcome
-**Likelihood of strong advocacy:** [X/5] — Would the recruiter champion you or just pass you along?
+**Likelihood of being forwarded:** [X/5]: Checkbox × Trust = overall outcome
+**Likelihood of strong advocacy:** [X/5]: Would the recruiter champion you or just pass you along?
 
 ### Answer-by-Answer Analysis
 
 | # | Topic | Question (summary) | Rating | Trust Impact | Anti-Patterns | Notes |
 |---|-------|-------------------|--------|--------------|---------------|-------|
-| 1 | Pitch | Self-introduction | 4/5 | ✅ | — | Strong opening, close to coached version |
+| 1 | Pitch | Self-introduction | 4/5 | ✅ | N/A | Strong opening, close to coached version |
 | 2 | Technical | [Technical requirement] | 2/5 | ❌ | Didn't answer yes/no | Recruiter asked twice, creates doubt |
 | ... | | | | | | |
 
 ### Anti-Patterns Triggered
 
-- [x] Pattern name — specific example from transcript
-- [ ] Pattern name — NOT triggered
+- [x] Pattern name: specific example from transcript
+- [ ] Pattern name: NOT triggered
 
 ### What Went Well
 - [bullet points of strongest moments]
@@ -172,7 +172,7 @@ Present the debrief report and discuss:
 
 After the user confirms the assessment:
 
-1. **Create session file** — copy `framework/templates/recruiter-session.md` to `coaching/progress-recruiter/YYYY-MM-DD-HHMM-[role-slug].md`. Include:
+1. **Create session file**: copy `framework/templates/recruiter-session.md` to `coaching/progress-recruiter/YYYY-MM-DD-HHMM-[role-slug].md`. Include:
    - Takeaway (copy from the debrief report)
    - Mode: **Voice simulation**
    - All anti-patterns with checkboxes (checked = triggered)
@@ -194,7 +194,7 @@ After the user confirms the assessment:
    python tools/load_coached_answers.py
    ```
 
-4. **Store session moments to local semantic DB** — write to the local PostgreSQL
+4. **Store session moments to local semantic DB**: write to the local PostgreSQL
    database (`ic_context`, localhost:5432) using local Ollama embeddings (`mxbai-embed-large`).
    Build a JSON array of every Q&A pair from the transcript, including coach notes and
    quality scores. Store all moments where quality_score <= 3 OR coach_notes is non-empty
@@ -214,7 +214,7 @@ After the user confirms the assessment:
    - Add new patterns if discovered during the simulation
    - Add a line to the Update Log
 
-5. **Data enrichment** — check if the simulation surfaced new information (project details, achievements, technologies, skills) that should be captured in the data files. Follow the procedure in `framework/data-enrichment.md`.
+5. **Data enrichment**: check if the simulation surfaced new information (project details, achievements, technologies, skills) that should be captured in the data files. Follow the procedure in `framework/data-enrichment.md`.
 
 ### Session File Naming
 

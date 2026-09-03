@@ -74,7 +74,7 @@ file `output/markdown/20260302-default-cto.md`.
 - **Block 1 (after first ---):** Summary paragraphs. No `##` heading.
 - **Block 2 (after second ---):** Competencies, `·` separated. No `##` heading.
 - **Block 3+ (after third ---):** Body. ALL CAPS section labels. Role title on
-  its own line. `Company | City, ST | Year – Year` pipe line below role.
+  its own line. `Company | City, ST | 2019 – 2021` pipe line below role.
   Description line. Bullets use `·` (middle dot). 2-space indent on continuation
   lines. Jobs separated by blank lines only, NO `---` between jobs.
   One final `---` before EDUCATION/CERTIFICATIONS.
@@ -228,8 +228,8 @@ Before writing, state:
 ## Resume Plan
 
 **Roles to include (all from project-index.md):**
-- [Role] at [Company] (Year–Year): [1 sentence: how it maps to this role]
-- [Role] at [Company] (Year–Year): [1 sentence: how it maps to this role]
+- [Role] at [Company] (2019–2021): [1 sentence: how it maps to this role]
+- [Role] at [Company] (2019–2021): [1 sentence: how it maps to this role]
 ...
 
 **Order:** [explain if not strictly chronological, relevance-based reordering]

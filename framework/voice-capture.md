@@ -1,4 +1,4 @@
-# Voice Capture — Passive Observation Guide
+# Voice Capture: Passive Observation Guide
 
 Voice capture builds a profile of how the candidate naturally communicates. It
 runs passively and automatically every session: Claude observes throughout and
@@ -16,12 +16,12 @@ capture or ask permission at any point.
 Capture signals that are **spontaneous and unrehearsed**. The highest-value
 moments are when the candidate:
 
-- Corrects a draft you produced — note what they changed and in which direction
-- Pushes back on framing — note the reframe they chose instead
-- Explains something in their own words without being asked — note the structure
-- Cuts something you wrote — note what category of content they removed
-- Adds something you didn't include — note what they chose to surface
-- Uses a specific phrase more than once — note it verbatim
+- Corrects a draft you produced: note what they changed and in which direction
+- Pushes back on framing: note the reframe they chose instead
+- Explains something in their own words without being asked: note the structure
+- Cuts something you wrote: note what category of content they removed
+- Adds something you didn't include: note what they chose to surface
+- Uses a specific phrase more than once: note it verbatim
 
 Observations to capture, by category:
 
@@ -59,7 +59,7 @@ Observations to capture, by category:
 
 - Answers to direct questions about how they communicate (too prepared)
 - Information from a part of the session where they were role-playing or
-  rehearsing — capture only their natural register, not their coached answers
+  rehearsing: capture only their natural register, not their coached answers
 - Inferences beyond what was actually observed. If unsure, don't write it.
 
 ---
@@ -70,7 +70,7 @@ Be specific and concrete. Quote where possible.
 
 **Good:**
 > Short, declarative. Corrections consistently move toward fewer words.
-> "Means to an end" — used unprompted to describe AI Pioneers program.
+> "Means to an end": used unprompted to describe AI Pioneers program.
 > Removes hedges and passive constructions on every pass.
 > Leads with principle, then example. Rarely the reverse.
 
@@ -82,11 +82,11 @@ Be specific and concrete. Quote where possible.
 ## When to Update
 
 Update `memory/voice.md` as the **last step** of data enrichment at the end of
-the session — after data files have been updated and before the session closes.
+the session: after data files have been updated and before the session closes.
 
 1. Read the current `memory/voice.md`
 2. Review the session for observations matching the categories above
-3. Add new observations — do not overwrite existing entries, append to them
+3. Add new observations: do not overwrite existing entries, append to them
 4. Update the **Last updated** date at the top
 5. Add the session to the **Observed Over** list
 
@@ -110,6 +110,6 @@ during resume generation and coaching sessions. Specifically:
   writing preferences when drafting. Voice profile takes precedence over
   Claude's default phrasing patterns.
 - **Coached answers:** When delivering stronger versions of answers, apply
-  natural framing patterns from the profile — not textbook answer structures.
+  natural framing patterns from the profile: not textbook answer structures.
 - **Things to avoid:** Actively check generated output against the avoidance
   list before delivering.

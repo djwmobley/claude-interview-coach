@@ -14,7 +14,7 @@ produce a prioritised short-term learning plan.
 
 ## Arguments
 
-- `$ARGUMENTS` (required): The target role — one of:
+- `$ARGUMENTS` (required): The target role: one of:
   - A URL to a live job posting
   - A file path to a saved job description
   - A pasted job description (if no argument, prompt the candidate to paste it)
@@ -32,10 +32,10 @@ Examples:
 ### Step 1: Load Candidate Profile
 
 Read in parallel:
-- `data/skills.md` — full skill inventory with experience levels and self-ratings
-- `data/profile.md` — career direction, target roles, and stated preferences
-- `data/professional-identity.md` — strengths, growth edges, and career trajectory
-- `data/certifications.md` — active and lapsed certifications
+- `data/skills.md`: full skill inventory with experience levels and self-ratings
+- `data/profile.md`: career direction, target roles, and stated preferences
+- `data/professional-identity.md`: strengths, growth edges, and career trajectory
+- `data/certifications.md`: active and lapsed certifications
 
 Build a mental map of:
 - **Core strengths**: Expert-rated skills
@@ -54,7 +54,7 @@ If a URL was provided, fetch it with WebFetch using this prompt:
 ```
 Extract the complete job posting text. Include every section: title, description,
 responsibilities, required qualifications, preferred qualifications, and any
-stated nice-to-haves. Do not summarise — reproduce the full text.
+stated nice-to-haves. Do not summarise: reproduce the full text.
 ```
 
 If a file path was provided, read the file. If neither was provided, ask the
@@ -66,18 +66,18 @@ candidate to paste the job description.
 
 Parse the posting into three tiers:
 
-**Must-haves** — explicitly required, likely used in screening:
+**Must-haves**: explicitly required, likely used in screening:
 - Hard requirements ("required", "must have", "minimum X years of")
 - Technologies and tools stated as essential
 - Certifications explicitly required
 - Scope or seniority indicators (team size, budget, P&L responsibility)
 
-**Preferred** — stated as preferred, desired, or advantageous:
+**Preferred**: stated as preferred, desired, or advantageous:
 - Technologies and tools listed as "preferred" or "a plus"
 - Domain experience that isn't mandatory
 - Certifications listed as preferred
 
-**Nice-to-haves** — implied by the role or listed as optional:
+**Nice-to-haves**: implied by the role or listed as optional:
 - Industry experience that matches but isn't specified
 - Tools mentioned once without emphasis
 - Soft skills and leadership qualities
@@ -129,12 +129,12 @@ For every **Upskill needed** or **Gap** item:
 
 ---
 
-### Step 6: Output — Gap Analysis
+### Step 6: Output: Gap Analysis
 
 Present a structured analysis:
 
 ```markdown
-## Skill Gap Analysis — [Role Title] at [Company]
+## Skill Gap Analysis: [Role Title] at [Company]
 
 **Planning horizon:** [N] days
 **Must-haves assessed:** X  |  **Preferred assessed:** Y
@@ -144,7 +144,7 @@ Present a structured analysis:
 | Skill | Tier | Current State | Status |
 |---|---|---|---|
 | [Skill] | Must-have | Advanced | Covered |
-| [Skill] | Must-have | Not present | Gap — Blocker |
+| [Skill] | Must-have | Not present | Gap: Blocker |
 | [Skill] | Must-have | Intermediate | Upskill needed |
 | [Skill] | Must-have | AWS Expert | Reframeable (cloud platform transfer) |
 | [Skill] | Preferred | Not listed | Adjacent (project history covers this) |
@@ -153,10 +153,10 @@ Present a structured analysis:
 
 Gaps and upskill items rated **Blocker** that would likely cause screening rejection:
 
-1. **[Skill]** — [why it's a blocker] — [Fast/Medium/Long to close]
-2. **[Skill]** — [why it's a blocker] — [Fast/Medium/Long to close]
+1. **[Skill]**: [why it's a blocker]; [Fast/Medium/Long to close]
+2. **[Skill]**: [why it's a blocker]; [Fast/Medium/Long to close]
 
-*If the critical path is empty: no blockers identified — this role is within reach now.*
+*If the critical path is empty: no blockers identified: this role is within reach now.*
 
 ### Transferable Experience (reframing opportunities)
 
@@ -167,7 +167,7 @@ Skills where adjacent or reframeable experience can be presented rather than lea
 
 ---
 
-### Step 7: Output — Learning Plan
+### Step 7: Output: Learning Plan
 
 Produce a prioritised learning plan within the requested horizon.
 
@@ -181,25 +181,25 @@ criticality tier), then Strategic fit (Core before Role-specific).
 
 These are must-haves likely used in screening. Address before applying if possible.
 
-**[Skill]** — [N] days estimated
+**[Skill]**: [N] days estimated
 - What to reach: [specific proficiency target, not vague "familiarity"]
 - Starting point: [what the candidate already knows that helps]
-- Path: [type of resource — official docs / hands-on project / structured course /
-  certification — without specifying URLs that may go stale]
-- Done when: [concrete test of readiness — e.g., "can explain X, has built Y"]
+- Path: [type of resource: official docs / hands-on project / structured course /
+  certification: without specifying URLs that may go stale]
+- Done when: [concrete test of readiness: e.g., "can explain X, has built Y"]
 
 ### Build in Parallel (Material gaps)
 
 Preferred skills and material must-haves that strengthen the application.
 
-**[Skill]** — [N] days estimated
+**[Skill]**: [N] days estimated
 - [same structure]
 
 ### If Time Permits (Minor gaps)
 
 Lower-priority skills worth adding if the critical path and material gaps are covered.
 
-**[Skill]** — [N] days estimated
+**[Skill]**: [N] days estimated
 - [same structure]
 
 ### Skip for This Role
@@ -207,7 +207,7 @@ Lower-priority skills worth adding if the critical path and material gaps are co
 Skills listed in the posting that are not worth investing time in given the
 candidate's career direction or the role's actual screening weight:
 
-- **[Skill]**: [reason — e.g., "listed once, not core to the role", or
+- **[Skill]**: [reason: e.g., "listed once, not core to the role", or
   "outside stated career direction"]
 ```
 
@@ -217,19 +217,19 @@ candidate's career direction or the role's actual screening weight:
 
 For each gap or upskill item identified in Steps 5–7, search for specific learning
 resources. Focus on short-term, actionable options. Skip the PMP/PgMP certification
-track here — that's a separate long-term thread.
+track here: that's a separate long-term thread.
 
 **Search strategy (run searches in parallel where possible):**
 
 For each material gap, search:
-1. LinkedIn Learning — search `site:linkedin.com/learning [topic]`
-2. Free alternatives — SAP Learning (for SAP/ERP topics), swift.com (for payments/SWIFT), official vendor docs
-3. Udemy — for topics not well covered by LinkedIn Learning
+1. LinkedIn Learning: search `site:linkedin.com/learning [topic]`
+2. Free alternatives: SAP Learning (for SAP/ERP topics), swift.com (for payments/SWIFT), official vendor docs
+3. Udemy: for topics not well covered by LinkedIn Learning
 
 **WebSearch queries to use:**
-- `site:linkedin.com/learning [topic keyword]` — for each gap topic
-- `[topic] free online course 2025 OR 2026` — for free alternatives
-- `site:udemy.com [topic keyword]` — as a fallback
+- `site:linkedin.com/learning [topic keyword]`: for each gap topic
+- `[topic] free online course 2025 OR 2026`: for free alternatives
+- `site:udemy.com [topic keyword]`: as a fallback
 
 **For each resource found, capture:**
 - Course title
@@ -259,16 +259,16 @@ Group by: Free / Subscription-included first, Paid second.
 Ask the candidate four questions to determine their learning path. Use
 `AskUserQuestion` with four questions in one call:
 
-1. **Daily time available** — Be specific: "roughly how many hours per day can
+1. **Daily time available**: Be specific: "roughly how many hours per day can
    you realistically dedicate to learning right now?"
    - Under 30 min / 30–60 min / 1–2 hours / 3–4 hours / 5+ hours (full-day)
    - Note: the answer determines how `/learn-today` adapts its daily output.
      Under 30 min activates micro-task mode; 3h+ enables sprint sessions.
-2. **Track priority** — choose the primary gap area to attack first (or both
+2. **Track priority**: choose the primary gap area to attack first (or both
    in parallel if time permits)
-3. **Budget** — Free and subscription-included only / Open to paid if
+3. **Budget**: Free and subscription-included only / Open to paid if
    clearly worth it / No limit
-4. **Certification preference** — if a certification is relevant to the role,
+4. **Certification preference**: if a certification is relevant to the role,
    ask whether to pursue it before applying, after an offer, or skip it
 
 Wait for answers before proceeding.
@@ -280,7 +280,7 @@ Wait for answers before proceeding.
 Based on the gap analysis, discovered resources, and Q&A answers, write a
 structured learning plan to `data/learning-plan.md`.
 
-**Plan format (must follow this structure exactly — the `/learn-today` skill parses it):**
+**Plan format (must follow this structure exactly: the `/learn-today` skill parses it):**
 
 ```markdown
 # Learning Plan
@@ -288,13 +288,13 @@ structured learning plan to `data/learning-plan.md`.
 *Created: [today's date]*
 *Last updated: [today's date]*
 *Planning horizon: [N] days*
-*Daily commitment: [exact answer from Q&A — e.g., "30–60 min" or "3–4 hours"]*
+*Daily commitment: [exact answer from Q&A: e.g., "30–60 min" or "3–4 hours"]*
 *Budget: [answer from Q&A]*
 *Schedule mode: alternating tracks (A then B then A...) | track-A-only | track-B-only*
 
 ## Active Roles
 
-- [Role title at Company] — [goal: interview readiness / application prep / etc.]
+- [Role title at Company]: [goal: interview readiness / application prep / etc.]
 
 ---
 
@@ -302,16 +302,16 @@ structured learning plan to `data/learning-plan.md`.
 
 | ID | Module | Platform | URL | Duration | Status | Date Completed | Test Score |
 |----|--------|----------|-----|----------|--------|----------------|------------|
-| A1 | [Course name] | [Platform] | [URL] | [duration] | pending | — | — |
-| A2 | [Course name] | [Platform] | [URL] | [duration] | pending | — | — |
+| A1 | [Course name] | [Platform] | [URL] | [duration] | pending | N/A | N/A |
+| A2 | [Course name] | [Platform] | [URL] | [duration] | pending | N/A | N/A |
 
 ---
 
-## Track B: [Secondary Track Name — if applicable]
+## Track B: [Secondary Track Name: if applicable]
 
 | ID | Module | Platform | URL | Duration | Status | Date Completed | Test Score |
 |----|--------|----------|-----|----------|--------|----------------|------------|
-| B1 | [Course name] | [Platform] | [URL] | [duration] | pending | — | — |
+| B1 | [Course name] | [Platform] | [URL] | [duration] | pending | N/A | N/A |
 
 ---
 
@@ -323,7 +323,7 @@ structured learning plan to `data/learning-plan.md`.
 |-----|-------|----|-------|
 | Day 1 | A | A1 | [Module name and what to focus on] |
 | Day 2 | B | B1 | [Module name and what to focus on] |
-| Day 7 | QUIZ | — | Quiz day — run `/learn-today quiz week1` to test on all Week 1 material |
+| Day 7 | QUIZ | N/A | Quiz day: run `/learn-today quiz week1` to test on all Week 1 material |
 
 ---
 
@@ -331,7 +331,7 @@ structured learning plan to `data/learning-plan.md`.
 
 | Date | ID | Module | Result | Notes |
 |------|-----|--------|--------|-------|
-| — | — | — | — | Start your first module and run `/learn-today done` to log it |
+| N/A | N/A | N/A | N/A | Start your first module and run `/learn-today done` to log it |
 ```
 
 **If `data/learning-plan.md` already exists:**
@@ -341,8 +341,8 @@ structured learning plan to `data/learning-plan.md`.
 **After writing, tell the candidate:**
 > Learning plan saved. How to use it:
 >
-> - **`/learn-today`** — shows today's module with guidance tailored to your background and the JPMC roles
-> - **`/learn-today 15min`** — if you only have a few minutes; adapts to what's actually useful at that time
-> - **`/learn-today sprint`** or **`/learn-today sprint 4h`** — sequences a full block of modules when you have time to make serious progress
-> - **`/learn-today done`** — log a completed module and queue the next one
-> - **`/learn-today quiz`** — test yourself on what you've done so far
+> - **`/learn-today`**: shows today's module with guidance tailored to your background and the JPMC roles
+> - **`/learn-today 15min`**: if you only have a few minutes; adapts to what's actually useful at that time
+> - **`/learn-today sprint`** or **`/learn-today sprint 4h`**: sequences a full block of modules when you have time to make serious progress
+> - **`/learn-today done`**: log a completed module and queue the next one
+> - **`/learn-today quiz`**: test yourself on what you've done so far

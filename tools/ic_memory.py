@@ -1,17 +1,17 @@
 """
-Interview coach semantic memory — local Ollama embeddings + pgvector.
+Interview coach semantic memory: local Ollama embeddings + pgvector.
 
 Database: ic_context (localhost:5432, PostgreSQL)
-Model:    mxbai-embed-large via Ollama (localhost:11434) — 1024 dimensions, cosine similarity
+Model:    mxbai-embed-large via Ollama (localhost:11434): 1024 dimensions, cosine similarity
 
 WEEKLY MAINTENANCE: Run `ollama pull mxbai-embed-large` at the start of the first
 session each week. If a new version downloads, run `python tools/reembed_all.py`
 to keep all vectors consistent. See framework/memory-maintenance.md for full procedure.
 
 Tables:
-  ic_coached_answers  — coached answers and frameworks
-  ic_session_moments  — key exchanges from coaching sessions
-  ic_job_listings     — job scan cache with semantic dedup
+  ic_coached_answers : coached answers and frameworks
+  ic_session_moments : key exchanges from coaching sessions
+  ic_job_listings    : job scan cache with semantic dedup
 
 Usage:
   from tools.ic_memory import ICMemory
