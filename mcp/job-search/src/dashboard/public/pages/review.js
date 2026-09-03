@@ -1,5 +1,14 @@
 // @ts-check
-/** Review: candidate vs matches cards, differing fields highlighted, Merge (two-step)/Separate/Repost. */
+/**
+ * Review: candidate vs matches cards, differing fields highlighted, Merge (two-step)/Separate/Repost, plus
+ * a reason filter and bulk-separate bar (review-bulk spec S3b). The reason filter's options come from
+ * GET /api/review/reasons -- the DB universe of currently-open reasons -- never derived from whichever
+ * page of rows this file already loaded (dashboard UI restraint rule: option lists come from the DB
+ * universe, not loaded rows). The bulk bar only ever calls POST /api/review/bulk with mode:'reason': a
+ * dry-run count is fetched first, and going live requires the same two-step confirm pattern as the
+ * existing per-card Merge button (components/confirm-button.js), with confirm:true sent only on the
+ * second click, exactly mirroring the server-side rule (dry_run:false requires confirm:true).
+ */
 import { h, setChildren } from '../lib/dom.js';
 import { getJson, postJson } from '../lib/api.js';
 import { handleOutcome } from '../lib/outcome.js';
@@ -29,15 +38,43 @@ export async function render(container, params, app) {
   const cursor = createListCursor();
   /** @type {Map<string, number|null>} */
   let candidateIdByQueueId = new Map();
+  /** Selected reason filter; '' means "all reasons" (bulk bar hidden). */
+  let selectedReason = '';
   setChildren(container, [skeleton({ rows: 6 })]);
 
+  /** Section-card bulk bar, cyan accent stripe (dashboard UI restraint rule: a little color, no more). */
+  function bulkBar(reason, count) {
+    if (!reason) return null;
+    return h('div', { className: 'review-bulk-bar' }, [
+      h('span', { className: 'review-bulk-bar__count', text: count === null ? 'checking...' : `Return ${count} to untriaged` }),
+      count && count > 0
+        ? confirmButton({
+          label: 'Bulk separate',
+          confirmLabel: 'Confirm bulk separate',
+          onConfirm: async () => {
+            const out = handleOutcome(await postJson('/api/review/bulk', { mode: 'reason', reason, dry_run: false, confirm: true }));
+            if (out.kind === 'ok') { showToast({ message: `${out.body.counts.separate} item(s) returned to untriaged.` }); load(); }
+          },
+        })
+        : null,
+    ]);
+  }
+
   async function load() {
-    const outcome = handleOutcome(await getJson('/api/review'));
+    const [reviewOutcome, reasonsOutcome] = await Promise.all([getJson('/api/review'), getJson('/api/review/reasons')]);
+    const outcome = handleOutcome(reviewOutcome);
     if (outcome.kind !== 'ok') {
       setChildren(container, [emptyState({ message: 'The review queue could not be loaded right now.' })]);
       return;
     }
+    const reasonsResult = handleOutcome(reasonsOutcome);
+    const reasonOptions = reasonsResult.kind === 'ok' ? reasonsResult.body.reasons : [];
+    // If the previously selected reason no longer has any open items, fall back to "all" rather than
+    // silently filtering to an empty list against a reason that no longer exists in the DB universe.
+    if (selectedReason && !reasonOptions.includes(selectedReason)) selectedReason = '';
+
     const rows = outcome.body.rows;
+    const visibleRows = selectedReason ? rows.filter((item) => item.reason === selectedReason) : rows;
     const autoNote = outcome.body.auto_separated > 0 ? h('p', { className: 'review-auto-note', text: `${outcome.body.auto_separated} items auto-resolved.` }) : null;
 
     const resolve = async (queueId, resolution, targetId) => {
@@ -45,7 +82,24 @@ export async function render(container, params, app) {
       if (out.kind === 'ok') { showToast({ message: `Resolved as ${resolution}.` }); load(); }
     };
 
-    const cards = rows.map((item) => {
+    const reasonSelect = h('select', {
+      className: 'review-reason-select',
+      attrs: { 'aria-label': 'Filter by reason' },
+      on: {
+        change: (ev) => {
+          selectedReason = /** @type {HTMLSelectElement} */ (ev.target).value;
+          load();
+        },
+      },
+    }, [
+      h('option', { value: '', selected: selectedReason === '', text: `All reasons (${rows.length})` }),
+      ...reasonOptions.map((r) => h('option', { value: r, selected: selectedReason === r, text: r })),
+    ]);
+
+    /** @type {HTMLElement|null} */
+    let bulkBarEl = selectedReason ? bulkBar(selectedReason, null) : null;
+
+    const cards = visibleRows.map((item) => {
       const candidate = item.candidate;
       const matches = item.matches ?? [];
       return h('div', { className: 'review-card', dataset: { rowId: item.queue_id }, attrs: { tabindex: '0' } }, [
@@ -71,10 +125,23 @@ export async function render(container, params, app) {
     setChildren(container, [
       h('h1', { className: 'page-title', text: 'Review' }),
       autoNote,
-      rows.length === 0 ? emptyState({ message: 'No items pending review.' }) : h('div', { className: 'review-cards' }, cards),
+      h('div', { className: 'review-toolbar' }, [reasonSelect]),
+      bulkBarEl,
+      visibleRows.length === 0 ? emptyState({ message: selectedReason ? 'No open items with this reason.' : 'No items pending review.' }) : h('div', { className: 'review-cards' }, cards),
     ]);
     cursor.setRows([...container.querySelectorAll('.review-card')]);
-    candidateIdByQueueId = new Map(rows.map((item) => [String(item.queue_id), item.candidate?.id ?? null]));
+    candidateIdByQueueId = new Map(visibleRows.map((item) => [String(item.queue_id), item.candidate?.id ?? null]));
+
+    // The dry-run count is fetched AFTER the bar is already on screen (as "checking..."), then the bar
+    // is replaced in place once it resolves, rather than blocking the whole page render on it.
+    if (selectedReason) {
+      const reason = selectedReason;
+      const out = handleOutcome(await postJson('/api/review/bulk', { mode: 'reason', reason, dry_run: true }));
+      if (out.kind === 'ok' && selectedReason === reason) {
+        const fresh = bulkBar(reason, out.body.counts.separate);
+        if (bulkBarEl && bulkBarEl.parentElement) bulkBarEl.replaceWith(fresh);
+      }
+    }
   }
 
   /** @param {{ type: string, [k: string]: any }} action */
