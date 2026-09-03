@@ -14,7 +14,11 @@ import path from 'node:path';
 import { fileURLToPath } from 'node:url';
 import fs from 'node:fs';
 import os from 'node:os';
-import { alertSendersSchema, GMAIL_PARSER_NAMES, loadConfig, triageSchema, atsApplySchema, CONFIG_FILES, computeConfigHash, loadTriageCandidateSummary, checkConfigLock, writeConfigLock, missingConfigFiles } from '../src/core/config.js';
+import {
+  alertSendersSchema, GMAIL_PARSER_NAMES, loadConfig, triageSchema, atsApplySchema, CONFIG_FILES, computeConfigHash,
+  loadTriageCandidateSummary, checkConfigLock, writeConfigLock, missingConfigFiles,
+  triageCandidatePresent, computeTriageCandidateHash, triageCandidateLockPath, checkTriageCandidateLock, writeTriageCandidateLock,
+} from '../src/core/config.js';
 import { PARSERS } from '../src/adapters/gmail-parsers.js';
 import { CONFIG_DIR } from './helpers/scan-fixtures.js';
 
@@ -227,23 +231,89 @@ describe('config.lock.json freshness against the REAL config dir (guardurl fix: 
     // which resolves to the real mcp/job-search/config directory unless a caller sets the env var (the
     // spawned-child tests elsewhere in this suite do that for isolation; this in-process test does not).
     // This must fail if someone edits config/adapters.json without re-running `node bin/config-lock.js --write`.
+    // scan-never-skip fix: triage-candidate.md (the rubric) is no longer a CONFIG_FILES member, so this
+    // test needs no gitignored file copied into a fresh worktree to pass any more -- that was exactly the
+    // PRs #35/#36/#38 incident (a worktree lacking the rubric produced a lock that mismatched main's, and
+    // the next unattended scan refused with no run row and no reason shown). The rubric's own integrity is
+    // now tracked by its own gitignored sidecar (see the "rubric integrity sidecar" describe block below),
+    // which an unattended scan warns about instead of ever refusing to run.
     const r = checkConfigLock();
-    // r.detail names any missing file and the copy remedy (worktree authors: copy the gitignored
-    // config/triage-candidate.md from the main checkout in before running this suite), or the
-    // stale-hash remedy otherwise, so a failure here is immediately actionable, not just "expected !=
-    // actual". See PRs #35/#36's incident: a worktree --write with the rubric absent produced a lock
-    // that mismatched main's, and the next unattended scan refused with no run row and no reason shown.
     assert.equal(r.ok, true, r.detail);
     assert.deepEqual(r.missing, [], `CONFIG_FILES entries missing on disk: ${r.missing.join(', ')} -- ${r.detail}`);
   });
 });
 
+describe('rubric integrity sidecar (scan-never-skip fix: config/triage-candidate.md tracked outside config.lock.json)', () => {
+  function withTmpDir(fn) {
+    const tmp = fs.mkdtempSync(path.join(os.tmpdir(), 'rubric-sidecar-'));
+    try {
+      return fn(tmp);
+    } finally {
+      fs.rmSync(tmp, { recursive: true, force: true });
+    }
+  }
+
+  test('rubric absent: triageCandidatePresent false, checkTriageCandidateLock reports {present:false, ok:true}, writeTriageCandidateLock is a no-op', () => {
+    withTmpDir((tmp) => {
+      assert.equal(triageCandidatePresent(tmp), false);
+      const r = checkTriageCandidateLock(tmp);
+      assert.deepEqual(r, { present: false, ok: true, expected: null, actual: null });
+      assert.equal(writeTriageCandidateLock(tmp), null);
+      assert.equal(fs.existsSync(triageCandidateLockPath(tmp)), false, 'no sidecar file should be created when the rubric is absent');
+    });
+  });
+
+  test('rubric present, sidecar missing: checkTriageCandidateLock reports {present:true, ok:false}', () => {
+    withTmpDir((tmp) => {
+      fs.writeFileSync(path.join(tmp, 'triage-candidate.md'), 'Damian Mobley, CTO, Houston TX.\n');
+      const r = checkTriageCandidateLock(tmp);
+      assert.equal(r.present, true);
+      assert.equal(r.ok, false);
+      assert.equal(r.expected, null);
+      assert.equal(r.actual, computeTriageCandidateHash(tmp));
+    });
+  });
+
+  test('rubric present, sidecar written then matches: writeTriageCandidateLock -> checkTriageCandidateLock reports {present:true, ok:true}', () => {
+    withTmpDir((tmp) => {
+      fs.writeFileSync(path.join(tmp, 'triage-candidate.md'), 'Damian Mobley, CTO, Houston TX.\n');
+      const hash = writeTriageCandidateLock(tmp);
+      assert.equal(typeof hash, 'string');
+      assert.equal(fs.existsSync(triageCandidateLockPath(tmp)), true);
+      const r = checkTriageCandidateLock(tmp);
+      assert.deepEqual(r, { present: true, ok: true, expected: hash, actual: hash });
+    });
+  });
+
+  test('rubric edited after the sidecar was written: checkTriageCandidateLock reports {present:true, ok:false}', () => {
+    withTmpDir((tmp) => {
+      fs.writeFileSync(path.join(tmp, 'triage-candidate.md'), 'original content\n');
+      writeTriageCandidateLock(tmp);
+      fs.writeFileSync(path.join(tmp, 'triage-candidate.md'), 'edited content\n');
+      const r = checkTriageCandidateLock(tmp);
+      assert.equal(r.ok, false);
+      assert.notEqual(r.expected, r.actual);
+    });
+  });
+
+  test('the sidecar is never a CONFIG_FILES member and never changes computeConfigHash()', () => {
+    withTmpDir((tmp) => {
+      for (const name of CONFIG_FILES) fs.writeFileSync(path.join(tmp, name), `placeholder for ${name}\n`);
+      const hashBefore = computeConfigHash(tmp);
+      fs.writeFileSync(path.join(tmp, 'triage-candidate.md'), 'rubric content\n');
+      writeTriageCandidateLock(tmp);
+      const hashAfter = computeConfigHash(tmp);
+      assert.equal(hashBefore, hashAfter, 'writing the rubric and its sidecar must never change the tracked config-lock hash');
+    });
+  });
+});
+
 describe('config-lock missing-file handling (config-lock rubric incident: PRs #35/#36 --write with the rubric absent)', () => {
   /**
-   * Seed every CONFIG_FILES entry into `dir`, skipping any name in `skip`. CONFIG_DIR (the test fixture
-   * config dir) never has triage-candidate.md (gitignored personal data, absent even from fixtures) --
-   * a placeholder is written for it here so a caller that only wants ONE deliberately-missing file
-   * doesn't also get triage-candidate.md as an incidental second one.
+   * Seed every CONFIG_FILES entry into `dir`, skipping any name in `skip`. triage-candidate.md (gitignored
+   * personal data) is deliberately NOT a CONFIG_FILES member any more (see config.js's CONFIG_FILES
+   * comment), so this never needs to special-case it: every remaining CONFIG_FILES entry is present in
+   * CONFIG_DIR (the test fixture config dir), and any absent one falls back to a placeholder below.
    */
   function seedConfigDir(dir, skip = []) {
     for (const name of CONFIG_FILES) {
@@ -301,14 +371,16 @@ describe('config-lock missing-file handling (config-lock rubric incident: PRs #3
   });
 
   test('a missing file\'s hash sentinel does not collide with a real file whose content is the sentinel text', () => {
-    // dirA: triage-candidate.md genuinely absent (hashed via the missing-file presence-byte branch).
+    // dirA: triage.json genuinely absent (hashed via the missing-file presence-byte branch; triage.json is
+    // loaded tolerantly by loadConfig() but still a CONFIG_FILES member, so computeConfigHash() still
+    // covers it the same as every other config file).
     const dirA = fs.mkdtempSync(path.join(os.tmpdir(), 'config-lock-sentinel-absent-'));
-    // dirB: triage-candidate.md PRESENT on disk, its content literally the missing-marker text.
+    // dirB: triage.json PRESENT on disk, its content literally the missing-marker text.
     const dirB = fs.mkdtempSync(path.join(os.tmpdir(), 'config-lock-sentinel-literal-'));
     try {
-      seedConfigDir(dirA, ['triage-candidate.md']);
+      seedConfigDir(dirA, ['triage.json']);
       seedConfigDir(dirB);
-      fs.writeFileSync(path.join(dirB, 'triage-candidate.md'), '<missing:triage-candidate.md>');
+      fs.writeFileSync(path.join(dirB, 'triage.json'), '<missing:triage.json>');
       const hashA = computeConfigHash(dirA);
       const hashB = computeConfigHash(dirB);
       assert.notEqual(hashA, hashB, 'a present file whose content equals the missing-marker text must not hash identically to the file being absent');
@@ -323,9 +395,9 @@ describe('config-lock missing-file handling (config-lock rubric incident: PRs #3
     const bom = fs.mkdtempSync(path.join(os.tmpdir(), 'config-lock-normalize-bom-'));
     const cr = fs.mkdtempSync(path.join(os.tmpdir(), 'config-lock-normalize-cr-'));
     try {
-      seedConfigDir(clean, ['triage-candidate.md']);
-      seedConfigDir(bom, ['triage-candidate.md']);
-      seedConfigDir(cr, ['triage-candidate.md']);
+      seedConfigDir(clean);
+      seedConfigDir(bom);
+      seedConfigDir(cr);
       // The real fixture file is already CRLF on disk (Windows checkout); normalize to LF first so
       // ".replace(/\n/g, '\r\n')" below doesn't double up an existing \r into \r\r\n.
       const raw = fs.readFileSync(path.join(CONFIG_DIR, 'noise-rules.json'), 'utf8');
@@ -374,10 +446,14 @@ describe('assertTestDbGuard (scan-report-fixes item: structural test-isolation g
 });
 
 describe('triageSchema and triage.json loading (slice 3 auto-triage, docs/slice3-auto-triage-spec.md section 3)', () => {
-  test('CONFIG_FILES includes triage.json, triage-candidate.md, triage-output-schema.json, triage-mcp-empty.json', () => {
-    for (const name of ['triage.json', 'triage-candidate.md', 'triage-output-schema.json', 'triage-mcp-empty.json']) {
+  test('CONFIG_FILES includes triage.json, triage-output-schema.json, triage-mcp-empty.json', () => {
+    for (const name of ['triage.json', 'triage-output-schema.json', 'triage-mcp-empty.json']) {
       assert.ok(CONFIG_FILES.includes(name), `${name} must be in CONFIG_FILES`);
     }
+  });
+
+  test('CONFIG_FILES deliberately excludes triage-candidate.md (scan-never-skip fix: rubric out of the tracked lock, tracked by its own gitignored sidecar instead)', () => {
+    assert.ok(!CONFIG_FILES.includes('triage-candidate.md'));
   });
 
   test('the test fixture config dir\'s triage.json (deterministic and model both off) parses and loadConfig sets present=true', () => {

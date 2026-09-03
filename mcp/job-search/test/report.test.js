@@ -187,27 +187,84 @@ describe('buildScanReport: noise exclusion, home locations, review queue, disabl
   });
 
   test('buildReportSubject: [LOCK MISMATCH] prefix wins over [SCAN FAILED] and [NO SCAN] (config-lock rubric incident)', () => {
-    const data = { dayKey: '2026-08-26', worstStatus: 'failed', noScan: true, lockMismatch: { run_id: 1, message: 'missing config file(s): triage-candidate.md' }, lookAtThese: { rows: [] }, reviewQueue: { total: 0 } };
+    const data = { dayKey: '2026-08-26', worstStatus: 'failed', noScan: true, lockMismatch: { run_id: 1, code: 'CONFIG_LOCK_MISMATCH', message: 'config.lock.json is stale: run node bin/config-lock.js --write' }, lookAtThese: { rows: [] }, reviewQueue: { total: 0 } };
     assert.match(buildReportSubject(data), /^\[LOCK MISMATCH\]/);
   });
 
-  test('a CONFIG_LOCK_MISMATCH failed run row: buildScanReport sets lockMismatch and noScan is false (config-lock rubric incident: PRs #35/#36 left an empty [NO SCAN] digest with no reason)', async () => {
+  test('buildReportSubject: [RUBRIC UNLOCKED] prefix for a RUBRIC_UNLOCKED warning (scan-never-skip fix)', () => {
+    const data = { dayKey: '2026-08-26', worstStatus: 'ok', noScan: false, lockMismatch: { run_id: 1, code: 'RUBRIC_UNLOCKED', message: 'run node bin/config-lock.js --write in the main checkout' }, lookAtThese: { rows: [] }, reviewQueue: { total: 0 } };
+    assert.match(buildReportSubject(data), /^\[RUBRIC UNLOCKED\]/);
+  });
+
+  test('an ok run carrying only a CONFIG_LOCK_MISMATCH warning: buildScanReport still sets lockMismatch and renders it, while worstStatus and noScan both read as if nothing were wrong (scan-never-skip fix: bin/scan.js never blocks the scan on a mismatch any more, so this can no longer be keyed off run.status)', async () => {
     const profile = `zz-test-report-lockmismatch-${process.pid}`;
     const since = new Date(Date.now() - 1000);
-    const msg = 'missing config file(s): triage-candidate.md -- copy the gitignored file from the main checkout into this worktree\'s config/ then rerun';
+    const remedy = 'config.lock.json is stale: expected=abc actual=def -- run node bin/config-lock.js --write';
     const row = await client.query(
-      `INSERT INTO ic_scan_runs (profile, trigger, status, started_at, finished_at, errors)
-       VALUES ($1, 'cli', 'failed', now(), now(), $2::jsonb) RETURNING id`,
-      [profile, JSON.stringify([{ source: null, code: 'CONFIG_LOCK_MISMATCH', message: msg }])],
+      `INSERT INTO ic_scan_runs (profile, trigger, status, started_at, finished_at, stats, errors)
+       VALUES ($1, 'cli', 'ok', now(), now(), '{"fetched":1,"new":1}'::jsonb, $2::jsonb) RETURNING id`,
+      [profile, JSON.stringify([{ source: null, code: 'CONFIG_LOCK_MISMATCH', severity: 'warning', expected: 'abc', actual: 'def', missing: [], remedy }])],
     );
     try {
       const report = await buildScanReport(client, { sinceOverride: since });
-      assert.equal(report.noScan, false, 'a run row exists, even a failed one, so this is not the bare NO SCAN case');
-      assert.ok(report.lockMismatch, 'lockMismatch must be populated from the failed run\'s CONFIG_LOCK_MISMATCH error');
+      assert.equal(report.noScan, false, 'a run row exists so this is not the bare NO SCAN case');
+      // Scoped to THIS run's own row rather than the window-wide worstStatus: other tests in this shared
+      // _test database can leave partial/failed rows inside the same broad time window, which would make a
+      // global worstStatus assertion flaky. The row itself is what proves "a warning-only run stays ok".
+      const own = report.runs.find((r) => r.run_id === Number(row.rows[0].id));
+      assert.ok(own, 'this run must appear in the report window');
+      assert.equal(own.status, 'ok', 'a run carrying only a severity:\'warning\' entry must never be misread as a failure');
+      assert.ok(report.lockMismatch, 'lockMismatch must be populated from the ok run\'s CONFIG_LOCK_MISMATCH warning, even though run.status is ok');
       assert.equal(report.lockMismatch.run_id, Number(row.rows[0].id));
-      assert.equal(report.lockMismatch.message, msg);
+      assert.equal(report.lockMismatch.code, 'CONFIG_LOCK_MISMATCH');
+      assert.equal(report.lockMismatch.message, remedy);
       assert.match(buildReportSubject(report), /^\[LOCK MISMATCH\]/);
-      assert.match(renderReportText(report), /^LOCK MISMATCH: missing config file\(s\): triage-candidate\.md/m);
+      assert.match(renderReportText(report), /^LOCK MISMATCH: config\.lock\.json is stale/m);
+      // The per-run detail line below the banner also names the warning, alongside the normal digest.
+      assert.match(renderReportText(report), /error: run CONFIG_LOCK_MISMATCH: config\.lock\.json is stale/);
+    } finally {
+      await client.query(`DELETE FROM ic_scan_runs WHERE profile = $1`, [profile]);
+    }
+  });
+
+  test('a RUBRIC_UNLOCKED warning on an ok run: buildScanReport renders the [RUBRIC UNLOCKED] banner and remedy (scan-never-skip fix)', async () => {
+    const profile = `zz-test-report-rubricunlocked-${process.pid}`;
+    const since = new Date(Date.now() - 1000);
+    const row = await client.query(
+      `INSERT INTO ic_scan_runs (profile, trigger, status, started_at, finished_at, stats, errors)
+       VALUES ($1, 'cli', 'ok', now(), now(), '{"fetched":1}'::jsonb, $2::jsonb) RETURNING id`,
+      [profile, JSON.stringify([{ source: null, code: 'RUBRIC_UNLOCKED', severity: 'warning', remedy: 'run node bin/config-lock.js --write in the main checkout' }])],
+    );
+    try {
+      const report = await buildScanReport(client, { sinceOverride: since });
+      const own = report.runs.find((r) => r.run_id === Number(row.rows[0].id));
+      assert.ok(own);
+      assert.equal(own.status, 'ok');
+      assert.ok(report.lockMismatch);
+      assert.equal(report.lockMismatch.code, 'RUBRIC_UNLOCKED');
+      assert.match(buildReportSubject(report), /^\[RUBRIC UNLOCKED\]/);
+      assert.match(renderReportText(report), /^RUBRIC UNLOCKED: config\/triage-candidate\.md changed.*run node bin\/config-lock\.js --write in the main checkout$/m);
+    } finally {
+      await client.query(`DELETE FROM ic_scan_runs WHERE profile = $1`, [profile]);
+    }
+  });
+
+  test('a run with a CONFIG_LOCK_MISMATCH warning PLUS a real (non-warning) error is partial, not ok, and still carries the lockMismatch banner (scan-never-skip fix)', async () => {
+    const profile = `zz-test-report-lockmismatch-partial-${process.pid}`;
+    const since = new Date(Date.now() - 1000);
+    const row = await client.query(
+      `INSERT INTO ic_scan_runs (profile, trigger, status, started_at, finished_at, stats, errors)
+       VALUES ($1, 'cli', 'partial', now(), now(), '{"fetched":1}'::jsonb, $2::jsonb) RETURNING id`,
+      [profile, JSON.stringify([
+        { source: null, code: 'CONFIG_LOCK_MISMATCH', severity: 'warning', remedy: 'run node bin/config-lock.js --write' },
+        { source: 'greenhouse', code: 'BAD_RESPONSE', message: 'board not found' },
+      ])],
+    );
+    try {
+      const report = await buildScanReport(client, { sinceOverride: since });
+      assert.equal(report.worstStatus, 'partial');
+      assert.ok(report.lockMismatch);
+      assert.match(buildReportSubject(report), /^\[LOCK MISMATCH\]/);
     } finally {
       await client.query(`DELETE FROM ic_scan_runs WHERE profile = $1`, [profile]);
     }

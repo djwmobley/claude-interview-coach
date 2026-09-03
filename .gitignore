@@ -36,6 +36,7 @@ mcp/job-search/test/screenshots/
 # run node bin/config-lock.js --write for that machine, same "config drift must be deliberate" rule
 # every other config file gets.
 mcp/job-search/config/triage-candidate.md
+mcp/job-search/config/triage-candidate.lock
 # Apply pipeline slice 4: the screening-question answer bank is personal data (EEO answers, salary
 # floor), never committed. mcp/job-search/data/apply-answers.example.md (tracked) documents the format.
 mcp/job-search/data/apply-answers.md

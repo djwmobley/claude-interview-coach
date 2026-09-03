@@ -218,6 +218,37 @@ describe('runScan persisted', () => {
     }
   });
 
+  test('opts.preRunWarnings (scan-never-skip fix): a run seeded with only a warning stays status ok, and the warning rides along in the response/DB errors', async () => {
+    const warning = { source: null, code: 'CONFIG_LOCK_MISMATCH', severity: 'warning', expected: 'abc', actual: 'def', missing: [], remedy: 'run node bin/config-lock.js --write' };
+    const r = await runScanWaiting(
+      { profile: PROFILE, sources: ['greenhouse'], dryRun: true, wait: true },
+      offlineDeps({ fetch: makeFixtureFetch(ZZ_MAP) }),
+      { trigger: 'mcp', log: () => {}, preRunWarnings: [warning] },
+    );
+    assert.equal(r.status, 'ok', 'a run carrying only a severity:\'warning\' entry must stay ok');
+    assert.ok(r.errors.some((/** @type {any} */ e) => e.code === 'CONFIG_LOCK_MISMATCH' && e.severity === 'warning'));
+    const row = await client.query('SELECT status, errors FROM ic_scan_runs WHERE id = $1', [r.run_id]);
+    assert.equal(row.rows[0].status, 'ok');
+    assert.ok(row.rows[0].errors.some((/** @type {any} */ e) => e.code === 'CONFIG_LOCK_MISMATCH'));
+  });
+
+  test('opts.preRunWarnings plus a real (non-warning) run-level error: status is partial, never ok, and the warning is still present alongside it', async () => {
+    await client.query(`INSERT INTO ic_source_state (source, manual_disable) VALUES ('dayforce', true) ON CONFLICT (source) DO UPDATE SET manual_disable = true`);
+    try {
+      const warning = { source: null, code: 'RUBRIC_UNLOCKED', severity: 'warning', remedy: 'run node bin/config-lock.js --write in the main checkout' };
+      const r = await runScanWaiting(
+        { profile: PROFILE, sources: ['dayforce'], dryRun: true, wait: true },
+        offlineDeps(),
+        { trigger: 'mcp', log: () => {}, preRunWarnings: [warning] },
+      );
+      assert.equal(r.status, 'partial', 'SOURCE_DISABLED is a real error, not a warning, so the warning alone cannot keep this ok');
+      assert.ok(r.errors.some((/** @type {any} */ e) => e.code === 'RUBRIC_UNLOCKED' && e.severity === 'warning'));
+      assert.ok(r.errors.some((/** @type {any} */ e) => e.code === 'SOURCE_DISABLED'));
+    } finally {
+      await client.query(`UPDATE ic_source_state SET manual_disable = false, disabled_until = NULL, consecutive_walls = 0 WHERE source = 'dayforce'`);
+    }
+  });
+
   test('resolveSources refuses unknown names; fetchDetailForRow refuses browser sources and serves fetch sources', async () => {
     const config = testConfig();
     assert.throws(() => resolveSources(['greenhouse', 'bogus'], config), (/** @type {any} */ e) => e.code === 'VALIDATION');

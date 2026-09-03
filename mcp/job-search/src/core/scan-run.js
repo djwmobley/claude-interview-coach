@@ -95,6 +95,13 @@ export const USER_AGENT = 'job-search-mcp/0.1 (interview-coach; read-only scanne
  *   INSERT returns (dashboard PR 2's marker-file correlation: bin/scan.js's `--run-marker` writes the
  *   run id to a file from this callback, before any further work happens, so the dashboard never
  *   correlates a spawn by timing).
+ * @property {Array<{ source: string|null, code: string, severity: 'warning', [k: string]: any }>} [preRunWarnings]
+ *   Warnings the caller already knows about before this run even started (scan-never-skip fix): a
+ *   config-lock mismatch, an unlocked rubric, or a self-healed/failed Chrome launch, all discovered in
+ *   bin/scan.js before runScan() is called. Seeded into this run's own `errors` array at the very start of
+ *   executeRun() so they land in the same finalize UPDATE as everything else and are visible on the run row
+ *   -- but status computation ignores every entry whose `severity` is 'warning', so a run carrying ONLY
+ *   these stays 'ok'.
  */
 
 /**
@@ -273,8 +280,13 @@ async function executeRun(p) {
 
   /** @type {RunStats} */
   const stats = { fetched: 0, new: 0, updated: 0, cross_source_dup: 0, repost: 0, ambiguous: 0, errors: 0, unembedded: 0, stale_dropped: 0, detail_fetched: 0, detail_skipped_budget: 0, adopted: 0, expired: 0, pages_by_source: {} };
-  /** @type {Array<{ source: string|null, code: string, message: string }>} */
-  const errors = [];
+  // Seeded with anything the caller already knew about before this run started (scan-never-skip fix): a
+  // config-lock mismatch, an unlocked rubric, or a self-healed/failed Chrome launch. Each carries
+  // severity:'warning' so the status computation at finalize below ignores it; a run-level failure this
+  // file itself detects (SOURCE_DISABLED, BUDGET_EXCEEDED, a source's own thrown error, etc.) never sets
+  // severity, so it counts toward 'partial'/'failed' exactly as before.
+  /** @type {Array<{ source: string|null, code: string, message?: string, severity?: 'warning', [k: string]: any }>} */
+  const errors = Array.isArray(opts.preRunWarnings) ? [...opts.preRunWarnings] : [];
   /** @type {string[]} */
   const warnings = [];
   /** @type {any[]} */
@@ -762,8 +774,13 @@ async function executeRun(p) {
     }
   }
 
-  stats.errors = errors.length;
-  const status = cancelled ? 'failed' : partial || errors.length > 0 ? 'partial' : 'ok';
+  // Warnings (severity:'warning' -- config-lock mismatch, unlocked rubric, Chrome self-heal) never count
+  // toward stats.errors or the status computation: a run carrying only warnings stays 'ok'. `partial` is
+  // still set independently by real run-level conditions elsewhere in this file (SOURCE_DISABLED, a wall,
+  // BROWSER_UNAVAILABLE, etc.), unaffected by this filter.
+  const blockingErrors = errors.filter((e) => e.severity !== 'warning');
+  stats.errors = blockingErrors.length;
+  const status = cancelled ? 'failed' : partial || blockingErrors.length > 0 ? 'partial' : 'ok';
   try {
     await client.query(
       `UPDATE ic_scan_runs SET status = CASE WHEN status = 'running' THEN $2 ELSE status END, finished_at = now(), heartbeat_at = now(),
