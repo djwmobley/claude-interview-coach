@@ -84,7 +84,28 @@ export const KEYWORD_RE = /^[\p{L}\p{N} .,+'/&-]{1,80}$/u;
  * @property {string[]} pathPatterns
  * @property {string[]} blindSpots
  * @property {(profile: SearchProfile, ctx: AdapterCtx) => AsyncGenerator<AdapterEvent, void, Directive>} search
- * @property {((listing: { url: string|null, url_normalized?: string|null, external_id?: string|null, source?: string|null }, ctx: AdapterCtx) => Promise<{ description: string|null }>)} [fetchDetail]
+ * @property {((listing: { url: string|null, url_normalized?: string|null, external_id?: string|null, source?: string|null }, ctx: AdapterCtx) => Promise<FetchDetailResult>)} [fetchDetail]
+ */
+
+/**
+ * fetchDetail's return shape, widened for auto-apply PR B (docs/auto-apply-spec.md) without breaking any
+ * existing caller: every new field is OPTIONAL, so a legacy adapter returning only `{ description }`
+ * remains a perfectly valid FetchDetailResult -- scan-run.js's own apply-target persistence step treats a
+ * missing field as "this adapter has nothing to say about the apply target", never as an error.
+ * @typedef {Object} FetchDetailResult
+ * @property {string|null} description
+ * @property {string|null} [externalApplyUrl] a candidate apply-page URL discovered on the listing page
+ *   (an anchor href, a decoded LinkedIn safety/go wrapper, or the listing's own URL when the ATS's apply
+ *   page IS the listing page). Never itself redirect-chased or classified by the adapter -- that is
+ *   src/apply/apply-target.js's job, run later by scan-run.js/bin/auto-apply.js.
+ * @property {boolean} [easyApplyOnly] true when the listing's own apply flow is an in-page "Easy Apply"
+ *   with no external URL to resolve at all (no browser click was performed to determine this; adapters
+ *   set it only when the classify-only nature of the ATS itself already implies it, e.g. LinkedIn/Indeed
+ *   Easy Apply postings).
+ * @property {{ applicantTrackingSystemName?: string|null, companyName?: string|null }|null} [applyProbe]
+ *   a same-tab query-param hint captured incidentally (never from a browser click performed by
+ *   fetchDetail itself, which never clicks anything) -- diagnostic only, never treated as a resolved
+ *   apply target on its own.
  */
 
 /**

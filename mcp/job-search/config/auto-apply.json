@@ -1,10 +1,15 @@
 {
-  "_comment": "One-click apply / auto-apply gate config (PR A spec item 2). fitFloor: minimum fit_score an auto-apply candidate must carry. dailyCap: max auto-apply submissions per day (enforced by a later slice; the field ships now so this file's shape is stable). atsAllow: ATS types auto-apply is permitted to submit through (excludes indeed_easy/linkedin_easy -- classify-only adapters -- and unknown). floors: src/core/salary-floor.js's resolveFloor() inputs, in whole US dollars per year.",
+  "_comment": "One-click apply / auto-apply gate config (PR A spec item 2, extended by PR B docs/auto-apply-spec.md). fitFloor: minimum fit_score an auto-apply candidate must carry. dailyCap: max auto-apply submissions per day. atsAllow: ATS types auto-apply is permitted to submit through (excludes indeed_easy/linkedin_easy -- classify-only adapters -- and unknown). floors: src/core/salary-floor.js's resolveFloor() inputs, in whole US dollars per year. probeCapPerSource/probeRowCap/reprobeAfterHours: apply-target probe registry budget and cooldown. lockMinutes/pollSeconds: bin/auto-apply.js's own advisory-lock contention poll.",
   "fitFloor": 70,
   "dailyCap": 5,
   "atsAllow": ["greenhouse", "lever", "smartrecruiters", "workday", "icims", "dayforce"],
   "floors": {
     "texas_or_remote": 225000,
     "relocation": 275000
-  }
+  },
+  "probeCapPerSource": 10,
+  "probeRowCap": 3,
+  "reprobeAfterHours": 48,
+  "lockMinutes": 40,
+  "pollSeconds": 30
 }

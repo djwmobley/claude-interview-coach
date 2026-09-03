@@ -949,6 +949,175 @@ export function renderReportMarkdown(data, registry, googleAuthState, dashboardH
   return lines.join('\n');
 }
 
+// ---------------------------------------------------------------------------
+// Auto-apply section (auto-apply PR B, docs/auto-apply-spec.md). There is no ic_scan_runs-equivalent
+// table for an auto-apply run -- bin/auto-apply.js's own `--json` output IS the durable record of one
+// run, mirroring how googleAuthLineText()/dashboardHealthLineText() above render a CALLER-SUPPLIED
+// classification rather than this module doing its own file I/O (report.js stays pure data collection +
+// rendering; whatever caller wires this section into the daily email is responsible for reading that JSON
+// file off disk, exactly as bin/remind.js already does for the Google-auth and watchdog lines).
+// ---------------------------------------------------------------------------
+
+/**
+ * @typedef {Object} AutoApplySummary bin/auto-apply.js's own --json output shape (only the fields this
+ *   section reads are declared)
+ * @property {boolean} [dry_run]
+ * @property {{ results?: Array<{ listingId: number, reason: string }>, cap_used?: number, cap_remaining?: number }} [select]
+ * @property {Array<{ listingId: number, applicationId?: number, outcome: string }>} [applied]
+ */
+
+/**
+ * @typedef {Object} AutoApplyReportData
+ * @property {boolean} dryRun
+ * @property {number} appliedCount
+ * @property {number} cappedCount
+ * @property {number|null} capUsed
+ * @property {number|null} capRemaining
+ * @property {Record<string, number>} skippedByReason every non-'eligible', non-'daily_cap' reason -> count
+ * @property {Array<{ id: number, title: string, company: string, source: string|null, url: string|null, linkedinDeepLink: string|null }>} unresolved
+ */
+
+/**
+ * Shape one auto-apply run's JSON summary into report data, looking up title/company/source for the
+ * listings that ended up 'apply_target_unresolved' or 'easy_apply_only' (the summary itself only carries
+ * bare listing ids) so the report reads like every other section's listing rows. When `summary` is
+ * missing (the feature never ran today, or its state file could not be read), this returns
+ * `{ hasRun: false }` rather than `null`: the section is ALWAYS rendered (see renderAutoApplyText/Html/
+ * Markdown below), never silently omitted -- a missing run is itself something the operator should see,
+ * not something that quietly disappears from the email.
+ * @param {import('pg').ClientBase} client
+ * @param {AutoApplySummary|null|undefined} summary
+ * @returns {Promise<{ hasRun: false } | ({ hasRun: true } & AutoApplyReportData)>}
+ */
+export async function collectAutoApply(client, summary) {
+  if (!summary || typeof summary !== 'object') return { hasRun: false };
+  const results = Array.isArray(summary.select?.results) ? /** @type {Array<{ listingId: number, reason: string }>} */ (summary.select.results) : [];
+  const applied = Array.isArray(summary.applied) ? summary.applied : [];
+  const appliedCount = applied.filter((a) => a && a.outcome === 'applied').length;
+
+  /** @type {Record<string, number>} */
+  const skippedByReason = {};
+  for (const r of results) {
+    if (!r || r.reason === 'eligible') continue;
+    skippedByReason[r.reason] = (skippedByReason[r.reason] ?? 0) + 1;
+  }
+  const cappedCount = skippedByReason.daily_cap ?? 0;
+
+  const unresolvedIds = [...new Set(
+    results.filter((r) => r && (r.reason === 'apply_target_unresolved' || r.reason === 'easy_apply_only')).map((r) => Number(r.listingId)),
+  )];
+  /** @type {any[]} */
+  let unresolvedRows = [];
+  if (unresolvedIds.length) {
+    const r = await client.query(`SELECT id, title, company, source, url, url_normalized FROM ic_job_listings WHERE id = ANY($1::int[])`, [unresolvedIds]);
+    unresolvedRows = r.rows;
+  }
+  return {
+    hasRun: true,
+    dryRun: Boolean(summary.dry_run),
+    appliedCount,
+    cappedCount,
+    capUsed: typeof summary.select?.cap_used === 'number' ? summary.select.cap_used : null,
+    capRemaining: typeof summary.select?.cap_remaining === 'number' ? summary.select.cap_remaining : null,
+    skippedByReason,
+    unresolved: unresolvedRows.map((r) => {
+      const url = r.url_normalized ?? r.url ?? null;
+      const isLinkedin = typeof r.source === 'string' && r.source === 'linkedin';
+      return { id: Number(r.id), title: r.title, company: r.company, source: r.source ?? null, url, linkedinDeepLink: isLinkedin ? url : null };
+    }),
+  };
+}
+
+/** Rendered skipped-reasons clause shared by all three renderers below (excludes 'daily_cap', already its own `cappedCount`). @param {AutoApplyReportData} data */
+function skippedReasonsText(data) {
+  const parts = Object.entries(data.skippedByReason).filter(([k]) => k !== 'daily_cap').map(([k, v]) => `${k}=${v}`);
+  return parts.length ? parts.join(', ') : '(none)';
+}
+
+/**
+ * Plain-text auto-apply section. ALWAYS renders a section (see collectAutoApply's own doc comment): a
+ * `{ hasRun: false }` (or falsy/absent) `data` renders a distinct "no run recorded" line rather than
+ * being omitted.
+ * @param {({ hasRun: true } & AutoApplyReportData) | { hasRun: false } | null | undefined} data
+ * @param {import('./urlguard.js').Registry} [registry]
+ * @returns {string}
+ */
+export function renderAutoApplyText(data, registry) {
+  if (!data || !data.hasRun) return '== Auto-apply ==\n(no auto-apply run recorded today)';
+  const reg = registry ?? { entries: [], httpAllowedHosts: new Set() };
+  const lines = [];
+  lines.push(`== Auto-apply${data.dryRun ? ' (dry run)' : ''} ==`);
+  lines.push(`applied ${data.appliedCount} | capped ${data.cappedCount} | cap used ${data.capUsed ?? '?'} | cap remaining ${data.capRemaining ?? '?'}`);
+  lines.push(`skipped: ${skippedReasonsText(data)}`);
+  lines.push(`unresolved apply targets (${data.unresolved.length}):`);
+  for (const u of data.unresolved) {
+    const candidate = u.linkedinDeepLink ?? u.url;
+    const passes = urlPassesRegistry(candidate, reg);
+    const link = !passes ? '' : u.linkedinDeepLink ? ` | linkedin: ${candidate}` : ` | ${candidate}`;
+    lines.push(`  #${u.id} | ${u.title} | ${u.company} | ${u.source ?? 'n/a'}${link}`);
+  }
+  return lines.join('\n');
+}
+
+/**
+ * HTML auto-apply section (every field escaped, spec R1.5's discipline applied identically here). ALWAYS
+ * renders a section -- see renderAutoApplyText's own doc comment.
+ * @param {({ hasRun: true } & AutoApplyReportData) | { hasRun: false } | null | undefined} data
+ * @param {import('./urlguard.js').Registry} [registry]
+ * @returns {string}
+ */
+export function renderAutoApplyHtml(data, registry) {
+  if (!data || !data.hasRun) return '<h3>Auto-apply</h3><p>(no auto-apply run recorded today)</p>';
+  const esc = escapeHtml;
+  const reg = registry ?? { entries: [], httpAllowedHosts: new Set() };
+  const parts = [];
+  parts.push(`<h3>Auto-apply${data.dryRun ? ' (dry run)' : ''}</h3>`);
+  parts.push(`<p>applied ${data.appliedCount}, capped ${data.cappedCount}, cap used ${data.capUsed ?? '?'}, cap remaining ${data.capRemaining ?? '?'}</p>`);
+  parts.push(`<p>skipped: ${esc(skippedReasonsText(data))}</p>`);
+  if (data.unresolved.length) {
+    parts.push(`<p>unresolved apply targets (${data.unresolved.length}):</p><ul>`);
+    for (const u of data.unresolved) {
+      const candidate = u.linkedinDeepLink ?? u.url;
+      const passes = urlPassesRegistry(candidate, reg);
+      const link = !passes ? '' : u.linkedinDeepLink
+        ? ` (linkedin: <a href="${esc(candidate)}">${esc(candidate)}</a>)`
+        : ` (<a href="${esc(candidate)}">${esc(candidate)}</a>)`;
+      parts.push(`<li>#${u.id} ${esc(u.title)} at ${esc(u.company)}, ${esc(u.source ?? 'n/a')}${link}</li>`);
+    }
+    parts.push('</ul>');
+  } else {
+    parts.push('<p>unresolved apply targets: (none)</p>');
+  }
+  return parts.join('\n');
+}
+
+/**
+ * Markdown auto-apply section. ALWAYS renders a section -- see renderAutoApplyText's own doc comment.
+ * @param {({ hasRun: true } & AutoApplyReportData) | { hasRun: false } | null | undefined} data
+ * @param {import('./urlguard.js').Registry} [registry]
+ * @returns {string}
+ */
+export function renderAutoApplyMarkdown(data, registry) {
+  if (!data || !data.hasRun) return '## Auto-apply\n\n(no auto-apply run recorded today)';
+  const reg = registry ?? { entries: [], httpAllowedHosts: new Set() };
+  const lines = [];
+  lines.push(`## Auto-apply${data.dryRun ? ' (dry run)' : ''}`);
+  lines.push('');
+  lines.push(`applied ${data.appliedCount}, capped ${data.cappedCount}, cap used ${data.capUsed ?? '?'}, cap remaining ${data.capRemaining ?? '?'}`);
+  lines.push('');
+  lines.push(`skipped: ${skippedReasonsText(data)}`);
+  lines.push('');
+  lines.push(`unresolved apply targets (${data.unresolved.length}):`);
+  if (data.unresolved.length === 0) lines.push('(none)');
+  for (const u of data.unresolved) {
+    const candidate = u.linkedinDeepLink ?? u.url;
+    const passes = urlPassesRegistry(candidate, reg);
+    const link = !passes ? '' : u.linkedinDeepLink ? ` (linkedin: ${candidate})` : ` (${candidate})`;
+    lines.push(`- #${u.id} ${u.title} at ${u.company}, ${u.source ?? 'n/a'}${link}`);
+  }
+  return lines.join('\n');
+}
+
 // Re-exported so callers building the combined follow-ups + scan-report email do not need a second
 // import for the follow-ups helpers report.js itself does not otherwise depend on.
 export { formatFollowup, selectDue, unsnoozeDue, formatDate };

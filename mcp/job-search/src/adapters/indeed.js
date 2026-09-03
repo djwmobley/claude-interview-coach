@@ -123,14 +123,27 @@ export const indeed = defineAdapter({
     if (!cap) return { description: null };
     await ctx.reserveDetail();
     await cap.goto(url);
+    // Auto-apply PR B: Indeed's own Easy Apply ("applystart") flow never navigates externally -- observed
+    // here, never clicked. An "Apply on company site" anchor off indeed.com is surfaced as externalApplyUrl.
+    /** @type {any} */
+    let applyState = null;
+    try {
+      applyState = await cap.readJson('indeedApplyState');
+    } catch {
+      applyState = null;
+    }
+    const externalApplyUrl = applyState && typeof applyState.href === 'string' ? applyState.href : null;
+    const easyApplyOnly = Boolean(applyState ? applyState.easyApplyOnly : true);
     const docs = /** @type {any[]} */ (await cap.readJson('readJsonLd'));
     for (const d of Array.isArray(docs) ? docs : []) {
       const nodes = Array.isArray(d) ? d : [d];
       for (const n of nodes) {
-        if (n && n['@type'] === 'JobPosting' && typeof n.description === 'string' && n.description.trim()) return { description: n.description };
+        if (n && n['@type'] === 'JobPosting' && typeof n.description === 'string' && n.description.trim()) {
+          return { description: n.description, externalApplyUrl, easyApplyOnly };
+        }
       }
     }
     const text = /** @type {string} */ (await cap.readJson('bodyText'));
-    return { description: text && text.trim() ? text : null };
+    return { description: text && text.trim() ? text : null, externalApplyUrl, easyApplyOnly };
   },
 });

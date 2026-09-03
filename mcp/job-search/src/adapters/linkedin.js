@@ -136,12 +136,28 @@ export const linkedin = defineAdapter({
     if (!cap) return { description: null };
     await ctx.reserveDetail();
     await cap.goto(url);
+    // Auto-apply PR B: observe (never click) the page's own Apply affordance. A navigable href (including
+    // a linkedin.com/safety/go/ wrapper, decoded later by src/apply/apply-target.js -- never here) is
+    // surfaced as externalApplyUrl; an Easy Apply button with no href sets easyApplyOnly instead.
+    /** @type {any} */
+    let applyState = null;
+    try {
+      applyState = await cap.readJson('linkedinApplyLink');
+    } catch {
+      applyState = null;
+    }
+    const externalApplyUrl = applyState && typeof applyState.href === 'string' ? applyState.href : null;
+    const easyApplyOnly = Boolean(applyState && applyState.buttonOnly && !externalApplyUrl);
     const d = /** @type {any} */ (await cap.readJson('linkedinJobDetail'));
-    if (d && typeof d.description === 'string' && d.description.trim()) return { description: d.description };
+    if (d && typeof d.description === 'string' && d.description.trim()) {
+      return { description: d.description, externalApplyUrl, easyApplyOnly };
+    }
     const docs = /** @type {any[]} */ (await cap.readJson('readJsonLd'));
     for (const doc of Array.isArray(docs) ? docs : []) {
-      if (doc && doc['@type'] === 'JobPosting' && typeof doc.description === 'string' && doc.description.trim()) return { description: doc.description };
+      if (doc && doc['@type'] === 'JobPosting' && typeof doc.description === 'string' && doc.description.trim()) {
+        return { description: doc.description, externalApplyUrl, easyApplyOnly };
+      }
     }
-    return { description: null };
+    return { description: null, externalApplyUrl, easyApplyOnly };
   },
 });

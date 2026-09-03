@@ -587,7 +587,7 @@ export function normalizeCompany(raw, opts) {
 // ---------------------------------------------------------------------------
 
 /** @type {Record<string, string>} */
-const US_STATES = {
+export const US_STATES = {
   alabama: 'al', alaska: 'ak', arizona: 'az', arkansas: 'ar', california: 'ca', colorado: 'co', connecticut: 'ct',
   delaware: 'de', florida: 'fl', georgia: 'ga', hawaii: 'hi', idaho: 'id', illinois: 'il', indiana: 'in', iowa: 'ia',
   kansas: 'ks', kentucky: 'ky', louisiana: 'la', maine: 'me', maryland: 'md', massachusetts: 'ma', michigan: 'mi',
@@ -597,7 +597,8 @@ const US_STATES = {
   tennessee: 'tn', texas: 'tx', utah: 'ut', vermont: 'vt', virginia: 'va', washington: 'wa', 'west virginia': 'wv',
   wisconsin: 'wi', wyoming: 'wy', 'district of columbia': 'dc', 'washington dc': 'dc', 'washington d c': 'dc',
 };
-const US_ABBRS = new Set(Object.values(US_STATES));
+/** Every 2-letter US state/territory abbreviation normalizeLocation() can produce (derived from US_STATES, never a separate hand-maintained list). Exported for auto-apply's isUsLocation (src/core/auto-apply-select.js), which needs the same vocabulary to classify a location_norm value. */
+export const US_ABBRS = new Set(Object.values(US_STATES));
 
 /** @type {Record<string, string>} */
 const COUNTRIES = {

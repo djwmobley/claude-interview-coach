@@ -386,6 +386,17 @@ export const autoApplySchema = z.object({
     texas_or_remote: z.number().positive().default(225000),
     relocation: z.number().positive().default(275000),
   }).default({}),
+  // Auto-apply PR B additions (docs/auto-apply-spec.md). probeCapPerSource/probeRowCap bound how much of
+  // the apply-target probe registry's redirect-chasing bin/auto-apply.js's prepare phase spends per run;
+  // reprobeAfterHours is the cooldown before a listing whose apply target is still unresolved is tried
+  // again; lockMinutes/pollSeconds size bin/auto-apply.js's own advisory-lock contention poll (mirrors
+  // src/core/scan-run.js's LOCK_KEY, but polls instead of failing on the first try since a scan can hold
+  // the lock for a while).
+  probeCapPerSource: z.number().int().positive().default(10),
+  probeRowCap: z.number().int().positive().default(3),
+  reprobeAfterHours: z.number().int().positive().default(48),
+  lockMinutes: z.number().int().positive().default(40),
+  pollSeconds: z.number().int().positive().default(30),
 });
 
 export const companyAliasesSchema = z.object({

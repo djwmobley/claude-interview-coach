@@ -48,6 +48,7 @@ import { connectSession as defaultConnectSession, applyTargetMarkerPath } from '
 import { makeCapability } from '../browser/capability.js';
 import { ADAPTERS, getAdapter } from '../adapters/index.js';
 import { runTriage } from './triage.js';
+import { persistApplyTargetForListing, buildScanProbeRegistry } from './apply-target-persist.js';
 
 /** Advisory lock key shared by MCP and CLI (spec section 5). */
 export const LOCK_KEY = 730193001;
@@ -329,6 +330,38 @@ async function executeRun(p) {
   }, HEARTBEAT_MS);
 
   const registry = buildRegistry(config);
+  // Auto-apply PR B (docs/auto-apply-spec.md): the OPPORTUNISTIC half of apply-target resolution -- a
+  // SEPARATE, host-only-gate registry (never a relaxation of `registry` above; see probe-registry.js's own
+  // doc comment) built once per run, plus a per-source, per-run counter enforcing
+  // config/auto-apply.json's probeCapPerSource. Only ever consulted from finalizeListing/
+  // maybeSaveApplyTarget below, and only when an adapter's fetchDetail returned an apply-target hint.
+  const probeRegistry = buildScanProbeRegistry(config);
+  /** @type {Map<string, number>} */
+  const probeCountBySource = new Map();
+  /**
+   * @param {string} sourceName
+   * @param {number} listingId
+   * @param {import('./normalize.js').NormalizedListing} rec
+   * @param {import('./apply-target-persist.js').ApplyDetail} applyDetail
+   */
+  async function maybeSaveApplyTarget(sourceName, listingId, rec, applyDetail) {
+    const used = probeCountBySource.get(sourceName) ?? 0;
+    if (used >= config.autoApply.probeCapPerSource) return;
+    try {
+      const cur = await client.query('SELECT apply_probed_at, probe_attempts FROM ic_job_listings WHERE id = $1', [listingId]);
+      if (cur.rowCount === 0) return;
+      const listingState = {
+        id: listingId, url: null, url_normalized: rec.url_normalized,
+        apply_probed_at: cur.rows[0].apply_probed_at, probe_attempts: Number(cur.rows[0].probe_attempts ?? 0),
+      };
+      const result = await persistApplyTargetForListing(client, listingState, applyDetail, {
+        probeRegistry, reprobeAfterHours: config.autoApply.reprobeAfterHours, now, dryRun: false, fetch: deps.fetch, lookup: deps.lookup,
+      });
+      if (result.outcome === 'resolved' || result.outcome === 'unresolved') probeCountBySource.set(sourceName, used + 1);
+    } catch (err) {
+      log({ evt: 'apply_target_persist_failed', source: sourceName, listing_id: listingId, ...errFields(err) });
+    }
+  }
   /** @type {import('../browser/session.js').Session|null} */
   let session = null;
   let sessionFailed = false;
@@ -493,8 +526,10 @@ async function executeRun(p) {
    * @param {number} psRaw
    * @param {string} noiseClass
    * @param {boolean} detailSkipped
+   * @param {import('./apply-target-persist.js').ApplyDetail|null} [applyDetail] auto-apply PR B: set only
+   *   when this row went through a detail fetch AND the adapter returned an apply-target hint
    */
-  async function finalizeListing(s, ev, rec, decision, ps, psRaw, noiseClass, detailSkipped) {
+  async function finalizeListing(s, ev, rec, decision, ps, psRaw, noiseClass, detailSkipped, applyDetail = null) {
     /** @type {{ id: number|null, outcome: string, queued: number|null, branch: string }} */
     let applied;
     if (dryRun) {
@@ -514,6 +549,7 @@ async function executeRun(p) {
         prescore: ps, prescoreRaw: psRaw, noiseClass, detailSkipped, embedding, now,
       }));
     }
+    if (!dryRun && applyDetail && applied.id) await maybeSaveApplyTarget(s.name, applied.id, rec, applyDetail);
     if (applied.outcome === 'update') stats.updated++;
     else if (applied.outcome === 'new') stats.new++;
     else if (applied.outcome === 'cross_source_dup') stats.cross_source_dup++;
@@ -547,17 +583,10 @@ async function executeRun(p) {
    * @param {import('./normalize.js').NormalizedListing} rec
    */
   async function tryFetchDetail(s, ctx, ev, rec) {
+    /** @type {any} */
+    let d = null;
     try {
-      const d = await s.adapter.fetchDetail({ url: ev.listing.url, url_normalized: rec.url_normalized, external_id: rec.external_id, source: rec.source }, ctx);
-      if (d && d.description) {
-        const rec2 = normalizeListing({ ...ev.listing, description: d.description });
-        const psRaw2 = prescore(rec2, profile);
-        const noiseClass2 = classifyNoise(rec2, { rules: noiseRules, knownSources: noiseKnownSources });
-        const ps2 = weightedPrescore(psRaw2, noiseClass2, { rules: noiseRules });
-        const decision2 = await classify(rec2, lookups, classifyOpts);
-        stats.detail_fetched++;
-        return { rec: rec2, decision: decision2, ps: ps2, psRaw: psRaw2, noiseClass: noiseClass2, skipped: false };
-      }
+      d = await s.adapter.fetchDetail({ url: ev.listing.url, url_normalized: rec.url_normalized, external_id: rec.external_id, source: rec.source }, ctx);
     } catch (err) {
       if (err instanceof JobSearchError && err.code === 'CANCELLED') throw err;
       if (err instanceof JobSearchError && err.code === 'BUDGET_EXHAUSTED') {
@@ -566,8 +595,27 @@ async function executeRun(p) {
         return { skipped: true };
       }
       warnings.push(`detail fetch failed for ${rec.source} ${rec.external_id ?? ''}: ${errFields(err).err_code}`);
+      return { skipped: false };
     }
-    return { skipped: false };
+    // Auto-apply PR B: capture whatever apply-target hint the adapter returned, REGARDLESS of whether the
+    // description fetch itself succeeded -- an adapter whose own listing URL already IS the apply page
+    // (greenhouse/workday/dayforce) still has something worth persisting opportunistically even when the
+    // description fetch failed. `applyDetail` is null when the adapter returned none of the new optional
+    // fields at all (the legacy `{ description }`-only shape), so a caller that never widened its adapter
+    // sees no behavior change whatsoever.
+    const applyDetail = d && (d.externalApplyUrl !== undefined || d.easyApplyOnly !== undefined || d.applyProbe !== undefined)
+      ? { externalApplyUrl: d.externalApplyUrl ?? null, easyApplyOnly: Boolean(d.easyApplyOnly), applyProbe: d.applyProbe ?? null }
+      : null;
+    if (d && d.description) {
+      const rec2 = normalizeListing({ ...ev.listing, description: d.description });
+      const psRaw2 = prescore(rec2, profile);
+      const noiseClass2 = classifyNoise(rec2, { rules: noiseRules, knownSources: noiseKnownSources });
+      const ps2 = weightedPrescore(psRaw2, noiseClass2, { rules: noiseRules });
+      const decision2 = await classify(rec2, lookups, classifyOpts);
+      stats.detail_fetched++;
+      return { rec: rec2, decision: decision2, ps: ps2, psRaw: psRaw2, noiseClass: noiseClass2, skipped: false, applyDetail };
+    }
+    return { skipped: false, applyDetail };
   }
 
   /**
@@ -619,6 +667,8 @@ async function executeRun(p) {
       if (signal.aborted) break;
       let { ev, rec, decision, ps, psRaw, noiseClass } = item;
       let detailSkipped = false;
+      /** @type {import('./apply-target-persist.js').ApplyDetail|null} */
+      let applyDetail = null;
       if (queuedSkippedFromHere) {
         // Budget already exhausted earlier in this SAME sorted pass: every remaining item skips the
         // network attempt outright (decision 22: queued minus fetched) rather than re-throwing per item.
@@ -637,8 +687,9 @@ async function executeRun(p) {
           psRaw = r.psRaw;
           noiseClass = r.noiseClass;
         }
+        applyDetail = r.applyDetail ?? null;
       }
-      await finalizeListing(s, ev, rec, decision, ps, psRaw, noiseClass, detailSkipped);
+      await finalizeListing(s, ev, rec, decision, ps, psRaw, noiseClass, detailSkipped, applyDetail);
     }
   }
 
