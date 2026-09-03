@@ -8,7 +8,7 @@
  */
 import fs from 'node:fs';
 import path from 'node:path';
-import { checkConfigLock, writeConfigLock, loadConfig } from '../src/core/config.js';
+import { checkConfigLock, writeConfigLock, loadConfig, writeTriageCandidateLock, triageCandidatePresent } from '../src/core/config.js';
 import { errFields } from '../src/core/errors.js';
 import { lintNoiseFixtures } from '../src/core/noise.js';
 
@@ -63,6 +63,15 @@ function main() {
       process.exit(1);
     }
     process.stdout.write(`config.lock.json written: ${hash}\n`);
+    // Rubric sidecar (spec section 5, "rubric out of the tracked lock"): never part of config.lock.json --
+    // its own gitignored triage-candidate.lock tracks it instead. Skipped silently (with a printed note,
+    // not an error) when the rubric itself is absent, since a fresh worktree or CI checkout never has it.
+    if (triageCandidatePresent(cfg.configDir)) {
+      const rubricHash = writeTriageCandidateLock(cfg.configDir);
+      process.stdout.write(`triage-candidate.lock written: ${rubricHash}\n`);
+    } else {
+      process.stdout.write('triage-candidate.md not present: triage-candidate.lock skipped\n');
+    }
     process.exit(0);
   }
   const r = checkConfigLock();

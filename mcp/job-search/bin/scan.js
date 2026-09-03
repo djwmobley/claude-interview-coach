@@ -4,17 +4,32 @@
  * Scan CLI (spec section 6), for Windows Task Scheduler and manual runs.
  *
  *   node mcp/job-search/bin/scan.js --profile exec-default [--sources a,b] [--days N] [--max-pages N]
- *        [--min-prescore N] [--dry-run] [--json out] [--launch-chrome] [--accept-config-change]
+ *        [--min-prescore N] [--dry-run] [--json out] [--launch-chrome]
  *
  * Exit 0 ok / 2 partial or locked / 1 failed. SIGINT/SIGTERM abort the run;
- * the run loop closes its pages and releases the advisory lock. Refuses an
- * unattended run when config/*.json differs from config.lock.json unless
- * --accept-config-change. Logs JSONL to logs/scan-YYYY-MM-DD.log (14-day
- * retention); --json defaults to a file inside logs/.
+ * the run loop closes its pages and releases the advisory lock. Logs JSONL to
+ * logs/scan-YYYY-MM-DD.log (14-day retention); --json defaults to a file inside logs/.
  *
- * --launch-chrome starts the DEDICATED scan Chrome from CHROME_EXECUTABLE
- * with --user-data-dir=SCAN_PROFILE_DIR and the port from SCAN_CDP_URL. It
- * refuses port 9222 (the daily-driver instance) outright.
+ * Config lock (scan-never-skip fix): an unattended run NEVER exits on a config-lock mismatch (the
+ * incident this fix exists for: a lost scan day when a config drift was left unreviewed overnight).
+ * Instead it proceeds with the on-disk config and records a CONFIG_LOCK_MISMATCH warning on the run --
+ * the daily report renders it loudly ([LOCK MISMATCH]) without ever blocking the scan itself. A
+ * config/*.json file that fails zod validation (CONFIG_INVALID) still exits unconditionally: that is a
+ * real, broken config, not a drift-review question. A present-but-unlocked rubric (config/triage-
+ * candidate.md whose gitignored triage-candidate.lock sidecar is missing or stale) similarly warns
+ * (RUBRIC_UNLOCKED) rather than blocking. `--accept-config-change` no longer exists: there is nothing left
+ * for it to override.
+ *
+ * --launch-chrome starts the DEDICATED scan Chrome from CHROME_EXECUTABLE with --user-data-dir=
+ * SCAN_PROFILE_DIR and the port from SCAN_CDP_URL. It refuses port 9222 (the daily-driver instance) and
+ * any non-loopback host outright (hard failures, not retried). Readiness is proven by a real DevTools
+ * protocol round trip over the CDP websocket (src/core/chrome-launch.js's probeDevToolsProtocol), never
+ * by the HTTP GET /json/version probe alone -- a zombie chrome-scan-profile process can keep answering
+ * that HTTP endpoint while its DevTools websocket is wedged. A failed probe kills the whole
+ * chrome-scan-profile process tree (matched only by command line containing the scan profile directory,
+ * never by process name, never touching any other Chrome) and relaunches, up to two retries. Exhausting
+ * every attempt records a CHROME_LAUNCH_FAILED warning and proceeds into the run rather than losing the
+ * day; a successful self-heal records CHROME_RELAUNCHED so the report shows the browser needed repair.
  *
  * JOBSEARCH_FIXTURE_MAP=<file.json> replaces the network with recorded
  * responses ({"<url prefix>": "<fixture path>"}); used by test/scan-cli.test.js.
@@ -28,11 +43,11 @@ import fs from 'node:fs';
 import path from 'node:path';
 import { spawn } from 'node:child_process';
 import { fileURLToPath } from 'node:url';
-import { getEnv, loadConfig, checkConfigLock } from '../src/core/config.js';
+import { getEnv, loadConfig, checkConfigLock, checkTriageCandidateLock } from '../src/core/config.js';
 import { createLogger, dailyLogPath, pruneLogs } from '../src/core/logger.js';
 import { errFields } from '../src/core/errors.js';
 import { runScan } from '../src/core/scan-run.js';
-import { connectDedicated } from '../src/core/db.js';
+import { probeDevToolsProtocol, selfHealingLaunch } from '../src/core/chrome-launch.js';
 
 /** Closed list of valid --trigger values; default 'cli'. Anything else is a visible error (see main()). */
 export const SCAN_TRIGGERS = Object.freeze(['cli', 'dashboard']);
@@ -48,7 +63,6 @@ export function parseArgs(argv) {
     dryRun: false,
     /** @type {string|null|undefined} */ json: undefined,
     launchChrome: false,
-    acceptConfigChange: false,
     /** @type {string} */ trigger: 'cli',
     /** @type {string|undefined} */ runMarker: undefined,
     help: false,
@@ -69,7 +83,6 @@ export function parseArgs(argv) {
         i++;
       } else out.json = null;
     } else if (a === '--launch-chrome') out.launchChrome = true;
-    else if (a === '--accept-config-change') out.acceptConfigChange = true;
     else if (a === '--trigger') out.trigger = String(next() ?? 'cli');
     else if (a === '--run-marker') out.runMarker = String(next() ?? '');
     else if (a === '--help' || a === '-h') out.help = true;
@@ -77,7 +90,7 @@ export function parseArgs(argv) {
   return out;
 }
 
-const USAGE = 'usage: node bin/scan.js --profile exec-default [--sources a,b] [--days N] [--max-pages N] [--min-prescore N] [--dry-run] [--trigger cli|dashboard] [--run-marker path] [--json [out]] [--launch-chrome] [--accept-config-change]';
+const USAGE = 'usage: node bin/scan.js --profile exec-default [--sources a,b] [--days N] [--max-pages N] [--min-prescore N] [--dry-run] [--trigger cli|dashboard] [--run-marker path] [--json [out]] [--launch-chrome]';
 
 /**
  * Write `{"run_id": N}` to `markerFile` (dashboard PR 2, pr2-spec-decisions.md "Scan runner"): the
@@ -90,41 +103,6 @@ const USAGE = 'usage: node bin/scan.js --profile exec-default [--sources a,b] [-
 export function writeRunMarker(markerFile, runId) {
   fs.mkdirSync(path.dirname(markerFile), { recursive: true });
   fs.writeFileSync(markerFile, JSON.stringify({ run_id: runId }));
-}
-
-/**
- * A CONFIG_LOCK_MISMATCH refusal happens before runScan() ever inserts an ic_scan_runs row (spec: "no
- * run row" incident writeup), which is exactly why the 06:34 mismatch produced a bare [NO SCAN] daily
- * digest instead of a loud failure: report.js's noScan check only looks at whether any run row exists
- * since the last report. This writes a lightweight, already-finished 'failed' row directly (no
- * migration: status 'failed', trigger 'cli'/'dashboard', and the errors jsonb column are all already
- * supported by ic_scan_runs) so buildScanReport() sees a run and report.js can render a loud
- * "[LOCK MISMATCH]" subject and remedy line instead. Best-effort: a DB failure here only logs a second
- * error and never changes scan.js's own exit code (already 1 for the mismatch itself).
- * @param {ReturnType<typeof parseArgs>} args
- * @param {ReturnType<typeof checkConfigLock>} lock
- * @param {(f: Record<string, string|number|boolean|null>) => void} log
- */
-export async function recordConfigLockMismatchRun(args, lock, log) {
-  let client;
-  try {
-    client = await connectDedicated();
-    await client.query(
-      `INSERT INTO ic_scan_runs (profile, trigger, dry_run, config_hash, status, started_at, finished_at, errors)
-       VALUES ($1, $2, $3, $4, 'failed', now(), now(), $5::jsonb)`,
-      [args.profile, args.trigger, args.dryRun, lock.actual, JSON.stringify([{ source: null, code: 'CONFIG_LOCK_MISMATCH', message: lock.detail }])],
-    );
-  } catch (err) {
-    log({ evt: 'config_lock_mismatch_run_row_failed', ...errFields(err) });
-  } finally {
-    if (client) {
-      try {
-        await client.end();
-      } catch {
-        /* ignore */
-      }
-    }
-  }
 }
 
 /**
@@ -167,39 +145,53 @@ export async function cdpReachable(cdpUrl) {
 }
 
 /**
- * Launch the dedicated scan Chrome. Never the 9222 daily driver.
+ * Launch the dedicated scan Chrome, self-healing (src/core/chrome-launch.js's selfHealingLaunch): never
+ * the 9222 daily driver (hard refusal, never retried); readiness proven by a real DevTools protocol round
+ * trip, never the HTTP probe alone; a zombie chrome-scan-profile process is killed (command-line matched
+ * only) and relaunched, up to two retries. Returns `{ port, launched, healed, attempts, killedPids,
+ * warning }` -- `warning` (CHROME_RELAUNCHED or CHROME_LAUNCH_FAILED, both severity 'warning') is null
+ * when the first probe already found Chrome healthy. Never throws for a launch/readiness failure -- only
+ * the two guard checks below (wrong port, non-loopback host) throw, since those are refusals to even
+ * attempt a launch, not launch failures to retry through.
  * @param {import('../src/core/config.js').Env} env
  * @param {(f: Record<string, string|number|boolean|null>) => void} log
+ * @param {{ probe?: typeof probeDevToolsProtocol, listProcesses?: Function, killTree?: Function, spawn?: typeof spawn, sleep?: (ms: number) => Promise<void> }} [deps]
  */
-export async function launchChrome(env, log) {
+export async function launchChrome(env, log, deps = {}) {
   const u = new URL(env.SCAN_CDP_URL);
   const port = Number(u.port || (u.protocol === 'https:' ? 443 : 80));
   if (port === 9222) throw new Error('refusing to launch on port 9222: that is the daily-driver Chrome; set SCAN_CDP_URL to the dedicated scan port');
   if (!['127.0.0.1', 'localhost', '[::1]'].includes(u.hostname)) throw new Error('SCAN_CDP_URL must point at a loopback address to launch Chrome');
-  if (await cdpReachable(env.SCAN_CDP_URL)) {
-    log({ evt: 'chrome_already_running', port });
-    return { launched: false, port };
-  }
-  if (!env.CHROME_EXECUTABLE) throw new Error('CHROME_EXECUTABLE is not set; cannot launch the scan Chrome');
-  if (!fs.existsSync(env.CHROME_EXECUTABLE)) throw new Error('CHROME_EXECUTABLE does not exist');
-  fs.mkdirSync(env.SCAN_PROFILE_DIR, { recursive: true });
-  const args = [
-    `--user-data-dir=${env.SCAN_PROFILE_DIR}`,
-    `--remote-debugging-port=${port}`,
-    '--remote-allow-origins=http://127.0.0.1:' + port + ',http://localhost:' + port,
-    '--no-first-run',
-    '--no-default-browser-check',
-    '--disable-background-networking',
-    'about:blank',
-  ];
-  const child = spawn(env.CHROME_EXECUTABLE, args, { detached: true, stdio: 'ignore', windowsHide: false });
-  child.unref();
-  log({ evt: 'chrome_launched', port, pid: child.pid ?? null });
-  for (let i = 0; i < 40; i++) {
-    await new Promise((r) => setTimeout(r, 500));
-    if (await cdpReachable(env.SCAN_CDP_URL)) return { launched: true, port };
-  }
-  throw new Error('scan Chrome did not expose CDP within 20 s');
+
+  const spawnImpl = deps.spawn ?? spawn;
+  const spawnChromeOnce = async () => {
+    if (!env.CHROME_EXECUTABLE) throw new Error('CHROME_EXECUTABLE is not set; cannot launch the scan Chrome');
+    if (!fs.existsSync(env.CHROME_EXECUTABLE)) throw new Error('CHROME_EXECUTABLE does not exist');
+    fs.mkdirSync(env.SCAN_PROFILE_DIR, { recursive: true });
+    const args = [
+      `--user-data-dir=${env.SCAN_PROFILE_DIR}`,
+      `--remote-debugging-port=${port}`,
+      '--remote-allow-origins=http://127.0.0.1:' + port + ',http://localhost:' + port,
+      '--no-first-run',
+      '--no-default-browser-check',
+      '--disable-background-networking',
+      'about:blank',
+    ];
+    const child = spawnImpl(env.CHROME_EXECUTABLE, args, { detached: true, stdio: 'ignore', windowsHide: false });
+    child.unref?.();
+    log({ evt: 'chrome_launched', port, pid: child.pid ?? null });
+    for (let i = 0; i < 40; i++) {
+      await new Promise((r) => setTimeout(r, 500));
+      if (await cdpReachable(env.SCAN_CDP_URL)) return;
+    }
+    throw new Error('scan Chrome did not expose its HTTP debug endpoint within 20 s');
+  };
+
+  const result = await selfHealingLaunch(
+    { cdpUrl: env.SCAN_CDP_URL, profileDir: env.SCAN_PROFILE_DIR },
+    { probe: deps.probe ?? probeDevToolsProtocol, spawnChrome: spawnChromeOnce, listProcesses: deps.listProcesses, killTree: deps.killTree, log, sleep: deps.sleep },
+  );
+  return { port, ...result };
 }
 
 async function main() {
@@ -218,14 +210,28 @@ async function main() {
   /** @param {Record<string, string|number|boolean|null>} f */
   const log = (f) => logger.info(f);
 
+  // Config lock (scan-never-skip fix): NEVER exits on a mismatch. The run proceeds with the on-disk
+  // config; a warning rides along in the run's own errors so the daily report renders it loudly without
+  // ever blocking the scan (the incident this fix exists for: a lost scan day when the old hard-exit fired
+  // unattended and produced a bare [NO SCAN] digest with no reason shown).
+  /** @type {Array<{ source: null, code: string, severity: 'warning', [k: string]: any }>} */
+  const preRunWarnings = [];
   const lock = checkConfigLock();
-  if (!lock.ok && !args.acceptConfigChange) {
-    const out = { ok: false, code: 'CONFIG_LOCK_MISMATCH', message: 'config/*.json differs from config.lock.json', hint: 'review the change, then run node bin/config-lock.js --write, or pass --accept-config-change for this run', expected: lock.expected, actual: lock.actual, missing: lock.missing };
+  if (!lock.ok) {
     log({ evt: 'config_lock_mismatch', expected: lock.expected, actual: lock.actual, missing: lock.missing.join(',') });
-    await recordConfigLockMismatchRun(args, lock, log);
-    console.log(JSON.stringify(out));
-    process.exit(1);
+    preRunWarnings.push({
+      source: null,
+      code: 'CONFIG_LOCK_MISMATCH',
+      severity: 'warning',
+      expected: lock.expected,
+      actual: lock.actual,
+      missing: lock.missing,
+      remedy: lock.detail,
+    });
   }
+
+  // config/*.json failing zod validation (a real, broken config) still exits unconditionally -- this is
+  // never a drift-review question the way a lock-hash mismatch is.
   let config;
   try {
     config = loadConfig({ fresh: true });
@@ -236,10 +242,22 @@ async function main() {
     process.exit(1);
   }
 
+  // Rubric integrity (spec section 5): the rubric itself is never part of config.lock.json any more; its
+  // own gitignored sidecar tracks it. Absent rubric is not a warning (triage already degrades with
+  // candidate_summary_missing); present-but-unlocked is.
+  const rubricLock = checkTriageCandidateLock(env.JOBSEARCH_CONFIG_DIR);
+  if (rubricLock.present && !rubricLock.ok) {
+    log({ evt: 'rubric_unlocked', expected: rubricLock.expected, actual: rubricLock.actual });
+    preRunWarnings.push({ source: null, code: 'RUBRIC_UNLOCKED', severity: 'warning', remedy: 'run node bin/config-lock.js --write in the main checkout' });
+  }
+
   if (args.launchChrome) {
     try {
-      await launchChrome(env, log);
+      const chrome = await launchChrome(env, log);
+      if (chrome.warning) preRunWarnings.push({ source: null, ...chrome.warning });
     } catch (err) {
+      // Only the launchChrome guard refusals (wrong port, non-loopback host) throw -- a real launch/
+      // readiness failure never does (it self-heals or warns and proceeds via chrome.warning above).
       const f = errFields(err);
       log({ evt: 'chrome_launch_failed', ...f });
       console.log(JSON.stringify({ ok: false, code: 'BROWSER_UNAVAILABLE', message: f.err_message }));
@@ -286,6 +304,7 @@ async function main() {
         progress: (f) => log({ evt: 'progress', ...f }),
         ...(fixedNow ? { now: fixedNow } : {}),
         ...(args.runMarker ? { onRunStarted: (runId) => writeRunMarker(/** @type {string} */ (args.runMarker), runId) } : {}),
+        ...(preRunWarnings.length ? { preRunWarnings } : {}),
       },
     );
     if (result.status === 'ok') code = 0;

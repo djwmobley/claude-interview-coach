@@ -14,7 +14,7 @@ import { spawn } from 'node:child_process';
 import { fileURLToPath } from 'node:url';
 import { newClient, upsertTestProfile, cleanupScan, CONFIG_DIR, FIXTURE_NOW } from './helpers/scan-fixtures.js';
 import { parseArgs, launchChrome, cdpReachable } from '../bin/scan.js';
-import { computeConfigHash } from '../src/core/config.js';
+import { computeConfigHash, CONFIG_FILES, writeTriageCandidateLock } from '../src/core/config.js';
 
 const HERE = path.dirname(fileURLToPath(import.meta.url));
 const PKG = path.join(HERE, '..');
@@ -68,7 +68,7 @@ after(async () => {
 
 describe('scan.js CLI', () => {
   test('parseArgs', () => {
-    const a = parseArgs(['--profile', 'p', '--sources', 'greenhouse, lever', '--days', '3', '--max-pages', '2', '--dry-run', '--json', '--launch-chrome', '--accept-config-change']);
+    const a = parseArgs(['--profile', 'p', '--sources', 'greenhouse, lever', '--days', '3', '--max-pages', '2', '--dry-run', '--json', '--launch-chrome']);
     assert.equal(a.profile, 'p');
     assert.deepEqual(a.sources, ['greenhouse', 'lever']);
     assert.equal(a.days, 3);
@@ -76,10 +76,14 @@ describe('scan.js CLI', () => {
     assert.equal(a.dryRun, true);
     assert.equal(a.json, null);
     assert.equal(a.launchChrome, true);
-    assert.equal(a.acceptConfigChange, true);
     assert.equal(parseArgs(['--json', 'out.json']).json, 'out.json');
     assert.equal(parseArgs([]).trigger, 'cli', 'default trigger is cli (dashboard PR 1)');
     assert.equal(parseArgs(['--trigger', 'dashboard']).trigger, 'dashboard');
+  });
+
+  test('--accept-config-change no longer exists: parseArgs never sets an acceptConfigChange field (scan-never-skip fix: nothing left for it to override)', () => {
+    const a = parseArgs(['--accept-config-change']);
+    assert.equal('acceptConfigChange' in a, false);
   });
 
   test('cdpReachable is exported and reports false for an unreachable port (dashboard PR 1)', async () => {
@@ -90,6 +94,43 @@ describe('scan.js CLI', () => {
   test('refuses --launch-chrome on port 9222 and on a non-loopback host', async () => {
     await assert.rejects(launchChrome(/** @type {any} */ ({ SCAN_CDP_URL: 'http://127.0.0.1:9222', CHROME_EXECUTABLE: null, SCAN_PROFILE_DIR: 'x' }), () => {}), /9222/);
     await assert.rejects(launchChrome(/** @type {any} */ ({ SCAN_CDP_URL: 'http://10.0.0.5:9333', CHROME_EXECUTABLE: null, SCAN_PROFILE_DIR: 'x' }), () => {}), /loopback/);
+  });
+
+  test('launchChrome self-heal wiring (scan-never-skip SPEC 9): a fake probe/list/kill/spawn set proves the guard checks still throw but a real launch/readiness failure never does', async () => {
+    const env = /** @type {any} */ ({ SCAN_CDP_URL: 'http://127.0.0.1:9333', CHROME_EXECUTABLE: 'C:\\fake\\chrome.exe', SCAN_PROFILE_DIR: 'C:\\fake\\chrome-scan-profile' });
+    // Healthy first probe: launchChrome never lists/kills/spawns.
+    let listCalls = 0;
+    const r1 = await launchChrome(env, () => {}, {
+      probe: async () => true,
+      listProcesses: async () => {
+        listCalls++;
+        return [];
+      },
+      killTree: async () => true,
+    });
+    assert.equal(r1.launched, false);
+    assert.equal(r1.healed, false);
+    assert.equal(r1.warning, null);
+    assert.equal(listCalls, 0);
+
+    // Every attempt fails to become ready: launchChrome returns (never throws) with a CHROME_LAUNCH_FAILED
+    // warning, matched pids only from listProcesses containing the configured profile dir.
+    const killed = [];
+    const r2 = await launchChrome(env, () => {}, {
+      probe: async () => false,
+      listProcesses: async (dir) => {
+        assert.equal(dir, env.SCAN_PROFILE_DIR);
+        return [123];
+      },
+      killTree: async (pid) => {
+        killed.push(pid);
+        return true;
+      },
+      sleep: async () => {},
+    });
+    assert.equal(r2.warning.code, 'CHROME_LAUNCH_FAILED');
+    assert.equal(r2.warning.severity, 'warning');
+    assert.ok(killed.length > 0);
   });
 
   test('--dry-run --sources greenhouse: exit 0, stdout summary, run row, JSONL log, --json file', async () => {
@@ -169,40 +210,77 @@ describe('scan.js CLI', () => {
     }
   });
 
-  test('config lock mismatch refuses the run with exit 1 unless --accept-config-change', async () => {
-    // The real config.lock.json does not match the test config dir hash.
-    const r = await runCli(['--profile', PROFILE, '--dry-run', '--sources', 'greenhouse']);
-    assert.equal(r.code, 1, r.out + r.err);
-    const out = JSON.parse(r.out.trim());
-    assert.equal(out.code, 'CONFIG_LOCK_MISMATCH');
-    // The mismatch refusal happens before runScan() would insert its own run row (spec: no run row
-    // means report.js's noScan check never fires, producing a bare [NO SCAN] digest with no reason).
-    // bin/scan.js's recordConfigLockMismatchRun writes a lightweight already-finished 'failed' row with
-    // the CONFIG_LOCK_MISMATCH error so the daily report can render a loud [LOCK MISMATCH] instead.
-    const q = await client.query(
-      `SELECT status, errors FROM ic_scan_runs WHERE profile = $1 AND started_at > now() - interval '5 seconds' ORDER BY id DESC LIMIT 1`,
-      [PROFILE],
-    );
-    assert.equal(q.rows.length, 1, 'a failed run row should be written for a config-lock mismatch');
-    assert.equal(q.rows[0].status, 'failed');
-    assert.equal(q.rows[0].errors.length, 1);
-    assert.equal(q.rows[0].errors[0].code, 'CONFIG_LOCK_MISMATCH');
-    // This test config dir never includes the gitignored triage-candidate.md (real repos and CI alike),
-    // so checkConfigLock()'s detail always takes the "missing" branch here.
-    assert.match(q.rows[0].errors[0].message, /missing config file\(s\): triage-candidate\.md/);
-    let r2;
+  test('config lock mismatch: the unattended run NEVER exits, proceeds with the on-disk config, and the run row carries a CONFIG_LOCK_MISMATCH warning while staying status ok (scan-never-skip fix)', async () => {
+    // The real config.lock.json does not match the test config dir hash; no lock file override is passed,
+    // so this exercises the real mismatch path bin/scan.js hits on every unattended run against a drifted
+    // config.
+    let r;
     for (let i = 0; i < 60; i++) {
-      r2 = await runCli(['--profile', PROFILE, '--dry-run', '--sources', 'greenhouse', '--accept-config-change']);
-      if (!/"status":"locked"/.test(r2.out)) break;
+      r = await runCli(['--profile', PROFILE, '--dry-run', '--sources', 'greenhouse']);
+      if (!/"status":"locked"/.test(r.out)) break;
       await new Promise((res) => setTimeout(res, 500));
     }
-    assert.ok(r2);
-    assert.equal(r2.code, 0, r2.out + r2.err);
+    assert.ok(r);
+    assert.equal(r.code, 0, `stdout=${r.out} stderr=${r.err}`);
+    const summary = JSON.parse(r.out.trim().split('\n').pop() ?? '{}');
+    assert.equal(summary.ok, true);
+    assert.equal(summary.status, 'ok', 'a run carrying only a warning must stay ok, never partial/failed');
+    const q = await client.query('SELECT status, errors FROM ic_scan_runs WHERE id = $1', [summary.run_id]);
+    assert.equal(q.rows[0].status, 'ok');
+    const warnings = q.rows[0].errors.filter((e) => e.code === 'CONFIG_LOCK_MISMATCH');
+    assert.equal(warnings.length, 1, `expected exactly one CONFIG_LOCK_MISMATCH warning, got ${JSON.stringify(q.rows[0].errors)}`);
+    assert.equal(warnings[0].severity, 'warning');
+    assert.equal(warnings[0].source, null);
+    assert.ok(typeof warnings[0].remedy === 'string' && warnings[0].remedy.length > 0);
   });
 
-  test('unknown source exits 1 with a VALIDATION error and no run row', async () => {
+  test('rubric present, sidecar missing: the run row carries a RUBRIC_UNLOCKED warning and stays ok; rubric absent (the normal test config dir) never carries it (scan-never-skip fix)', async () => {
+    const tmp = fs.mkdtempSync(path.join(os.tmpdir(), 'scan-cli-rubric-'));
+    try {
+      for (const name of CONFIG_FILES) fs.copyFileSync(path.join(CONFIG_DIR, name), path.join(tmp, name));
+      fs.writeFileSync(path.join(tmp, 'triage-candidate.md'), 'Damian Mobley, CTO, Houston TX.\n');
+      // Sidecar deliberately NOT written -- present rubric + missing sidecar is exactly the RUBRIC_UNLOCKED
+      // trigger. A matching config.lock.json isolates this from a simultaneous CONFIG_LOCK_MISMATCH.
+      const lockPath = path.join(tmp, 'config.lock.json');
+      fs.writeFileSync(lockPath, JSON.stringify({ sha256: computeConfigHash(tmp), files: [...CONFIG_FILES], updated_at: new Date().toISOString() }) + '\n');
+      let r;
+      for (let i = 0; i < 60; i++) {
+        r = await runCli(['--profile', PROFILE, '--dry-run', '--sources', 'greenhouse'], { JOBSEARCH_CONFIG_DIR: tmp, JOBSEARCH_CONFIG_LOCK: lockPath });
+        if (!/"status":"locked"/.test(r.out)) break;
+        await new Promise((res) => setTimeout(res, 500));
+      }
+      assert.ok(r);
+      assert.equal(r.code, 0, `stdout=${r.out} stderr=${r.err}`);
+      const summary = JSON.parse(r.out.trim().split('\n').pop() ?? '{}');
+      assert.equal(summary.status, 'ok');
+      const q = await client.query('SELECT status, errors FROM ic_scan_runs WHERE id = $1', [summary.run_id]);
+      assert.equal(q.rows[0].status, 'ok');
+      const rubricWarnings = q.rows[0].errors.filter((e) => e.code === 'RUBRIC_UNLOCKED');
+      assert.equal(rubricWarnings.length, 1);
+      assert.equal(rubricWarnings[0].severity, 'warning');
+      assert.match(rubricWarnings[0].remedy, /config-lock\.js --write/);
+
+      // Now write the sidecar and rerun: the warning must disappear (present + matching sidecar = locked).
+      writeTriageCandidateLock(tmp);
+      let r2;
+      for (let i = 0; i < 60; i++) {
+        r2 = await runCli(['--profile', PROFILE, '--dry-run', '--sources', 'greenhouse'], { JOBSEARCH_CONFIG_DIR: tmp, JOBSEARCH_CONFIG_LOCK: lockPath });
+        if (!/"status":"locked"/.test(r2.out)) break;
+        await new Promise((res) => setTimeout(res, 500));
+      }
+      assert.ok(r2);
+      assert.equal(r2.code, 0, `stdout=${r2.out} stderr=${r2.err}`);
+      const summary2 = JSON.parse(r2.out.trim().split('\n').pop() ?? '{}');
+      const q2 = await client.query('SELECT errors FROM ic_scan_runs WHERE id = $1', [summary2.run_id]);
+      assert.equal(q2.rows[0].errors.filter((e) => e.code === 'RUBRIC_UNLOCKED').length, 0, 'a locked rubric must never warn');
+    } finally {
+      fs.rmSync(tmp, { recursive: true, force: true });
+    }
+  });
+
+  test('unknown source exits 1 with a VALIDATION error and no run row (config-lock mismatch never blocks this: it warns and proceeds into source resolution, which is what actually fails)', async () => {
     const before = await client.query('SELECT count(*)::int AS n FROM ic_scan_runs WHERE profile = $1', [PROFILE]);
-    const r = await runCli(['--profile', PROFILE, '--dry-run', '--sources', 'monster', '--accept-config-change']);
+    const r = await runCli(['--profile', PROFILE, '--dry-run', '--sources', 'monster']);
     assert.equal(r.code, 1);
     assert.match(r.out, /VALIDATION/);
     const after2 = await client.query('SELECT count(*)::int AS n FROM ic_scan_runs WHERE profile = $1', [PROFILE]);

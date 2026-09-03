@@ -129,6 +129,58 @@ export async function resolveReportWindow(client, opts) {
 
 export const REPORT_STATUS_PRIORITY = Object.freeze({ failed: 3, partial: 2, locked: 1, running: 1, ok: 0 });
 
+/** Subject/banner label + human sentence for one warning entry, by code -- total for the two codes this
+ * report gives their own top banner; any other warning code still falls through to a generic sentence
+ * naming the code and remedy, never silently dropped. @param {any} entry */
+function describeWarning(entry) {
+  if (entry.code === 'CONFIG_LOCK_MISMATCH') {
+    // entry.remedy is checkConfigLock()'s own `detail` string (config.js): already a complete, accurate
+    // sentence naming either the missing files + copy remedy, or the stale-hash + --write remedy, so it is
+    // rendered as-is rather than re-derived from expected/actual/missing here.
+    return entry.remedy ?? `config/*.json differs from config.lock.json (expected ${entry.expected ?? 'none'}, actual ${entry.actual ?? 'unknown'}). run node bin/config-lock.js --write`;
+  }
+  if (entry.code === 'RUBRIC_UNLOCKED') {
+    return `config/triage-candidate.md changed since its triage-candidate.lock sidecar was last written. ${entry.remedy ?? 'run node bin/config-lock.js --write in the main checkout'}`.trim();
+  }
+  if (entry.code === 'CHROME_LAUNCH_FAILED') {
+    return `scan Chrome did not become ready after ${entry.attempts ?? '?'} attempt(s): ${entry.lastError ?? 'DevTools protocol never responded'}. ${entry.remedy ?? ''}`.trim();
+  }
+  if (entry.code === 'CHROME_RELAUNCHED') {
+    return `scan Chrome had to be killed and relaunched (${entry.attempts ?? '?'} attempt(s)) before this run could proceed.`;
+  }
+  return `${entry.code}${entry.remedy ? `. ${entry.remedy}` : ''}`;
+}
+
+/** Subject-prefix label for buildReportSubject(), by code. @param {string} code */
+function warningBannerLabel(code) {
+  return code === 'RUBRIC_UNLOCKED' ? '[RUBRIC UNLOCKED]' : '[LOCK MISMATCH]';
+}
+
+/** Per-run error-line text: a warning entry (CONFIG_LOCK_MISMATCH, RUBRIC_UNLOCKED, CHROME_LAUNCH_FAILED,
+ * CHROME_RELAUNCHED) never carries its own `message` field (spec: code + structured fields only), so this
+ * falls back to describeWarning() for those; a real error keeps using its own `message` as before.
+ * @param {any} e */
+function errorLineMessage(e) {
+  if (e.severity === 'warning') return describeWarning(e);
+  return String(e.message ?? '');
+}
+
+/**
+ * First run (in collectRuns()'s ascending finished_at order, i.e. the earliest since the marker) carrying
+ * a severity:'warning' error of the given `code`, or null. Never keyed off run.status -- a run carrying
+ * only warnings stays 'ok' (scan-never-skip fix), so status can no longer distinguish "this run has
+ * something worth a banner" from an ordinary clean run.
+ * @param {RunSummary[]} runs
+ * @param {string} code
+ */
+function findFirstWarning(runs, code) {
+  for (const r of runs) {
+    const hit = r.errors.find((e) => /** @type {any} */ (e).severity === 'warning' && e.code === code);
+    if (hit) return { run_id: r.run_id, code, message: describeWarning(hit) };
+  }
+  return null;
+}
+
 /**
  * @param {Date} date
  * @param {string} timezone IANA zone
@@ -517,15 +569,15 @@ export async function buildScanReport(client, opts = {}) {
   const since = effectiveSince ?? new Date(now.getTime() - 24 * 3600000);
   const runs = await collectRuns(client, effectiveSince ? since : null);
   const noScan = runs.length === 0 && isWeekdayInTz(now, timezone);
-  // A CONFIG_LOCK_MISMATCH refusal (bin/scan.js's recordConfigLockMismatchRun) writes a lightweight
-  // 'failed' run row carrying this error code specifically so this report can tell "config drift blocked
-  // the scan" apart from every other failure and from the bare [NO SCAN] case (runs.length === 0):
-  // without this row noScan above would be true and the operator would see an empty digest with no
-  // reason, which is the incident this exists to prevent.
-  const lockMismatchRun = runs.find((r) => r.errors.some((e) => e.code === 'CONFIG_LOCK_MISMATCH'));
-  const lockMismatch = lockMismatchRun
-    ? { run_id: lockMismatchRun.run_id, message: (lockMismatchRun.errors.find((e) => e.code === 'CONFIG_LOCK_MISMATCH') ?? {}).message ?? 'config/*.json differs from config.lock.json' }
-    : null;
+  // Loud-warning detection (scan-never-skip fix): bin/scan.js NEVER blocks an unattended run on a
+  // config-lock mismatch or an unlocked rubric any more -- it proceeds and records a severity:'warning'
+  // entry on the run instead, which means the run's own `status` can be 'ok'. This scan therefore looks
+  // at every run's errors directly (never keyed off status, and never restricted to a synthetic
+  // "refused before the run started" row -- that mechanism no longer exists) for the two warning codes
+  // bin/scan.js records before a run even starts. CONFIG_LOCK_MISMATCH takes priority over RUBRIC_UNLOCKED
+  // when a run somehow carries both (a config drift is the more consequential of the two); either way the
+  // full per-run error list below still prints every warning line regardless of which one wins the banner.
+  const lockMismatch = findFirstWarning(runs, 'CONFIG_LOCK_MISMATCH') ?? findFirstWarning(runs, 'RUBRIC_UNLOCKED');
   const lookAtThese = await collectLookAtThese(client, since, topN);
   const suspectUnclassified = await collectSuspectAndUnclassified(client, since, 10);
   const homeLocations = await collectHomeLocations(client, since, homeLocationNorms, homeMinPrescore);
@@ -562,10 +614,11 @@ export async function buildScanReport(client, opts = {}) {
  */
 export function buildReportSubject(data, extra = {}) {
   const prefixes = [];
-  // Loud and specific beats the generic [SCAN FAILED]/[NO SCAN] prefixes: a config-lock mismatch is a
-  // deliberate, actionable state (someone needs to run config-lock.js --write, or copy a missing
-  // worktree file), not an ordinary scan failure.
-  if (data.lockMismatch) prefixes.push('[LOCK MISMATCH]');
+  // Loud and specific beats the generic [SCAN FAILED]/[NO SCAN] prefixes: a config-lock mismatch or an
+  // unlocked rubric is a deliberate, actionable state (someone needs to run config-lock.js --write), not
+  // an ordinary scan failure -- and, since bin/scan.js never blocks the scan for either any more, the run
+  // itself can otherwise look perfectly 'ok'.
+  if (data.lockMismatch) prefixes.push(warningBannerLabel(data.lockMismatch.code));
   else if (data.noScan) prefixes.push('[NO SCAN]');
   else if (data.worstStatus !== 'ok') prefixes.push(`[SCAN ${String(data.worstStatus).toUpperCase()}]`);
   const parts = [`Job scan report ${data.dayKey}`];
@@ -697,7 +750,8 @@ export function renderReportText(data, registry, googleAuthState, dashboardHealt
   lines.push(`Job scan report for ${data.dayKey} (times ${data.timezone})`);
   lines.push('');
   if (data.lockMismatch) {
-    lines.push(`LOCK MISMATCH: ${data.lockMismatch.message}`);
+    const label = data.lockMismatch.code === 'RUBRIC_UNLOCKED' ? 'RUBRIC UNLOCKED' : 'LOCK MISMATCH';
+    lines.push(`${label}: ${data.lockMismatch.message}`);
     lines.push('');
   } else if (data.noScan) {
     lines.push('NO SCAN: no scan run has completed since the last report, on a day one was expected.');
@@ -722,7 +776,7 @@ export function renderReportText(data, registry, googleAuthState, dashboardHealt
     if (Object.keys(r.pages_by_source).length) lines.push(`  pages by source: ${Object.entries(r.pages_by_source).map(([k, v]) => `${k}=${v}`).join(', ')}`);
     const triageLine = renderTriageLine(s.triage);
     if (triageLine) lines.push(`  ${triageLine}`);
-    for (const e of r.errors.slice(0, 5)) lines.push(`  error: ${e.source ?? 'run'} ${e.code}: ${String(e.message ?? '').slice(0, 200)}`);
+    for (const e of r.errors.slice(0, 5)) lines.push(`  error: ${e.source ?? 'run'} ${e.code}: ${errorLineMessage(e).slice(0, 200)}`);
   }
   lines.push('');
   lines.push(`== Look at these (top ${data.lookAtThese.rows.length}) ==`);
@@ -777,8 +831,10 @@ export function renderReportHtml(data, registry, googleAuthState, dashboardHealt
   };
   const parts = [];
   parts.push(`<h2>Job scan report for ${esc(data.dayKey)} (times ${esc(data.timezone)})</h2>`);
-  if (data.lockMismatch) parts.push(`<p><strong>LOCK MISMATCH</strong>: ${esc(data.lockMismatch.message)}</p>`);
-  else if (data.noScan) parts.push('<p><strong>NO SCAN</strong>: no scan run has completed since the last report, on a day one was expected.</p>');
+  if (data.lockMismatch) {
+    const label = data.lockMismatch.code === 'RUBRIC_UNLOCKED' ? 'RUBRIC UNLOCKED' : 'LOCK MISMATCH';
+    parts.push(`<p><strong>${esc(label)}</strong>: ${esc(data.lockMismatch.message)}</p>`);
+  } else if (data.noScan) parts.push('<p><strong>NO SCAN</strong>: no scan run has completed since the last report, on a day one was expected.</p>');
   if (googleAuthState !== undefined) parts.push(`<p>${esc(googleAuthLineText(googleAuthState))}</p>`);
   const dashboardLineHtml = dashboardHealthLineText(dashboardHealthState ?? null);
   if (dashboardLineHtml) parts.push(`<p>${esc(dashboardLineHtml)}</p>`);
@@ -789,7 +845,7 @@ export function renderReportHtml(data, registry, googleAuthState, dashboardHealt
     for (const r of data.runs) {
       const s = r.stats;
       const banner = r.status !== 'ok' ? `<strong>[${esc(String(r.status).toUpperCase())}]</strong> ` : '';
-      const errs = r.errors.slice(0, 5).map((e) => `<br>error: ${esc(e.source ?? 'run')} ${esc(e.code)}: ${esc(String(e.message ?? '').slice(0, 200))}`).join('');
+      const errs = r.errors.slice(0, 5).map((e) => `<br>error: ${esc(e.source ?? 'run')} ${esc(e.code)}: ${esc(errorLineMessage(e).slice(0, 200))}`).join('');
       const triageLine = renderTriageLine(s.triage);
       const triageHtml = triageLine ? `<br>${esc(triageLine)}` : '';
       parts.push(`<li>${banner}run #${r.run_id}, profile ${esc(r.profile)}, status ${esc(r.status)}, started ${esc(r.started_at)}, duration ${r.duration_seconds ?? '?'}s<br>fetched ${s.fetched ?? 0}, new ${s.new ?? 0}, updated ${s.updated ?? 0}, repost ${s.repost ?? 0}, ambiguous ${s.ambiguous ?? 0}, detail_skipped_budget ${s.detail_skipped_budget ?? 0}${triageHtml}${errs}</li>`);
@@ -827,7 +883,8 @@ export function renderReportMarkdown(data, registry, googleAuthState, dashboardH
   lines.push(`Times shown in ${data.timezone}.`);
   lines.push('');
   if (data.lockMismatch) {
-    lines.push(`**LOCK MISMATCH**: ${data.lockMismatch.message}`);
+    const label = data.lockMismatch.code === 'RUBRIC_UNLOCKED' ? 'RUBRIC UNLOCKED' : 'LOCK MISMATCH';
+    lines.push(`**${label}**: ${data.lockMismatch.message}`);
     lines.push('');
   } else if (data.noScan) {
     lines.push('**NO SCAN**: no scan run has completed since the last report, on a day one was expected.');
@@ -853,7 +910,7 @@ export function renderReportMarkdown(data, registry, googleAuthState, dashboardH
     if (Object.keys(r.pages_by_source).length) lines.push(`  pages by source: ${Object.entries(r.pages_by_source).map(([k, v]) => `${k}=${v}`).join(', ')}`);
     const triageLine = renderTriageLine(s.triage);
     if (triageLine) lines.push(`  ${triageLine}`);
-    for (const e of r.errors.slice(0, 5)) lines.push(`  error: ${e.source ?? 'run'} ${e.code}: ${String(e.message ?? '').slice(0, 200)}`);
+    for (const e of r.errors.slice(0, 5)) lines.push(`  error: ${e.source ?? 'run'} ${e.code}: ${errorLineMessage(e).slice(0, 200)}`);
   }
   lines.push('');
   lines.push(`## Look at these (top ${data.lookAtThese.rows.length})`);

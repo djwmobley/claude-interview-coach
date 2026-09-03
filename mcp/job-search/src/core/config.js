@@ -455,14 +455,25 @@ export const CONFIG_FILES = Object.freeze([
   // apply run submitting a real application under a silently-drifted ATS host list is a materially worse
   // failure mode than a stale dashboard banner.
   'ats-apply.json',
-  // Slice 3 auto-triage (spec section 3): all four hashed for "config drift must be deliberate", even
-  // though triage.json is loaded tolerantly (readOptionalValidated, below) and triage-candidate.md is
-  // never committed (personal data, gitignored) -- computeConfigHash() hashes a "<missing>" placeholder
-  // for an absent file without throwing, so this list growing never blocks loadConfig() on its own; it
-  // only changes the config-lock hash, which is why the real triage.json + a fresh config.lock.json must
-  // ship in the same deploy as this code (spec section 3, "Production rollout").
-  'triage.json', 'triage-candidate.md', 'triage-output-schema.json', 'triage-mcp-empty.json',
+  // Slice 3 auto-triage (spec section 3): three of the original four hashed for "config drift must be
+  // deliberate", even though triage.json is loaded tolerantly (readOptionalValidated, below) --
+  // computeConfigHash() hashes a "<missing>" placeholder for an absent file without throwing, so this
+  // list growing never blocks loadConfig() on its own; it only changes the config-lock hash, which is why
+  // the real triage.json + a fresh config.lock.json must ship in the same deploy as this code (spec
+  // section 3, "Production rollout"). NOTE (scan-never-skip fix): 'triage-candidate.md' is deliberately
+  // NOT in this list any more. It never appears in `git diff` (gitignored, personal data) and its absence
+  // from a fresh worktree was exactly the incident that caused an unattended scan to refuse with
+  // CONFIG_LOCK_MISMATCH and no run row (PRs #35/#36/#38). The tracked config.lock.json must never depend
+  // on a file that legitimately does not exist in every checkout; the rubric's own integrity is tracked
+  // separately by its own gitignored sidecar (see triageCandidateLockPath() below), which an unattended
+  // scan warns about (RUBRIC_UNLOCKED) instead of refusing to run.
+  'triage.json', 'triage-output-schema.json', 'triage-mcp-empty.json',
 ]);
+
+/** Bare filename of the rubric (never in CONFIG_FILES; see the note above). */
+const TRIAGE_CANDIDATE_FILE = 'triage-candidate.md';
+/** Bare filename of the rubric's own gitignored integrity sidecar, written by `config-lock.js --write`. */
+const TRIAGE_CANDIDATE_LOCK_FILE = 'triage-candidate.lock';
 
 /**
  * @typedef {Object} LoadedConfig
@@ -560,7 +571,8 @@ function readOptionalValidated(dir, name, schema) {
  * Missing, or blank after trimming, returns null -- the caller disables model scoring for that run with
  * reason 'candidate_summary_missing', never a silent default description. Not committed to the repo
  * (personal data): gitignored (mcp/job-search/.gitignore via the repo root .gitignore), present only on
- * an operator's own machine.
+ * an operator's own machine. Not a CONFIG_FILES member (see the note there): its own integrity is tracked
+ * by triageCandidateLockPath()'s sidecar, not by config.lock.json.
  * @param {string} dir configDir
  * @returns {string|null}
  */
@@ -710,5 +722,74 @@ export function writeConfigLock() {
   const hash = computeConfigHash(dir);
   const body = { sha256: hash, files: [...CONFIG_FILES], updated_at: new Date().toISOString() };
   fs.writeFileSync(configLockPath(), JSON.stringify(body, null, 2) + '\n');
+  return hash;
+}
+
+/**
+ * Whether config/triage-candidate.md (the rubric) exists on disk in `dir`. Presence only -- a
+ * whitespace-only file still counts as present here (loadTriageCandidateSummary()'s blank-means-null
+ * treatment is a separate, triage-specific concern; this is a plain integrity check on whatever bytes are
+ * actually on disk).
+ * @param {string} [dir]
+ */
+export function triageCandidatePresent(dir = getEnv().JOBSEARCH_CONFIG_DIR) {
+  return fs.existsSync(path.join(dir, TRIAGE_CANDIDATE_FILE));
+}
+
+/**
+ * sha256 over the rubric's normalized content. Throws if the file is absent -- callers must check
+ * triageCandidatePresent() first (mirrors computeConfigHash()'s own per-file convention, just not folded
+ * into that function since the rubric is no longer a CONFIG_FILES member).
+ * @param {string} [dir]
+ */
+export function computeTriageCandidateHash(dir = getEnv().JOBSEARCH_CONFIG_DIR) {
+  const text = fs.readFileSync(path.join(dir, TRIAGE_CANDIDATE_FILE), 'utf8');
+  return crypto.createHash('sha256').update(normalizeConfigText(text)).digest('hex');
+}
+
+/**
+ * Path of the rubric's own gitignored integrity sidecar (spec section 5, "rubric out of the tracked
+ * lock"): kept alongside the rubric itself in the config dir, never committed (add to .gitignore), never
+ * part of config.lock.json or CONFIG_FILES.
+ * @param {string} [dir]
+ */
+export function triageCandidateLockPath(dir = getEnv().JOBSEARCH_CONFIG_DIR) {
+  return path.join(dir, TRIAGE_CANDIDATE_LOCK_FILE);
+}
+
+/**
+ * Rubric integrity check, total classification of the three possible states: rubric absent -> {present:
+ * false, ok: true} (nothing to check; a missing rubric already degrades triage with
+ * candidate_summary_missing, so this is never itself a warning); rubric present with a missing or stale
+ * sidecar -> {present: true, ok: false}; rubric present and sidecar hash matches -> {present: true, ok:
+ * true}.
+ * @param {string} [dir]
+ * @returns {{ present: boolean, ok: boolean, expected: string|null, actual: string|null }}
+ */
+export function checkTriageCandidateLock(dir = getEnv().JOBSEARCH_CONFIG_DIR) {
+  if (!triageCandidatePresent(dir)) return { present: false, ok: true, expected: null, actual: null };
+  const actual = computeTriageCandidateHash(dir);
+  let expected = null;
+  try {
+    const lock = JSON.parse(fs.readFileSync(triageCandidateLockPath(dir), 'utf8'));
+    expected = typeof lock.sha256 === 'string' ? lock.sha256 : null;
+  } catch {
+    expected = null;
+  }
+  return { present: true, ok: expected === actual, expected, actual };
+}
+
+/**
+ * Write the rubric's integrity sidecar. Silently skipped (returns null, no throw) when the rubric itself
+ * is absent -- there is nothing to lock; the caller (bin/config-lock.js) prints a note in that case. Never
+ * written to config.lock.json or CONFIG_FILES: this sidecar is the rubric's own, separate hash record.
+ * @param {string} [dir]
+ * @returns {string|null} the hash written, or null when skipped
+ */
+export function writeTriageCandidateLock(dir = getEnv().JOBSEARCH_CONFIG_DIR) {
+  if (!triageCandidatePresent(dir)) return null;
+  const hash = computeTriageCandidateHash(dir);
+  const body = { sha256: hash, updated_at: new Date().toISOString() };
+  fs.writeFileSync(triageCandidateLockPath(dir), JSON.stringify(body, null, 2) + '\n');
   return hash;
 }

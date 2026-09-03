@@ -24,8 +24,10 @@ mcp/job-search/
                       alert-senders.json noise-rules.json noise-fixtures.json style-checks.json
                       triage.json triage-output-schema.json triage-mcp-empty.json
                       triage-candidate.md (gitignored, personal data, not committed -- see "Auto-triage")
-  config.lock.json    sha256 of the ten config-locked files (six original plus four for slice 3
-                      auto-triage); unattended runs refuse a mismatch
+                      triage-candidate.lock (gitignored, the rubric's own integrity sidecar -- see "Config lock")
+  config.lock.json    sha256 of the nine tracked config files (six original plus three for slice 3
+                      auto-triage; the rubric itself is deliberately NOT one of them, see "Config lock");
+                      an unattended run WARNS on a mismatch and proceeds -- it never refuses to run
   sql/                001-011 migrations (each BEGIN/COMMIT, idempotent) + unique_indexes.sql (conditional)
   bin/                scan.js  migrate.js  backfill-embeddings.js  config-lock.js  remind.js
                       dashboard.js  seed-opportunities.js  triage-backfill.js
@@ -115,20 +117,28 @@ is the safe first call. `wait:false` returns `{run_id}` at once; poll with
 
 ```
 node mcp/job-search/bin/scan.js --profile exec-default [--sources a,b] [--days N] [--max-pages N]
-     [--min-prescore N] [--dry-run] [--json [out]] [--launch-chrome] [--accept-config-change]
+     [--min-prescore N] [--dry-run] [--json [out]] [--launch-chrome]
 ```
 
-Exit codes: `0` ok, `2` partial or locked, `1` failed (including
-`CONFIG_LOCK_MISMATCH` and unknown sources). Logs JSONL to
+Exit codes: `0` ok, `2` partial or locked, `1` failed (unknown sources, a
+malformed config, or a rejected `--trigger`). Logs JSONL to
 `logs/scan-YYYY-MM-DD.log` (14-day retention); `--json` with no path writes
 the full response under `logs/`. Ctrl-C (SIGINT) or SIGTERM aborts the run:
 pages are closed, the run row is marked failed with `CANCELLED`, and the
 advisory lock is released.
 
-Unattended runs refuse to start when `config/*.json` differs from
-`config.lock.json` (exit 1, `CONFIG_LOCK_MISMATCH`). After an intentional edit run
-`node bin/config-lock.js --write` and commit both; `--accept-config-change`
-overrides for a single run.
+**An unattended run never exits on a config-lock mismatch (scan-never-skip fix, 2026-09-03).**
+The earlier behavior -- refusing outright with `CONFIG_LOCK_MISMATCH` -- cost a full
+scan day when a config drift was left unreviewed overnight: the scan simply never ran, and the
+daily digest showed nothing actionable. Instead, the run proceeds with the on-disk config and
+records a `{code:'CONFIG_LOCK_MISMATCH', severity:'warning', expected, actual, missing, remedy}`
+entry in the run's own `errors`; the run's `status` stays `ok` (a warning never counts toward
+`partial`/`failed`), and the daily report renders a loud `[LOCK MISMATCH]` subject prefix plus a
+remedy line, with the normal digest still printed below it. After an intentional config edit,
+still run `node bin/config-lock.js --write` and commit the result -- the warning is a nudge to do
+that, not a gate. `config/*.json` failing zod validation (`CONFIG_INVALID`, a genuinely broken
+file) is unaffected and still exits unconditionally: that is never a drift-review question.
+`--accept-config-change` no longer exists; there is nothing left for it to override.
 
 A genuinely offline first run uses only the fetch adapters:
 `--sources greenhouse,lever,workday`. `--dry-run` skips every database write
@@ -149,12 +159,23 @@ One-time setup:
    "C:\Program Files\Google\Chrome\Application\chrome.exe" --user-data-dir="C:\Users\<you>\chrome-scan-profile" --remote-debugging-port=9333
    ```
    or `node mcp/job-search/bin/scan.js --launch-chrome --dry-run --sources greenhouse`, which reads
-   `CHROME_EXECUTABLE` and `SCAN_PROFILE_DIR`, launches Chrome, and waits up to 20 s for CDP to answer.
+   `CHROME_EXECUTABLE` and `SCAN_PROFILE_DIR` and self-heals the launch (`src/core/chrome-launch.js`,
+   scan-never-skip fix): readiness is proven by a real DevTools protocol round trip over the CDP
+   websocket (`Browser.getVersion`), never by the plain HTTP `GET /json/version` probe alone -- a
+   zombie `chrome-scan-profile` process can keep answering that HTTP endpoint while its DevTools
+   websocket is wedged, which is a real failure mode this project hit. A failed probe kills the whole
+   `chrome-scan-profile` process tree (matched only by command line containing the scan profile
+   directory, never by process name, never touching the daily-driver Chrome or any other user Chrome
+   window) and relaunches, up to two retries (three attempts total). Exhausting every attempt records
+   a `{code:'CHROME_LAUNCH_FAILED', severity:'warning', attempts, lastError, remedy}` entry and
+   proceeds into the run rather than losing the day -- browser sources degrade to `BROWSER_UNAVAILABLE`
+   for that run (non-browser sources are unaffected); a successful self-heal records
+   `{code:'CHROME_RELAUNCHED', severity:'warning', attempts}` so the daily report shows the browser
+   needed repair.
 2. In that Chrome window, log in to LinkedIn and Indeed once by hand. The
    profile keeps the session; the scanner never types credentials.
-3. Leave that Chrome running when a scheduled scan is expected. When it is
-   down, the run degrades to `partial` with `BROWSER_UNAVAILABLE`; fetch sources
-   still complete.
+3. Leave that Chrome running when a scheduled scan is expected. When every self-heal attempt still
+   fails, the run degrades to `partial` with `BROWSER_UNAVAILABLE`; fetch sources still complete.
 
 Detail fetches on LinkedIn and Indeed (prescore >= 55 for these two sources,
 per-adapter `detailFetchMinPrescore` in `config/adapters.json`; other sources
@@ -275,11 +296,14 @@ outright.
 **Enabling model scoring:**
 1. Create `mcp/job-search/config/triage-candidate.md` (plain text, a few paragraphs describing the
    candidate) -- gitignored, never commit it.
-2. Set `"model": { "enabled": true }` in `config/triage.json`.
-3. Run `node bin/config-lock.js --write` and commit the updated `config.lock.json` (the candidate summary
-   file itself is still config-locked for hash purposes only, per the "config drift must be deliberate"
-   rule every config file gets -- editing it without re-running `config-lock.js --write` fails the next
-   scan's lock check).
+2. Set `"model": { "enabled": true }` in `config/triage.json` and run `node bin/config-lock.js --write`
+   (this part of the file IS config-locked for hash purposes, per the "config drift must be deliberate"
+   rule every tracked config file gets) and commit the updated `config.lock.json`.
+3. The rubric itself (`triage-candidate.md`) is deliberately NOT part of `config.lock.json` (see "Config
+   lock" > "Rubric integrity" above) -- `--write` from step 2 also writes its own gitignored
+   `triage-candidate.lock` sidecar as a side effect, whenever the rubric is present. Editing the rubric
+   later without re-running `config-lock.js --write` produces a `RUBRIC_UNLOCKED` warning on the next scan
+   (never a refusal), naming the same remedy.
 
 A missing `config/triage.json`, a missing/blank candidate summary, or any model-step failure never blocks
 or fails the scan -- only a loud report line (below). A present but malformed `triage.json` still fails
@@ -894,8 +918,8 @@ Same `_test`-suffixed-DSN requirement as the Greenhouse smoke test above; writes
 
 ## Config lock
 
-`node bin/config-lock.js` reports whether the config-locked files (`CONFIG_FILES` in `src/core/config.js`
--- the original six plus, since slice 3, `triage.json`, `triage-candidate.md`, `triage-output-schema.json`,
+`node bin/config-lock.js` reports whether the tracked config files (`CONFIG_FILES` in
+`src/core/config.js` -- the original six plus, since slice 3, `triage.json`, `triage-output-schema.json`,
 and `triage-mcp-empty.json`) match `config.lock.json` (exit 2 on mismatch). It also lints
 `config/noise-rules.json` against the named fixture cases in `config/noise-fixtures.json` on every run
 (check or `--write`), failing closed (exit 1) if any fixture's expected
@@ -904,38 +928,62 @@ noise-rule edit that silently changes behavior for a known case, not just a
 hash mismatch. After an intentional config edit run
 `node bin/config-lock.js --write` and commit both.
 
+**Unattended runs warn and proceed on a mismatch; interactive starts still block (scan-never-skip fix,
+2026-09-03).** `bin/scan.js` (Task Scheduler, manual CLI runs) never exits on a lock mismatch any more --
+it proceeds with the on-disk config and records a `CONFIG_LOCK_MISMATCH` warning on the run instead (see
+"From the command line / Task Scheduler" above). The dashboard's interactive scan-start route
+(`src/dashboard/scan-runner.js`'s `start()`) is unaffected and still returns a `409`/`CONFIG_LOCK_MISMATCH`
+refusal outright: a human is present there to review the drift before kicking off a run, which is exactly
+the case the old CLI behavior was never actually protecting (an unattended overnight run has no human to
+show a refusal to).
+
 `triage.json` is loaded tolerantly (a missing file loads with every field at its schema default, never
-`CONFIG_INVALID`, see "Auto-triage" above), but it is still hashed here: a missing `triage.json`, and a
-missing `triage-candidate.md` (gitignored, personal data, present only on an operator's own machine), both
-hash via a non-colliding missing-file marker (a presence byte plus `<missing:NAME>`, so no real file's
-content can collide with it), so `config.lock.json` still needs a `--write` whenever either file's
-presence or content changes on a given machine, same "config drift must be deliberate" rule every other
-config file gets. Hashing also strips a leading UTF-8 BOM and normalizes CRLF/bare-CR to LF first, so a
-git autocrlf checkout, an LF worktree, and a file re-saved with different line endings all still hash
-identically.
+`CONFIG_INVALID`, see "Auto-triage" above), but it is still hashed here: a missing `triage.json` hashes via
+a non-colliding missing-file marker (a presence byte plus `<missing:NAME>`, so no real file's content can
+collide with it), so `config.lock.json` still needs a `--write` whenever its presence or content changes,
+same "config drift must be deliberate" rule every other tracked config file gets. Hashing also strips a
+leading UTF-8 BOM and normalizes CRLF/bare-CR to LF first, so a git autocrlf checkout, an LF worktree, and
+a file re-saved with different line endings all still hash identically.
 
 **`--write` refuses when any `CONFIG_FILES` entry is missing from disk** -- it never silently hashes a
-missing file into a lock that then mismatches every other checkout. This is why PRs #35 and #36 broke the
-06:34 scheduled scan: a worktree ran `--write` with `config/triage-candidate.md` absent, which hashed as
-`<missing>` under the old (collision-prone) scheme, producing a lock that disagreed with main's (where the
-file is present), so the next unattended `job-search scan` refused with `CONFIG_LOCK_MISMATCH` -- and,
-before this fix, wrote no run row, so the daily report showed a bare `[NO SCAN]` digest with no reason.
+missing file into a lock that then mismatches every other checkout.
 
-**Worktree authors: before running `node bin/config-lock.js --write` in a worktree, copy the gitignored
-`config/triage-candidate.md` from the main checkout into the worktree's `config/` directory first** (it is
-never committed, so a fresh worktree never has it). `--write` fails fast with the missing file's name and
-this same remedy if you forget. Because `triage-candidate.md` never appears in `git diff` (gitignored), a
-PR whose `--write` picked up a *changed* rubric on the author's own machine must call that out explicitly
-in the PR description -- the lock hash moving is otherwise the only visible trace of a rubric content
+### Rubric integrity: `config/triage-candidate.md` is out of the tracked lock
+
+`config/triage-candidate.md` (the rubric, gitignored personal data, never committed -- see "Auto-triage")
+is deliberately **not** a `CONFIG_FILES` member and never contributes to `config.lock.json`'s hash. This is
+the scan-never-skip fix for the incident PRs #35, #36, and #38 chased: a worktree lacking the rubric (every
+fresh worktree, since it is gitignored) could never produce a lock that matched main's, so the next
+unattended `job-search scan` either refused outright (PRs #35/#36, wrote no run row, the daily report
+showed a bare `[NO SCAN]` digest with no reason) or, after PR #38 made the refusal loud, still refused --
+just with a clearer message. Taking the rubric out of the tracked lock removes the structural cause: a
+worktree that never has the rubric no longer needs it copied in for `config.lock.json` to match main's.
+
+The rubric's own integrity is tracked separately, by its own gitignored sidecar,
+`config/triage-candidate.lock` (`{sha256, updated_at}`, written by `node bin/config-lock.js --write`,
+**never committed** -- add it to your own machine's expectations, not to git). `--write` writes this
+sidecar only when the rubric is present on disk (a fresh worktree without one prints a note and skips it,
+no error); a missing rubric is never itself a warning, since `src/core/triage.js` already degrades model
+scoring with `candidate_summary_missing` in that case. At the start of every scan, `bin/scan.js` checks the
+rubric against its sidecar: rubric present with a missing or stale sidecar records a
+`{code:'RUBRIC_UNLOCKED', severity:'warning', remedy}` entry on the run (never a refusal, same warn-and-
+proceed treatment as `CONFIG_LOCK_MISMATCH`); rubric absent, or present and matching, is silent.
+
+Because `triage-candidate.md` never appears in `git diff` (gitignored), a PR whose `--write` picked up a
+*changed* rubric on the author's own machine must still call that out explicitly in the PR description --
+the sidecar's hash moving (not `config.lock.json`'s any more) is the only visible trace of a rubric content
 change, and a reviewer cannot see the diff to confirm it was intentional.
+
+**Post-merge step for anyone pulling this change into an existing checkout with a rubric already in
+place:** run `node bin/config-lock.js --write` once in the main checkout to create the sidecar (the rubric
+predates this fix, so no sidecar exists yet until you do).
 
 `node bin/config-lock.js` (check mode, no `--write`) also reports any `CONFIG_FILES` entry missing from
 disk by name, separately from a plain hash mismatch, and the dashboard's `/api/health` endpoint's
 `config_lock_detail` string (alongside the existing `config_lock_ok` boolean) carries the same missing-file
 or stale-hash detail for anyone watching the dashboard rather than the CLI. The lock-freshness test in
-`test/config.test.js` fails on purpose, naming the file and this same copy remedy, when a config-locked
-file is absent from `mcp/job-search/config` -- this is expected in a fresh worktree until the rubric is
-copied in, not a real regression.
+`test/config.test.js` passes in every worktree, rubric present or not, exactly because the rubric is no
+longer part of what that test checks.
 
 ## Embeddings
 
