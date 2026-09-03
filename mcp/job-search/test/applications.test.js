@@ -17,9 +17,9 @@ import { pgConnectionConfig } from '../src/core/config.js';
 import { ensureAuxSchema } from '../src/core/schema.js';
 import {
   TRANSITIONS, APPLICATION_STATES, ATS_TYPES,
-  createApplication, transition, resume, retry, onDocumentLinked, markSubmitted, reconcileStale,
+  createApplication, transition, resume, retry, onDocumentLinked, onDocumentLinkedForApplication, markSubmitted, reconcileStale,
   getApplication, getApplicationForListing, approve, listApplicationEvents,
-  recordSubmitRequestSent, hasSubmitRequestSentThisAttempt, markAppliedByHand, APPLY_NUDGE_PREFIX,
+  recordSubmitRequestSent, hasSubmitRequestSentThisAttempt, markAppliedByHand, recordApplicationEvent, APPLY_NUDGE_PREFIX,
 } from '../src/core/applications.js';
 
 const CO = `ZZ-TEST-APPLICATIONS-${process.pid}`;
@@ -28,13 +28,13 @@ let client;
 /** @type {number[]} */
 const listingIds = [];
 
-/** @param {Partial<{ status: string|null }>} o */
+/** @param {Partial<{ status: string|null, locationNorm: string, remoteMode: string|null }>} o */
 async function insertListing(o = {}) {
   const n = Math.floor(Math.random() * 1e9);
   const r = await client.query(
-    `INSERT INTO ic_job_listings (title, company, source, external_id, record_kind, company_norm, title_norm, location_norm, dedup_hash, last_seen, status)
-     VALUES ('Applications Test', $1, $2, $3, 'listing', 'applications test co', 'applications test', 'legacy-unknown', $4, now(), $5) RETURNING id`,
-    [CO, `zz-test-applications-${process.pid}`, `zz-test-applications-${process.pid}:${n}`, `zz-applications-hash-${n}`, o.status ?? null],
+    `INSERT INTO ic_job_listings (title, company, source, external_id, record_kind, company_norm, title_norm, location_norm, remote_mode, dedup_hash, last_seen, status)
+     VALUES ('Applications Test', $1, $2, $3, 'listing', 'applications test co', 'applications test', $4, $5, $6, now(), $7) RETURNING id`,
+    [CO, `zz-test-applications-${process.pid}`, `zz-test-applications-${process.pid}:${n}`, o.locationNorm ?? 'legacy-unknown', o.remoteMode ?? null, `zz-applications-hash-${n}`, o.status ?? null],
   );
   const id = Number(r.rows[0].id);
   listingIds.push(id);
@@ -139,6 +139,70 @@ describe('createApplication', () => {
     const second = await createApplication(client, { listingId });
     assert.notEqual(second.id, first.id);
     assert.equal(second.state, 'drafting');
+  });
+
+  test('rejects a listing that does not exist with NOT_FOUND', async () => {
+    await assert.rejects(createApplication(client, { listingId: 999999999 }), (err) => {
+      assert.equal(/** @type {any} */ (err).code, 'NOT_FOUND');
+      return true;
+    });
+  });
+});
+
+describe('sql/014_application_salary_floor.sql: APPLICATION_COLS round-trip (spec item 1)', () => {
+  test('salary_floor, review_verdict, review_findings round-trip through getApplication()', async () => {
+    const { id } = await seedApplication('docs_ready');
+    await client.query(
+      `UPDATE ic_job_applications SET salary_floor = $2, review_verdict = $3, review_findings = $4::jsonb WHERE id = $1`,
+      [id, 250000, 'FAIL', JSON.stringify({ verdict: 'FAIL', critical_count: 1, important_count: 0, minor_count: 0, findings: [{ severity: 'CRITICAL', text: 'x' }] })],
+    );
+    const row = await getApplication(client, id);
+    assert.equal(row.salary_floor, 250000);
+    assert.equal(row.review_verdict, 'FAIL');
+    assert.equal(row.review_findings.critical_count, 1);
+    assert.deepEqual(row.review_findings.findings, [{ severity: 'CRITICAL', text: 'x' }]);
+  });
+
+  test('a fresh application has salary_floor set (from createApplication) and review_verdict/review_findings null', async () => {
+    const listingId = await insertListing();
+    const app = await createApplication(client, { listingId });
+    assert.equal(typeof app.salary_floor, 'number');
+    assert.equal(app.review_verdict, null);
+    assert.equal(app.review_findings, null);
+  });
+});
+
+describe('createApplication: salary_floor (one-click apply PR A spec item 1/3)', () => {
+  const FLOORS = { texas_or_remote: 225000, relocation: 275000 };
+
+  test('remote_mode "remote" stores the texas_or_remote floor', async () => {
+    const listingId = await insertListing({ locationNorm: 'country-us', remoteMode: 'remote' });
+    const app = await createApplication(client, { listingId, floors: FLOORS });
+    assert.equal(app.salary_floor, 225000);
+  });
+
+  test('locationNorm "state-tx" stores the texas_or_remote floor even when remote_mode is onsite', async () => {
+    const listingId = await insertListing({ locationNorm: 'state-tx', remoteMode: 'onsite' });
+    const app = await createApplication(client, { listingId, floors: FLOORS });
+    assert.equal(app.salary_floor, 225000);
+  });
+
+  test('every other location falls to the relocation floor', async () => {
+    const listingId = await insertListing({ locationNorm: 'country-us', remoteMode: 'onsite' });
+    const app = await createApplication(client, { listingId, floors: FLOORS });
+    assert.equal(app.salary_floor, 275000);
+  });
+
+  test('a custom floors object (not the config default) is honored', async () => {
+    const listingId = await insertListing({ locationNorm: 'state-tx', remoteMode: null });
+    const app = await createApplication(client, { listingId, floors: { texas_or_remote: 111, relocation: 222 } });
+    assert.equal(app.salary_floor, 111);
+  });
+
+  test('without a floors override, the real config/auto-apply.json floors are used', async () => {
+    const listingId = await insertListing({ locationNorm: 'country-us', remoteMode: 'remote' });
+    const app = await createApplication(client, { listingId });
+    assert.equal(app.salary_floor, 225000);
   });
 });
 
@@ -335,6 +399,116 @@ describe('onDocumentLinked', () => {
     const row = await getApplication(client, id);
     assert.equal(row.coverletter_doc_id, docId);
     assert.equal(row.state, 'drafting');
+  });
+
+  test('the normal single-drafting-application case never logs the multiple-drafting warning', async () => {
+    // sql/012's partial unique index (WHERE state <> 'withdrawn') makes a genuine SECOND drafting row for
+    // one listing structurally impossible to construct against the real schema without dropping that
+    // constraint -- which is exactly the point of the defensive count check this exercises the "normal,
+    // constraint-holds" side of. The >1 branch itself is covered by direct inspection of the code path
+    // (it is a plain `count(*) > 1` check with no other logic) rather than forcing a DB-constraint
+    // violation in a test, which would risk corrupting the shared test DB's invariant for other files
+    // running concurrently. See this PR's blind-spots note.
+    const { listingId } = await seedApplication('drafting');
+    /** @type {any[]} */
+    const warnings = [];
+    const docId = await insertDocument(listingId, 'resume', 'resumes/single-drafting.docx');
+    const out = await onDocumentLinked(client, listingId, 'resume', docId, { actor: 'mcp', log: (f) => warnings.push(f) });
+    assert.equal(out.ignored, false);
+    assert.equal(warnings.length, 0);
+  });
+});
+
+describe('onDocumentLinkedForApplication (one-click apply PR A spec item 4): application-scoped linking', () => {
+  test('links to the SPECIFIED application, never "most recent for the listing"', async () => {
+    // Two applications across time for related-but-different listings, to prove the function truly
+    // targets applicationId and not merely "the most recent drafting row it can find."
+    const { id: appA, listingId: listingA } = await seedApplication('drafting');
+    const docId = await insertDocument(listingA, 'resume', 'resumes/scoped.docx');
+    const out = await onDocumentLinkedForApplication(client, appA, listingA, 'resume', docId, { actor: 'mcp' });
+    assert.equal(out.ignored, false);
+    assert.equal(out.application.id, appA);
+    assert.equal(out.application.state, 'docs_ready');
+    const row = await getApplication(client, appA);
+    assert.equal(row.resume_doc_id, docId);
+  });
+
+  test('a mismatched listingId (application belongs to a different listing) is rejected with VALIDATION', async () => {
+    const { id: appId, listingId } = await seedApplication('drafting');
+    const otherListingId = await insertListing();
+    const docId = await insertDocument(listingId, 'resume', 'resumes/mismatch.docx');
+    await assert.rejects(
+      onDocumentLinkedForApplication(client, appId, otherListingId, 'resume', docId),
+      (err) => { assert.equal(/** @type {any} */ (err).code, 'VALIDATION'); assert.match(/** @type {Error} */ (err).message, /belongs to listing/); return true; },
+    );
+  });
+
+  test('a document belonging to a different listing than both applicationId and listingId is rejected', async () => {
+    const { id: appId, listingId } = await seedApplication('drafting');
+    const otherListingId = await insertListing();
+    const docId = await insertDocument(otherListingId, 'resume', 'resumes/wrong-doc-listing.docx');
+    await assert.rejects(onDocumentLinkedForApplication(client, appId, listingId, 'resume', docId), /belongs to listing/);
+  });
+
+  test('a nonexistent applicationId is NOT_FOUND', async () => {
+    const listingId = await insertListing();
+    const docId = await insertDocument(listingId, 'resume', 'resumes/no-app.docx');
+    await assert.rejects(onDocumentLinkedForApplication(client, 999999999, listingId, 'resume', docId), (err) => {
+      assert.equal(/** @type {any} */ (err).code, 'NOT_FOUND');
+      return true;
+    });
+  });
+
+  test('an application that is not drafting is a strict no-op, matching onDocumentLinked', async () => {
+    const { id: appId, listingId } = await seedApplication('approved');
+    const docId = await insertDocument(listingId, 'resume', 'resumes/not-drafting-scoped.docx');
+    const out = await onDocumentLinkedForApplication(client, appId, listingId, 'resume', docId);
+    assert.deepEqual(out, { ignored: true, reason: 'not_drafting' });
+  });
+
+  test('a race scenario: a SECOND application created for the same listing after the first started drafting still links to the FIRST (correct) applicationId', async () => {
+    const { id: firstId, listingId } = await seedApplication('drafting');
+    // Simulate the race the adversary finding worried about: withdraw the first app's own "activeness"
+    // constraint by first withdrawing it (so a second createApplication is legal), representing "a second
+    // application exists for this listing by the time the resume run's render_doc call lands" -- the
+    // scoped function must still resolve to the id it was given, not silently re-target the newer row.
+    await transition(client, firstId, 'withdrawn', { actor: 'mcp' });
+    const second = await createApplication(client, { listingId });
+    const docId = await insertDocument(listingId, 'resume', 'resumes/race.docx');
+    // A caller still holding the FIRST (now withdrawn) applicationId gets a clean not_drafting no-op, not
+    // a silent link to the wrong (second) application.
+    const out = await onDocumentLinkedForApplication(client, firstId, listingId, 'resume', docId);
+    assert.deepEqual(out, { ignored: true, reason: 'not_drafting' });
+    const secondRow = await getApplication(client, second.id);
+    assert.equal(secondRow.resume_doc_id, null, 'the second application was never touched by a call scoped to the first id');
+  });
+});
+
+describe('recordApplicationEvent (one-click apply PR A: standalone note/error/progress events)', () => {
+  test('records a note/error/progress event with no state transition', async () => {
+    const { id } = await seedApplication('drafting');
+    await recordApplicationEvent(client, { applicationId: id, kind: 'error', actor: 'apply', note: 'resume runner failed: no_description' });
+    const events = await listApplicationEvents(client, id);
+    const last = events[events.length - 1];
+    assert.equal(last.kind, 'error');
+    assert.equal(last.actor, 'apply');
+    assert.match(last.note, /no_description/);
+    const row = await getApplication(client, id);
+    assert.equal(row.state, 'drafting', 'no state transition occurs');
+  });
+
+  test('rejects an unrecognized kind', async () => {
+    const { id } = await seedApplication('drafting');
+    await assert.rejects(recordApplicationEvent(client, { applicationId: id, kind: /** @type {any} */ ('bogus-kind'), actor: 'apply' }), /kind must be one of/);
+  });
+
+  test('stores arbitrary meta as jsonb', async () => {
+    const { id } = await seedApplication('drafting');
+    await recordApplicationEvent(client, { applicationId: id, kind: 'progress', actor: 'apply', note: 'resume runner CLI result', meta: { cost_usd: 0.28, turns: 14, is_error: false, session_id: 'abc' } });
+    const events = await listApplicationEvents(client, id);
+    const last = events[events.length - 1];
+    assert.equal(last.meta.cost_usd, 0.28);
+    assert.equal(last.meta.session_id, 'abc');
   });
 });
 

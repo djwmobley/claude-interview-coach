@@ -95,6 +95,13 @@ export function ensureDotenv() {
  * @property {string|undefined} DASHBOARD_PORT raw string from .env/process.env; bin/dashboard.js
  *   validates and falls back to its own default (7311) -- getEnv() does not itself validate or default
  *   this one, since resolvePort()'s fallback-with-warning behavior needs the raw, possibly-invalid value.
+ * @property {string} JOBSEARCH_CLAUDE_BIN one-click apply (PR A): absolute path to the headless claude
+ *   CLI binary src/dashboard/resume-runner.js and review-runner.js spawn.
+ * @property {string} JOBSEARCH_RESUME_MODEL
+ * @property {number} JOBSEARCH_RESUME_MAX_TURNS
+ * @property {number} JOBSEARCH_RESUME_BUDGET_USD
+ * @property {number} JOBSEARCH_RESUME_TIMEOUT_MS
+ * @property {string} JOBSEARCH_REVIEW_MODEL
  */
 
 /**
@@ -123,6 +130,16 @@ export function getEnv() {
     REMINDER_TO: e.REMINDER_TO || '',
     LOG_LEVEL: e.LOG_LEVEL || 'info',
     DASHBOARD_PORT: e.DASHBOARD_PORT || undefined,
+    // One-click apply PR A (spec items 5/6/11): headless resume/review runner defaults. Budget/timeout
+    // defaults were tuned down from an initial live measurement (a real headless write-resume run against
+    // a well-populated listing cost $0.28 / 38 s / 14 turns) -- 5 dollars and 15 minutes are a generous
+    // multiple of that, not the observed figure itself.
+    JOBSEARCH_CLAUDE_BIN: e.JOBSEARCH_CLAUDE_BIN || path.join(os.homedir(), '.local', 'bin', 'claude.exe'),
+    JOBSEARCH_RESUME_MODEL: e.JOBSEARCH_RESUME_MODEL || 'sonnet',
+    JOBSEARCH_RESUME_MAX_TURNS: Number(e.JOBSEARCH_RESUME_MAX_TURNS) > 0 ? Number(e.JOBSEARCH_RESUME_MAX_TURNS) : 80,
+    JOBSEARCH_RESUME_BUDGET_USD: Number(e.JOBSEARCH_RESUME_BUDGET_USD) > 0 ? Number(e.JOBSEARCH_RESUME_BUDGET_USD) : 5,
+    JOBSEARCH_RESUME_TIMEOUT_MS: Number(e.JOBSEARCH_RESUME_TIMEOUT_MS) > 0 ? Number(e.JOBSEARCH_RESUME_TIMEOUT_MS) : 15 * 60 * 1000,
+    JOBSEARCH_REVIEW_MODEL: e.JOBSEARCH_REVIEW_MODEL || 'sonnet',
   };
 }
 
@@ -354,6 +371,23 @@ export const atsApplySchema = z.object({
   indeed: z.object({ hostSuffix: domain }),
 });
 
+/**
+ * One-click apply / auto-apply gate config (PR A spec item 2, config/auto-apply.json). `floors` feeds
+ * src/core/salary-floor.js's resolveFloor() directly -- every value here is a whole US dollar annual
+ * figure, never a config-file magic number duplicated in code.
+ */
+export const autoApplySchema = z.object({
+  _comment: z.string().optional(),
+  fitFloor: z.number().int().min(0).max(100).default(70),
+  dailyCap: z.number().int().positive().default(5),
+  atsAllow: z.array(z.enum(['greenhouse', 'lever', 'workday', 'dayforce', 'indeed_easy', 'linkedin_easy', 'icims', 'smartrecruiters', 'unknown']))
+    .default(['greenhouse', 'lever', 'smartrecruiters', 'workday', 'icims', 'dayforce']),
+  floors: z.object({
+    texas_or_remote: z.number().positive().default(225000),
+    relocation: z.number().positive().default(275000),
+  }).default({}),
+});
+
 export const companyAliasesSchema = z.object({
   _comment: z.string().optional(),
   aliases: z.record(z.string().min(1), z.string().min(1)),
@@ -455,6 +489,10 @@ export const CONFIG_FILES = Object.freeze([
   // apply run submitting a real application under a silently-drifted ATS host list is a materially worse
   // failure mode than a stale dashboard banner.
   'ats-apply.json',
+  // One-click apply (PR A spec item 2): config/auto-apply.json holds fitFloor/dailyCap/atsAllow and the
+  // salary floors src/core/salary-floor.js reads -- hashed here for the same reason as ats-apply.json
+  // above, a change to any of these is config drift and must be deliberate.
+  'auto-apply.json',
   // Slice 3 auto-triage (spec section 3): three of the original four hashed for "config drift must be
   // deliberate", even though triage.json is loaded tolerantly (readOptionalValidated, below) --
   // computeConfigHash() hashes a "<missing>" placeholder for an absent file without throwing, so this
@@ -480,6 +518,7 @@ const TRIAGE_CANDIDATE_LOCK_FILE = 'triage-candidate.lock';
  * @property {z.infer<typeof adaptersSchema>} adapters
  * @property {z.infer<typeof atsBoardsSchema>} atsBoards
  * @property {z.infer<typeof atsApplySchema>} atsApply
+ * @property {z.infer<typeof autoApplySchema>} autoApply
  * @property {z.infer<typeof execBoardsSchema>} execBoards
  * @property {Record<string, string>} companyAliases
  * @property {z.infer<typeof alertSendersSchema>['senders']} alertSenders
@@ -646,6 +685,7 @@ export function loadConfig(opts = {}) {
   const adapters = readValidated(dir, 'adapters.json', adaptersSchema);
   const atsBoards = readValidated(dir, 'ats-boards.json', atsBoardsSchema);
   const atsApply = readValidated(dir, 'ats-apply.json', atsApplySchema);
+  const autoApply = readValidated(dir, 'auto-apply.json', autoApplySchema);
   const execBoards = readValidated(dir, 'exec-boards.json', execBoardsSchema);
   const aliasesFile = readValidated(dir, 'company-aliases.json', companyAliasesSchema);
   const alertSendersFile = readValidated(dir, 'alert-senders.json', alertSendersSchema);
@@ -656,6 +696,7 @@ export function loadConfig(opts = {}) {
     adapters,
     atsBoards,
     atsApply,
+    autoApply,
     execBoards,
     companyAliases: aliasesFile.aliases,
     alertSenders: alertSendersFile.senders,

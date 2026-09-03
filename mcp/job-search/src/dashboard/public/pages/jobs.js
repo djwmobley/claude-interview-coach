@@ -93,6 +93,8 @@ export const COLUMNS = Object.freeze([
   { text: 'Fit', sortKey: 'fit', className: 'job-row__fit' },
   { text: 'First seen', sortKey: 'first_seen', className: 'job-row__first-seen' },
   { text: 'Location', sortKey: 'location', className: 'job-row__location' },
+  // One-click apply (PR A spec item 8): not sortable -- application state is not a query_jobs sort key.
+  { text: 'Apply', className: 'job-row__apply' },
 ]);
 
 /**
@@ -189,6 +191,20 @@ export async function render(container, params, app) {
    * and sorted -- the Filter modal's Source checkbox options. */
   function sourceOptionsUnion() {
     return unionSourceOptions(apiSources, seenSources);
+  }
+
+  /** One-click apply (PR A spec item 8): kicks off POST /api/listings/:id/apply-now. 409 (an active
+   * application already exists past drafting) is a normal, expected outcome -- e.g. a second click while
+   * the chain is already running -- surfaced as an informational toast, never an error toast. */
+  async function applyNow(id) {
+    const outcome = handleOutcome(await postJson(`/api/listings/${id}/apply-now`, {}));
+    if (outcome.kind === 'ok') {
+      showToast({ message: 'Applying: drafting resume.' });
+      load();
+    } else if (outcome.kind === 'duplicate_application') {
+      showToast({ message: 'This listing already has an active application.' });
+      load();
+    }
   }
 
   async function setStageOnRow(id, status) {
@@ -289,6 +305,7 @@ export async function render(container, params, app) {
               selected: selected.has(row.id),
               onToggleSelect: (id) => { if (selected.has(id)) selected.delete(id); else selected.add(id); load(); },
               onOpen: (id) => app.navigate('job-detail', { id }),
+              onApplyNow: applyNow,
               triageBand,
             })),
           }),

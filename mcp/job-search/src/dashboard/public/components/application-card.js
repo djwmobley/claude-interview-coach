@@ -23,10 +23,34 @@ import { credentialPrompt } from './credential-prompt.js';
 export function applicationCard(opts) {
   const { listing, application, ats, documents } = opts;
 
+  // One-click apply (PR A spec item 8): available whenever there is no application yet, or the existing
+  // one is still 'drafting' -- the same "create-or-reuse a drafting row" range POST /api/listings/:id/
+  // apply-now itself accepts (routes/applications.js). Runs the full resume -> review -> approve -> apply
+  // chain; distinct from "Create application" below, which only creates the row for the existing manual
+  // /write-resume copy-paste flow.
+  const applyNowButton = (!application || application.state === 'drafting') ? h('button', {
+    className: 'btn btn--primary',
+    attrs: { type: 'button' },
+    text: 'Apply now',
+    on: {
+      click: async () => {
+        const outcome = handleOutcome(await postJson(`/api/listings/${listing.id}/apply-now`, {}));
+        if (outcome.kind === 'ok') {
+          showToast({ message: 'Applying: drafting resume.' });
+          opts.onChanged();
+        } else if (outcome.kind === 'duplicate_application') {
+          showToast({ message: 'An application already exists for this listing.' });
+          opts.onChanged();
+        }
+      },
+    },
+  }) : null;
+
   if (!application) {
     return h('div', { className: 'application-card' }, [
       h('h3', { text: 'Application' }),
       h('p', { className: 'application-card__hint', text: 'No application started for this listing yet.' }),
+      applyNowButton,
       h('button', {
         className: 'btn btn--small',
         attrs: { type: 'button' },
@@ -201,16 +225,31 @@ export function applicationCard(opts) {
     ? h('p', { className: 'application-card__hint', text: application.state === 'submitting' ? 'Submitting -- this updates live as the run progresses.' : 'Approved -- queued to submit.' })
     : null;
 
+  // One-click apply (PR A spec item 6/8): the independent headless review's own findings, shown whenever
+  // review_findings is set -- regardless of the application's CURRENT state, so a FAIL/unparseable verdict
+  // that parked the application at docs_ready (never auto-approved) stays visible on the card as the
+  // reason Approve is still a manual decision, not silently dropped once the application moves on.
+  const findingsPanel = Array.isArray(application.review_findings)
+    ? h('div', { className: 'application-card__findings' }, [
+      h('h4', { text: application.review_verdict === 'PASS' ? 'Review findings' : `Review: ${application.review_verdict ?? 'unparseable'}` }),
+      application.review_findings.length === 0
+        ? h('p', { className: 'application-card__hint', text: 'No findings.' })
+        : h('ul', {}, application.review_findings.map((f) => h('li', { text: `${f.severity ? `${f.severity}: ` : ''}${f.text ?? ''}` }))),
+    ])
+    : null;
+
   return h('div', { className: 'application-card' }, [
     h('div', { className: 'application-card__header' }, [
       h('h3', { text: 'Application' }),
       h('span', { className: chipClassName(stateChip), text: stateChip.label }),
     ]),
+    application.state === 'drafting' ? applyNowButton : null,
     application.state === 'drafting' ? copyRow : null,
     h('ul', { className: 'application-card__docs' }, [docRow('Resume', application.resume_doc_id), docRow('Cover letter', application.coverletter_doc_id)]),
     unknownAtsNote,
     application.state === 'docs_ready' ? approveButton : null,
     progressPanel,
+    findingsPanel,
     needsHumanPanel,
     failedPanel,
   ]);

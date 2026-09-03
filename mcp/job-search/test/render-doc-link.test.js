@@ -158,3 +158,35 @@ describe('linkRenderedDocument: application_link (onDocumentLinked pass-through)
     assert.deepEqual(application_link, { ignored: true, reason: 'unsupported_doc_kind' });
   });
 });
+
+describe('linkRenderedDocument: applicationId (one-click apply PR A spec item 4, adversary finding 1)', () => {
+  test('with applicationId, links THAT SPECIFIC application, not "most recent for the listing"', async () => {
+    const listingId = await insertListing();
+    const app = await createApplication(client, { listingId });
+    const { application_link } = await linkRenderedDocument(client, {
+      listingId, kind: 'resume', outputPath: 'output/resumes/Jordan Reyes - CTO.docx', root, applicationId: app.id,
+    });
+    assert.equal(application_link.ignored, false);
+    assert.equal(/** @type {any} */ (application_link).application.id, app.id);
+    assert.equal(/** @type {any} */ (application_link).application.state, 'docs_ready');
+  });
+
+  test('a mismatched applicationId/listingId pair is rejected with VALIDATION, no link happens', async () => {
+    const listingId = await insertListing();
+    const app = await createApplication(client, { listingId });
+    const otherListingId = await insertListing();
+    await assert.rejects(
+      linkRenderedDocument(client, { listingId: otherListingId, kind: 'resume', outputPath: 'output/resumes/Jordan Reyes - CTO.docx', root, applicationId: app.id }),
+      /belongs to listing/,
+    );
+    const row = await getApplication(client, app.id);
+    assert.equal(row.state, 'drafting', 'the rejected call never touched the application');
+  });
+
+  test('without applicationId, the pre-existing listing-scoped behavior is unchanged (backward compatible)', async () => {
+    const listingId = await insertListing();
+    const app = await createApplication(client, { listingId });
+    const { application_link } = await linkRenderedDocument(client, { listingId, kind: 'resume', outputPath: 'output/resumes/Jordan Reyes - CTO.docx', root });
+    assert.equal(/** @type {any} */ (application_link).application.id, app.id);
+  });
+});

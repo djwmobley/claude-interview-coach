@@ -349,3 +349,49 @@ describe('runApplyWorker: apply pipeline slice 6 ctx wiring (credentials, gmailV
     assert.equal(sleepCalls[0], 1234);
   });
 });
+
+describe('runApplyWorker: one-click apply PR A spec item 3 -- effective bank salary_floor override', () => {
+  /** A fake AnswerBank matching src/apply/answers.js's parseAnswerBank() shape: facts is a Map, meta
+   * carries the bank's own (personal-data) salary_floor. */
+  function fakeBank(bankSalaryFloor) {
+    return { facts: new Map(), labels: new Map(), meta: { salary_floor: bankSalaryFloor } };
+  }
+
+  /** @param {any} probeBank captures ctx.answers.bank as seen by the adapter */
+  function probeAdapter(seen) {
+    return {
+      ats: 'greenhouse', requires: [], classifyOnly: false, uploadHosts: [],
+      async run(cap, ctx) {
+        seen.bank = ctx.answers.bank;
+        return { outcome: 'needs_human', pendingQuestion: { kind: 'salary_floor_probe', label: String(ctx.answers.bank.meta.salary_floor) } };
+      },
+    };
+  }
+
+  test('the application\'s own salary_floor wins over the shared bank\'s meta.salary_floor', async () => {
+    const id = await seedApprovedApplication({ atsType: 'greenhouse' });
+    await verifyClient.query('UPDATE ic_job_applications SET salary_floor = $2 WHERE id = $1', [id, 250000]);
+    const seen = {};
+    const result = await runApplyWorker(id, baseDeps({ adapters: { greenhouse: probeAdapter(seen) }, answerBank: fakeBank(150000) }));
+    assert.equal(result.status, 'needs_human');
+    assert.equal(seen.bank.meta.salary_floor, 250000, 'the application-level floor (250000) must win over the bank file\'s own value (150000)');
+  });
+
+  test('falls back to the bank\'s own meta.salary_floor when the application has none recorded', async () => {
+    const id = await seedApprovedApplication({ atsType: 'greenhouse' });
+    await verifyClient.query('UPDATE ic_job_applications SET salary_floor = NULL WHERE id = $1', [id]);
+    const seen = {};
+    const result = await runApplyWorker(id, baseDeps({ adapters: { greenhouse: probeAdapter(seen) }, answerBank: fakeBank(150000) }));
+    assert.equal(result.status, 'needs_human');
+    assert.equal(seen.bank.meta.salary_floor, 150000);
+  });
+
+  test('the effective bank never mutates the shared answerBank object passed in (a spread copy, not an in-place set)', async () => {
+    const id = await seedApprovedApplication({ atsType: 'greenhouse' });
+    await verifyClient.query('UPDATE ic_job_applications SET salary_floor = $2 WHERE id = $1', [id, 999999]);
+    const sharedBank = fakeBank(150000);
+    const seen = {};
+    await runApplyWorker(id, baseDeps({ adapters: { greenhouse: probeAdapter(seen) }, answerBank: sharedBank }));
+    assert.equal(sharedBank.meta.salary_floor, 150000, 'the ORIGINAL bank object passed by the caller is untouched -- a second application sharing it must see its own floor, not a leaked one');
+  });
+});

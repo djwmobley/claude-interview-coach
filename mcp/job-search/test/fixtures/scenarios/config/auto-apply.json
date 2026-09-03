@@ -1,0 +1,10 @@
+{
+  "_comment": "Test fixture mirror of config/auto-apply.json (PR A spec item 2).",
+  "fitFloor": 70,
+  "dailyCap": 5,
+  "atsAllow": ["greenhouse", "lever", "smartrecruiters", "workday", "icims", "dayforce"],
+  "floors": {
+    "texas_or_remote": 225000,
+    "relocation": 275000
+  }
+}

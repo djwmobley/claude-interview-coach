@@ -14,7 +14,7 @@ import path from 'node:path';
 import { JobSearchError } from '../../core/errors.js';
 import {
   createApplication, approve, getApplication, getApplicationForListing, retry, markAppliedByHand, resume,
-  listApplicationEvents,
+  listApplicationEvents, recordApplicationEvent,
 } from '../../core/applications.js';
 import { classifyApplyUrl } from '../../apply/ats-detect.js';
 import { resolveLatestApplicationScreenshot } from '../../apply/screenshot.js';
@@ -23,6 +23,11 @@ import { packageRoot } from '../../core/config.js';
 import { sendJson } from '../http.js';
 
 const ANSWER_BANK_PATH = path.join(packageRoot(), 'data', 'apply-answers.md');
+
+/** One-click apply (PR A spec item 7): a drafting row this old is reused only after resetting its resume
+ * link -- the world (the listing's own description, or the operator's data files) may well have changed
+ * since a stale drafting row was first created, so a fresh draft is safer than trusting a week-old link. */
+const STALE_DRAFTING_MS = 7 * 24 * 60 * 60 * 1000;
 
 /**
  * Best-effort, non-blocking: start the apply runner for an application that just landed in 'approved'.
@@ -37,6 +42,61 @@ function kickApplyRunner(deps, applicationId) {
   Promise.resolve(deps.applyRunner.start(applicationId)).catch((err) => {
     deps.log?.({ evt: 'apply_runner_start_failed', application_id: applicationId, err_message: err instanceof Error ? err.message.slice(0, 300) : String(err).slice(0, 300) });
   });
+}
+
+/**
+ * One-click apply (PR A spec item 7): resume runner -> review runner -> approve() -> kickApplyRunner.
+ * Runs entirely after the route has already sent its 202 -- never awaited by the route handler -- so a
+ * multi-minute headless run never blocks the HTTP response. Every phase writes a progress application
+ * event and calls streamHub.notifyChanged('events') so an open dashboard tab's SSE stream reflects each
+ * step as it happens, matching the existing approved/submitting live-progress pattern (application-card.js).
+ * Each runner call already records its own success/failure event and (for review) the verdict/findings
+ * columns; this function's own events mark the CHAIN's phase boundaries, not the runners' internal detail.
+ * @param {import('../server.js').DashboardDeps} deps
+ * @param {ReturnType<typeof import('../stream.js').createStreamHub>|undefined} streamHub
+ * @param {number} applicationId
+ * @param {number} listingId
+ */
+async function runApplyNowChain(deps, streamHub, applicationId, listingId) {
+  const notify = () => streamHub?.notifyChanged('events');
+  const progress = async (note) => {
+    await deps.withClient((c) => recordApplicationEvent(c, { applicationId, kind: 'progress', actor: 'apply', note }));
+    notify();
+  };
+  try {
+    if (!deps.resumeRunner || !deps.reviewRunner) {
+      deps.log?.({ evt: 'apply_now_chain_missing_runner', application_id: applicationId });
+      return;
+    }
+    await progress('one-click apply: drafting resume');
+    const resumeResult = await deps.resumeRunner.run(applicationId, listingId);
+    notify();
+    if (!resumeResult.ok || !resumeResult.markdownPath) return;
+
+    await progress('one-click apply: reviewing draft');
+    const reviewResult = await deps.reviewRunner.run(applicationId, resumeResult.markdownPath, listingId);
+    notify();
+    if (!reviewResult.ok || reviewResult.verdict !== 'PASS') return;
+
+    await progress('one-click apply: approving');
+    await deps.withClient((c) => approve(c, applicationId, { outputRoot: deps.outputRoot, actor: 'apply' }));
+    notify();
+    kickApplyRunner(deps, applicationId);
+  } catch (err) {
+    deps.log?.({
+      evt: 'apply_now_chain_failed', application_id: applicationId,
+      err_message: err instanceof Error ? err.message.slice(0, 300) : String(err).slice(0, 300),
+    });
+    try {
+      await deps.withClient((c) => recordApplicationEvent(c, {
+        applicationId, kind: 'error', actor: 'apply', note: 'one-click apply chain failed unexpectedly',
+        meta: { err_message: err instanceof Error ? err.message.slice(0, 300) : String(err).slice(0, 300) },
+      }));
+      notify();
+    } catch {
+      /* best-effort logging only; never let a failed error-log throw out of the fire-and-forget chain */
+    }
+  }
 }
 
 /**
@@ -66,6 +126,43 @@ export function register(router, deps, streamHub) {
     }
     streamHub?.notifyChanged('events');
     sendJson(ctx.res, 201, { ok: true, row: app, ats: classification });
+  }, { allowEmptyBody: true });
+
+  // One-click apply (PR A spec item 7): create-or-reuse the drafting application for this listing, then
+  // run resume -> review -> approve -> apply asynchronously (runApplyNowChain above). Returns 202 with the
+  // application id immediately; the caller polls/streams the application's own state and events for
+  // progress, exactly as it already does for the pre-existing Approve/Retry flow.
+  router.register('POST', '/api/listings/:id/apply-now', async (ctx) => {
+    const listingId = Number(ctx.params.id);
+    if (!Number.isInteger(listingId) || listingId <= 0) throw new JobSearchError('VALIDATION', 'id must be a positive integer');
+
+    let app = await deps.withClient((c) => getApplicationForListing(c, listingId));
+    if (app) {
+      if (app.state !== 'drafting') {
+        return sendJson(ctx.res, 409, {
+          ok: false, code: 'DUPLICATE_APPLICATION',
+          message: `an active application (${app.id}, state "${app.state}") already exists for listing ${listingId}`,
+        });
+      }
+      const ageMs = Date.now() - new Date(app.created_at).getTime();
+      if (ageMs > STALE_DRAFTING_MS) {
+        await deps.withClient((c) => c.query('UPDATE ic_job_applications SET resume_doc_id = NULL, updated_at = now() WHERE id = $1', [app.id]));
+        app = await deps.withClient((c) => getApplication(c, app.id));
+      }
+    } else {
+      const listingRes = await deps.withClient((c) => c.query('SELECT id, url, url_normalized FROM ic_job_listings WHERE id = $1', [listingId]));
+      if (listingRes.rowCount === 0) throw new JobSearchError('NOT_FOUND', `listing ${listingId} not found`);
+      const listing = listingRes.rows[0];
+      const applyUrl = listing.url_normalized ?? listing.url ?? null;
+      const classification = classifyApplyUrl(applyUrl);
+      app = await deps.withClient((c) => createApplication(c, { listingId, atsType: classification.ats, applyUrl, actor: 'dashboard' }));
+    }
+
+    streamHub?.notifyChanged('events');
+    sendJson(ctx.res, 202, { ok: true, application_id: app.id });
+
+    // Fire-and-forget: the route has already responded. Never awaited here.
+    runApplyNowChain(deps, streamHub, app.id, listingId);
   }, { allowEmptyBody: true });
 
   router.register('GET', '/api/applications/:id', async (ctx) => {

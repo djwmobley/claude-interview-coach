@@ -192,6 +192,10 @@ table { border-collapse: collapse; width: 100%; }
 .jobs-table .job-row__first-seen { width: 86px; }
 .jobs-table .job-row__company { width: 20%; }
 .jobs-table .job-row__location { width: 16%; }
+/* One-click apply (PR A spec item 8): the Apply column absorbs its own fixed width like every other
+   non-percentage column above, sized for its longest label ("Drafting resume"). */
+.jobs-table .job-row__apply { width: 112px; }
+.job-row__apply-status { color: var(--muted); font-size: 0.85em; }
 /* Fixed layout takes column widths from the header row; hiding a header at the 1180px breakpoint below
    (job-row__location, job-row__fit) simply removes that column's width claim and lets Title (still
    undeclared) absorb the freed space, same as at full width. */
