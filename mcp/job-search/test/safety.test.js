@@ -126,4 +126,22 @@ describe('structural safety', () => {
       assert.ok(!src.includes('\u2013'), `${path.relative(HERE, f)} contains an en-dash`);
     }
   });
+
+  // Regression guard for the literal NUL byte once embedded in core/auto-apply-select.js's dedup
+  // key template literal (it made git treat that file as binary). Reads raw bytes, not a decoded
+  // string, so a stray control character can never hide inside surrogate handling or encoding
+  // normalization. Tab/LF/CR are legitimate whitespace and are the only bytes below 0x20 allowed.
+  test('no control characters below 0x20 (other than tab/LF/CR) in any src/ or bin/ file', () => {
+    const all = [...files, ...walk(path.join(HERE, '..', 'bin'))];
+    const ALLOWED = new Set([0x09, 0x0a, 0x0d]);
+    for (const f of all) {
+      const buf = fs.readFileSync(f);
+      for (let i = 0; i < buf.length; i++) {
+        const b = buf[i];
+        if (b < 0x20 && !ALLOWED.has(b)) {
+          assert.fail(`${path.relative(HERE, f)} contains control byte 0x${b.toString(16).padStart(2, '0')} at offset ${i}`);
+        }
+      }
+    }
+  });
 });

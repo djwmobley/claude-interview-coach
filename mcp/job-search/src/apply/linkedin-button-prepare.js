@@ -100,8 +100,11 @@ export async function prepareLinkedInListing(client, listing, deps) {
     });
     if (probeResult.outcome === 'new_target') applyDetail = { externalApplyUrl: probeResult.url };
     else if (probeResult.outcome === 'hint') applyDetail = { applyProbe: probeResult.hint };
-    // 'timeout' -> applyDetail stays null: persistApplyTargetForListing below still records the attempt
-    // (apply_probed_at/probe_attempts) via its own no-candidate/no-hint branch, leaving apply_ats null.
+    // 'timeout' -> applyDetail stays null: persistApplyTargetForListing below falls back to the listing's
+    // own url_normalized/url as the resolution candidate (never skipped_no_candidate, since that URL is
+    // still non-null) and runs it through resolveApplyTarget, which correctly reports 'unresolved' since
+    // the raw LinkedIn posting URL is not itself an ATS apply link. The attempt is still recorded
+    // (apply_probed_at/probe_attempts), leaving apply_ats null.
   }
 
   return persistApplyTargetForListing(client, listing, applyDetail, {
