@@ -405,6 +405,39 @@ describe('classifyCompensationLabel: hourly-disqualifier ruling (2026-09-03)', (
     assert.equal(r.reason, 'salary_unclassified');
   });
 
+  test('Expected rate parks salary_unclassified (no hourly cue present)', () => {
+    const r = classifyCompensationLabel('Expected rate', floorDescriptor);
+    assert.equal(r.category, 'unclassified');
+    assert.equal(r.reason, 'salary_unclassified');
+  });
+
+  test('Bill rate parks salary_unclassified', () => {
+    const r = classifyCompensationLabel('Bill rate', floorDescriptor);
+    assert.equal(r.category, 'unclassified');
+    assert.equal(r.reason, 'salary_unclassified');
+  });
+
+  test('Hourly rate still parks hourly_rate_field (unaffected by the noun-sense rate fix)', () => {
+    const r = classifyCompensationLabel('Hourly rate', floorDescriptor);
+    assert.equal(r.category, 'hourly');
+    assert.equal(r.reason, 'hourly_rate_field');
+  });
+
+  test('"Rate your proficiency with SQL" is not compensation-family (verb-sense "rate" never gates)', () => {
+    const r = classifyCompensationLabel('Rate your proficiency with SQL', floorDescriptor);
+    assert.equal(r.category, 'not_compensation');
+  });
+
+  test('"Please rate your experience 1-5" is not compensation-family (verb-sense "rate" never gates)', () => {
+    const r = classifyCompensationLabel('Please rate your experience 1-5', floorDescriptor);
+    assert.equal(r.category, 'not_compensation');
+  });
+
+  test('"How would you rate your leadership?" is not compensation-family (verb-sense "rate" never gates)', () => {
+    const r = classifyCompensationLabel('How would you rate your leadership?', floorDescriptor);
+    assert.equal(r.category, 'not_compensation');
+  });
+
   test('Compensation alone parks salary_unclassified', () => {
     const r = classifyCompensationLabel('Compensation', floorDescriptor);
     assert.equal(r.category, 'unclassified');
@@ -434,6 +467,31 @@ describe('classifyCompensationLabel: hourly-disqualifier ruling (2026-09-03)', (
     assert.equal(r.category, 'component');
     assert.equal(r.reason, 'compensation_component_field');
   });
+
+  test('"Package delivered?" is not COMPONENT (never gated at all -- a shipment mention, not a comp package)', () => {
+    const r = classifyCompensationLabel('Package delivered?', floorDescriptor);
+    assert.notEqual(r.category, 'component');
+    assert.equal(r.category, 'not_compensation');
+  });
+
+  // Post-review sweep: confirm nothing else in the widened outer gate matches common non-compensation
+  // screening labels (coordinator-requested confirmation pass, 2026-09-03).
+  for (const label of [
+    'Years of experience',
+    'Base location',
+    'Are you authorized to work in the US?',
+    'Package delivered?',
+    'Total years managing teams',
+    'Equity and inclusion statement',
+    'Expected start date',
+    'Desired location',
+    'Target start date',
+  ]) {
+    test(`"${label}" is not compensation-family`, () => {
+      const r = classifyCompensationLabel(label, floorDescriptor);
+      assert.equal(r.category, 'not_compensation', `expected not_compensation, got "${r.category}"`);
+    });
+  }
 
   test('Expected annual salary, text control, configured floor: fills 225000', () => {
     const r = classifyCompensationLabel('Expected annual salary', floorDescriptor);
@@ -498,6 +556,11 @@ describe('SALARY_LABEL_RE: outer compensation-family gate', () => {
     'Rate expectation',
     'Target salary range',
     'Rate',
+    'Hourly rate',
+    'Bill rate',
+    'Expected rate',
+    'Rate:',
+    '(Rate)',
   ]) {
     test(`matches: "${label}"`, () => {
       assert.match(label, SALARY_LABEL_RE);
@@ -511,6 +574,11 @@ describe('SALARY_LABEL_RE: outer compensation-family gate', () => {
     'Corporate travel availability',
     '24-hour support experience',
     'Hours per week',
+    'Conversion rate for the referral program',
+    'Rate your proficiency with SQL',
+    'Please rate your experience 1-5',
+    'How would you rate your leadership?',
+    'Package delivered?',
   ]) {
     test(`does NOT match: "${label}"`, () => {
       assert.doesNotMatch(label, SALARY_LABEL_RE);

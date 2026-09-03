@@ -628,8 +628,9 @@ const BASE_ANNUAL_RE = /\bsalary\b|\bbase\s+salary\b|\bannual(?:ly)?\b|\bper\s+y
  * on-target, commission, equity/stock (each with a negative lookahead so an unrelated DEI or
  * insider-trading-policy mention never trips it), RSU, signing-on, relocation-AS-A-BENEFIT (never a bare
  * "willing to relocate?" boolean, which mentions no assistance/bonus/stipend/etc word), total comp, or a
- * generic "package". */
-const COMPONENT_RE = /\bbonus\b|\bOTE\b|\bon[- ]target\b|\bcommission\b|\bequity\b(?!.{0,20}\b(diversity|inclusion)\b)|\bstock\b(?!.{0,20}\b(trading|insider|policy)\b)|\bRSU\b|\bsign(?:ing)?[- ]on\b|\brelocation\b.{0,20}\b(assistance|bonus|stipend|package|allowance|amount|expect)\b|\btotal\s+comp(?:ensation)?\b|\bpackage\b/i;
+ * generic "package" (excluded when it reads as a shipment/delivery, e.g. "Package delivered?", via its own
+ * negative lookahead -- the same pattern equity/stock already use). */
+const COMPONENT_RE = /\bbonus\b|\bOTE\b|\bon[- ]target\b|\bcommission\b|\bequity\b(?!.{0,20}\b(diversity|inclusion)\b)|\bstock\b(?!.{0,20}\b(trading|insider|policy)\b)|\bRSU\b|\bsign(?:ing)?[- ]on\b|\brelocation\b.{0,20}\b(assistance|bonus|stipend|package|allowance|amount|expect)\b|\btotal\s+comp(?:ensation)?\b|\bpackage\b(?!.{0,20}\b(deliver(?:ed|y)?|shipp(?:ed|ing)?|track(?:ed|ing)?|courier|parcel)\b)/i;
 
 /** Rule 4 cue: a bare "range" mention. Only meaningful once the outer gate (SALARY_LABEL_RE below) has
  * already established the label is compensation-family -- an unqualified "range" alone (a "date range")
@@ -643,16 +644,32 @@ const RATE_EXPECTATION_PROXIMITY_RE = /\brate\b(?:\s+\S+){0,4}\s*\bexpectations?
 const EXPECTED_DESIRED_TARGET_PROXIMITY_RE = /\b(?:expected|desired|target)\b(?:\s+\S+){0,4}\s*\b(?:compensation|pay|salary|wages?|remuneration|OTE|rate|range)\b/i;
 
 /**
+ * Noun-sense "rate" cue (post-review fix: a bare \brate\b over-parked every verb-sense "rate" -- "Rate
+ * your proficiency with SQL", "Please rate your experience 1-5", "How would you rate your leadership?").
+ * "Rate" only enters the compensation gate when it reads as a NOUN meaning a pay figure, never a verb
+ * meaning "to score/evaluate": (a) the label IS exactly "rate", optionally decorated with a trailing colon
+ * or asterisk, or wrapped in parentheses (a bare field label with no other words); (b) a pay word
+ * immediately precedes "rate" (hourly/daily/day/pay/billing/bill/contract/salary/compensation rate); (c)
+ * "rate" is immediately followed by "of pay", "expectation(s)", "expected", "desired", or
+ * "requirement(s)"; or (d) an adjective (expected/desired/target/required) immediately precedes "rate".
+ * Every branch requires "rate" to be adjacent to (not merely present somewhere in the same label as) a
+ * pay-shaped word, so an unrelated verb-sense "rate" elsewhere in the sentence never trips it.
+ */
+const RATE_NOUN_RE = /^\s*\(?rate\)?[:*]?\s*$|\b(?:hourly|daily|day|pay|billing|bill|contract|salary|compensation)\s+rate\b|\brate\s+(?:of\s+pay|expectations?|expected|desired|requirements?)\b|\b(?:expected|desired|target|required)\s+rate\b/i;
+
+/**
  * Outer gate: a label is "compensation-family" -- eligible to be classified at all by
  * classifyCompensationLabel -- when it matches an hourly cue, a base-annual cue, a bare
- * compensation/remuneration/wages/OTE/pay/rate word, the COMPONENT regex (bonus, equity, stock, RSU,
- * relocation-as-benefit, package, total comp, ...), the rate<->expectations proximity pattern, or the
- * expected|desired|target<->compensation-word proximity pattern. A label matching NONE of these never
- * enters classifyCompensationLabel's rules at all -- it falls straight through to the generic three-tier
- * bank matcher exactly like any ordinary screening question ("Willing to relocate?", a DEI statement, an
- * unrelated "insider trading stock policy" mention all fail this gate and are never treated as
- * compensation-family). Exported so every adapter (and the dashboard answer-confirmation path, via
- * appendLearnedLabel) shares one pre-check rather than a private per-caller copy that could silently drift.
+ * compensation/remuneration/wages/OTE/pay word, the noun-sense "rate" cue (RATE_NOUN_RE -- never a bare
+ * \brate\b, which would wrongly gate a verb-sense "Rate your proficiency..." question), the COMPONENT
+ * regex (bonus, equity, stock, RSU, relocation-as-benefit, package, total comp, ...), the
+ * rate<->expectations proximity pattern, or the expected|desired|target<->compensation-word proximity
+ * pattern. A label matching NONE of these never enters classifyCompensationLabel's rules at all -- it
+ * falls straight through to the generic three-tier bank matcher exactly like any ordinary screening
+ * question ("Willing to relocate?", a DEI statement, an unrelated "insider trading stock policy" mention,
+ * "Rate your proficiency with SQL" all fail this gate and are never treated as compensation-family).
+ * Exported so every adapter (and the dashboard answer-confirmation path, via appendLearnedLabel) shares one
+ * pre-check rather than a private per-caller copy that could silently drift.
  */
 export const SALARY_LABEL_RE = new RegExp(
   [
@@ -663,7 +680,7 @@ export const SALARY_LABEL_RE = new RegExp(
     '\\bwages?\\b',
     '\\bOTE\\b',
     '\\bpay\\b',
-    '\\brate\\b',
+    RATE_NOUN_RE.source,
     COMPONENT_RE.source,
     RATE_EXPECTATION_PROXIMITY_RE.source,
     EXPECTED_DESIRED_TARGET_PROXIMITY_RE.source,
