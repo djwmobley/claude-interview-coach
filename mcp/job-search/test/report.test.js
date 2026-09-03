@@ -175,15 +175,42 @@ describe('buildScanReport: noise exclusion, home locations, review queue, disabl
   });
 
   test('buildReportSubject: [SCAN PARTIAL] / [SCAN FAILED] prefix when any run is not ok (decision 27)', async () => {
-    const dataOk = { dayKey: '2026-08-26', worstStatus: 'ok', noScan: false, lookAtThese: { rows: [] }, reviewQueue: { total: 0 } };
+    const dataOk = { dayKey: '2026-08-26', worstStatus: 'ok', noScan: false, lockMismatch: null, lookAtThese: { rows: [] }, reviewQueue: { total: 0 } };
     const dataPartial = { ...dataOk, worstStatus: 'partial' };
     assert.doesNotMatch(buildReportSubject(dataOk), /^\[SCAN/);
     assert.match(buildReportSubject(dataPartial), /^\[SCAN PARTIAL\]/);
   });
 
   test('buildReportSubject: [NO SCAN] prefix when noScan is true (decision 26)', () => {
-    const data = { dayKey: '2026-08-26', worstStatus: 'ok', noScan: true, lookAtThese: { rows: [] }, reviewQueue: { total: 0 } };
+    const data = { dayKey: '2026-08-26', worstStatus: 'ok', noScan: true, lockMismatch: null, lookAtThese: { rows: [] }, reviewQueue: { total: 0 } };
     assert.match(buildReportSubject(data), /^\[NO SCAN\]/);
+  });
+
+  test('buildReportSubject: [LOCK MISMATCH] prefix wins over [SCAN FAILED] and [NO SCAN] (config-lock rubric incident)', () => {
+    const data = { dayKey: '2026-08-26', worstStatus: 'failed', noScan: true, lockMismatch: { run_id: 1, message: 'missing config file(s): triage-candidate.md' }, lookAtThese: { rows: [] }, reviewQueue: { total: 0 } };
+    assert.match(buildReportSubject(data), /^\[LOCK MISMATCH\]/);
+  });
+
+  test('a CONFIG_LOCK_MISMATCH failed run row: buildScanReport sets lockMismatch and noScan is false (config-lock rubric incident: PRs #35/#36 left an empty [NO SCAN] digest with no reason)', async () => {
+    const profile = `zz-test-report-lockmismatch-${process.pid}`;
+    const since = new Date(Date.now() - 1000);
+    const msg = 'missing config file(s): triage-candidate.md -- copy the gitignored file from the main checkout into this worktree\'s config/ then rerun';
+    const row = await client.query(
+      `INSERT INTO ic_scan_runs (profile, trigger, status, started_at, finished_at, errors)
+       VALUES ($1, 'cli', 'failed', now(), now(), $2::jsonb) RETURNING id`,
+      [profile, JSON.stringify([{ source: null, code: 'CONFIG_LOCK_MISMATCH', message: msg }])],
+    );
+    try {
+      const report = await buildScanReport(client, { sinceOverride: since });
+      assert.equal(report.noScan, false, 'a run row exists, even a failed one, so this is not the bare NO SCAN case');
+      assert.ok(report.lockMismatch, 'lockMismatch must be populated from the failed run\'s CONFIG_LOCK_MISMATCH error');
+      assert.equal(report.lockMismatch.run_id, Number(row.rows[0].id));
+      assert.equal(report.lockMismatch.message, msg);
+      assert.match(buildReportSubject(report), /^\[LOCK MISMATCH\]/);
+      assert.match(renderReportText(report), /^LOCK MISMATCH: missing config file\(s\): triage-candidate\.md/m);
+    } finally {
+      await client.query(`DELETE FROM ic_scan_runs WHERE profile = $1`, [profile]);
+    }
   });
 
   test('disabled sources and review queue reasons are surfaced', async () => {
