@@ -174,6 +174,24 @@
       "dailyDetails": 1,
       "maxPagesPerQuery": 1
     },
+    "smartrecruiters": {
+      "_comment": "Apply pipeline follow-up (guardurl fix): registered ONLY so src/core/urlguard.js's buildRegistry() has a matching domain/pathPatterns entry for src/apply/worker.js's guardUrl() call before navigating to a SmartRecruiters apply_url -- there is no src/adapters/smartrecruiters.js scan adapter and this source is never scanned (it never appears in a profile's sources list). The scan-shaped fields below (transport/delayMs/dailyPages/etc.) are inert placeholders satisfying adaptersSchema, not tuned scan behavior. Domains are the exact two hosts ats-detect.js treats as certain SmartRecruiters hosts (jobs.smartrecruiters.com, careers.smartrecruiters.com); company-branded subdomains (e.g. acme.smartrecruiters.com) are a documented shared limitation and are deliberately NOT suffix-matched here.",
+      "transport": "html",
+      "domains": [
+        "jobs.smartrecruiters.com",
+        "careers.smartrecruiters.com"
+      ],
+      "pathPatterns": [
+        "^/[A-Za-z0-9][A-Za-z0-9._-]*/\\d+(-[A-Za-z0-9-]+)?/?(\\?.*)?$"
+      ],
+      "delayMs": [
+        2000,
+        4000
+      ],
+      "dailyPages": 1,
+      "dailyDetails": 1,
+      "maxPagesPerQuery": 1
+    },
     "exec": {
       "transport": "html",
       "domains": [],

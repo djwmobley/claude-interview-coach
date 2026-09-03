@@ -24,7 +24,11 @@ const routesText = fs.readFileSync(ROUTES_PATH, 'utf8');
 
 describe('apply-answer SKILL.md (apply pipeline slice 8)', () => {
   test('frontmatter carries every required field, including name: apply-answer', () => {
-    const fm = skillText.match(/^---\n([\s\S]*?)\n---/);
+    // \r?\n (not a bare \n) on both fences: a CRLF-checked-out SKILL.md (this repo has no .gitattributes
+    // rule pinning it to LF, and pinning one is a repo-wide policy decision out of scope here) must
+    // still be recognized -- a bare \n would leave the trailing \r attached to "---" on the opening
+    // fence line, so "---\n" never matches and the whole frontmatter block is missed.
+    const fm = skillText.match(/^---\r?\n([\s\S]*?)\r?\n---/);
     assert.ok(fm, 'SKILL.md must start with a --- frontmatter block');
     const block = fm[1];
     for (const field of ['name:', 'description:', 'argument-hint:', 'user-invocable:', 'allowed-tools:']) {

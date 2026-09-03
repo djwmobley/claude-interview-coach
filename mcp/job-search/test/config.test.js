@@ -14,7 +14,7 @@ import path from 'node:path';
 import { fileURLToPath } from 'node:url';
 import fs from 'node:fs';
 import os from 'node:os';
-import { alertSendersSchema, GMAIL_PARSER_NAMES, loadConfig, triageSchema, atsApplySchema, CONFIG_FILES, computeConfigHash, loadTriageCandidateSummary } from '../src/core/config.js';
+import { alertSendersSchema, GMAIL_PARSER_NAMES, loadConfig, triageSchema, atsApplySchema, CONFIG_FILES, computeConfigHash, loadTriageCandidateSummary, checkConfigLock } from '../src/core/config.js';
 import { PARSERS } from '../src/adapters/gmail-parsers.js';
 import { CONFIG_DIR } from './helpers/scan-fixtures.js';
 
@@ -218,6 +218,17 @@ describe('atsApplySchema and config/ats-apply.json (apply pipeline slice 2, spec
     } finally {
       fs.rmSync(tmp, { recursive: true, force: true });
     }
+  });
+});
+
+describe('config.lock.json freshness against the REAL config dir (guardurl fix: smartrecruiters entry)', () => {
+  test('checkConfigLock() with no dir override (mcp/job-search/config, not the CONFIG_DIR test fixture) reports ok', () => {
+    // No `dir` argument here on purpose: checkConfigLock() falls back to getEnv().JOBSEARCH_CONFIG_DIR,
+    // which resolves to the real mcp/job-search/config directory unless a caller sets the env var (the
+    // spawned-child tests elsewhere in this suite do that for isolation; this in-process test does not).
+    // This must fail if someone edits config/adapters.json without re-running `node bin/config-lock.js --write`.
+    const r = checkConfigLock();
+    assert.equal(r.ok, true, `config.lock.json is stale: expected=${r.expected} actual=${r.actual} -- run \`node bin/config-lock.js --write\``);
   });
 });
 
