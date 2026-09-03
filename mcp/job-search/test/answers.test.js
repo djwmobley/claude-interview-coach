@@ -9,7 +9,7 @@ import { test, describe } from 'node:test';
 import assert from 'node:assert/strict';
 import {
   parseAnswerBank, appendLearnedLabel, normalizeText, matchQuestion, resolveControl, CONTROL_TYPES,
-  taxonomyOptionsFor, taxonomyCanonicalFor, resolveSalaryAnswer, validateAnswerAgainstOptions, isDurableFactType,
+  taxonomyOptionsFor, taxonomyCanonicalFor, classifyCompensationLabel, validateAnswerAgainstOptions, isDurableFactType,
   SALARY_LABEL_RE,
 } from '../src/apply/answers.js';
 
@@ -354,50 +354,139 @@ describe('EEO taxonomy: both directions', () => {
   });
 });
 
-describe('resolveSalaryAnswer: unit-basis detection and single-configured-floor', () => {
-  const bank = { meta: { salary_floor: 150000 } };
-  const noFloorBank = { meta: { salary_floor: null } };
+describe('classifyCompensationLabel: hourly-disqualifier ruling (2026-09-03)', () => {
+  const floorDescriptor = { controlType: 'text', floor: 225000 };
 
-  test('annual label + text control + configured floor: answers with the floor', () => {
-    const r = resolveSalaryAnswer({ label: 'What is your desired annual salary?', controlType: 'text', bank });
-    assert.equal(r.outcome, 'answer');
-    assert.equal(r.unit, 'annual');
-    assert.equal(r.value, 150000);
+  test('24-hour support experience not compensation-family', () => {
+    const r = classifyCompensationLabel('24-hour support experience', { controlType: 'text', floor: 225000 });
+    assert.equal(r.category, 'not_compensation');
   });
 
-  test('hourly label + text control + configured floor: answers with floor/2080', () => {
-    const r = resolveSalaryAnswer({ label: 'What is your desired hourly rate?', controlType: 'text', bank });
-    assert.equal(r.outcome, 'answer');
-    assert.equal(r.unit, 'hourly');
-    assert.equal(r.value, Math.round((150000 / 2080) * 100) / 100);
+  test('Hours per week not compensation-family', () => {
+    const r = classifyCompensationLabel('Hours per week', { controlType: 'text', floor: 225000 });
+    assert.equal(r.category, 'not_compensation');
   });
 
-  test('a label matching neither hourly nor annual wording is ambiguous and parks', () => {
-    const r = resolveSalaryAnswer({ label: 'What are your compensation expectations?', controlType: 'text', bank });
-    assert.equal(r.outcome, 'park');
-    assert.equal(r.reason, 'ambiguous_unit_unknown');
+  test('Hourly rate parks hourly_rate_field with no value', () => {
+    const r = classifyCompensationLabel('Hourly rate', floorDescriptor);
+    assert.equal(r.category, 'hourly');
+    assert.equal(r.reason, 'hourly_rate_field');
+    assert.equal(r.value, null);
   });
 
-  test('a label matching BOTH hourly and annual wording is ambiguous and parks', () => {
-    const r = resolveSalaryAnswer({ label: 'Annual salary or hourly rate, whichever applies', controlType: 'text', bank });
-    assert.equal(r.outcome, 'park');
-    assert.equal(r.reason, 'ambiguous_unit_both_matched');
+  test('mixed case "Hourly Rate:" parks hourly_rate_field', () => {
+    const r = classifyCompensationLabel('Hourly Rate:', floorDescriptor);
+    assert.equal(r.category, 'hourly');
+    assert.equal(r.reason, 'hourly_rate_field');
   });
 
-  test('a non-text control (range/currency picker) always parks, unconfigured', () => {
-    const r = resolveSalaryAnswer({ label: 'Desired annual salary', controlType: 'radio', bank });
-    assert.equal(r.outcome, 'park');
-    assert.equal(r.reason, 'range_or_currency_shape_not_configured');
+  test('Expected salary (per hour or per year) parks ambiguous_dual_unit_field', () => {
+    const r = classifyCompensationLabel('Expected salary (per hour or per year)', floorDescriptor);
+    assert.equal(r.category, 'ambiguous_dual_unit');
+    assert.equal(r.reason, 'ambiguous_dual_unit_field');
+    assert.equal(r.value, null);
   });
 
-  test('no salary_floor configured: parks even with an unambiguous unit and a text control', () => {
-    const r = resolveSalaryAnswer({ label: 'Desired annual salary', controlType: 'text', bank: noFloorBank });
-    assert.equal(r.outcome, 'park');
-    assert.equal(r.reason, 'salary_floor_not_configured');
+  test('Base salary + bonus parks compensation_component_field', () => {
+    const r = classifyCompensationLabel('Base salary + bonus', floorDescriptor);
+    assert.equal(r.category, 'component');
+    assert.equal(r.reason, 'compensation_component_field');
+  });
+
+  test('Salary range parks salary_range_field', () => {
+    const r = classifyCompensationLabel('Salary range', floorDescriptor);
+    assert.equal(r.category, 'range');
+    assert.equal(r.reason, 'salary_range_field');
+  });
+
+  test('Rate alone parks salary_unclassified', () => {
+    const r = classifyCompensationLabel('Rate', floorDescriptor);
+    assert.equal(r.category, 'unclassified');
+    assert.equal(r.reason, 'salary_unclassified');
+  });
+
+  test('Compensation alone parks salary_unclassified', () => {
+    const r = classifyCompensationLabel('Compensation', floorDescriptor);
+    assert.equal(r.category, 'unclassified');
+    assert.equal(r.reason, 'salary_unclassified');
+  });
+
+  test('"diversity, equity and inclusion" is not COMPONENT (never gated at all)', () => {
+    const r = classifyCompensationLabel('Our commitment to diversity, equity and inclusion', floorDescriptor);
+    assert.notEqual(r.category, 'component');
+    assert.equal(r.category, 'not_compensation');
+  });
+
+  test('"insider trading stock policy" is not COMPONENT (never gated at all)', () => {
+    const r = classifyCompensationLabel('Acknowledge the insider trading stock policy', floorDescriptor);
+    assert.notEqual(r.category, 'component');
+    assert.equal(r.category, 'not_compensation');
+  });
+
+  test('"Willing to relocate?" is not COMPONENT (never gated at all)', () => {
+    const r = classifyCompensationLabel('Willing to relocate?', floorDescriptor);
+    assert.notEqual(r.category, 'component');
+    assert.equal(r.category, 'not_compensation');
+  });
+
+  test('Relocation assistance amount parks compensation_component_field', () => {
+    const r = classifyCompensationLabel('Relocation assistance amount', floorDescriptor);
+    assert.equal(r.category, 'component');
+    assert.equal(r.reason, 'compensation_component_field');
+  });
+
+  test('Expected annual salary, text control, configured floor: fills 225000', () => {
+    const r = classifyCompensationLabel('Expected annual salary', floorDescriptor);
+    assert.equal(r.category, 'fill');
+    assert.equal(r.reason, null);
+    assert.equal(r.value, 225000);
+  });
+
+  test('same label with a select ("radio") control parks salary_unclassified, never fills', () => {
+    const r = classifyCompensationLabel('Expected annual salary', { controlType: 'radio', floor: 225000 });
+    assert.equal(r.category, 'unclassified');
+    assert.equal(r.reason, 'salary_unclassified');
+  });
+
+  test('no configured floor: an otherwise-fillable annual label parks salary_unclassified', () => {
+    const r = classifyCompensationLabel('Expected annual salary', { controlType: 'text', floor: null });
+    assert.equal(r.category, 'unclassified');
+  });
+
+  test('unresolved sibling unit selector present parks salary_unit_selector_present, even with a floor configured', () => {
+    const r = classifyCompensationLabel('Compensation', { controlType: 'text', floor: 225000, hasUnitSelector: true });
+    assert.equal(r.category, 'unit_selector');
+    assert.equal(r.reason, 'salary_unit_selector_present');
+  });
+
+  test('a paired/grouped (range) control descriptor parks salary_range_field regardless of label wording', () => {
+    const r = classifyCompensationLabel('Compensation', { controlType: 'text', floor: 225000, isRangePair: true });
+    assert.equal(r.category, 'range');
+    assert.equal(r.reason, 'salary_range_field');
   });
 });
 
-describe('SALARY_LABEL_RE: unit-less compensation wording (post-review widening, apply pipeline slice 8)', () => {
+describe('appendLearnedLabel: refuses HOURLY/COMPONENT labels (gate-before-learned-answers ruling)', () => {
+  test('an hourly label is refused: the bank text is returned unchanged', () => {
+    const bank = 'salary_floor: 150000\n\n## work_authorization\ntype: boolean\nvalue: true\n';
+    const updated = appendLearnedLabel(bank, 'work_authorization', 'Hourly rate');
+    assert.equal(updated, bank);
+  });
+
+  test('a component (bonus) label is refused: the bank text is returned unchanged', () => {
+    const bank = 'salary_floor: 150000\n\n## work_authorization\ntype: boolean\nvalue: true\n';
+    const updated = appendLearnedLabel(bank, 'work_authorization', 'Base salary + bonus');
+    assert.equal(updated, bank);
+  });
+
+  test('a non-compensation label is still learned normally', () => {
+    const bank = 'salary_floor: 150000\n\n## work_authorization\ntype: boolean\nvalue: true\n';
+    const updated = appendLearnedLabel(bank, 'work_authorization', 'Are you legally authorized to work here?');
+    assert.match(updated, /learned: Are you legally authorized to work here\?/);
+  });
+});
+
+describe('SALARY_LABEL_RE: outer compensation-family gate', () => {
   for (const label of [
     'Desired compensation',
     'What are your pay expectations',
@@ -408,6 +497,7 @@ describe('SALARY_LABEL_RE: unit-less compensation wording (post-review widening,
     'Current wage',
     'Rate expectation',
     'Target salary range',
+    'Rate',
   ]) {
     test(`matches: "${label}"`, () => {
       assert.match(label, SALARY_LABEL_RE);
@@ -419,7 +509,8 @@ describe('SALARY_LABEL_RE: unit-less compensation wording (post-review widening,
     'Spanish proficiency',
     'Payload size limit',
     'Corporate travel availability',
-    'Conversion rate for the referral program',
+    '24-hour support experience',
+    'Hours per week',
   ]) {
     test(`does NOT match: "${label}"`, () => {
       assert.doesNotMatch(label, SALARY_LABEL_RE);

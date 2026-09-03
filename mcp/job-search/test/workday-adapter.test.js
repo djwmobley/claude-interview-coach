@@ -37,7 +37,7 @@ function makeFakeCap(responses = {}) {
 }
 
 /**
- * @param {{ match?: Function, credential?: { username: string, password: string } | null, gmailVerify?: Function, sharedCalls?: any[] }} overrides
+ * @param {{ match?: Function, credential?: { username: string, password: string } | null, gmailVerify?: Function, sharedCalls?: any[], salaryFloor?: number|null }} overrides
  */
 function makeCtx(overrides = {}) {
   /** @type {any[]} */
@@ -52,7 +52,10 @@ function makeCtx(overrides = {}) {
     tenantHost: 'acme.wd5.myworkdayjobs.com',
     profile: { fullName: 'Jordan Reyes', email: 'jordan@example.com', phone: '555-0100' },
     documents: { resumePath: 'resumes/jordan-reyes.docx', coverletterPath: null },
-    answers: { match: overrides.match ?? (() => ({ outcome: 'needs_human_no_match', tier: 'none' })) },
+    answers: {
+      match: overrides.match ?? (() => ({ outcome: 'needs_human_no_match', tier: 'none' })),
+      bank: { meta: { salary_floor: overrides.salaryFloor === undefined ? null : overrides.salaryFloor } },
+    },
     log: (f) => events.push(f),
     recordSubmitRequestSent: async () => { events.push({ evt: 'submit_request_sent' }); },
     credentials: {
@@ -269,6 +272,64 @@ describe('workday adapter', () => {
     const result = await workday.run(cap, ctx);
     assert.equal(result.outcome, 'submitted');
     assert.ok(cap.calls.some((c) => c[0] === 'fill' && c[1] === '#q1' && c[2] === 'Yes'));
+  });
+
+  // Damian's ruling (hourly-disqualifier), spec item B: the compensation-family gate runs BEFORE the
+  // generic bank matcher / tier-1 learned lookup, unconditionally -- an hourly-shaped question must park
+  // even when a "learned" tier-1 match exists and would otherwise auto-answer it.
+  test('an HOURLY-shaped question is gated BEFORE the generic bank matcher: never filled, even when a learned-tier match would otherwise auto-answer it', async () => {
+    let matchCalled = false;
+    const cap = makeFakeCap({
+      waitFor: {
+        [SELECTORS.authGate]: EL,
+        [SELECTORS.stepProbe]: EL,
+        [SELECTORS.customFields]: [{ tagName: 'input', type: 'text', id: 'rate', name: 'rate', text: 'Desired hourly rate', value: null, required: true, options: null }],
+      },
+    });
+    const ctx = makeCtx({
+      credential: { username: 'jordan@example.com', password: 'stored-pw' },
+      salaryFloor: 150000,
+      match: () => { matchCalled = true; return { outcome: 'auto_answer', tier: 'learned', value: 72, controlResult: { ok: true, text: '72' } }; },
+    });
+    const result = await workday.run(cap, ctx);
+    assert.equal(result.outcome, 'needs_human');
+    assert.equal(result.pendingQuestion.kind, 'question');
+    assert.equal(matchCalled, false, 'the compensation gate must intercept before the generic bank matcher is ever consulted');
+    assert.equal(cap.calls.some((c) => c[0] === 'fill' && c[1] === '#rate'), false, 'an hourly field must never be filled, even from a learned tier-1 match');
+  });
+
+  test('a plain-text BASE ANNUAL salary question fills from the configured floor', async () => {
+    const cap = makeFakeCap({
+      waitFor: {
+        [SELECTORS.authGate]: EL,
+        [SELECTORS.stepProbe]: EL,
+        [SELECTORS.customFields]: [{ tagName: 'input', type: 'text', id: 'salary', name: 'salary', text: 'Desired annual salary', value: null, required: true, options: null }],
+        [SELECTORS.submit]: { tagName: 'button', text: 'Submit' },
+        [SELECTORS.confirmationHeading]: { tagName: 'h1', text: 'Thank you for applying!' },
+      },
+    });
+    const ctx = makeCtx({ credential: { username: 'jordan@example.com', password: 'stored-pw' }, salaryFloor: 150000 });
+    const result = await workday.run(cap, ctx);
+    assert.equal(result.outcome, 'submitted');
+    assert.ok(cap.calls.some((c) => c[0] === 'fill' && c[1] === '#salary' && c[2] === '150000'));
+  });
+
+  test('Workday\'s two-step compensation shape (a number field with a sibling unit/currency selector) parks salary_unit_selector_present rather than guessing which unit', async () => {
+    const cap = makeFakeCap({
+      waitFor: {
+        [SELECTORS.authGate]: EL,
+        [SELECTORS.stepProbe]: EL,
+        [SELECTORS.customFields]: [
+          { tagName: 'input', type: 'text', id: 'compAmount', name: 'compAmount', text: 'Compensation', value: null, required: true, options: null },
+          { tagName: 'select', type: null, id: 'compUnit', name: 'compUnit', text: '', value: null, required: true, options: ['Hourly', 'Annual'] },
+        ],
+      },
+    });
+    const ctx = makeCtx({ credential: { username: 'jordan@example.com', password: 'stored-pw' }, salaryFloor: 150000 });
+    const result = await workday.run(cap, ctx);
+    assert.equal(result.outcome, 'needs_human');
+    assert.equal(result.pendingQuestion.kind, 'question');
+    assert.equal(cap.calls.some((c) => c[0] === 'fill' && c[1] === '#compAmount'), false, 'never guess a fill when the unit is unresolved');
   });
 
   test('an unconfirmed resume upload refuses to proceed to submit', async () => {

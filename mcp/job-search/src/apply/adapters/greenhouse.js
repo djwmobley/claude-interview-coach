@@ -17,6 +17,7 @@
  * not automate anything until the selectors are corrected against a real page.
  */
 import { detectRecaptchaV3Script } from '../../browser/wall.js';
+import { classifyCompensationLabel } from '../answers.js';
 
 /** Selector contract this adapter targets. Grouped here (not inlined) so a future selector fix touches one place. */
 export const SELECTORS = Object.freeze({
@@ -61,10 +62,12 @@ function controlTypeFor(f) {
 }
 
 /**
- * Answer every enumerated custom screening field. Returns `{ parked: false }` when every required field
- * either auto-answered or was optional-and-unmatched (skipped, logged); returns `{ parked: true,
- * pendingQuestion }` on the FIRST required field that does not auto-answer (never guesses a required
- * answer -- amended spec).
+ * Answer every enumerated custom screening field. Compensation gate (Damian's ruling, spec item B): a
+ * compensation-family label (classifyCompensationLabel) is ALWAYS routed through that gate before the
+ * generic bank matcher, and every shape but a plain-text BASE ANNUAL figure with a configured floor always
+ * parks. Returns `{ parked: false }` when every required field either auto-answered or was
+ * optional-and-unmatched (skipped, logged); returns `{ parked: true, pendingQuestion }` on the FIRST
+ * required field that does not auto-answer (never guesses a required answer -- amended spec).
  * @param {import('../apply-capability.js').ApplyCapability} cap
  * @param {any} ctx
  */
@@ -74,9 +77,25 @@ async function answerCustomFields(cap, ctx) {
     const label = String(f.text ?? '').trim();
     if (!label) continue;
     const controlType = controlTypeFor(f);
+    const selector = f.id ? `#${f.id}` : null;
+
+    const compClass = classifyCompensationLabel(label, { controlType, floor: ctx.answers.bank?.meta?.salary_floor ?? null });
+    if (compClass.category !== 'not_compensation') {
+      if (compClass.category === 'fill' && selector) {
+        await cap.fill(selector, String(compClass.value));
+        continue;
+      }
+      const shot = await cap.screenshot();
+      return {
+        parked: true,
+        pendingQuestion: {
+          kind: 'question', label, page_url: ctx.applyUrl, screenshot: shot.relPath, suggestion: null, tier: null,
+        },
+      };
+    }
+
     const match = ctx.answers.match(label, controlType, f.options ?? undefined);
     if (match.outcome === 'auto_answer') {
-      const selector = f.id ? `#${f.id}` : null;
       if (!selector) continue;
       if (controlType === 'text') {
         await cap.fill(selector, String(match.controlResult?.text ?? match.value ?? ''));

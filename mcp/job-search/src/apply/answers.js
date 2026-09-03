@@ -27,10 +27,12 @@
  *   - EEO race/ethnicity (and any other key that needs it) gets a semantic-enum-to-site-option taxonomy
  *     (EEO_TAXONOMY), because the same canonical answer ("White, not Hispanic or Latino") is spelled
  *     differently on every ATS.
- *   - Salary: unit-basis (hourly vs annual) is detected from the question label; ambiguous parks. Only a
- *     plain 'text' control with an unambiguous unit and a configured salary_floor ever produces an
- *     answer; any other control shape (range, currency picker) parks, because this slice does not
- *     configure one.
+ *   - Salary/compensation (Damian's ruling, amended 2026-09-03): never apply to hourly-rate jobs. An
+ *     HOURLY-shaped question is a disqualifier signal and is NEVER filled, regardless of a configured
+ *     floor. Bonus/OTE/relocation/equity/stock/RSU/signing-on/total-comp and any range or unresolved
+ *     unit-selector shape always park too. Only a plain 'text' control asking for a BASE ANNUAL figure,
+ *     with a configured salary_floor, ever auto-fills -- see classifyCompensationLabel below, which
+ *     entirely replaces the prior resolveSalaryAnswer/2080-hourly-derivation design.
  *
  * The bank file (data/apply-answers.md under this package, gitignored -- see data/apply-answers.example.md
  * for the tracked, de-identified format reference) is a human-edited markdown-like file. Every line inside
@@ -263,6 +265,12 @@ export function parseAnswerBank(rawText) {
  * half of "confirming a suggestion promotes it to the learned store" (spec section 4) -- wiring it to a
  * dashboard action is left to the slice that builds the question-answer card (out of this slice's scope;
  * see the PR body).
+ * Refuses (logs and returns bankText UNCHANGED, never throws) when `label` itself classifies as HOURLY or
+ * COMPONENT (classifyCompensationLabel below) -- the ruling's "gate before learned answers" requirement
+ * applies here too: a human confirming a one-time hourly/bonus/OTE/relocation/etc answer must never
+ * promote that label into the learned store, or the NEXT posting with the same wording would silently
+ * auto-fill from it. Every other category (not_compensation, ambiguous_dual_unit, range, unit_selector,
+ * unclassified) is fine to learn -- only HOURLY and COMPONENT are refused, per spec.
  * @param {string} bankText
  * @param {string} key
  * @param {string} label raw (un-normalized) label text, exactly as seen on the page
@@ -270,6 +278,12 @@ export function parseAnswerBank(rawText) {
  */
 export function appendLearnedLabel(bankText, key, label) {
   if (typeof bankText !== 'string') throw new JobSearchError('VALIDATION', 'appendLearnedLabel: bankText must be a string');
+  const compClass = classifyCompensationLabel(label);
+  if (compClass.category === 'hourly' || compClass.category === 'component') {
+    // eslint-disable-next-line no-console
+    console.warn(`appendLearnedLabel: refusing to learn a ${compClass.category} label under key "${key}": "${String(label).slice(0, 200)}"`);
+    return bankText;
+  }
   const text = bankText.replace(/\r\n/g, '\n');
   const lines = text.split('\n');
   let start = -1;
@@ -593,94 +607,143 @@ export function validateAnswerAgainstOptions(fact, value, options) {
 }
 
 // ---------------------------------------------------------------------------------------------------
-// Salary: unit-basis detection, single configured floor, everything else parks.
+// Compensation-family classification (Damian's ruling, 2026-09-03, amended by the pre-authoring
+// spec-adversary pass): never apply to hourly-rate jobs. Hourly is a disqualifier signal and is NEVER
+// filled -- there is no hourly-from-annual derivation anywhere in this module any more. Bonus/OTE/
+// relocation-as-benefit/equity/stock/RSU/signing-on/total-comp/package, a range shape, and an unresolved
+// unit-selector shape always park. Only a plain 'text' control asking for a BASE ANNUAL figure, with a
+// configured floor, ever auto-fills. This entirely replaces the pre-ruling resolveSalaryAnswer design.
 // ---------------------------------------------------------------------------------------------------
 
-const HOURLY_RE = /\bhour(?:ly)?\b|\/\s*hr\b/i;
-const ANNUAL_RE = /\bannual(?:ly)?\b|\byear(?:ly)?\b|\/\s*yr\b|\bsalary\b/i;
+/** Rule 1/2 cue: an explicit hourly-rate wording. Deliberately excludes bare "hour" -- "24-hour support"
+ * and "Hours per week" never match; only a genuinely hourly-PAY phrasing gates here. Exported so
+ * src/core/auto-apply-select.js's `hourly_pay` closed reason (a listing-level signal, not a screening
+ * question) shares this exact cue rather than a private, potentially drifting copy. */
+export const HOURLY_RE = /\bhourly\b|\bper\s+hour\b|\/\s*hrs?\b|\bhourly\s+rate\b|\bhourly\s+wage\b/i;
+
+/** Rule 6 cue: an annual/base-salary wording a plain-text field may safely auto-fill from the floor. */
+const BASE_ANNUAL_RE = /\bsalary\b|\bbase\s+salary\b|\bannual(?:ly)?\b|\bper\s+year\b|\/\s*yr\b|\bcompensation\s+expectation\b|\bdesired\s+pay\b|\bexpected\s+pay\b|\bpay\s+range\b/i;
+
+/** Rule 3 cue: any compensation COMPONENT other than a single base-annual figure -- bonus, OTE,
+ * on-target, commission, equity/stock (each with a negative lookahead so an unrelated DEI or
+ * insider-trading-policy mention never trips it), RSU, signing-on, relocation-AS-A-BENEFIT (never a bare
+ * "willing to relocate?" boolean, which mentions no assistance/bonus/stipend/etc word), total comp, or a
+ * generic "package". */
+const COMPONENT_RE = /\bbonus\b|\bOTE\b|\bon[- ]target\b|\bcommission\b|\bequity\b(?!.{0,20}\b(diversity|inclusion)\b)|\bstock\b(?!.{0,20}\b(trading|insider|policy)\b)|\bRSU\b|\bsign(?:ing)?[- ]on\b|\brelocation\b.{0,20}\b(assistance|bonus|stipend|package|allowance|amount|expect)\b|\btotal\s+comp(?:ensation)?\b|\bpackage\b/i;
+
+/** Rule 4 cue: a bare "range" mention. Only meaningful once the outer gate (SALARY_LABEL_RE below) has
+ * already established the label is compensation-family -- an unqualified "range" alone (a "date range")
+ * never reaches this regex because it never passes the outer gate on its own. */
+const RANGE_RE = /\brange\b/i;
+
+/** Proximity cues folded into the outer gate: "rate expectation(s)" either order, and
+ * expected/desired/target near a compensation word -- covers phrasings with no bare compensation noun at
+ * all ("What is your rate expectation?", "Desired range"). */
+const RATE_EXPECTATION_PROXIMITY_RE = /\brate\b(?:\s+\S+){0,4}\s*\bexpectations?\b|\bexpectations?\b(?:\s+\S+){0,4}\s*\brate\b/i;
+const EXPECTED_DESIRED_TARGET_PROXIMITY_RE = /\b(?:expected|desired|target)\b(?:\s+\S+){0,4}\s*\b(?:compensation|pay|salary|wages?|remuneration|OTE|rate|range)\b/i;
 
 /**
- * Apply pipeline slice 8 (widened post-review, same slice): a label is salary-related whenever it matches
- * either unit regex above OR one of the unit-less compensation words/phrases below -- there was no single
- * pre-existing "is this a salary question" regex to reuse, only the two unit-detection regexes, so this
- * combines them per the amended spec's own fallback instruction. A real screening question routinely asks
- * for compensation with no "salary"/"hourly"/"annual" keyword at all ("Desired compensation", "What are
- * your pay expectations", "Base + bonus target", "OTE expectation"), and those must never fall through to
- * the generic bank matcher or a guessed plain-text fill just because they used different wording.
- *
- * Every alternative below is word-boundary-anchored so it never fires on "pay" as a mere substring of an
- * unrelated word ("PayPal", "payload") -- `\bpay\b` requires a non-word character (or string edge) on both
- * sides, which "PayPal"/"payload" never provide immediately after "pay".
- *   - `compensation`, `remuneration`, `wages?`, `OTE`, `pay`: bare, unambiguous compensation nouns.
- *   - `base ... bonus` / `bonus ... base` (up to 4 intervening words either order): "base salary plus
- *     bonus" phrasing, e.g. "Base + bonus target".
- *   - `rate ... expectation` / `expectation ... rate` (up to 4 intervening words either order): "rate
- *     expectation" phrasing, without requiring the word "pay" to appear too.
- *   - `(expected|desired|target)` followed within a few words by `(compensation|pay|salary|wage(s)|
- *     remuneration|OTE|rate|range)`: the proximity rule the amended spec calls for by name, so a bare
- *     "range" or "rate" only counts when explicitly framed as a compensation ask (an unqualified "range" or
- *     "rate" alone is too generic -- "date range", "conversion rate" -- to treat as salary-related on its
- *     own).
- *
- * Every adapter that answers a custom screening field checks this BEFORE the generic bank matcher/text
- * fill, so a salary-shaped question always routes through resolveSalaryAnswer() and never falls through to
- * an unrelated alias/synonym match or a guessed plain-text fill. Exported so every adapter (present and
- * future) shares the exact same detection regex rather than a private per-adapter copy that could silently
- * drift.
+ * Outer gate: a label is "compensation-family" -- eligible to be classified at all by
+ * classifyCompensationLabel -- when it matches an hourly cue, a base-annual cue, a bare
+ * compensation/remuneration/wages/OTE/pay/rate word, the COMPONENT regex (bonus, equity, stock, RSU,
+ * relocation-as-benefit, package, total comp, ...), the rate<->expectations proximity pattern, or the
+ * expected|desired|target<->compensation-word proximity pattern. A label matching NONE of these never
+ * enters classifyCompensationLabel's rules at all -- it falls straight through to the generic three-tier
+ * bank matcher exactly like any ordinary screening question ("Willing to relocate?", a DEI statement, an
+ * unrelated "insider trading stock policy" mention all fail this gate and are never treated as
+ * compensation-family). Exported so every adapter (and the dashboard answer-confirmation path, via
+ * appendLearnedLabel) shares one pre-check rather than a private per-caller copy that could silently drift.
  */
 export const SALARY_LABEL_RE = new RegExp(
   [
     HOURLY_RE.source,
-    ANNUAL_RE.source,
+    BASE_ANNUAL_RE.source,
     '\\bcompensation\\b',
     '\\bremuneration\\b',
     '\\bwages?\\b',
     '\\bOTE\\b',
     '\\bpay\\b',
-    '\\bbase\\b(?:\\s+\\S+){0,4}\\s*\\bbonus\\b',
-    '\\bbonus\\b(?:\\s+\\S+){0,4}\\s*\\bbase\\b',
-    '\\brate\\b(?:\\s+\\S+){0,4}\\s*\\bexpectations?\\b',
-    '\\bexpectations?\\b(?:\\s+\\S+){0,4}\\s*\\brate\\b',
-    '\\b(?:expected|desired|target)\\b(?:\\s+\\S+){0,4}\\s*\\b(?:compensation|pay|salary|wages?|remuneration|OTE|rate|range)\\b',
+    '\\brate\\b',
+    COMPONENT_RE.source,
+    RATE_EXPECTATION_PROXIMITY_RE.source,
+    EXPECTED_DESIRED_TARGET_PROXIMITY_RE.source,
   ].join('|'),
   'i',
 );
 
 /**
- * @typedef {Object} SalaryResult
- * @property {'answer'|'park'} outcome
- * @property {string} [reason] present when outcome is 'park'
- * @property {number} [value]
- * @property {'hourly'|'annual'} [unit]
+ * @typedef {Object} CompensationDescriptor
+ * @property {string} [controlType] the field's resolveControl()-style control type
+ * @property {number|null} [floor] the configured salary floor (bank.meta.salary_floor, or an
+ *   application's own per-application floor override -- see worker.js)
+ * @property {boolean} [isRangePair] true when the field descriptor itself reports a paired/grouped
+ *   min-max control, regardless of what the label text says
+ * @property {boolean} [hasUnitSelector] true when the field descriptor reports an unresolved sibling
+ *   unit/currency selector (e.g. Workday's two-step compensation question: a number field plus a sibling
+ *   dropdown) that this build does not resolve
  */
 
 /**
- * Resolve a salary-expectation question. Unit basis is read from the question's own label text, never
- * guessed: both/neither of HOURLY_RE and ANNUAL_RE matching is ambiguous and parks. Only a plain 'text'
- * control ever produces an answer in this slice -- a range picker or a currency-amount widget always
- * parks, because "explicitly configured" support for those shapes does not exist yet (spec's own
- * qualifier: "unless explicitly configured"). The single number this function ever writes comes from
- * `bank.meta.salary_floor` (data/apply-answers.md, personal data, never config/); an hourly figure is
- * derived from it (floor / 2080, the standard full-time annual-hours divisor), never entered separately.
- * @param {{ label: unknown, controlType: unknown, bank: AnswerBank }} input
- * @returns {SalaryResult}
+ * @typedef {Object} CompensationClassification
+ * @property {'not_compensation'|'hourly'|'ambiguous_dual_unit'|'component'|'range'|'unit_selector'|'fill'|'unclassified'} category
+ * @property {string|null} reason one of the spec's park reasons, or null for 'not_compensation'/'fill'
+ * @property {number|null} value the resolved floor, present only when category === 'fill'
  */
-export function resolveSalaryAnswer(input) {
-  const label = typeof input.label === 'string' ? input.label : '';
-  const isHourly = HOURLY_RE.test(label);
-  const isAnnual = ANNUAL_RE.test(label);
-  if (isHourly === isAnnual) {
-    return { outcome: 'park', reason: isHourly ? 'ambiguous_unit_both_matched' : 'ambiguous_unit_unknown' };
+
+/**
+ * Total classification of a screening-question label against the hourly/compensation-component ruling.
+ * Every caller that answers a custom screening field (every adapter's answerCustomFields, and
+ * appendLearnedLabel below) MUST run this BEFORE the generic three-tier bank matcher / before writing to
+ * the learned store -- a learned or alias answer can never fill an hourly, component, range, or
+ * unit-selector field.
+ *
+ * `category: 'not_compensation'` means the label failed the outer gate entirely: the caller proceeds with
+ * its normal (non-compensation) matching path, completely unchanged. Every other category means the
+ * caller must NOT consult the generic bank matcher for this field at all: fill from `value` (category
+ * 'fill' only) or park with `reason` (every other category).
+ *
+ * Rule order (first match wins), matching the spec exactly except that the HOURLY/dual-unit pair is
+ * checked together rather than HOURLY-alone-first: numbering "HOURLY, then ambiguous-dual-unit" only
+ * produces the spec's own worked example ("Expected salary (per hour or per year)" -> ambiguous, not
+ * hourly) when the more specific dual-cue case is checked before the plain hourly case -- checking them in
+ * the other order would let a both-present label misfire as plain hourly before ever reaching rule 2.
+ * @param {unknown} label
+ * @param {CompensationDescriptor} [descriptor]
+ * @returns {CompensationClassification}
+ */
+export function classifyCompensationLabel(label, descriptor = {}) {
+  const text = typeof label === 'string' ? label : '';
+  if (!SALARY_LABEL_RE.test(text)) {
+    return { category: 'not_compensation', reason: null, value: null };
   }
-  if (input.controlType !== 'text') {
-    return { outcome: 'park', reason: 'range_or_currency_shape_not_configured' };
+
+  const hourlyHit = HOURLY_RE.test(text);
+  const annualHit = BASE_ANNUAL_RE.test(text);
+
+  // Rules 1+2.
+  if (hourlyHit && annualHit) return { category: 'ambiguous_dual_unit', reason: 'ambiguous_dual_unit_field', value: null };
+  if (hourlyHit) return { category: 'hourly', reason: 'hourly_rate_field', value: null };
+
+  // Rule 3: bonus/OTE/equity/stock/RSU/signing-on/relocation-as-benefit/package/total-comp.
+  if (COMPONENT_RE.test(text)) return { category: 'component', reason: 'compensation_component_field', value: null };
+
+  // Rule 4: a range wording, or the field descriptor itself reports a paired/grouped (min/max) control --
+  // regardless of controlType.
+  if (RANGE_RE.test(text) || descriptor.isRangePair) {
+    return { category: 'range', reason: 'salary_range_field', value: null };
   }
-  const floor = input.bank?.meta?.salary_floor;
-  if (typeof floor !== 'number' || !Number.isFinite(floor)) {
-    return { outcome: 'park', reason: 'salary_floor_not_configured' };
+
+  // Rule 5: an unresolved sibling unit/currency selector (e.g. Workday's number-field-plus-dropdown shape).
+  if (descriptor.hasUnitSelector) {
+    return { category: 'unit_selector', reason: 'salary_unit_selector_present', value: null };
   }
-  if (isHourly) {
-    return { outcome: 'answer', value: Math.round((floor / 2080) * 100) / 100, unit: 'hourly' };
+
+  // Rule 6: a plain 'text' control, an unambiguous base-annual cue, and a configured floor.
+  if (annualHit && descriptor.controlType === 'text' && typeof descriptor.floor === 'number' && Number.isFinite(descriptor.floor)) {
+    return { category: 'fill', reason: null, value: descriptor.floor };
   }
-  return { outcome: 'answer', value: floor, unit: 'annual' };
+
+  // Rule 7: anything else compensation-family (a bare "compensation"/"pay"/"rate"/OTE, a non-text
+  // control, or an unconfigured floor) parks unclassified rather than falling through to a guess.
+  return { category: 'unclassified', reason: 'salary_unclassified', value: null };
 }

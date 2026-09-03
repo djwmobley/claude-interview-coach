@@ -21,7 +21,7 @@
  * appropriate) instead of proceeding against a page it does not actually recognize.
  */
 import { detectRecaptchaV3Script } from '../../browser/wall.js';
-import { resolveSalaryAnswer, SALARY_LABEL_RE } from '../answers.js';
+import { classifyCompensationLabel } from '../answers.js';
 
 /** Selector contract this adapter targets. Grouped here (not inlined) so a future selector fix touches one place. */
 export const SELECTORS = Object.freeze({
@@ -115,13 +115,13 @@ async function uploadDocumentsIfPresent(cap, ctx) {
 }
 
 /**
- * Answer every enumerated custom screening field on the page. Salary routing (spec item C): a label
- * matching SALARY_LABEL_RE is ALWAYS routed through resolveSalaryAnswer() before the generic bank matcher
- * ever runs -- a salary-shaped question is never answered by an unrelated alias/synonym match, and no fill
- * call for it ever carries a number unless resolveSalaryAnswer itself resolved one (which requires a
- * configured salary_floor). An unresolved salary question always parks, regardless of the field's own
- * required flag -- never silently skipped, since guessing or skipping a compensation figure is a worse
- * failure mode than an extra manual click.
+ * Answer every enumerated custom screening field on the page. Compensation gate (Damian's ruling, spec
+ * item B): a label classifying as compensation-family (classifyCompensationLabel) is ALWAYS routed
+ * through that gate before the generic bank matcher ever runs -- never answered by an unrelated
+ * alias/synonym/learned match. Hourly is a disqualifier and is never filled; only a plain-text BASE ANNUAL
+ * figure with a configured floor ever auto-fills. Every other compensation-family shape always parks,
+ * regardless of the field's own required flag -- never silently skipped, since guessing or skipping a
+ * compensation figure is a worse failure mode than an extra manual click.
  * @param {import('../apply-capability.js').ApplyCapability} cap
  * @param {any} ctx
  */
@@ -133,10 +133,10 @@ async function answerCustomFields(cap, ctx) {
     const controlType = controlTypeFor(f);
     const selector = f.id ? `#${f.id}` : null;
 
-    if (SALARY_LABEL_RE.test(label)) {
-      const salaryResult = resolveSalaryAnswer({ label, controlType, bank: ctx.answers.bank });
-      if (salaryResult.outcome === 'answer' && selector) {
-        await cap.fill(selector, String(salaryResult.value));
+    const compClass = classifyCompensationLabel(label, { controlType, floor: ctx.answers.bank?.meta?.salary_floor ?? null });
+    if (compClass.category !== 'not_compensation') {
+      if (compClass.category === 'fill' && selector) {
+        await cap.fill(selector, String(compClass.value));
         continue;
       }
       const shot = await cap.screenshot();

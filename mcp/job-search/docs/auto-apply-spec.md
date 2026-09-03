@@ -83,8 +83,11 @@ non-US.
 ```
 not_scored, below_fit, human_fit_override, duplicate_of, not_us, salary_below_floor,
 active_application, no_description, apply_target_unresolved, easy_apply_only, ats_not_allowed,
-confidence_not_exact, daily_cap, eligible
+confidence_not_exact, hourly_pay, daily_cap, eligible
 ```
+
+`hourly_pay` (added by the hourly-disqualifier ruling, section 13 below) is checked immediately before the
+final `eligible` return -- after every other closed reason, before the daily cap is ever applied.
 
 `below_fit` vs `human_fit_override`: a fit score under the floor that a human explicitly set (the newest
 `ic_job_events` `kind='fit'` row for that listing has `actor <> 'auto'`) is reported distinctly from an
@@ -230,3 +233,68 @@ existing scan-report and follow-ups sections. `bin/remind.js` wires `autoApplySu
   session (`connectSession`, `session.attachPage`, `makeCapability`) for the button-probe path is
   exercised only by inspection, not by an automated test against a real or simulated CDP endpoint --
   `runPrepare`'s own tests inject `linkedInBrowser` directly, bypassing `openLinkedInBrowser` entirely.
+
+## 13. Hourly-disqualifier ruling (2026-09-03)
+
+Damian's ruling: never apply to hourly-rate jobs. Hourly is a disqualifier signal at both the
+screening-question level and the listing level; bonus/OTE/relocation/equity/stock/RSU/signing-on/
+total-comp/a range shape/an unresolved unit-selector shape always park a screening question; only a
+plain-text BASE ANNUAL figure with a configured floor ever auto-fills. This entirely removed the prior
+`resolveSalaryAnswer` design (including its floor/2080 hourly-derivation, which no longer exists anywhere
+in this codebase).
+
+**A. Screening-question classification (`src/apply/answers.js`).** `classifyCompensationLabel(label,
+descriptor)` replaces `resolveSalaryAnswer`. An outer gate (`SALARY_LABEL_RE`) decides whether a label is
+"compensation-family" at all -- a label matching none of its cues (hourly wording, base-annual wording, a
+bare compensation/remuneration/wages/OTE/pay/rate word, the bonus/OTE/equity/stock/RSU/relocation-as-
+benefit/package/total-comp regex, or the rate<->expectations / expected|desired|target<->compensation-word
+proximity patterns) is `category: 'not_compensation'` and falls through to the ordinary three-tier bank
+matcher unchanged. Every other label is classified, first-match-wins:
+
+1. HOURLY (`/\bhourly\b|\bper\s+hour\b|\/\s*hrs?\b|\bhourly\s+rate\b|\bhourly\s+wage\b/i` -- deliberately
+   excludes bare "hour", so "24-hour support" and "Hours per week" never match) -> park
+   `hourly_rate_field`, never a value.
+2. HOURLY and BASE_ANNUAL cues both present -> park `ambiguous_dual_unit_field`.
+3. COMPONENT (bonus, OTE, on-target, commission, equity/stock with negative lookaheads for an unrelated
+   DEI/insider-trading-policy mention, RSU, signing-on, relocation-AS-A-BENEFIT, total comp, package) ->
+   park `compensation_component_field`.
+4. A bare "range" mention, or the field descriptor itself reports a paired/grouped min-max control -> park
+   `salary_range_field`, regardless of control type.
+5. The field descriptor reports an unresolved sibling unit/currency selector -> park
+   `salary_unit_selector_present`.
+6. BASE_ANNUAL (`salary`, `base salary`, `annual(ly)`, `per year`, `/yr`, `compensation expectation`,
+   `desired pay`, `expected pay`, `pay range`) AND a plain `'text'` control AND a configured floor -> fill
+   the floor.
+7. Anything else compensation-family (a bare `compensation`/`pay`/`rate`/OTE, a non-text control, or an
+   unconfigured floor) -> park `salary_unclassified`.
+
+Every adapter (Workday, Greenhouse, Lever, SmartRecruiters, iCIMS, Dayforce) runs this gate BEFORE the
+generic three-tier bank matcher for every enumerated custom field -- a learned/alias/synonym answer can
+never fill an HOURLY, COMPONENT, range, or unit-selector field, because the gate never lets that field
+reach `ctx.answers.match` at all. `appendLearnedLabel` independently refuses (logs, returns the bank text
+unchanged) to store a label that itself classifies HOURLY or COMPONENT, so a human's one-time hourly/bonus
+answer can never be promoted into the learned store either. Workday's own two-step compensation shape (a
+number field plus a sibling unit/currency `<select>`) is detected heuristically
+(`hasSiblingUnitSelector` in `src/apply/adapters/workday.js`) and populates the descriptor so rule 5 fires
+-- UNVERIFIED against a live Workday tenant, see the Blind Spots section.
+
+**B. Structured pay period (`sql/016_listing_salary_period.sql`, `src/core/normalize.js`).**
+`ic_job_listings.salary_period` (`text`, nullable) is a total classification of a listing's own
+`salary_raw` text into `'hour'|'day'|'week'|'month'|'year'|'unknown'`, computed by the new
+`parseSalaryPeriod()` (never throws) and persisted by every scan-run upsert (`insertListing`/
+`updateListing` in `src/core/upsert.js`). `bin/backfill-salary-period.js` is an optional, explicitly-
+invoked, read-mostly script that fills `salary_period` from `salary_raw` for pre-migration rows where it
+is `NULL`; it is idempotent and supports `--dry-run`, and is never wired into any scheduled/unattended
+path.
+
+**C. Listing-level `hourly_pay` (`src/core/auto-apply-select.js`).** `CLOSED_REASONS` gains `hourly_pay`,
+checked immediately before the final `eligible` return (before the daily cap is ever applied). The signal
+(`isHourlyPaySignal`): `salary_period === 'hour'`, OR `salary_period` is `null`/`undefined` AND
+`salary_raw` (NEVER `description`, which routinely mentions "hourly" in unrelated benefits copy) matches
+the same anchored `HOURLY_RE` cue from part A with the cue within 12 characters of a dollar figure, either
+direction. A listing carrying neither signal is unaffected -- `CandidateRow` gained `salaryPeriod` and
+`salaryRaw` fields, sourced from `ic_job_listings.salary_period`/`salary_raw`.
+
+**D. Answer-bank documentation.** `data/apply-answers.md` (gitignored, personal data) may still describe
+the old floor/2080 hourly-fill behavior in its own comments; this PR does not edit that file (it is never
+tracked in git). If Damian's own copy documents the superseded behavior, it should be updated by hand.

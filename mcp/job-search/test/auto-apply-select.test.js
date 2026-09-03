@@ -77,6 +77,43 @@ describe('classifyCandidate: one reason per test, closed enum', () => {
   test('confidence_not_exact: resolved but not exact confidence', () => assert.equal(classifyCandidate(row({ applyConfidence: 'inferred' }), CTX), 'confidence_not_exact'));
   test('eligible: everything checks out', () => assert.equal(classifyCandidate(row(), CTX), 'eligible'));
 
+  // Damian's ruling (hourly-disqualifier, spec item D): hourly_pay is checked AFTER confidence_not_exact
+  // and BEFORE the final 'eligible' return -- so an otherwise fully-eligible row still gets disqualified
+  // when its own pay signal says hourly.
+  describe('hourly_pay: Damian\'s ruling -- never apply to hourly-rate jobs', () => {
+    test('salary_period === "hour" disqualifies regardless of salary_raw', () => {
+      assert.equal(classifyCandidate(row({ salaryPeriod: 'hour', salaryRaw: 'no dollar figure here at all' }), CTX), 'hourly_pay');
+    });
+
+    test('salary_period null, salary_raw carries an hourly cue within 12 chars of a dollar figure', () => {
+      assert.equal(classifyCandidate(row({ salaryPeriod: null, salaryRaw: 'Pays $55/hr, weekends optional' }), CTX), 'hourly_pay');
+      assert.equal(classifyCandidate(row({ salaryPeriod: null, salaryRaw: '$45 hourly rate' }), CTX), 'hourly_pay');
+    });
+
+    test('an annual listing whose salary_raw mentions an unrelated hourly wellness stipend far from any dollar figure is NOT hourly_pay', () => {
+      assert.equal(
+        classifyCandidate(row({ salaryPeriod: null, salaryRaw: 'Hourly wellness stipend available; $65,000/year base' }), CTX),
+        'eligible',
+      );
+    });
+
+    test('salary_period === "year" is never hourly_pay even if salary_raw happens to mention "hourly" elsewhere', () => {
+      assert.equal(classifyCandidate(row({ salaryPeriod: 'year', salaryRaw: 'Hourly stipend plus $150,000/year base' }), CTX), 'eligible');
+    });
+
+    test('null salaryPeriod/salaryRaw fields (pre-migration-016 rows) are unaffected', () => {
+      assert.equal(classifyCandidate(row({ salaryPeriod: null, salaryRaw: null }), CTX), 'eligible');
+      assert.equal(classifyCandidate(row({ salaryPeriod: undefined, salaryRaw: undefined }), CTX), 'eligible');
+    });
+
+    test('hourly_pay precedes daily_cap: a would-be-capped row is reported hourly_pay via classifyCandidate, never reaches applyDailyCap as eligible', () => {
+      const classified = [{ row: row({ salaryPeriod: 'hour' }), reason: classifyCandidate(row({ salaryPeriod: 'hour' }), CTX) }];
+      assert.equal(classified[0].reason, 'hourly_pay');
+      const capped = applyDailyCap(classified, 0);
+      assert.equal(capped[0].reason, 'hourly_pay', 'a non-eligible reason must never be overwritten by applyDailyCap');
+    });
+  });
+
   test('every non-daily_cap CLOSED_REASONS member is reachable', () => {
     const reachable = new Set([
       classifyCandidate(row({ fitScore: null }), CTX),
@@ -91,6 +128,7 @@ describe('classifyCandidate: one reason per test, closed enum', () => {
       classifyCandidate(row({ applyUrl: null, applyAts: null }), CTX),
       classifyCandidate(row({ applyAts: 'workday', applyUrl: 'https://acme.wd1.myworkdayjobs.com/en-US/External/job/x' }), CTX),
       classifyCandidate(row({ applyConfidence: 'inferred' }), CTX),
+      classifyCandidate(row({ salaryPeriod: 'hour' }), CTX),
       classifyCandidate(row(), CTX),
     ]);
     for (const reason of CLOSED_REASONS) {
