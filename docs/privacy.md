@@ -37,7 +37,7 @@ If you fork or clone this repo publicly, the gitignore protections apply automat
 If you use a private repository and want git history for your career data, you can remove the gitignore lines for `data/` and `coaching/`. The `.gitignore` file has a comment explaining this:
 
 ```
-# Personal data — ignored by default to prevent accidental exposure.
+# Personal data: ignored by default to prevent accidental exposure.
 # If you use a private repo and want to version your data, remove these lines.
 /data/
 /coaching/

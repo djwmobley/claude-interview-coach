@@ -8,7 +8,7 @@ Print the following reference. No file I/O needed.
 
 ---
 
-## AI Interview Coach — Command Reference
+## AI Interview Coach: Command Reference
 
 ### Stage 1: Getting Started
 

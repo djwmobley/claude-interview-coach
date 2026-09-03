@@ -18,45 +18,45 @@ All examples below are from a tough-mode interview with the fictional example pr
 
 **The coaching loop:** you answer, the coach catches anti-patterns and provides the strongest version:
 
-> **Recruiter:** "The role is heavily Go — it's our primary language for platform services. I see three years on your CV. The engineers on this team have been writing Go for seven, eight years. How would you handle that gap in experience?"
+> **Recruiter:** "The role is heavily Go: it's our primary language for platform services. I see three years on your CV. The engineers on this team have been writing Go for seven, eight years. How would you handle that gap in experience?"
 >
 > **You:** "Probably not as good as them *laughs*. But I'm a quick learner."
 >
 > **Coach:** That answer just killed your candidacy. Let me be specific about why:
 >
-> "Probably not as good as them" — she didn't say you're worse than the team. You said that. She asked how you'd handle the difference. You confirmed yourself as the weakest engineer on the team before you've even interviewed. That goes straight into her notes.
+> "Probably not as good as them": she didn't say you're worse than the team. You said that. She asked how you'd handle the difference. You confirmed yourself as the weakest engineer on the team before you've even interviewed. That goes straight into her notes.
 >
-> "I'm a quick learner" — every single candidate says this. It means nothing. It's the recruiter equivalent of white noise.
+> "I'm a quick learner": every single candidate says this. It means nothing. It's the recruiter equivalent of white noise.
 >
 > Anti-patterns triggered:
-> - **Confirming the recruiter's concern** — she floated the gap. You confirmed it and made it worse.
-> - **Volunteering negatives** — she said the team has 7-8 years. She didn't say "so you'd be the weakest." You volunteered that.
-> - **Generic self-description** — "quick learner" is not a differentiator.
-> - **Missing quantitative checkboxes** — you have 3 years of Go. You didn't even state the number or what you built with it.
+> - **Confirming the recruiter's concern**: she floated the gap. You confirmed it and made it worse.
+> - **Volunteering negatives**: she said the team has 7-8 years. She didn't say "so you'd be the weakest." You volunteered that.
+> - **Generic self-description**: "quick learner" is not a differentiator.
+> - **Missing quantitative checkboxes**: you have 3 years of Go. You didn't even state the number or what you built with it.
 >
 > What she actually needed to hear: what you've built with Go, and why 3 years of production Go from someone who also does infrastructure is different from 3 years of Go from a pure backend dev.
 >
-> **Strongest version:** "Three years of production Go — I built the microservice layer at NordPay for their payment platform, and I wrote Go tooling at ShopStream for the internal developer platform. My angle isn't competing on pure language years — it's that I write Go AND design the infrastructure it runs on. Most Go engineers don't think about the platform layer. I do both. Is the team looking for a pure Go specialist, or someone who bridges Go development and infrastructure?"
+> **Strongest version:** "Three years of production Go: I built the microservice layer at NordPay for their payment platform, and I wrote Go tooling at ShopStream for the internal developer platform. My angle isn't competing on pure language years: it's that I write Go AND design the infrastructure it runs on. Most Go engineers don't think about the platform layer. I do both. Is the team looking for a pure Go specialist, or someone who bridges Go development and infrastructure?"
 
 **Session debrief:** after each session, you get structured feedback and a concrete focus for next time:
 
 > **Dominant patterns:** Volunteering negatives (5 of 8 answers) and not answering the actual question (4 of 8).
-> No gap reframing applied — despite having frameworks for it, zero questions used the acknowledge-pivot-question back pattern.
+> No gap reframing applied: despite having frameworks for it, zero questions used the acknowledge-pivot-question back pattern.
 >
 > **Focus for next session:**
 > 1. Write and memorise 15-second recruiter pitch
 > 2. Practise gap reframing on 3 common gaps
-> 3. Practise direct answer structure — answer first, brief context, stop
-> 4. Work on emotional regulation — when a question feels unfair, pause, don't react
+> 3. Practise direct answer structure: answer first, brief context, stop
+> 4. Work on emotional regulation: when a question feels unfair, pause, don't react
 
 **Progress tracking:** anti-pattern counts across sessions so you can see improvement over time:
 
 > | Anti-Pattern | Total | Trend |
 > |---|---|---|
-> | Volunteered a negative unprompted | 5 | — (baseline) |
-> | Not answering the actual question | 4 | — (baseline) |
-> | Hedging on rate/availability/logistics | 2 | — (baseline) |
-> | Confirming recruiter's concern | 2 | — (baseline) |
+> | Volunteered a negative unprompted | 5 |: (baseline) |
+> | Not answering the actual question | 4 |: (baseline) |
+> | Hedging on rate/availability/logistics | 2 |: (baseline) |
+> | Confirming recruiter's concern | 2 |: (baseline) |
 
 ## Quick start
 

@@ -1,10 +1,10 @@
-# Direct Answer Structure — Answer First, Explain Second
+# Direct Answer Structure: Answer First, Explain Second
 
 ## Quick Overview
 
 **What it is:** A technique for structuring answers so you give the verdict/answer immediately, then brief context, then stop.
 
-**The problem it fixes:** "Essay structure" (verdict last) and "not answering the actual question" — two persistent anti-patterns where you ramble before answering, or never quite answer at all.
+**The problem it fixes:** "Essay structure" (verdict last) and "not answering the actual question": two persistent anti-patterns where you ramble before answering, or never quite answer at all.
 
 **The formula:** **Answer → Brief context → Stop**
 
@@ -14,7 +14,7 @@
 > "Well, [specific process] is complex because you have to rebuild environments, and there are different strategies depending on workload types... so technically no, but I've done something very similar..."
 
 ✓ **Direct answer structure:**
-> "Not in that exact form. What the client needs — building a parallel environment, zero downtime — I've done exactly that."
+> "Not in that exact form. What the client needs (building a parallel environment, zero downtime), I've done exactly that."
 
 **When to use:** Every answer to every question. This is the default structure, not an edge case.
 
@@ -41,7 +41,7 @@ You give a long preamble, explanation, or justification BEFORE answering the que
 **What happened:** 30 seconds of preamble, answer buried at the end, sounds like you're avoiding saying "no."
 
 ✓ **Direct answer:**
-> "Not in that exact form. What the client needs — building a parallel environment, migrating workloads with zero downtime — I've done exactly that."
+> "Not in that exact form. What the client needs (building a parallel environment, migrating workloads with zero downtime), I've done exactly that."
 
 **Result:** Answer in the first 3 words. Context follows. Recruiter is satisfied.
 
@@ -83,7 +83,7 @@ You give a long preamble, explanation, or justification BEFORE answering the que
 
 ✓ **Direct answer:**
 > **Q:** "Do you have CI/CD experience?"
-> **A:** "Yes. I built the full CI/CD pipeline from scratch in [CI/CD platform] — [pipeline technology], multi-stage, deploying across [N] environments."
+> **A:** "Yes. I built the full CI/CD pipeline from scratch in [CI/CD platform]: [pipeline technology], multi-stage, deploying across [N] environments."
 
 ---
 
@@ -111,7 +111,7 @@ You give a long preamble, explanation, or justification BEFORE answering the que
 
 ✓ **Direct answer:**
 > **Q:** "Tell me about a time you disagreed with a technical decision."
-> **A:** "At [project/client], there was a discussion about [technical topic] — the team wanted [approach A], I recommended [approach B] because of [concrete reason]. I documented the risks, and the team went with [approach B]."
+> **A:** "At [project/client], there was a discussion about [technical topic]: the team wanted [approach A], I recommended [approach B] because of [concrete reason]. I documented the risks, and the team went with [approach B]."
 
 **Key:** Start with the project and situation ("At [project]..."), not philosophy about disagreements.
 
@@ -157,7 +157,7 @@ You give a long preamble, explanation, or justification BEFORE answering the que
 
 ✓ **Direct answer:**
 > **Q:** "How do you handle disagreements in a team?"
-> **A:** "I document my concerns, discuss with the team, and if the decision goes against me, I commit to it and raise it in the retro if problems emerge. At [project], I was part of a larger team — this came up regularly."
+> **A:** "I document my concerns, discuss with the team, and if the decision goes against me, I commit to it and raise it in the retro if problems emerge. At [project], I was part of a larger team: this came up regularly."
 
 **Key:** Process first (how you handle it), then one concrete grounding example (where you did it).
 
@@ -173,7 +173,7 @@ You give a long preamble, explanation, or justification BEFORE answering the que
 > "Well, let me explain how [specific process] works... you see, [technical explanation]..."
 
 ✓ **Direct answer:**
-> "Not in that exact form. What the client needs — parallel buildout, zero downtime — I've done exactly that. Does the client need [specific tool] experience, or someone who understands the architecture?"
+> "Not in that exact form. What the client needs (parallel buildout, zero downtime), I've done exactly that. Does the client need [specific tool] experience, or someone who understands the architecture?"
 
 ---
 
@@ -199,7 +199,7 @@ You give a long preamble, explanation, or justification BEFORE answering the que
 > "Well, I'm currently finishing up another engagement, and I'd need to organize some things, so I think I could probably..."
 
 ✓ **Direct answer:**
-> "[Start date], [hours] per week. I've managed concurrent engagements before — [brief reference to precedent from your projects]."
+> "[Start date], [hours] per week. I've managed concurrent engagements before: [brief reference to precedent from your projects]."
 
 ---
 
@@ -271,9 +271,9 @@ If the answer to any of these is "no," you're likely doing essay structure.
 ## Related Anti-Patterns
 
 This technique fixes:
-- **Essay structure (verdict last)** — Answer comes at the end instead of the beginning
-- **Didn't answer the actual question** — Gave tangential or philosophical answer instead of what they asked for
-- **Over-explaining** — Kept talking instead of stopping after brief context
+- **Essay structure (verdict last)**: Answer comes at the end instead of the beginning
+- **Didn't answer the actual question**: Gave tangential or philosophical answer instead of what they asked for
+- **Over-explaining**: Kept talking instead of stopping after brief context
 
 See [anti-patterns.md](anti-patterns.md) for full list.
 
@@ -281,10 +281,10 @@ See [anti-patterns.md](anti-patterns.md) for full list.
 
 ## Related Strategy Files
 
-- [behavioral-questions-without-prepared-example.md](behavioral-questions-without-prepared-example.md) — Specific strategies for "tell me about a time" questions when you can't recall examples
-- [gap-reframing.md](gap-reframing.md) — How to structure gap answers (acknowledge → pivot → question back)
-- [question-back-technique.md](question-back-technique.md) — How to use question-backs after direct answers
-- [pin-down-defense.md](pin-down-defense.md) — How to handle pressure tests with direct answers
+- [behavioral-questions-without-prepared-example.md](behavioral-questions-without-prepared-example.md): Specific strategies for "tell me about a time" questions when you can't recall examples
+- [gap-reframing.md](gap-reframing.md): How to structure gap answers (acknowledge → pivot → question back)
+- [question-back-technique.md](question-back-technique.md): How to use question-backs after direct answers
+- [pin-down-defense.md](pin-down-defense.md): How to handle pressure tests with direct answers
 
 ---
 

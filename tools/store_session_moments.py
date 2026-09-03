@@ -2,7 +2,7 @@
 Store key Q&A moments from a coaching session into ic_session_moments.
 Called by the debrief skill and interview-workflow after every session.
 
-Usage — pipe JSON array to stdin:
+Usage: pipe JSON array to stdin:
   echo '[{"question":"...", "response":"...", ...}]' | python tools/store_session_moments.py
 
 Or pass a JSON file:
@@ -11,16 +11,16 @@ Or pass a JSON file:
 JSON fields per moment:
   question      (str, required)
   response      (str, required)
-  coach_notes   (str, optional) — coach's feedback on this answer
+  coach_notes   (str, optional): coach's feedback on this answer
   quality_score (int 1-5, optional)
-  company       (str, optional) — company the role was at
-  role_type     (str, optional) — "recruiter" or "hiring_manager"
-  session_date  (str YYYY-MM-DD, optional) — defaults to today
+  company       (str, optional): company the role was at
+  role_type     (str, optional): "recruiter" or "hiring_manager"
+  session_date  (str YYYY-MM-DD, optional): defaults to today
   tags          (list[str], optional)
 
 Only moments with quality_score <= 3 or explicit coach_notes are worth storing
 (high-quality clean answers add less retrieval value than coached corrections).
-The skill decides what to include — this script stores whatever it receives.
+The skill decides what to include: this script stores whatever it receives.
 """
 
 import json

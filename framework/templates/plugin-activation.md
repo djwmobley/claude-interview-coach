@@ -7,9 +7,9 @@
 mode: all
 
 <!-- Options:
-  - all         — every plugin in plugins/ is active (default)
-  - blocklist   — all active EXCEPT those listed under ## Disabled
-  - allowlist   — ONLY those listed under ## Enabled are active
+  - all        : every plugin in plugins/ is active (default)
+  - blocklist  : all active EXCEPT those listed under ## Disabled
+  - allowlist  : ONLY those listed under ## Enabled are active
 -->
 
 ## Disabled

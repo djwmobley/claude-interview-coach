@@ -2,18 +2,18 @@
 
 ## Tone & Voice
 
-Derive the CV's tone from the candidate's data files — don't assume a default persona.
+Derive the CV's tone from the candidate's data files: don't assume a default persona.
 
 Before writing, read:
-- `data/professional-identity.md` — identity statements, strengths, and narrative patterns define how the candidate should sound (e.g. hands-on builder vs. strategic advisor vs. consultative leader)
-- `data/profile.md` — location and language context inform spelling variant and market conventions
+- `data/professional-identity.md`: identity statements, strengths, and narrative patterns define how the candidate should sound (e.g. hands-on builder vs. strategic advisor vs. consultative leader)
+- `data/profile.md`: location and language context inform spelling variant and market conventions
 
 Then apply these universal principles:
-- **Professional but not stiff** — match the energy of the candidate's identity, not a generic corporate template
-- **Use the narrative patterns table** — if `professional-identity.md` contains reframes, apply them. The candidate's default framing is usually weaker than the coached version
+- **Professional but not stiff**: match the energy of the candidate's identity, not a generic corporate template
+- **Use the narrative patterns table**: if `professional-identity.md` contains reframes, apply them. The candidate's default framing is usually weaker than the coached version
 - **Use concrete numbers** where the source data provides them (scale, duration, team size, impact metrics)
 - **Language variant:** Infer from `data/profile.md` location or match the job posting's language. Maintain consistency within a single CV. Match the formality level expected in the target market's language conventions (e.g. German resumes use formal professional German)
-- **Never impose a work-style assumption** (e.g. "hands-on", "building and operating", "consulting on") — let the projects and identity data speak for themselves
+- **Never impose a work-style assumption** (e.g. "hands-on", "building and operating", "consulting on"): let the projects and identity data speak for themselves
 
 ## CV Formats
 
@@ -36,7 +36,7 @@ For US-based roles and US job boards:
 - Experience section with accomplishment-driven bullets (lead with impact metrics)
 - Education at the bottom (unless recent graduate)
 - Typically 1-2 pages (senior roles may extend to 3)
-- No availability or rate in the document — discuss in conversation
+- No availability or rate in the document: discuss in conversation
 
 ### UK CV Format
 

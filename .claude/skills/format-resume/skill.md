@@ -46,7 +46,7 @@ render_doc({kind:'resume', source:'output/markdown/<filename>', outName:'<Human 
 
 `outName` is required for resumes: a human file name such as `Jordan Reyes - CTO`, no `.docx`, no datestamp. Ask for it if the request did not include one.
 
-The tool returns `checks[]` covering: em-dash, en-dash outside `Year – Year` ranges, scare quotes, buzzwords, the problem-comparison reframe, md_to_docx.py block structure (header block, `---` dividers, no `#` in summary or competencies, `·` bullets, `Company | City, ST | Year – Year` lines, no commas in role titles, no tables), role inclusion against `data/project-index.md`, PMP wording, Jenkon title, and output naming. Report every `fail` with its line numbers. Do not edit the resume yourself in this skill; hand the failures back so the content owner fixes the source, then preflight again. A role the candidate explicitly approved omitting is passed as `allowMissing:['Company']`.
+The tool returns `checks[]` covering: em-dash, en-dash outside `2019 – 2021` ranges, scare quotes, buzzwords, the problem-comparison reframe, md_to_docx.py block structure (header block, `---` dividers, no `#` in summary or competencies, `·` bullets, `Company | City, ST | 2019 – 2021` lines, no commas in role titles, no tables), role inclusion against `data/project-index.md`, PMP wording, Jenkon title, and output naming. Report every `fail` with its line numbers. Do not edit the resume yourself in this skill; hand the failures back so the content owner fixes the source, then preflight again. A role the candidate explicitly approved omitting is passed as `allowMissing:['Company']`.
 
 In addition, report (warnings only, the tool does not check these):
 

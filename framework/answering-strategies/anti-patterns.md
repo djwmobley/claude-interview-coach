@@ -1,4 +1,4 @@
-# Anti-Patterns — What NOT to Do
+# Anti-Patterns: What NOT to Do
 
 ## Quick Overview
 
@@ -30,7 +30,7 @@ Before answering any recruiter question, silently ask: **"What checkbox are they
 
 ## The Meta-Insight
 
-**You treat recruiter calls like hiring manager conversations.** You over-explain, add personal context, and chat — instead of ticking boxes. This is the root cause of most recruiter-stage mistakes below. Recruiters don't evaluate depth — they filter. Give them what they need to forward you.
+**You treat recruiter calls like hiring manager conversations.** You over-explain, add personal context, and chat, instead of ticking boxes. This is the root cause of most recruiter-stage mistakes below. Recruiters don't evaluate depth; they filter. Give them what they need to forward you.
 
 ---
 
@@ -40,7 +40,7 @@ Before answering any recruiter question, silently ask: **"What checkbox are they
 
 **What it is:** Bringing up gaps, weaknesses, or concerns that the recruiter didn't ask about.
 
-**Why it's bad:** Creates disqualifiers out of thin air. The recruiter has a list of things to check — don't add to it.
+**Why it's bad:** Creates disqualifiers out of thin air. The recruiter has a list of things to check: don't add to it.
 
 **Examples:**
 
@@ -48,7 +48,7 @@ Before answering any recruiter question, silently ask: **"What checkbox are they
 - They didn't ask about Java. Don't volunteer it.
 
 ❌ "I can start April 1st, though I also have a concurrent engagement..."
-- They asked about start date. The concurrent engagement is a separate concern — only address if they probe.
+- They asked about start date. The concurrent engagement is a separate concern: only address if they probe.
 
 ❌ "The [Cert A] is active, though the [Cert B] is missing..."
 - They asked about [Cert A]. Don't volunteer missing certs.
@@ -270,7 +270,7 @@ Before answering any recruiter question, silently ask: **"What checkbox are they
 
 **Instead:** Listen to the question type (yes/no? date? number? story?) and give that specific thing.
 
-**Note:** Overlaps significantly with #4 — both stem from not matching your answer type to the question type.
+**Note:** Overlaps significantly with #4: both stem from not matching your answer type to the question type.
 
 ---
 
@@ -285,14 +285,14 @@ Before answering any recruiter question, silently ask: **"What checkbox are they
 ❌ "I'm a senior cloud architect and backend developer with experience in migrations..."
 - Generic. Describes 100 candidates.
 
-**Instead:** Lead with your unique differentiator — what makes you different from others with the same job title. See `data/professional-identity.md`.
+**Instead:** Lead with your unique differentiator: what makes you different from others with the same job title. See `data/professional-identity.md`.
 
-✓ "I'm a [Role] specialising in [your domain] — for the last [N] years I've [your most impressive scope or impact, from your projects]."
+✓ "I'm a [Role] specialising in [your domain]: for the last [N] years I've [your most impressive scope or impact, from your projects]."
 
 Alternative differentiator templates (choose the one that fits your story):
-- **Depth:** "I'm a [Role] — I've spent the last [N] years going deep on [specific domain], most recently [flagship achievement]."
-- **Breadth:** "I'm a [Role] who bridges [area A] and [area B] — at [project], I [concrete cross-cutting achievement]."
-- **Impact:** "I'm a [Role] — the systems I've built [measurable outcome: serve N users / process N transactions / run in N markets]."
+- **Depth:** "I'm a [Role]: I've spent the last [N] years going deep on [specific domain], most recently [flagship achievement]."
+- **Breadth:** "I'm a [Role] who bridges [area A] and [area B]: at [project], I [concrete cross-cutting achievement]."
+- **Impact:** "I'm a [Role]: the systems I've built [measurable outcome: serve N users / process N transactions / run in N markets]."
 
 ---
 
@@ -302,7 +302,7 @@ Alternative differentiator templates (choose the one that fits your story):
 
 **Why it's bad:** The recruiter can't define it either. Asking creates an awkward silence that sounds like you don't know the topic.
 
-**Instead:** Don't define the term. List the concrete things you do that fall under the umbrella — e.g. "SOA, distributed services, serverless functions, message queues, IaC, CI/CD" — and let the term attach itself. **Prep:** Scan the job ad before the call and look up any term you can't define in one sentence. 30 seconds of prep prevents a 30-second hesitation.
+**Instead:** Don't define the term. List the concrete things you do that fall under the umbrella, e.g. "SOA, distributed services, serverless functions, message queues, IaC, CI/CD", and let the term attach itself. **Prep:** Scan the job ad before the call and look up any term you can't define in one sentence. 30 seconds of prep prevents a 30-second hesitation.
 
 ---
 
@@ -313,7 +313,7 @@ Alternative differentiator templates (choose the one that fits your story):
 **Why it's bad:** If you ask "which do you mean?", the recruiter probably doesn't know the difference. You lose momentum.
 
 **Instead:** If you do BOTH meanings, answer for both in two sentences. Examples:
-- **Azure DevOps:** "[Product name] is my daily platform — [feature list]. And [practice name] as a discipline is my daily work: [practice list]." Both boxes ticked.
+- **Azure DevOps:** "[Product name] is my daily platform: [feature list]. And [practice name] as a discipline is my daily work: [practice list]." Both boxes ticked.
 - **Salesforce:** "I've configured Sales Cloud for [use case]. And I've built custom apps on the Salesforce platform with [Apex/Lightning/Flows]." Both interpretations covered.
 
 ---
@@ -344,7 +344,7 @@ Alternative differentiator templates (choose the one that fits your story):
 
 **Instead:** Hold your position + brief justification + question back.
 
-✓ "I understand that's the upper end. For what I bring — [2-3 concrete differentiators] — I think that's where I should land. Is there flexibility in the package beyond base?"
+✓ "I understand that's the upper end. For what I bring, [2-3 concrete differentiators], I think that's where I should land. Is there flexibility in the package beyond base?"
 ✓ "My rate is [amount]. That reflects [scope/certs/experience]. Is that within budget?"
 
 **Key:** The recruiter isn't your opponent. They need ammunition to fight for you internally. Give it to them.
@@ -375,8 +375,8 @@ For current status on which patterns are resolved, persistent, or regressing, se
 
 ## Related Strategy Files
 
-- [gap-reframing.md](gap-reframing.md) — How to address gaps without disqualifying yourself
-- [pin-down-defense.md](pin-down-defense.md) — How to handle pressure tests on gaps
-- [direct-answer-structure.md](direct-answer-structure.md) — How to answer questions directly (fixes essay structure)
-- [behavioral-questions-without-prepared-example.md](behavioral-questions-without-prepared-example.md) — How to handle "tell me about a time" questions
-- [question-back-technique.md](question-back-technique.md) — How to turn questions around strategically
+- [gap-reframing.md](gap-reframing.md): How to address gaps without disqualifying yourself
+- [pin-down-defense.md](pin-down-defense.md): How to handle pressure tests on gaps
+- [direct-answer-structure.md](direct-answer-structure.md): How to answer questions directly (fixes essay structure)
+- [behavioral-questions-without-prepared-example.md](behavioral-questions-without-prepared-example.md): How to handle "tell me about a time" questions
+- [question-back-technique.md](question-back-technique.md): How to turn questions around strategically

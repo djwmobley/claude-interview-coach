@@ -1,23 +1,23 @@
 ---
 name: import-cv
-description: Import an existing CV into structured data files — additive merge with existing data, can be run repeatedly
+description: Import an existing CV into structured data files (additive merge with existing data, can be run repeatedly)
 argument-hint: <path-to-cv-or-paste>
 user-invocable: true
 allowed-tools: Read(*), Glob(*), Grep(*), Write(data/**), Edit(data/**)
 ---
 
-# Import CV — Extract and Merge CV Data into Structured Files
+# Import CV: Extract and Merge CV Data into Structured Files
 
-Import professional experience from an existing CV (PDF, markdown, or pasted text) into the repository's structured data files. Designed to be run multiple times — each import **merges** with existing data rather than overwriting it.
+Import professional experience from an existing CV (PDF, markdown, or pasted text) into the repository's structured data files. Designed to be run multiple times: each import **merges** with existing data rather than overwriting it.
 
 ## Core Principle: Additive Merge
 
 This skill never destroys data. When run against a repository that already has data files:
 
-- **New data gets added** — new projects, skills, certifications get created
-- **Existing data gets enriched** — missing fields filled in, thin descriptions expanded
-- **Nothing gets deleted** — a project from a previous import that isn't on the new CV stays untouched
-- **User-edited content is preserved** — if a TODO marker was replaced with real content, don't overwrite it with a new TODO
+- **New data gets added**: new projects, skills, certifications get created
+- **Existing data gets enriched**: missing fields filled in, thin descriptions expanded
+- **Nothing gets deleted**: a project from a previous import that isn't on the new CV stays untouched
+- **User-edited content is preserved**: if a TODO marker was replaced with real content, don't overwrite it with a new TODO
 
 This means a user can safely import an old 2018 CV first, then a newer 2024 CV, and the data accumulates correctly.
 
@@ -38,7 +38,7 @@ This means a user can safely import an old 2018 CV first, then a newer 2024 CV, 
    - Ask the user to paste their CV text.
    - Wait for the response and store as `CV_TEXT`.
 
-3. **Detect language:** Scan section headers and body text. Common header patterns — English: "Summary", "Experience", "Projects", "Skills", "Education"; German: "Kurzprofil", "Berufserfahrung", "Projekterfahrung", "Fachkenntnisse", "Ausbildung"; French: "Compétences", "Expérience", "Formation"; Dutch: "Vaardigheden", "Werkervaring", "Opleiding"; Spanish: "Habilidades", "Experiencia", "Formación"; other languages: infer from content. Note the language for later use but don't block on it.
+3. **Detect language:** Scan section headers and body text. Common header patterns: English: "Summary", "Experience", "Projects", "Skills", "Education"; German: "Kurzprofil", "Berufserfahrung", "Projekterfahrung", "Fachkenntnisse", "Ausbildung"; French: "Compétences", "Expérience", "Formation"; Dutch: "Vaardigheden", "Werkervaring", "Opleiding"; Spanish: "Habilidades", "Experiencia", "Formación"; other languages: infer from content. Note the language for later use but don't block on it.
 
 ### Step 2: Load Existing Data
 
@@ -52,7 +52,7 @@ Read all current data files to establish the merge baseline. Read these in paral
 - `data/project-index.md`
 - All files in `data/projects/*.md`
 
-If files don't exist (first run on a clean repo), that's fine — start from empty for those sections.
+If files don't exist (first run on a clean repo), that's fine: start from empty for those sections.
 
 ### Step 3: Extract and Merge
 
@@ -76,7 +76,7 @@ Extract and merge into this structure:
 <!-- - **Independent since:** [year] -->
 
 ## Compensation
-<!-- TODO: Add your compensation structure. Rarely on CVs — fill this in manually.
+<!-- TODO: Add your compensation structure. Rarely on CVs: fill this in manually.
 Use whichever section applies:
 
 ### Freelance / Contract
@@ -98,7 +98,7 @@ Use whichever section applies:
 - If profile.md already exists with real content in a field, keep it
 - If profile.md has a TODO and the CV provides the data, replace the TODO
 - If profile.md doesn't exist, create it with what the CV provides + TODOs for the rest
-- Compensation and availability are almost never on CVs — create TODO sections unless they're already filled in
+- Compensation and availability are almost never on CVs: create TODO sections unless they're already filled in
 
 #### 3b: Skills (`data/skills.md`)
 
@@ -114,10 +114,10 @@ Extract skills and group by category using this table format:
 | [Skill] | [X+ years] | [Expert/Advanced/Intermediate] |
 ```
 
-**Categories** (adjust to match the candidate's actual skill domains — these are suggestions):
+**Categories** (adjust to match the candidate's actual skill domains: these are suggestions):
 - Cloud & Infrastructure
-- Development — Backend
-- Development — Frontend
+- Development: Backend
+- Development: Frontend
 - Data
 - DevOps & Tooling
 - Soft Skills & Methods
@@ -127,7 +127,7 @@ Extract skills and group by category using this table format:
 - Add new skills not already in the file
 - If a skill already exists with a higher experience level, keep the higher one
 - If the CV shows more years than the existing entry, update the years
-- If Self-Rating is `—` (unrated) and the CV doesn't provide a rating, leave it as `—`
+- If Self-Rating is `N/A` (unrated) and the CV doesn't provide a rating, leave it as `N/A`
 - Never remove a skill that exists in the file but isn't on the new CV
 
 **Experience estimation:** If the CV doesn't list years per skill but does list project dates, estimate experience from the span of projects using that skill. Mark estimates: `3+ years <!-- estimated from project dates -->`.
@@ -173,13 +173,13 @@ Extract into the structured format:
 ## [Degree Name]
 
 - **Institution:** [name]
-- **Period:** [MM/YYYY – MM/YYYY]
+- **Period:** [03/2019 – 09/2021]
 - **Final grade:** [if available]
 - **Majors:** [if available]
 - **Thesis:** [if available]
 ```
 
-For non-English degrees, add English equivalents in parentheses. Research the degree system of the candidate's country to provide accurate equivalencies — e.g. German "Diplom [Subject] (Master's equiv.)", French "Licence (Bachelor's equiv.)", Dutch "Doctoraal (Master's equiv.)", Japanese "学士 Gakushi (Bachelor's equiv.)".
+For non-English degrees, add English equivalents in parentheses. Research the degree system of the candidate's country to provide accurate equivalencies: e.g. German "Diplom [Subject] (Master's equiv.)", French "Licence (Bachelor's equiv.)", Dutch "Doctoraal (Master's equiv.)", Japanese "学士 Gakushi (Bachelor's equiv.)".
 
 **Merge rules:**
 - Add new education entries not already listed (match by institution + degree)
@@ -194,7 +194,7 @@ Only relevant if the CV indicates freelance/self-employed status, own business e
 ## [Company Name]
 
 - **Type:** [LLC / Inc. / Ltd / GmbH / BV / Pty Ltd / S.A. / Sole Trader / etc.]
-- **Period:** [Founded YYYY – active/liquidated]
+- **Period:** [Founded YYYY; active or liquidated]
 - **Location:** [Country/city]
 - **Purpose:** [one sentence]
 ```
@@ -208,14 +208,14 @@ Only relevant if the CV indicates freelance/self-employed status, own business e
 
 This is the most important extraction. For each engagement/project on the CV, create or enrich a project file.
 
-**File naming:** Slug from client name or project name — lowercase, hyphens for spaces, no special characters. Examples: `acme-corp.md`, `flagship-project.md`, `summer-internship.md`.
+**File naming:** Slug from client name or project name: lowercase, hyphens for spaces, no special characters. Examples: `acme-corp.md`, `flagship-project.md`, `summer-internship.md`.
 
 **Target structure per file:**
 
 ```markdown
 # [Project Title]
 
-- **Period:** [MM/YYYY – MM/YYYY or "ongoing"]
+- **Period:** [03/2019 – 09/2021 or "ongoing"]
 - **Role:** [role title(s)]
 - **Client:** [client name]
 - **Industry:** [industry category]
@@ -251,13 +251,13 @@ This is the most important extraction. For each engagement/project on the CV, cr
 - Explicitly an internship → `internship`
 - Personal/hobby/side venture → `side-project`
 
-> **Note:** `flagship` is also a valid type (the candidate's single most significant role — typically multi-year, high-impact, central to professional identity), but **never auto-assign it during import**. Only the candidate can decide which project (if any) deserves this label. Mention it in Next Steps instead.
+> **Note:** `flagship` is also a valid type (the candidate's single most significant role: typically multi-year, high-impact, central to professional identity), but **never auto-assign it during import**. Only the candidate can decide which project (if any) deserves this label. Mention it in Next Steps instead.
 
-**Merge rules — the key logic:**
-- **Match existing projects by client name + overlapping period.** If a project file already exists for the same client and the periods overlap, this is the same project — enrich it.
+**Merge rules: the key logic:**
+- **Match existing projects by client name + overlapping period.** If a project file already exists for the same client and the periods overlap, this is the same project: enrich it.
 - **Enriching means:** add missing responsibilities, fill in blank descriptions, add technologies the CV mentions that the file doesn't have, update tags. Never remove content that's already there.
 - **New projects** (no matching file) get a new file created.
-- **Projects in existing files but not on this CV** are left completely untouched — they came from a previous import or were added manually.
+- **Projects in existing files but not on this CV** are left completely untouched: they came from a previous import or were added manually.
 - **Key Achievements** are rarely on CVs in detail. If the file already has achievements, keep them. If not, add a TODO:
 
 ```markdown
@@ -326,13 +326,13 @@ After all files are written, present a summary:
 
 ### TODO Items
 [count] items need manual attention:
-- `data/profile.md` — compensation, availability
-- `data/projects/[name].md` — key achievements (×N projects)
+- `data/profile.md`: compensation, availability
+- `data/projects/[name].md`: key achievements (×N projects)
 - [etc.]
 
 ### Next Steps
 - Fill in TODO items (highest impact: compensation and key achievements)
-- Review your projects — if one stands out as your anchor (multi-year, high-impact, central to your identity), mark its type as `flagship`
+- Review your projects: if one stands out as your anchor (multi-year, high-impact, central to your identity), mark its type as `flagship`
 - Import another CV to enrich further: `/onboard path/to/another-cv.pdf`
 - Discover your professional identity: `/extract-identity`
 - Generate your first CV: paste a job ad and ask for a targeted resume

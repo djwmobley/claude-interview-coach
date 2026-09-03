@@ -9,7 +9,7 @@ Format expected:
   Blank line
   Recipient block (one or more lines, ends at blank)
   Blank line
-  Re: line (optional — must start with "Re:")
+  Re: line (optional: must start with "Re:")
   Blank line
   Body paragraphs (separated by blank lines)
   Blank line

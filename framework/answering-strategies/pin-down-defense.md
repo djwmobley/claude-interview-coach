@@ -1,14 +1,14 @@
-# Pin-Down Defense — Handling Pressure Tests
+# Pin-Down Defense: Handling Pressure Tests
 
 ## The Problem
 
-After you answer a gap/weakness question, the recruiter sometimes follows up with a **direct pin-down** — a blunt restatement of the gap as a closed fact:
+After you answer a gap/weakness question, the recruiter sometimes follows up with a **direct pin-down**: a blunt restatement of the gap as a closed fact:
 
 - "So you don't have [technology] production experience then."
 - "Right, so no experience with [specific process/tool]."
 - "Okay, so the [certification] is expired."
 
-This is a **confidence test, not fact-finding.** The recruiter already knows the answer. They're checking whether you fold under pressure — because if you cave here, you'll cave in the client interview, and the recruiter looks bad.
+This is a **confidence test, not fact-finding.** The recruiter already knows the answer. They're checking whether you fold under pressure: because if you cave here, you'll cave in the client interview, and the recruiter looks bad.
 
 ---
 
@@ -37,7 +37,7 @@ This is a **confidence test, not fact-finding.** The recruiter already knows the
 
 The recruiter is thinking: "If I send this person to the client and they get pressed on this gap, will they hold their ground or will they collapse and make me look stupid?"
 
-They're not trying to disqualify you — they're **testing whether you can be forwarded safely.**
+They're not trying to disqualify you: they're **testing whether you can be forwarded safely.**
 
 ---
 
@@ -56,7 +56,7 @@ They're not trying to disqualify you — they're **testing whether you can be fo
 ### ❌ Over-Explained
 > "Let me explain how React works and why my experience with Angular is actually very similar..."
 
-**Why this fails:** You're lecturing the recruiter. They don't care about the technical details — they care whether you can defend this in the client interview.
+**Why this fails:** You're lecturing the recruiter. They don't care about the technical details: they care whether you can defend this in the client interview.
 
 ---
 
@@ -68,10 +68,10 @@ They're not trying to disqualify you — they're **testing whether you can be fo
 
 ### Structure
 
-1. **Acknowledge reality** — Don't deny the gap, don't apologize
-2. **Pivot to adjacent strength** — Show what you DO have that's related
-3. **Question back** — Make it about their needs, not your gap
-4. **Stop talking** — One sentence for each part, then silence
+1. **Acknowledge reality**: Don't deny the gap, don't apologize
+2. **Pivot to adjacent strength**: Show what you DO have that's related
+3. **Question back**: Make it about their needs, not your gap
+4. **Stop talking**: One sentence for each part, then silence
 
 ---
 
@@ -82,7 +82,7 @@ They're not trying to disqualify you — they're **testing whether you can be fo
 **Recruiter:** "So you don't have React production experience then."
 
 **Pin-Down Defense:**
-> "Not React specifically, but I've built production SPAs with Vue.js for 4+ years — component architecture, state management, CI/CD pipelines. Does the client need React specifically, or a frontend engineer who delivers production UI?"
+> "Not React specifically, but I've built production SPAs with Vue.js for 4+ years: component architecture, state management, CI/CD pipelines. Does the client need React specifically, or a frontend engineer who delivers production UI?"
 
 **Why this works:**
 - ✅ Acknowledges reality ("Not React specifically")
@@ -97,12 +97,12 @@ They're not trying to disqualify you — they're **testing whether you can be fo
 **Recruiter:** "Right, so the [certification] is expired then."
 
 **Pin-Down Defense:**
-> "Expired, renewal planned for [date]. [Related active certs] are current until [year]. And the practical experience the cert validates — like [concrete project work] — doesn't expire. Should I note the planned renewal date on my profile?"
+> "Expired, renewal planned for [date]. [Related active certs] are current until [year]. And the practical experience the cert validates (like [concrete project work]) doesn't expire. Should I note the planned renewal date on my profile?"
 
 **Why this works:**
 - ✅ Acknowledges reality ("Expired")
 - ✅ Pivots to adjacent strength (active certs + practical experience)
-- ✅ Question back ("Should I note the renewal date?") — makes it collaborative
+- ✅ Question back ("Should I note the renewal date?"): makes it collaborative
 - ✅ Confident, not defensive
 
 *Adapt with your actual cert names and dates from `data/certifications.md`.*
@@ -114,13 +114,13 @@ They're not trying to disqualify you — they're **testing whether you can be fo
 **Recruiter:** "So you haven't done [specific process] then."
 
 **Pin-Down Defense:**
-> "Not in that exact form. What the client needs — building a parallel environment, migrating workloads with zero downtime — I've done exactly that. [List the constituent tasks you've done]. Does the client need someone who knows [specific tool], or someone who understands the architecture and delivers zero downtime?"
+> "Not in that exact form. What the client needs (building a parallel environment, migrating workloads with zero downtime), I've done exactly that. [List the constituent tasks you've done]. Does the client need someone who knows [specific tool], or someone who understands the architecture and delivers zero downtime?"
 
 **Why this works:**
 - ✅ Acknowledges reality ("Not in that exact form")
 - ✅ Pivots to transferable skills (breaks the requirement into constituent tasks you HAVE done)
 - ✅ Question back reframes the requirement (tooling vs. outcome)
-- ✅ Confident framing — states what you've done, not what you haven't
+- ✅ Confident framing: states what you've done, not what you haven't
 
 ---
 
@@ -169,11 +169,11 @@ They're not trying to disqualify you — they're **testing whether you can be fo
 
 ## Key Principles
 
-1. **Never confirm the negative as a blocker** — "That's right" = disqualification
-2. **Never defend the gap itself** — Pivot to what you DO have
-3. **Always question back** — Make it about their needs, not your resume
-4. **One sentence per part** — Acknowledge, pivot, question back, stop
-5. **Confident, not defensive** — You're helping them understand if the gap matters
+1. **Never confirm the negative as a blocker**: "That's right" = disqualification
+2. **Never defend the gap itself**: Pivot to what you DO have
+3. **Always question back**: Make it about their needs, not your resume
+4. **One sentence per part**: Acknowledge, pivot, question back, stop
+5. **Confident, not defensive**: You're helping them understand if the gap matters
 
 ---
 

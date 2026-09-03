@@ -1,4 +1,4 @@
-# Recruiter Screening — [YYYY-MM-DD] — [Role Title]
+# Recruiter Screening: [YYYY-MM-DD]: [Role Title]
 
 - **Target role:** [role title + company/industry]
 - **Job source:** [job portal / referral / direct / etc.]
