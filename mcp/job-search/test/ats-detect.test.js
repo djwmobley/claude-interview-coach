@@ -105,10 +105,29 @@ describe('classifyApplyUrl(): confidence tiers (S6)', () => {
     assert.deepEqual(classify('https://careers.smartrecruiters.com/Acme/12345'), { ats: 'smartrecruiters', tenant: null, confidence: 'low' });
   });
 
-  test('iCIMS: any *.icims.com host, including careers-<x>/jobs-<x> prefixes, tenant always null (S5)', () => {
-    assert.deepEqual(classify('https://acme.icims.com/jobs/123/job'), { ats: 'icims', tenant: null, confidence: 'low' });
-    assert.deepEqual(classify('https://careers-acme.icims.com/jobs/123/job'), { ats: 'icims', tenant: null, confidence: 'low' });
-    assert.deepEqual(classify('https://jobs-acme.icims.com/jobs/123/job'), { ats: 'icims', tenant: null, confidence: 'low' });
+  test('iCIMS: *.icims.com host with a /jobs/<posting-id>... path (including careers-<x>/jobs-<x> host prefixes) is exact, tenant always null (S5 + slice 8)', () => {
+    // Apply pipeline slice 8: the /jobs/<posting-id> path shape is now 'exact' (ICIMS_POSTING_PATH_RE),
+    // not 'low' -- this test previously pinned 'low' for all three of these URLs. Tenant stays null either
+    // way (S5: no prior art for iCIMS tenant extraction, still unshipped).
+    assert.deepEqual(classify('https://acme.icims.com/jobs/123/job'), { ats: 'icims', tenant: null, confidence: 'exact' });
+    assert.deepEqual(classify('https://careers-acme.icims.com/jobs/123/job'), { ats: 'icims', tenant: null, confidence: 'exact' });
+    assert.deepEqual(classify('https://jobs-acme.icims.com/jobs/123/job'), { ats: 'icims', tenant: null, confidence: 'exact' });
+  });
+
+  test('iCIMS: a *.icims.com host with no recognizable /jobs/<posting-id> path stays low, never exact (slice 8)', () => {
+    assert.deepEqual(classify('https://acme.icims.com/jobsearch'), { ats: 'icims', tenant: null, confidence: 'low' });
+    assert.deepEqual(classify('https://acme.icims.com/jobs2/foo'), { ats: 'icims', tenant: null, confidence: 'low' });
+    assert.deepEqual(classify('https://acme.icims.com/jobs'), { ats: 'icims', tenant: null, confidence: 'low' });
+    assert.deepEqual(classify('https://acme.icims.com/jobs/notaid/job'), { ats: 'icims', tenant: null, confidence: 'low' });
+  });
+
+  test('iCIMS: an uppercase /JOBS/<id> path variant is still exact (case-insensitive path match, slice 8)', () => {
+    assert.deepEqual(classify('https://acme.icims.com/JOBS/123/Job'), { ats: 'icims', tenant: null, confidence: 'exact' });
+  });
+
+  test('iCIMS spoof set: a host that merely embeds "icims.com" (query param or a suffix trick) is never treated as an iCIMS host (slice 8)', () => {
+    assert.deepEqual(classify('https://evil.com/?u=acme.icims.com'), { ats: 'unknown', tenant: null, confidence: 'low' });
+    assert.deepEqual(classify('https://acme.icims.com.evil.com/jobs/123/job'), { ats: 'unknown', tenant: null, confidence: 'low' });
   });
 
   test('Dayforce host with no CandidatePortal path shape is low, tenant null', () => {
@@ -116,9 +135,14 @@ describe('classifyApplyUrl(): confidence tiers (S6)', () => {
     assert.deepEqual(r, { ats: 'dayforce', tenant: null, confidence: 'low' });
   });
 
-  test('Dayforce CandidatePortal shape is inferred, tenant is the client segment', () => {
+  test('Dayforce CandidatePortal shape is exact (slice 8: the anchored path-shape match is as certain a signal as Greenhouse/Lever\'s own canonical shapes -- this test previously pinned "inferred"), tenant is the client segment', () => {
     const r = classify('https://acme.dayforcehcm.com/CandidatePortal/en-US/acmeclient/Posting/View/12345');
-    assert.deepEqual(r, { ats: 'dayforce', tenant: 'acmeclient', confidence: 'inferred' });
+    assert.deepEqual(r, { ats: 'dayforce', tenant: 'acmeclient', confidence: 'exact' });
+  });
+
+  test('Dayforce: acme.dayforcehcm.com/marketing/OurCandidatePortalTour has no CandidatePortal path shape -- not exact (slice 8)', () => {
+    const r = classify('https://acme.dayforcehcm.com/marketing/OurCandidatePortalTour');
+    assert.deepEqual(r, { ats: 'dayforce', tenant: null, confidence: 'low' });
   });
 });
 
@@ -227,9 +251,11 @@ describe('classifyApplyUrl(): tenant is always lowercase (S10)', () => {
   });
 
   test('an uppercase Dayforce client segment is lowercased', () => {
+    // Confidence is 'exact' as of apply pipeline slice 8 (see the confidence-tiers describe block above);
+    // this test previously pinned 'inferred'.
     assert.deepEqual(
       classify('https://acme.dayforcehcm.com/CandidatePortal/en-US/AcmeClient/Posting/View/1'),
-      { ats: 'dayforce', tenant: 'acmeclient', confidence: 'inferred' },
+      { ats: 'dayforce', tenant: 'acmeclient', confidence: 'exact' },
     );
   });
 });

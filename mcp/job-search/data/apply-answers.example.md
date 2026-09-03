@@ -21,6 +21,8 @@
 #     sponsorship" is the inverse phrasing of "do you need sponsorship").
 #   - A "learned:" label auto-answers. An "aliases:" label only ever produces a parked suggestion for a
 #     human to confirm; confirming it is what promotes it to "learned:" (a later slice's UI action).
+#   - Confirming/answering a parked "question"-kind pending application from the command line: use the
+#     `/apply-answer <application-id>` skill (.claude/skills/apply-answer/SKILL.md, apply pipeline slice 8).
 
 salary_floor: 150000
 

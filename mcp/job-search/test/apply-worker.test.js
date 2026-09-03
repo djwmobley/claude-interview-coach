@@ -17,6 +17,7 @@ import { ensureAuxSchema } from '../src/core/schema.js';
 import { createApplication, transition, getApplication, approve } from '../src/core/applications.js';
 import { LOCK_KEY as SCAN_LOCK_KEY } from '../src/core/scan-run.js';
 import { runApplyWorker, LOCK_KEY as APPLY_LOCK_KEY } from '../src/apply/worker.js';
+import { ADAPTERS } from '../src/apply/adapters/index.js';
 
 const CO = `ZZ-TEST-APPLYWORKER-${process.pid}`;
 /** @type {pg.Client} */
@@ -123,9 +124,11 @@ describe('runApplyWorker: totality', () => {
   });
 
   test('an unsupported ATS (no registered adapter) parks in needs_human, never touches the browser session', async () => {
-    // icims has no registered adapter as of slice 6 (workday now does -- see test/workday-adapter.test.js
-    // and the worker-level workday coverage below, which is why this test no longer uses workday itself).
-    const id = await seedApprovedApplication({ atsType: 'icims', applyUrl: 'https://acme.icims.com/jobs/1/apply' });
+    // 'unknown' is the one ATS_TYPES value that will never get a registered adapter (it is
+    // classifyApplyUrl()'s own default branch for a URL this codebase does not recognize at all) -- icims
+    // and dayforce both got adapters in slice 8 (see the "adapter registry" describe block below), so this
+    // test no longer uses either of them.
+    const id = await seedApprovedApplication({ atsType: 'unknown', applyUrl: 'https://totally-unrecognized.example.com/x' });
     let sessionTouched = false;
     const result = await runApplyWorker(id, baseDeps({ connectSession: async () => { sessionTouched = true; return fakeSession(); } }));
     assert.equal(result.status, 'needs_human');
@@ -226,6 +229,65 @@ describe('runApplyWorker: totality', () => {
       await lockHolder.query('SELECT pg_advisory_unlock($1::bigint)', [APPLY_LOCK_KEY]);
       await lockHolder.end();
     }
+  });
+});
+
+describe('runApplyWorker: icims and dayforce are registered adapters (apply pipeline slice 8)', () => {
+  test('the default ADAPTERS registry has icims and dayforce entries with a run() function', () => {
+    assert.equal(typeof ADAPTERS.icims?.run, 'function');
+    assert.equal(typeof ADAPTERS.dayforce?.run, 'function');
+  });
+
+  /**
+   * A fake page whose waitForSelector always misses -- every cap.waitFor(..., {optional:true}) call
+   * resolves to null, so the real icims/dayforce adapter's very first probe fails to find its own page
+   * shape and parks with kind 'unrecognized_page'. The point of this test is NOT to exercise the real
+   * selectors (see each adapter's own KNOWN LIMITATION doc comment) -- it is to prove the worker's total
+   * `adapterRegistry[app.ats_type]` lookup now finds a real adapter for these two ATSs and actually calls
+   * it, rather than falling into the "no automated adapter for this ATS yet" branch this test used to
+   * cover before slice 8 registered them (see the "unsupported ATS" test above, now using 'unknown').
+   */
+  function fakePageNothingFound() {
+    return {
+      async goto() {},
+      async waitForSelector() { throw new Error('no such element in this fake DOM'); },
+      async $eval() { return null; },
+      async $$eval() { return []; },
+      async fill() {},
+      async click() {},
+      async selectOption() {},
+      async setInputFiles() { return null; },
+      async screenshot() { return Buffer.from(''); },
+    };
+  }
+
+  function fakeSessionNothingFound() {
+    return {
+      attachPage: async () => fakePageNothingFound(),
+      reconcile: async () => 0,
+      reconcileTargets: async () => ({ attempted: 0, closed: 0 }),
+      writeTargetMarker: async () => {},
+      closeAll: async () => {},
+      openPages: () => 0,
+    };
+  }
+
+  test('ats_type "icims" reaches the real icims adapter -- parks unrecognized_page, never unsupported_ats', async () => {
+    const id = await seedApprovedApplication({ atsType: 'icims', applyUrl: 'https://acme.icims.com/jobs/1/apply' });
+    const result = await runApplyWorker(id, baseDeps({ connectSession: async () => fakeSessionNothingFound() }));
+    assert.equal(result.status, 'needs_human');
+    const row = await getApplication(verifyClient, id);
+    assert.equal(row.pending_question.kind, 'unrecognized_page');
+    assert.notEqual(row.pending_question.kind, 'unsupported_ats');
+  });
+
+  test('ats_type "dayforce" reaches the real dayforce adapter -- parks unrecognized_page, never unsupported_ats', async () => {
+    const id = await seedApprovedApplication({ atsType: 'dayforce', applyUrl: 'https://acme.dayforcehcm.com/CandidatePortal/en-US/acme/Posting/View/1' });
+    const result = await runApplyWorker(id, baseDeps({ connectSession: async () => fakeSessionNothingFound() }));
+    assert.equal(result.status, 'needs_human');
+    const row = await getApplication(verifyClient, id);
+    assert.equal(row.pending_question.kind, 'unrecognized_page');
+    assert.notEqual(row.pending_question.kind, 'unsupported_ats');
   });
 });
 

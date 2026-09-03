@@ -10,6 +10,7 @@ import assert from 'node:assert/strict';
 import {
   parseAnswerBank, appendLearnedLabel, normalizeText, matchQuestion, resolveControl, CONTROL_TYPES,
   taxonomyOptionsFor, taxonomyCanonicalFor, resolveSalaryAnswer, validateAnswerAgainstOptions, isDurableFactType,
+  SALARY_LABEL_RE,
 } from '../src/apply/answers.js';
 
 const SAMPLE = `
@@ -394,6 +395,36 @@ describe('resolveSalaryAnswer: unit-basis detection and single-configured-floor'
     assert.equal(r.outcome, 'park');
     assert.equal(r.reason, 'salary_floor_not_configured');
   });
+});
+
+describe('SALARY_LABEL_RE: unit-less compensation wording (post-review widening, apply pipeline slice 8)', () => {
+  for (const label of [
+    'Desired compensation',
+    'What are your pay expectations',
+    'Base + bonus target',
+    'OTE expectation',
+    'Compensation range',
+    'What is your remuneration expectation?',
+    'Current wage',
+    'Rate expectation',
+    'Target salary range',
+  ]) {
+    test(`matches: "${label}"`, () => {
+      assert.match(label, SALARY_LABEL_RE);
+    });
+  }
+
+  for (const label of [
+    'PayPal email',
+    'Spanish proficiency',
+    'Payload size limit',
+    'Corporate travel availability',
+    'Conversion rate for the referral program',
+  ]) {
+    test(`does NOT match: "${label}"`, () => {
+      assert.doesNotMatch(label, SALARY_LABEL_RE);
+    });
+  }
 });
 
 describe('appendLearnedLabel: promote-on-confirm text transform', () => {
