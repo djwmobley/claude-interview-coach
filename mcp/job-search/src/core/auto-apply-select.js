@@ -21,6 +21,34 @@
 import { US_ABBRS } from './normalize.js';
 import { resolveFloor } from './salary-floor.js';
 import { ABSENT_LOCATION, LEGACY_UNKNOWN_LOCATION } from './normalize.js';
+import { HOURLY_RE } from '../apply/answers.js';
+
+/**
+ * Hourly-pay signal (Damian's ruling, spec item D): true when `salaryPeriod === 'hour'` (the structured,
+ * migration-016 column -- authoritative whenever set), OR `salaryPeriod` is null/undefined AND
+ * `salaryRaw` (NEVER `description` -- a job's prose routinely mentions "hourly" in unrelated benefits
+ * copy) contains the same HOURLY_RE cue answers.js's compensation gate uses, with the cue within 12
+ * characters of a dollar figure either direction -- "Pays $45/hr" and "$45 hourly rate" both signal;
+ * "Hourly wellness stipend available; $65,000/year base" does not, because the dollar figure nearest the
+ * hourly cue in that string is well outside a 12-character window. A listing with neither a period nor a
+ * salary_raw carrying this proximity pattern is simply unaffected -- this function returns false, never a
+ * third "unknown" outcome that would need its own handling.
+ * @param {string|null|undefined} salaryPeriod
+ * @param {string|null|undefined} salaryRaw
+ * @returns {boolean}
+ */
+export const HOURLY_NEAR_DOLLAR_RE = new RegExp(
+  `\\$\\s?\\d[\\d,.]*.{0,12}(?:${HOURLY_RE.source})|(?:${HOURLY_RE.source}).{0,12}\\$\\s?\\d[\\d,.]*`,
+  'i',
+);
+
+export function isHourlyPaySignal(salaryPeriod, salaryRaw) {
+  if (salaryPeriod === 'hour') return true;
+  if ((salaryPeriod === null || salaryPeriod === undefined) && typeof salaryRaw === 'string' && HOURLY_NEAR_DOLLAR_RE.test(salaryRaw)) {
+    return true;
+  }
+  return false;
+}
 
 /**
  * Total classification: every string maps to US or non-US, never a third "unknown" branch. See the
@@ -50,7 +78,7 @@ export function isUsLocation(locationNorm) {
 export const CLOSED_REASONS = Object.freeze([
   'not_scored', 'below_fit', 'human_fit_override', 'duplicate_of', 'not_us', 'salary_below_floor',
   'active_application', 'no_description', 'apply_target_unresolved', 'easy_apply_only', 'ats_not_allowed',
-  'confidence_not_exact', 'daily_cap', 'eligible',
+  'confidence_not_exact', 'hourly_pay', 'daily_cap', 'eligible',
 ]);
 
 /**
@@ -64,6 +92,11 @@ export const CLOSED_REASONS = Object.freeze([
  * @property {string|null} locationNorm
  * @property {string|null} remoteMode
  * @property {number|null} salaryMax
+ * @property {string|null} [salaryPeriod] ic_job_listings.salary_period ('hour'|'day'|'week'|'month'|
+ *   'year'|'unknown'), or null for a pre-migration-016 row
+ * @property {string|null} [salaryRaw] ic_job_listings.salary_raw -- consulted for the hourly_pay signal
+ *   ONLY when salaryPeriod is null/undefined; never `description`, which routinely mentions "hourly" in
+ *   unrelated benefits copy
  * @property {boolean} hasActiveApplication a non-withdrawn ic_job_applications row already exists
  * @property {string|null} description
  * @property {string|null} applyUrl
@@ -99,6 +132,7 @@ export function classifyCandidate(row, ctx) {
   if (!row.applyUrl || !row.applyAts) return 'apply_target_unresolved';
   if (!ctx.atsAllow.includes(row.applyAts)) return 'ats_not_allowed';
   if (row.applyConfidence !== 'exact') return 'confidence_not_exact';
+  if (isHourlyPaySignal(row.salaryPeriod ?? null, row.salaryRaw ?? null)) return 'hourly_pay';
   return 'eligible';
 }
 
@@ -208,7 +242,7 @@ export async function fetchCandidateRows(client) {
   const r = await client.query(`
     SELECT
       l.id AS listing_id, l.fit_score, l.duplicate_of, l.location_norm, l.remote_mode,
-      l.salary_max, l.description, l.apply_url, l.apply_ats, l.apply_ats_confidence, l.apply_easy_only,
+      l.salary_max, l.salary_period, l.salary_raw, l.description, l.apply_url, l.apply_ats, l.apply_ats_confidence, l.apply_easy_only,
       (SELECT actor FROM ic_job_events e WHERE e.listing_id = l.id AND e.kind = 'fit' ORDER BY e.at DESC, e.id DESC LIMIT 1) AS fit_actor,
       EXISTS (SELECT 1 FROM ic_job_applications a WHERE a.listing_id = l.id AND a.state <> 'withdrawn') AS has_active_application
     FROM ic_job_listings l
@@ -226,6 +260,8 @@ export async function fetchCandidateRows(client) {
     locationNorm: row.location_norm ?? null,
     remoteMode: row.remote_mode ?? null,
     salaryMax: row.salary_max === null ? null : Number(row.salary_max),
+    salaryPeriod: row.salary_period ?? null,
+    salaryRaw: row.salary_raw ?? null,
     hasActiveApplication: Boolean(row.has_active_application),
     description: row.description ?? null,
     applyUrl: row.apply_url ?? null,

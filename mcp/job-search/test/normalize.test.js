@@ -3,7 +3,7 @@ import { test, describe } from 'node:test';
 import assert from 'node:assert/strict';
 import {
   normalizeUrl, normalizeCompany, normalizeTitle, normalizeLocation, parseLocation, dedupHash, descriptionHash,
-  parseSalary, normalizeListing, normalizeLegacyRow, titleTokenKey, isLocationEligible, sha1, DEFAULT_TRACKING_PARAMS,
+  parseSalary, parseSalaryPeriod, normalizeListing, normalizeLegacyRow, titleTokenKey, isLocationEligible, sha1, DEFAULT_TRACKING_PARAMS,
   collapseWhitespace, stripZeroWidth, stripRepeatedLeadingSegment, cleanTitleText, TITLE_MAX_CHARS,
   stripTrailingUiFragments, DEFAULT_TITLE_TRAILING_FRAGMENTS,
 } from '../src/core/normalize.js';
@@ -494,14 +494,51 @@ describe('prescore case-insensitivity', () => {
 
 describe('parseSalary', () => {
   test('ranges and units', () => {
-    assert.deepEqual(parseSalary('$250,000 - $300,000 a year'), { salary_min: 250000, salary_max: 300000 });
-    assert.deepEqual(parseSalary('$250k-$300k'), { salary_min: 250000, salary_max: 300000 });
-    assert.deepEqual(parseSalary('Up to $300K'), { salary_min: 300000, salary_max: 300000 });
+    // "a year" (no "per"/"/yr"/"annual") is not a recognized period cue -- see parseSalaryPeriod's own
+    // doc comment: only an explicit per-year/annual/`/yr` phrasing counts, so this classifies 'unknown'.
+    assert.deepEqual(parseSalary('$250,000 - $300,000 a year'), { salary_min: 250000, salary_max: 300000, salary_period: 'unknown' });
+    assert.deepEqual(parseSalary('$250k-$300k'), { salary_min: 250000, salary_max: 300000, salary_period: 'unknown' });
+    assert.deepEqual(parseSalary('Up to $300K'), { salary_min: 300000, salary_max: 300000, salary_period: 'unknown' });
   });
   test('hourly and empty are null', () => {
-    assert.deepEqual(parseSalary('$55 - $65 / hr'), { salary_min: null, salary_max: null });
-    assert.deepEqual(parseSalary(''), { salary_min: null, salary_max: null });
-    assert.deepEqual(parseSalary(null), { salary_min: null, salary_max: null });
+    assert.deepEqual(parseSalary('$55 - $65 / hr'), { salary_min: null, salary_max: null, salary_period: 'hour' });
+    assert.deepEqual(parseSalary(''), { salary_min: null, salary_max: null, salary_period: 'unknown' });
+    assert.deepEqual(parseSalary(null), { salary_min: null, salary_max: null, salary_period: 'unknown' });
+  });
+});
+
+describe('parseSalaryPeriod: total pay-period classification (hourly-disqualifier ruling, migration 016)', () => {
+  test('$50-$60/hr -> hour', () => {
+    assert.deepEqual(parseSalary('$50-$60/hr'), { salary_min: null, salary_max: null, salary_period: 'hour' });
+    assert.equal(parseSalaryPeriod('$50-$60/hr'), 'hour');
+  });
+
+  test('$150,000/year -> year', () => {
+    assert.deepEqual(parseSalary('$150,000/year'), { salary_min: 150000, salary_max: 150000, salary_period: 'year' });
+    assert.equal(parseSalaryPeriod('$150,000/year'), 'year');
+  });
+
+  test('$12k/month -> month (salary_min/max stay null: the existing $20k-$5M number-extraction floor assumes an annual figure and filters a monthly $12,000 as noise -- an unrelated, pre-existing limitation this ruling does not change)', () => {
+    assert.deepEqual(parseSalary('$12k/month'), { salary_min: null, salary_max: null, salary_period: 'month' });
+    assert.equal(parseSalaryPeriod('$12k/month'), 'month');
+  });
+
+  test('no salary (no digits, no unit phrasing) -> unknown, never throws', () => {
+    assert.equal(parseSalaryPeriod('no salary'), 'unknown');
+    assert.deepEqual(parseSalary('no salary'), { salary_min: null, salary_max: null, salary_period: 'unknown' });
+  });
+
+  test('garbage input (non-string, empty, undefined) -> unknown, never throws', () => {
+    assert.equal(parseSalaryPeriod(undefined), 'unknown');
+    assert.equal(parseSalaryPeriod(null), 'unknown');
+    assert.equal(parseSalaryPeriod(12345), 'unknown');
+    assert.equal(parseSalaryPeriod({}), 'unknown');
+    assert.equal(parseSalaryPeriod('   '), 'unknown');
+  });
+
+  test('day and week phrasings classify distinctly', () => {
+    assert.equal(parseSalaryPeriod('$400/day'), 'day');
+    assert.equal(parseSalaryPeriod('$2,000 per week'), 'week');
   });
 });
 

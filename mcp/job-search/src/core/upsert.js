@@ -146,12 +146,12 @@ export async function insertListing(client, rec, decision, ctx) {
        (title, company, status, ad_date, url, notes, record_kind, source, external_id, url_normalized, dedup_hash,
         company_norm, title_norm, location, location_norm, remote_mode, remote_declared, salary_min, salary_max, salary_raw,
         posted_at, first_seen, last_seen, times_seen, absent_runs, last_page_index, profile_rev, description, description_hash,
-        search_profile, prescore, prescore_raw, noise_class, detail_skipped, duplicate_of, repost_of, embedding)
+        search_profile, prescore, prescore_raw, noise_class, detail_skipped, duplicate_of, repost_of, embedding, salary_period)
      VALUES
        ($1,$2,$3,$4,$5,NULL,'listing',$6,$7,$8,$9,
         $10,$11,$12,$13,$14,$15,$16,$17,$18,
         $19,$20,$20,1,0,$21,$22,$23,$24,
-        $25,$26,$27,$28,$29,$30,$31,$32::vector)
+        $25,$26,$27,$28,$29,$30,$31,$32::vector,$33)
      ON CONFLICT DO NOTHING
      RETURNING id`,
     [
@@ -160,6 +160,7 @@ export async function insertListing(client, rec, decision, ctx) {
       rec.company_norm, rec.title_norm, rec.location, rec.location_norm, rec.remote_mode, rec.remote_declared, rec.salary_min, rec.salary_max, rec.salary_raw,
       rec.posted_at, now, ctx.pageIndex ?? null, ctx.profileRev ?? null, rec.description, rec.description_hash,
       ctx.searchProfile ?? null, ctx.prescore ?? null, ctx.prescoreRaw ?? null, ctx.noiseClass ?? null, Boolean(ctx.detailSkipped), duplicateOf, decision.repostOf, ctx.embedding ?? null,
+      rec.salary_period ?? null,
     ],
   );
 
@@ -221,6 +222,7 @@ export async function updateListing(client, rec, decision, ctx, flags) {
        prescore_raw = coalesce($15, prescore_raw),
        noise_class = coalesce($16, noise_class),
        detail_skipped = coalesce($17, detail_skipped),
+       salary_period = coalesce($18, salary_period),
        expired_at = CASE WHEN $13 THEN NULL ELSE expired_at END,
        absent_runs = CASE WHEN $13 THEN 0 ELSE absent_runs END,
        stale = CASE WHEN $13 THEN false ELSE stale END,
@@ -230,6 +232,7 @@ export async function updateListing(client, rec, decision, ctx, flags) {
       target.id, now, flags.bumpTimesSeen ? 1 : 0, rec.salary_min, rec.salary_max, rec.salary_raw, rec.description, rec.description_hash,
       rec.posted_at, ctx.pageIndex ?? null, ctx.profileRev ?? null, ctx.prescore ?? null, repost, inheritedStatus,
       ctx.prescoreRaw ?? null, ctx.noiseClass ?? null, typeof ctx.detailSkipped === 'boolean' ? ctx.detailSkipped : null,
+      rec.salary_period ?? null,
     ],
   );
   return target.id;
@@ -327,6 +330,7 @@ export async function adoptUnclassifiedRows(client, opts = {}) {
       salary_raw: null,
       salary_min: null,
       salary_max: null,
+      salary_period: 'unknown',
     };
     try {
       const noiseClass = classifyNoise(rec);

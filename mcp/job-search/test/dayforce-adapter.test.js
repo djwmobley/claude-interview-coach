@@ -189,7 +189,7 @@ describe('dayforce adapter', () => {
       waitFor: {
         [SELECTORS.authGate]: EL,
         [SELECTORS.stepProbe]: EL,
-        [SELECTORS.customFields]: [{ tagName: 'input', type: 'text', id: 'salary', name: 'salary', text: 'Expected hourly rate', value: null, required: true, options: null }],
+        [SELECTORS.customFields]: [{ tagName: 'input', type: 'text', id: 'salary', name: 'salary', text: 'Expected annual salary', value: null, required: true, options: null }],
       },
     });
     const ctx = makeCtx({
@@ -199,16 +199,16 @@ describe('dayforce adapter', () => {
     const result = await dayforce.run(cap, ctx);
     assert.equal(result.outcome, 'needs_human');
     assert.equal(result.pendingQuestion.kind, 'question');
-    assert.equal(matchCalled, false, 'a salary-shaped label must route through resolveSalaryAnswer, never the generic bank matcher');
+    assert.equal(matchCalled, false, 'a salary-shaped label must route through classifyCompensationLabel, never the generic bank matcher');
     assert.equal(cap.calls.some((c) => c[0] === 'fill' && /^\d+(\.\d+)?$/.test(String(c[2]))), false, 'no fill call may carry a bare number for an unresolved salary question');
   });
 
-  test('a salary-shaped question with a configured salary_floor fills the resolved hourly figure (floor / 2080) and never parks', async () => {
+  test('a salary-shaped question with a configured salary_floor fills the resolved annual figure and never parks', async () => {
     const cap = makeFakeCap({
       waitFor: {
         [SELECTORS.authGate]: EL,
         [SELECTORS.stepProbe]: EL,
-        [SELECTORS.customFields]: [{ tagName: 'input', type: 'text', id: 'salary', name: 'salary', text: 'Desired hourly rate', value: null, required: true, options: null }],
+        [SELECTORS.customFields]: [{ tagName: 'input', type: 'text', id: 'salary', name: 'salary', text: 'Desired annual salary', value: null, required: true, options: null }],
         [SELECTORS.submit]: { tagName: 'button', text: 'Submit' },
         [SELECTORS.confirmationHeading]: { tagName: 'h1', text: 'Thank you for applying!' },
       },
@@ -216,7 +216,22 @@ describe('dayforce adapter', () => {
     const ctx = makeCtx({ credential: { username: 'jordan@example.com', password: 'stored-pw' }, salaryFloor: 150000 });
     const result = await dayforce.run(cap, ctx);
     assert.equal(result.outcome, 'submitted');
-    assert.ok(cap.calls.some((c) => c[0] === 'fill' && c[1] === '#salary' && c[2] === String(Math.round((150000 / 2080) * 100) / 100)));
+    assert.ok(cap.calls.some((c) => c[0] === 'fill' && c[1] === '#salary' && c[2] === '150000'));
+  });
+
+  test('an HOURLY-shaped question always parks (never filled from the floor), even with a configured salary_floor -- hourly is a disqualifier, per Damian\'s ruling', async () => {
+    const cap = makeFakeCap({
+      waitFor: {
+        [SELECTORS.authGate]: EL,
+        [SELECTORS.stepProbe]: EL,
+        [SELECTORS.customFields]: [{ tagName: 'input', type: 'text', id: 'salary', name: 'salary', text: 'Desired hourly rate', value: null, required: true, options: null }],
+      },
+    });
+    const ctx = makeCtx({ credential: { username: 'jordan@example.com', password: 'stored-pw' }, salaryFloor: 150000 });
+    const result = await dayforce.run(cap, ctx);
+    assert.equal(result.outcome, 'needs_human');
+    assert.equal(result.pendingQuestion.kind, 'question');
+    assert.equal(cap.calls.some((c) => c[0] === 'fill' && c[1] === '#salary'), false, 'an hourly field must never be filled, even with a configured floor');
   });
 
   test('wizard never reaches a submit step within MAX_STEPS -> needs_human, bounded (never an infinite loop)', async () => {

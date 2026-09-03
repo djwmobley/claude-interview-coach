@@ -896,12 +896,43 @@ export function descriptionHash(description) {
 // Salary (simple regex; prose-only salaries are a known blind spot)
 // ---------------------------------------------------------------------------
 
+const PERIOD_HOUR_RE = /\/\s*h(ou)?r\b|per hour|hourly/;
+const PERIOD_DAY_RE = /\/\s*day\b|per day|daily/;
+const PERIOD_WEEK_RE = /\/\s*w(ee)?k\b|per week|weekly/;
+const PERIOD_MONTH_RE = /\/\s*mo(nth)?\b|per month|monthly/;
+// Deliberately NOT a bare \bsalary\b cue (unlike answers.js's BASE_ANNUAL_RE, a screening-QUESTION-LABEL
+// regex): "salary" is far too generic a word to appear in a salary_raw string as a period signal --
+// "Competitive salary, no amount disclosed" carries the word with zero period information -- so this only
+// recognizes an explicit per-year/annual phrasing. A number with no unit phrasing at all classifies
+// 'unknown', never a guessed 'year', per the total-classification "friction over silent escape" ethos.
+const PERIOD_YEAR_RE = /\/\s*y(ea)?r\b|per year|annual(ly)?/;
+
+/**
+ * Total classification (apply pipeline hourly-disqualifier ruling, migration 016): every raw salary
+ * string maps to exactly one of hour/day/week/month/year/unknown, never a throw, never a third silent
+ * "unset" branch distinct from 'unknown'. Order matters (first match wins) but the five unit regexes are
+ * mutually exclusive on any realistic input, so ordering only matters for a deliberately ambiguous string.
+ * @param {unknown} raw
+ * @returns {'hour'|'day'|'week'|'month'|'year'|'unknown'}
+ */
+export function parseSalaryPeriod(raw) {
+  if (typeof raw !== 'string' || !raw.trim()) return 'unknown';
+  const s = raw.toLowerCase();
+  if (PERIOD_HOUR_RE.test(s)) return 'hour';
+  if (PERIOD_DAY_RE.test(s)) return 'day';
+  if (PERIOD_WEEK_RE.test(s)) return 'week';
+  if (PERIOD_MONTH_RE.test(s)) return 'month';
+  if (PERIOD_YEAR_RE.test(s)) return 'year';
+  return 'unknown';
+}
+
 /**
  * @param {unknown} raw
- * @returns {{ salary_min: number|null, salary_max: number|null }}
+ * @returns {{ salary_min: number|null, salary_max: number|null, salary_period: 'hour'|'day'|'week'|'month'|'year'|'unknown' }}
  */
 export function parseSalary(raw) {
-  if (typeof raw !== 'string' || !raw.trim()) return { salary_min: null, salary_max: null };
+  const salary_period = parseSalaryPeriod(raw);
+  if (typeof raw !== 'string' || !raw.trim()) return { salary_min: null, salary_max: null, salary_period };
   const s = raw.toLowerCase().replace(/,/g, '');
   const nums = [];
   const re = /\$?\s*(\d+(?:\.\d+)?)\s*(k|m)?\b/g;
@@ -912,12 +943,11 @@ export function parseSalary(raw) {
     else if (m[2] === 'm') n *= 1000000;
     if (n >= 20000 && n <= 5000000) nums.push(Math.round(n));
   }
-  if (nums.length === 0) return { salary_min: null, salary_max: null };
-  const hourly = /\/\s*h(ou)?r\b|per hour|hourly/.test(s);
-  if (hourly) return { salary_min: null, salary_max: null };
+  if (nums.length === 0) return { salary_min: null, salary_max: null, salary_period };
+  if (salary_period === 'hour') return { salary_min: null, salary_max: null, salary_period };
   const min = Math.min(...nums);
   const max = Math.max(...nums);
-  return { salary_min: min, salary_max: max };
+  return { salary_min: min, salary_max: max, salary_period };
 }
 
 // ---------------------------------------------------------------------------
@@ -964,6 +994,7 @@ export function parseSalary(raw) {
  * @property {string|null} salary_raw
  * @property {number|null} salary_min
  * @property {number|null} salary_max
+ * @property {'hour'|'day'|'week'|'month'|'year'|'unknown'} salary_period
  */
 
 /**
@@ -989,6 +1020,11 @@ export function normalizeListing(raw, opts) {
   const inferred = !declared && (mode === 'remote' || /\bremote\b/i.test(`${raw.title ?? ''} ${raw.location ?? ''}`));
   const loc = normalizeLocation(locationRaw, declared, inferred);
   const desc = descriptionHash(raw.description ?? null);
+  // salary_period always derives from the adapter's own raw salary text -- even when the adapter already
+  // supplied parsed salaryMin/salaryMax directly (skipping parseSalary's own number extraction below), a
+  // period classification is still read from whatever raw text is available, per the migration-016 "scan-
+  // run persists it" requirement (src/core/auto-apply-select.js's hourly_pay closed reason consumes it).
+  const salaryPeriod = parseSalaryPeriod(raw.salaryRaw ?? null);
   const sal = raw.salaryMin != null || raw.salaryMax != null
     ? { salary_min: raw.salaryMin ?? null, salary_max: raw.salaryMax ?? null }
     : parseSalary(raw.salaryRaw ?? null);
@@ -1013,6 +1049,7 @@ export function normalizeListing(raw, opts) {
     salary_raw: raw.salaryRaw ?? null,
     salary_min: sal.salary_min,
     salary_max: sal.salary_max,
+    salary_period: salaryPeriod,
   };
 }
 

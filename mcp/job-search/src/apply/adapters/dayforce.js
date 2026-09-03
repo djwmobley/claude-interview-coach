@@ -21,7 +21,7 @@
  * does not actually recognize.
  */
 import { detectRecaptchaV3Script } from '../../browser/wall.js';
-import { resolveSalaryAnswer, SALARY_LABEL_RE } from '../answers.js';
+import { classifyCompensationLabel } from '../answers.js';
 
 /** Selector contract this adapter targets. Grouped here (not inlined) so a future selector fix touches one place. */
 export const SELECTORS = Object.freeze({
@@ -62,10 +62,11 @@ function controlTypeFor(f) {
 }
 
 /**
- * Answer every enumerated custom screening field found on the CURRENT wizard step. Salary routing (spec
- * item C): identical rule to icims.js -- a label matching SALARY_LABEL_RE is ALWAYS routed through
- * resolveSalaryAnswer() before the generic bank matcher, and an unresolved salary question always parks
- * (never silently skipped, regardless of the field's own required flag).
+ * Answer every enumerated custom screening field found on the CURRENT wizard step. Compensation gate
+ * (Damian's ruling, spec item B): identical rule to icims.js -- a compensation-family label
+ * (classifyCompensationLabel) is ALWAYS routed through that gate before the generic bank matcher, and
+ * every shape but a plain-text BASE ANNUAL figure with a configured floor always parks (never silently
+ * skipped, regardless of the field's own required flag).
  * @param {import('../apply-capability.js').ApplyCapability} cap
  * @param {any} ctx
  */
@@ -77,10 +78,10 @@ async function answerCustomFields(cap, ctx) {
     const controlType = controlTypeFor(f);
     const selector = f.id ? `#${f.id}` : null;
 
-    if (SALARY_LABEL_RE.test(label)) {
-      const salaryResult = resolveSalaryAnswer({ label, controlType, bank: ctx.answers.bank });
-      if (salaryResult.outcome === 'answer' && selector) {
-        await cap.fill(selector, String(salaryResult.value));
+    const compClass = classifyCompensationLabel(label, { controlType, floor: ctx.answers.bank?.meta?.salary_floor ?? null });
+    if (compClass.category !== 'not_compensation') {
+      if (compClass.category === 'fill' && selector) {
+        await cap.fill(selector, String(compClass.value));
         continue;
       }
       const shot = await cap.screenshot();

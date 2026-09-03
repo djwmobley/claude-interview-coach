@@ -39,7 +39,7 @@ function makeFakeCap(responses = {}) {
   };
 }
 
-/** @param {{ match?: Function }} overrides */
+/** @param {{ match?: Function, salaryFloor?: number|null }} overrides */
 function makeCtx(overrides = {}) {
   /** @type {any[]} */
   const events = [];
@@ -48,7 +48,10 @@ function makeCtx(overrides = {}) {
     applyUrl: 'https://boards.greenhouse.io/acme/jobs/12345',
     profile: { fullName: 'Jordan Reyes', email: 'jordan@example.com', phone: '555-0100' },
     documents: { resumePath: 'resumes/jordan-reyes.docx', coverletterPath: null },
-    answers: { match: overrides.match ?? (() => ({ outcome: 'needs_human_no_match', tier: 'none' })) },
+    answers: {
+      match: overrides.match ?? (() => ({ outcome: 'needs_human_no_match', tier: 'none' })),
+      bank: { meta: { salary_floor: overrides.salaryFloor === undefined ? null : overrides.salaryFloor } },
+    },
     log: (f) => events.push(f),
     recordSubmitRequestSent: async () => { events.push({ evt: 'submit_request_sent' }); },
     _events: events,
@@ -176,6 +179,42 @@ for (const [name, adapter, SEL] of [['greenhouse', greenhouse, GH_SEL], ['lever'
 
     test('uploadHosts declares only this ATS\'s own registered hosts (documented, unverified against live CDN behavior)', () => {
       assert.ok(Array.isArray(adapter.uploadHosts) && adapter.uploadHosts.length > 0);
+    });
+
+    // Damian's ruling (hourly-disqualifier), spec item B: the compensation-family gate runs BEFORE the
+    // generic bank matcher / tier-1 learned lookup, unconditionally -- an hourly-shaped question must
+    // park even when a "learned" tier-1 match exists and would otherwise auto-answer it.
+    test('an HOURLY-shaped question is gated BEFORE the generic bank matcher: never filled, even when a learned-tier match would otherwise auto-answer it', async () => {
+      let matchCalled = false;
+      const cap = makeFakeCap({
+        waitFor: {
+          [SEL.formProbe]: { tagName: 'form', text: '' },
+          [SEL.customFields]: [{ tagName: 'input', type: 'text', id: 'rate', name: 'rate', text: 'Desired hourly rate', value: null, required: true, options: null }],
+        },
+      });
+      const ctx = makeCtx({
+        salaryFloor: 150000,
+        match: () => { matchCalled = true; return { outcome: 'auto_answer', tier: 'learned', value: 72, controlResult: { ok: true, text: '72' } }; },
+      });
+      const result = await adapter.run(cap, ctx);
+      assert.equal(result.outcome, 'needs_human');
+      assert.equal(result.pendingQuestion.kind, 'question');
+      assert.equal(matchCalled, false, 'the compensation gate must intercept before the generic bank matcher is ever consulted');
+      assert.equal(cap.calls.some((c) => c[0] === 'fill' && c[1] === '#rate'), false, 'an hourly field must never be filled, even from a learned tier-1 match');
+    });
+
+    test('a plain-text BASE ANNUAL salary question fills from the configured floor', async () => {
+      const cap = makeFakeCap({
+        waitFor: {
+          [SEL.formProbe]: { tagName: 'form', text: '' },
+          [SEL.customFields]: [{ tagName: 'input', type: 'text', id: 'salary', name: 'salary', text: 'Desired annual salary', value: null, required: true, options: null }],
+          [SEL.confirmationHeading]: { tagName: 'h1', text: 'Thank you for applying!' },
+        },
+      });
+      const ctx = makeCtx({ salaryFloor: 150000 });
+      const result = await adapter.run(cap, ctx);
+      assert.equal(result.outcome, 'submitted');
+      assert.ok(cap.calls.some((c) => c[0] === 'fill' && c[1] === '#salary' && c[2] === '150000'));
     });
   });
 }
