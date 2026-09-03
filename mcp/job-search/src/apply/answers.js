@@ -600,6 +600,17 @@ const HOURLY_RE = /\bhour(?:ly)?\b|\/\s*hr\b/i;
 const ANNUAL_RE = /\bannual(?:ly)?\b|\byear(?:ly)?\b|\/\s*yr\b|\bsalary\b/i;
 
 /**
+ * Apply pipeline slice 8: a label is salary-related whenever it matches either unit regex above (there was
+ * no single pre-existing "is this a salary question" regex to reuse -- only the two unit-detection regexes
+ * -- so this combines them, per the amended spec's own fallback instruction). Every adapter that answers a
+ * custom screening field checks this BEFORE the generic bank matcher/text fill, so a salary-shaped question
+ * always routes through resolveSalaryAnswer() and never falls through to an unrelated alias/synonym match
+ * or a guessed plain-text fill. Exported so every adapter (present and future) shares the exact same
+ * detection regex rather than a private per-adapter copy that could silently drift.
+ */
+export const SALARY_LABEL_RE = new RegExp(`${HOURLY_RE.source}|${ANNUAL_RE.source}`, 'i');
+
+/**
  * @typedef {Object} SalaryResult
  * @property {'answer'|'park'} outcome
  * @property {string} [reason] present when outcome is 'park'

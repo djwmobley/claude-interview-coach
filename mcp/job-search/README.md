@@ -739,6 +739,57 @@ real browser, or a real Task Scheduler task):
   reaches the `ic_scan_runs` INSERT that the marker follows) but has not been
   exercised against a real second in-flight scan process.
 
+## Apply pipeline: adapter coverage
+
+`src/apply/adapters/index.js`'s `ADAPTERS` registry, keyed by `ic_job_applications.ats_type`
+(`src/core/applications.js`'s `ATS_TYPES`). `src/apply/worker.js`'s adapter lookup is total: an
+`ats_type` with no registry entry parks the application in `needs_human` (`unsupported_ats`), never a
+throw or an assumed-ok skip -- `unknown` is the only value that will never get one, since it is
+`classifyApplyUrl()`'s own default branch for a URL this codebase does not recognize at all.
+
+| ATS | Account | Flow shape | Adapter |
+|---|---|---|---|
+| Greenhouse | none | single page | `greenhouse.js` (slice 5) |
+| Lever | none | single page | `lever.js` (slice 5) |
+| SmartRecruiters | none | single page | `smartrecruiters.js` (slice 6) |
+| Workday | per-tenant, self-registers | multi-step wizard, email verify | `workday.js` (slice 6) |
+| iCIMS | none (mandatory sign-in parks, never signs in) | single page | `icims.js` (slice 8) |
+| Dayforce | per-tenant, sign-in only, never self-registers | multi-step wizard | `dayforce.js` (slice 8) |
+| Indeed / LinkedIn Easy Apply | n/a | classify-only, deliberately never automated | `indeed-easy.js` / `linkedin-easy.js` |
+
+Every browser-driving adapter's CSS/data-attribute selectors are this build's best understanding of that
+ATS's public DOM, written and tested against a SCRIPTED FAKE page (see each adapter's own test file) --
+none has been verified against a live tenant in this sandboxed environment (no real Chrome/network
+available here). The failure mode on a wrong selector is safe by construction across every adapter: an
+optional `waitFor` miss parks in `needs_human` rather than guessing.
+
+**Confidence is a display hint, not a worker gate** (`src/apply/ats-detect.js`'s `classifyApplyUrl`):
+`exact` / `inferred` / `low` drive only the dashboard's ATS chip. The actual automation gate is the human
+Approve action on the application card (`POST /api/applications/:id/approve`) -- nothing runs the browser
+against a real ATS page until a person has approved it, regardless of confidence tier. As of slice 8,
+Dayforce's CandidatePortal path shape and iCIMS's `/jobs/<posting-id>...` path shape both classify `exact`
+(an anchored structural match, same certainty class as Greenhouse/Lever's own canonical URL shapes); either
+ATS with no recognizable posting path on the URL still classifies `low`.
+
+### Salary routing
+
+Every custom screening field an adapter answers checks the field's label against `src/apply/answers.js`'s
+`SALARY_LABEL_RE` (an hourly- or annual-unit-shaped label) BEFORE the generic three-tier bank matcher runs.
+A salary-shaped label always routes through `resolveSalaryAnswer()` instead: with a configured
+`salary_floor` (`data/apply-answers.md`, gitignored personal data) and an unambiguous unit, it fills the
+resolved figure; otherwise it parks a `question`-kind pending question, and no fill call for that field ever
+carries a bare number. `salary_floor` ships deliberately unset in this repo -- see `data/apply-answers.example.md`.
+
+### `/apply-answer` -- answering a parked screening question
+
+`.claude/skills/apply-answer/SKILL.md` drafts an answer to one application parked in `needs_human` with a
+`question`-kind pending question, strictly from this repo's own `data/` files, and posts it to
+`POST /api/applications/:id/answer` only after explicit approval in the conversation (`--dry-run` never
+posts at all). It handles the `question` kind only -- any other pending-question kind (`credential`,
+`captcha`, `document_drift`, and so on) gets a short, non-actionable message naming the kind instead, since
+those need a different action this skill does not perform. It never fills the application form itself; only
+the dashboard-driven `src/apply/worker.js` does that, after this skill's own POST resumes the application.
+
 ## Document rendering (`render_doc`)
 
 `render_doc({kind:'resume'|'cover_letter'|'cheatsheet', source, outName?, checkOnly?, force?, allowMissing?})`

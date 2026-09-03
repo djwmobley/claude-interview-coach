@@ -18,23 +18,32 @@
  * safe against a suffix spoof like `greenhouse.io.example.com` or `evil-greenhouse.io`.
  *
  * confidence is a closed, total enum: 'exact' | 'inferred' | 'low'.
- *   - 'exact': the canonical direct apply-URL shape for that ATS, where the tenant is structurally
- *     load-bearing in the URL itself (e.g. Greenhouse boards.greenhouse.io/<tenant>/jobs/<id>, Lever
- *     jobs.lever.co/<tenant>/<uuid>, Workday <tenant>.wd<N>.myworkdayjobs.com). LinkedIn/Indeed easy-apply
- *     classification is also 'exact' even though tenant is always null for them -- there is nothing
- *     ambiguous about identifying the ATS itself from those URL shapes, only the tenant concept does not
- *     apply (they are classify-only; see ATS_TYPES and the spec's slice list, item 8).
+ *   - 'exact': the canonical direct apply-URL shape for that ATS. Originally documented as "the tenant is
+ *     structurally load-bearing in the URL itself" (Greenhouse boards.greenhouse.io/<tenant>/jobs/<id>,
+ *     Lever jobs.lever.co/<tenant>/<uuid>, Workday <tenant>.wd<N>.myworkdayjobs.com); apply pipeline slice
+ *     8 widens this for two ATSs whose canonical URL shape is certain about the ATS and the POSTING even
+ *     though tenant extraction itself is not shipped: Dayforce's CandidatePortal path (the client segment
+ *     is present and structurally load-bearing even though it is not verified against a real tenant list,
+ *     see the Dayforce classification below) and iCIMS's `/jobs/<id>...` posting-id path shape (see below).
+ *     LinkedIn/Indeed easy-apply classification is also 'exact' even though tenant is always null for them
+ *     -- there is nothing ambiguous about identifying the ATS itself from those URL shapes, only the tenant
+ *     concept does not apply (they are classify-only; see ATS_TYPES and the spec's slice list, item 8).
  *   - 'inferred': the tenant is asserted by a query parameter or an embedded iframe an unrelated page
  *     (or an agency repost) could set to any value, e.g. Greenhouse's `/embed/job_app?for=<tenant>` or a
  *     single-tenant Greenhouse iframe found via the `html` option. Real, but not structurally guaranteed.
  *   - 'low': the ats is known but the tenant could not be determined at all (tenant is always null),
  *     or the ats is known only from a loose signal (a bare `gh_jid` query param on an arbitrary host).
  *
- * CONTRACT (spec-adversary amendment S6, enforced starting slice 5, not by this module): only 'exact' is
- * eligible for the automated apply path. 'inferred' and 'low' always route to needs_human -- a tailored
- * document or a submitted application built from a tenant this module is not certain of is a materially
- * worse failure mode than an extra manual click, per the plan's own classifier-traps warning about a
- * staffing-agency repost on `boards.greenhouse.io/embed/job_app?for=agency` tailoring to the wrong company.
+ * CONTRACT (spec-adversary amendment S6, amended by apply pipeline slice 8): confidence is a DISPLAY HINT
+ * for the dashboard's ATS chip (`src/dashboard/public/components/chips.js`'s `atsConfidenceChip`), not a
+ * worker gate -- this module, src/apply/worker.js, and the application routes never branch on confidence
+ * anywhere. The actual automation gate is the human Approve action on the application card
+ * (`POST /api/applications/:id/approve`, src/dashboard/routes/applications.js): nothing runs the browser
+ * against a real ATS page until a person has looked at the classification (including a low/inferred one)
+ * and approved it. This was originally written as "only 'exact' is eligible for the automated apply path"
+ * (S6) with the intent that a low-confidence classification should stay manual, but no code in this
+ * package ever enforced that as a gate -- slice 8 corrects the comment to match the actual, and safer,
+ * design: a human always decides at Approve time, regardless of confidence tier.
  */
 import { loadConfig } from '../core/config.js';
 import { ATS_TYPES } from '../core/applications.js';
@@ -53,6 +62,11 @@ export const CONFIDENCE_LEVELS = Object.freeze(['exact', 'inferred', 'low']);
 // change can. Both are copied verbatim from src/core/normalize.js's own
 // production regexes for these ATSs (verified against that file directly;
 // the code there is the source of truth this module mirrors).
+//
+// Apply pipeline slice 8 adds a second pinned rule, same rationale: iCIMS's
+// `/jobs/<posting-id>...` path shape. `/jobs2/foo` and `/jobsearch` (a real,
+// unrelated iCIMS search page) must never match -- the regex requires the
+// literal `/jobs/` segment boundary, never a bare `jobs` prefix.
 // ---------------------------------------------------------------------------
 
 const WORKDAY_HOST_RE = /^([a-z0-9-]+)\.(wd\d+)\.myworkdayjobs\.com$/;
@@ -62,6 +76,12 @@ const WORKDAY_HOST_RE = /^([a-z0-9-]+)\.(wd\d+)\.myworkdayjobs\.com$/;
 // it here, and do not loosen this regex to a suffix match on
 // "myworkday*.com" -- both would silently misclassify it as Workday.
 const DAYFORCE_CANDIDATE_PORTAL_RE = /^\/candidateportal\/([a-z]{2}-[a-z]{2})\/([^/]+)\/posting\/view\/(\d+)/i;
+// iCIMS exact-confidence path shape (apply pipeline slice 8): the literal `/jobs/` segment boundary
+// (never a bare `jobs` prefix -- `/jobsearch` and `/jobs2/foo` must never match) followed immediately by a
+// posting-id-shaped numeric segment. Anchored and case-insensitive, same discipline as every other
+// structural regex in this file; a substring/includes check would be the exact evasion this guards
+// against.
+const ICIMS_POSTING_PATH_RE = /^\/jobs\/\d+(?:\/|$)/i;
 const GREENHOUSE_JOBS_PATH_RE = /^\/(?:v1\/boards\/)?([a-z0-9-]+)\/jobs\/(\d+)/i;
 const GREENHOUSE_EMBED_PATH_RE = /^\/embed\/job_app/i;
 const GREENHOUSE_TENANT_TOKEN_RE = /^[a-z0-9-]+$/i;
@@ -266,7 +286,12 @@ export function classifyApplyUrl(url, opts = {}) {
 
   if (hostIs(host, o.dayforceHostSuffix)) {
     const m = DAYFORCE_CANDIDATE_PORTAL_RE.exec(u.pathname);
-    if (m) return { ats: 'dayforce', tenant: m[2].toLowerCase(), confidence: 'inferred' };
+    // Apply pipeline slice 8: the CandidatePortal path shape is a structural match against the ANCHORED,
+    // case-insensitive DAYFORCE_CANDIDATE_PORTAL_RE (never a substring/includes check) -- that is exactly
+    // as certain a signal as Greenhouse's or Lever's own canonical path shapes, so it is 'exact', not
+    // 'inferred'. The tenant (client segment) is still not verified against a real client list, same
+    // caveat SmartRecruiters/iCIMS below carry, but the URL SHAPE ITSELF is unambiguous.
+    if (m) return { ats: 'dayforce', tenant: m[2].toLowerCase(), confidence: 'exact' };
     return { ats: 'dayforce', tenant: null, confidence: 'low' };
   }
 
@@ -278,7 +303,12 @@ export function classifyApplyUrl(url, opts = {}) {
 
   if (hostIs(host, o.icimsHostSuffix)) {
     // Same rationale as SmartRecruiters (S5): *.icims.com covers the careers-<x>/jobs-<x> prefix shapes
-    // too (hostIs is a suffix match), but tenant extraction ships only after verification.
+    // too (hostIs is a suffix match), and tenant extraction still ships only after verification (tenant
+    // stays null either way). Apply pipeline slice 8: confidence is 'exact' only when the path ALSO
+    // carries the canonical `/jobs/<posting-id>...` shape (ICIMS_POSTING_PATH_RE) -- a bare *.icims.com
+    // host with no recognizable posting path (e.g. `/jobsearch`, a search/listing page, not a specific
+    // posting) stays 'low', same as before this slice.
+    if (ICIMS_POSTING_PATH_RE.test(u.pathname)) return { ats: 'icims', tenant: null, confidence: 'exact' };
     return { ats: 'icims', tenant: null, confidence: 'low' };
   }
 

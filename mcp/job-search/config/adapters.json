@@ -157,6 +157,23 @@
       "dailyDetails": 100,
       "maxPagesPerQuery": 3
     },
+    "icims": {
+      "_comment": "Apply pipeline slice 8: registered ONLY so src/core/urlguard.js's buildRegistry() has a matching domain/pathPatterns entry for src/apply/worker.js's guardUrl() call before navigating to an iCIMS apply_url -- there is no src/adapters/icims.js scan adapter and this source is never scanned (it never appears in a profile's sources list). The scan-shaped fields below (transport/delayMs/dailyPages/etc.) are inert placeholders satisfying adaptersSchema, not tuned scan behavior.",
+      "transport": "html",
+      "domains": [
+        "icims.com"
+      ],
+      "pathPatterns": [
+        "^/jobs/\\d+(/.*)?$"
+      ],
+      "delayMs": [
+        2000,
+        4000
+      ],
+      "dailyPages": 1,
+      "dailyDetails": 1,
+      "maxPagesPerQuery": 1
+    },
     "exec": {
       "transport": "html",
       "domains": [],
