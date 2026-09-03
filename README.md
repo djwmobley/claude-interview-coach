@@ -53,10 +53,10 @@ All examples below are from a tough-mode interview with the fictional example pr
 
 > | Anti-Pattern | Total | Trend |
 > |---|---|---|
-> | Volunteered a negative unprompted | 5 |: (baseline) |
-> | Not answering the actual question | 4 |: (baseline) |
-> | Hedging on rate/availability/logistics | 2 |: (baseline) |
-> | Confirming recruiter's concern | 2 |: (baseline) |
+> | Volunteered a negative unprompted | 5 | N/A (baseline) |
+> | Not answering the actual question | 4 | N/A (baseline) |
+> | Hedging on rate/availability/logistics | 2 | N/A (baseline) |
+> | Confirming recruiter's concern | 2 | N/A (baseline) |
 
 ## Quick start
 
