@@ -241,7 +241,14 @@ export async function runApplyWorker(applicationId, deps = {}) {
    * @param {{ client: import('pg').Client, app: any, controller: AbortController, adapters: Record<string, any>, outputRoot: string, bank: import('./answers.js').AnswerBank, env: any, config: any, connectSession: typeof defaultConnectSession, progress: (f: any) => void, log: (f: any) => void, lookup?: import('../core/urlguard.js').Lookup, targetMarkerFile?: string, credentials: WorkerDeps['credentials'], gmailVerify: WorkerDeps['gmailVerify'], sleep: WorkerDeps['sleep'] }} p
    */
   async function runOneApplication(p) {
-    const { client: c, app, controller, adapters: adapterRegistry, outputRoot: outRoot, bank: b, env: e, config: cfg, connectSession: connectSess, progress: prog, log: lg } = p;
+    const { client: c, app, controller, adapters: adapterRegistry, outputRoot: outRoot, bank: rawBank, env: e, config: cfg, connectSession: connectSess, progress: prog, log: lg } = p;
+    // One-click apply PR A (spec item 3): the application's own salary_floor (resolved once, at
+    // createApplication time, from the listing's location/remote_mode -- src/core/salary-floor.js's
+    // resolveFloor()) always wins over the shared answer bank's own meta.salary_floor for THIS
+    // application's screening questions, never the other way around: two applications sharing one bank
+    // file must never answer a salary question with the wrong location's floor. Falls back to the bank's
+    // own value only when the application has none recorded (e.g. a row created before this migration).
+    const b = { ...rawBank, meta: { ...rawBank.meta, salary_floor: app.salary_floor ?? rawBank.meta.salary_floor } };
     const adapter = adapterRegistry[app.ats_type];
     if (!adapter) {
       return { outcome: 'needs_human', pendingQuestion: { kind: 'unsupported_ats', label: `No automated adapter for ATS "${app.ats_type}" yet; apply by hand, then mark applied.`, page_url: app.apply_url } };

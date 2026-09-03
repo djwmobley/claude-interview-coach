@@ -24,7 +24,7 @@ const SCAN = path.join(PKG, 'bin', 'scan.js');
 const MAP = path.join(HERE, 'fixtures', 'triage', 'fixture-map.json');
 const FAKE_CLAUDE_JS = path.join(HERE, 'fixtures', 'triage', 'fake-claude.js');
 const PROFILE = `zz-test-cli-triage-${process.pid}`;
-const BASE_CONFIG_FILES = ['adapters.json', 'ats-boards.json', 'ats-apply.json', 'exec-boards.json', 'company-aliases.json', 'alert-senders.json', 'noise-rules.json'];
+const BASE_CONFIG_FILES = ['adapters.json', 'ats-boards.json', 'ats-apply.json', 'auto-apply.json', 'exec-boards.json', 'company-aliases.json', 'alert-senders.json', 'noise-rules.json'];
 
 /** @type {import('pg').Client} */
 let client;

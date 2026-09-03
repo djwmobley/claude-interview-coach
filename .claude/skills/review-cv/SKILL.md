@@ -1,9 +1,9 @@
 ---
 name: review-cv
 description: Fast quality-gate review of a generated CV against its target role
-argument-hint: <path-to-cv> [job-ad-url-or-path]
+argument-hint: <path-to-cv> [job-ad-url-or-path] [listing:<id>]
 user-invocable: true
-allowed-tools: Read(*), Glob(*), Grep(*), WebFetch
+allowed-tools: Read(*), Glob(*), Grep(*), WebFetch, mcp__job-search__get_job
 ---
 
 # Review CV: Fast Quality Gate
@@ -12,22 +12,51 @@ Run a focused quality check on a generated CV. This is designed to catch high-se
 
 ## Arguments
 
-- `$ARGUMENTS` (required): CV filename, optionally followed by the job ad (URL or file path).
+- `$ARGUMENTS` (required): CV filename, optionally followed by the job ad (URL or file path) or a `listing:<id>` token.
   1. **CV filename**: just the filename (e.g., `20260209-draft.md`). The file is always read from the `output/` folder. Must be an actual CV/resume, not a cheat sheet or internal document.
   2. *(optional)* **Job ad**: a URL (e.g., upwork.com link) or a path to a file containing the job description
+  3. *(optional)* **`listing:<id>`**: a job-search dashboard listing id, e.g. `listing:5871`. Present ONLY on a one-click apply / headless run kicked off by the dashboard's Apply button (src/dashboard/review-runner.js). Mutually exclusive with the job-ad URL/path argument: when `listing:<id>` is given, fetch the posting via the job-search MCP `get_job` tool instead, never WebFetch.
 - Examples:
   - `/review-cv 20260209-draft.md https://www.upwork.com/project/example-id123`
   - `/review-cv 20260209-draft.md data/job-posting.txt`
   - `/review-cv 20260209-draft.md` *(structural checks only)*
+  - `/review-cv 20260209-draft.md listing:5871` *(headless mode, see below)*
 
 If no job posting is provided, the review runs structural/language checks only (steps 3-6). If a job posting is provided, all steps run.
+
+## HEADLESS MODE
+
+Triggered ONLY when `$ARGUMENTS` contains a `listing:<id>` token. This is an
+unattended run driven by src/dashboard/review-runner.js: there is no person to
+ask anything, and the runner parses ONLY the machine block described in Step 7
+below out of the final result text -- everything else in the response is
+informational for a human reading the application event log later.
+
+- **Never ask the user anything in this mode.** Every place elsewhere in this
+  skill that says "STOP and ask the user" does not apply here. If Step 1's CV
+  validation would normally stop and ask, instead treat the file as failing
+  structural review (flag it CRITICAL: "file does not look like a CV/resume")
+  and continue to Step 7's report rather than halting.
+- Fetch the job posting via `mcp__job-search__get_job({id: <listingId>})`,
+  never WebFetch, and use its `description` field as the posting text. If the
+  description is missing or unusually thin, do not stop or ask: review the CV
+  structurally (Steps 3-6 only, same as "no job posting provided") and say so
+  plainly in the report's summary line -- never fabricate keyword findings
+  from a posting that was not actually there.
+- Keep the full human-readable report from Step 7. Headless mode changes only
+  who gets asked what and where the posting comes from; it does not shorten
+  or skip the report.
+- End the response with the machine block described in Step 7's "Headless
+  machine block" -- this applies on EVERY invocation, not only headless ones,
+  so the runner's parser and a human running this interactively see identical
+  output shape.
 
 ## Instructions
 
 ### Step 1: Load Context
 
-1. Read the CV file from `output/<filename>` (prepend `output/` to the filename from `$ARGUMENTS`). **Validate it is an actual CV/resume**: not a cheat sheet, coaching notes, or other internal document. If the file contains tactical call notes, scripted answers, rate negotiation scripts, or headers indicating call preparation rather than CV content (e.g., "Cheat Sheet", "Answers for the Call", in any language), **STOP and ask the user for the actual CV file**.
-2. If a job ad was provided as a URL, fetch it using WebFetch to extract the posting text. If it's a file path, read it. **If WebFetch returns fewer than 500 characters or only JavaScript boilerplate** (`noscript`, "enable JavaScript"), the portal is JS-rendered: fall back to Playwright MCP if configured (see `framework/playwright-setup.md`), or ask the user to paste the job posting text directly. Parse to extract the **top 10 keywords** (technologies, product names, certifications, domain terms) that the CV must contain.
+1. Read the CV file from `output/<filename>` (prepend `output/` to the filename from `$ARGUMENTS`). **Validate it is an actual CV/resume**: not a cheat sheet, coaching notes, or other internal document. If the file contains tactical call notes, scripted answers, rate negotiation scripts, or headers indicating call preparation rather than CV content (e.g., "Cheat Sheet", "Answers for the Call", in any language): in interactive mode, **STOP and ask the user for the actual CV file**; in headless mode (see HEADLESS MODE above), never stop or ask -- flag it CRITICAL and continue.
+2. If `listing:<id>` was given, call `get_job({id: <listingId>})` and use its `description` field as the posting text; never call WebFetch in this mode. Otherwise: if a job ad was provided as a URL, fetch it using WebFetch to extract the posting text. If it's a file path, read it. **If WebFetch returns fewer than 500 characters or only JavaScript boilerplate** (`noscript`, "enable JavaScript"), the portal is JS-rendered: fall back to Playwright MCP if configured (see `framework/playwright-setup.md`), or (interactive mode only) ask the user to paste the job posting text directly; in headless mode, fall back to structural-only review instead of asking. Parse to extract the **top 10 keywords** (technologies, product names, certifications, domain terms) that the CV must contain.
 3. Read `data/certifications.md` to check certification status.
 
 ### Step 2: Keyword Match (requires job posting)
@@ -118,3 +147,36 @@ Present results as a concise severity-grouped table:
 **FAIL criteria:** One or more CRITICAL issues.
 
 If the CV fails, list the critical issues prominently with specific suggested fixes.
+
+### Headless machine block (always, every invocation)
+
+After the human-readable report above, append a machine-readable block: a
+line reading exactly `VERDICT: PASS` or `VERDICT: FAIL` (PASS iff zero
+CRITICAL issues, matching the PASS/FAIL criteria above), followed immediately
+by a fenced json block. The VERDICT line itself is plain text, NOT inside a
+code fence -- only the json below it is fenced:
+
+VERDICT: PASS
+```json
+{
+  "verdict": "PASS",
+  "critical_count": 0,
+  "important_count": 2,
+  "minor_count": 1,
+  "findings": [
+    { "severity": "IMPORTANT", "text": "Missing availability in header" },
+    { "severity": "IMPORTANT", "text": "Concurrent engagement gap not explained" },
+    { "severity": "MINOR", "text": "Non-standard English term detected (line 51)" }
+  ]
+}
+```
+
+`findings` lists every issue found across all severities (CRITICAL included
+when present), each as `{severity, text}` with `text` a short, specific
+description (include the location inline in the text, e.g. "(Line 51)" --
+there is no separate location field). `critical_count`/`important_count`/
+`minor_count` must match the counts in `findings`. This block is parsed
+mechanically by src/dashboard/review-runner.js: it reads ONLY the VERDICT
+line and this json block, never the prose report above it, so keep both
+exactly in this shape -- the literal string `VERDICT: `, then `PASS` or
+`FAIL`, then a fenced ```json block whose content is valid JSON.

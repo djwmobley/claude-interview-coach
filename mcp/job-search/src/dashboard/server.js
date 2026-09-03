@@ -53,6 +53,13 @@ import { register as registerSources } from './routes/sources.js';
  *   wires a real one; route tests inject a fake the same way deps.scanRunner is stubbed. Every route that
  *   lands an application in 'approved' calls `.start(id)` right after (routes/applications.js's
  *   kickApplyRunner, routes/credentials.js's resume, stream.js's pollCredentialResume).
+ * @property {{ run: (applicationId: number, listingId: number) => Promise<{ok:boolean,reason?:string,markdownPath?:string}>, status: () => any }} [resumeRunner]
+ *   one-click apply PR A (src/dashboard/resume-runner.js's createResumeRunner()). bin/dashboard.js always
+ *   wires a real one; route tests inject a fake. Driven by POST /api/listings/:id/apply-now's
+ *   runApplyNowChain, never by any route directly.
+ * @property {{ run: (applicationId: number, resumeMarkdownPath: string, listingId: number) => Promise<{ok:boolean,verdict?:'PASS'|'FAIL',reason?:string}>, status: () => any }} [reviewRunner]
+ *   one-click apply PR A (src/dashboard/review-runner.js's createReviewRunner()). Same wiring pattern as
+ *   resumeRunner above.
  * @property {typeof fetch} [fetch]
  * @property {string} [version]
  * @property {string} [startedAt] ISO, set once at process start

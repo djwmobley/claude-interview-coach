@@ -2,7 +2,7 @@
 /** Pure formatting function tests (pr3-spec-decisions.md section 12 item 2). No DOM required. */
 import { test, describe } from 'node:test';
 import assert from 'node:assert/strict';
-import { relativeTime, ageDays, agingBucket, scoreBucket, fitBucket, fitDisplayState, shortDate, shortDateTime, salaryRange, formatMoney, pluralize, truncate, sourceLabel, formatPercent, normalizeAgendaTime, agendaTimeLabel } from '../src/dashboard/public/lib/format.js';
+import { relativeTime, ageDays, agingBucket, scoreBucket, fitBucket, fitDisplayState, applyButtonState, shortDate, shortDateTime, salaryRange, formatMoney, pluralize, truncate, sourceLabel, formatPercent, normalizeAgendaTime, agendaTimeLabel } from '../src/dashboard/public/lib/format.js';
 
 describe('relativeTime', () => {
   test('fixed-input cases', () => {
@@ -65,6 +65,42 @@ describe('fitBucket: same thresholds as scoreBucket, but missing maps to its own
 
   test('a real 0 score is "low", not "not-scored" (0 is a score, not an absence)', () => {
     assert.equal(fitBucket(0), 'low');
+  });
+});
+
+describe('applyButtonState: total classification of job-row.js\'s Apply button (one-click apply PR A spec item 8)', () => {
+  test('status "skip" hides the button entirely, regardless of application state', () => {
+    assert.equal(applyButtonState({ status: 'skip', application_id: null }), null);
+    assert.equal(applyButtonState({ status: 'skip', application_id: 5, application_state: 'drafting' }), null);
+  });
+
+  test('status "applied" hides the button entirely', () => {
+    assert.equal(applyButtonState({ status: 'applied', application_id: 5, application_state: 'submitted' }), null);
+  });
+
+  test('no application yet -> label "Apply", actionable', () => {
+    assert.deepEqual(applyButtonState({ status: 'new', application_id: null }), { label: 'Apply', actionable: true });
+    assert.deepEqual(applyButtonState({ status: 'new', application_id: undefined }), { label: 'Apply', actionable: true });
+  });
+
+  test('every application state maps to its own label; only "drafting" is actionable', () => {
+    const table = [
+      ['drafting', 'Drafting resume', true],
+      ['docs_ready', 'Reviewing', false],
+      ['approved', 'Approved', false],
+      ['submitting', 'Submitting', false],
+      ['needs_human', 'Needs you', false],
+      ['submitted', 'Submitted', false],
+      ['confirmed', 'Submitted', false],
+      ['failed', 'Failed', false],
+    ];
+    for (const [state, label, actionable] of table) {
+      assert.deepEqual(applyButtonState({ status: 'new', application_id: 1, application_state: state }), { label, actionable }, `state=${state}`);
+    }
+  });
+
+  test('an unrecognized application_state (should never happen given the CHECK constraint) falls back to the raw value, never actionable', () => {
+    assert.deepEqual(applyButtonState({ status: 'new', application_id: 1, application_state: 'withdrawn' }), { label: 'withdrawn', actionable: false });
   });
 });
 

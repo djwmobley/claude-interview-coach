@@ -91,6 +91,7 @@ describe('every COLUMNS entry carries the paired header/cell className used by a
     Fit: 'job-row__fit',
     'First seen': 'job-row__first-seen',
     Location: 'job-row__location',
+    Apply: 'job-row__apply',
   };
 
   test('every column is an object with a className, no bare string columns remain', () => {

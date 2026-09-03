@@ -466,7 +466,7 @@ describe('triageSchema and triage.json loading (slice 3 auto-triage, docs/slice3
   test('a MISSING triage.json loads successfully with present=false and every field at its schema default (finding 11 fix, never CONFIG_INVALID)', () => {
     const tmp = fs.mkdtempSync(path.join(os.tmpdir(), 'triage-config-missing-'));
     try {
-      for (const name of ['adapters.json', 'ats-boards.json', 'ats-apply.json', 'exec-boards.json', 'company-aliases.json', 'alert-senders.json', 'noise-rules.json']) {
+      for (const name of ['adapters.json', 'ats-boards.json', 'ats-apply.json', 'auto-apply.json', 'exec-boards.json', 'company-aliases.json', 'alert-senders.json', 'noise-rules.json']) {
         fs.copyFileSync(path.join(CONFIG_DIR, name), path.join(tmp, name));
       }
       const cfg = loadConfig({ dir: tmp, fresh: true });

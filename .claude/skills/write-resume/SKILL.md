@@ -1,7 +1,7 @@
 ---
 name: write-resume
 description: Write a targeted resume for a specific role, reads all source data, tailors content, generates markdown and DOCX
-argument-hint: <job-ad-url-or-file-or-paste-or-listing-id>
+argument-hint: <job-ad-url-or-file-or-paste-or-listing-id> [application:<id>]
 user-invocable: true
 allowed-tools: Read(*), Write(*), Edit(*), Glob(*), WebFetch, mcp__job-search__get_job, mcp__job-search__render_doc
 ---
@@ -26,6 +26,43 @@ recruiter call cheat sheet.
   - A URL to a live job posting
   - A file path to a saved job description
   - A pasted job description (if no argument, ask the candidate to paste it)
+- `application:<id>` (optional, appended after the listing id, e.g. `5871 application:42`):
+  present ONLY on a one-click apply / headless run kicked off by the dashboard's
+  Apply button. Presence of this token puts the skill in **headless mode** (see
+  below). Absent on every normal interactive invocation.
+
+---
+
+## HEADLESS MODE
+
+Triggered ONLY when `$ARGUMENTS` carries `application:<id>`. This is an
+unattended run: the caller (the dashboard's one-click apply chain) is not a
+person who can answer a question.
+
+**MUST NOT ask the user anything in this mode.** Every place elsewhere in this
+skill that says "ask the candidate," "stop here and ask," or similar does not
+apply in headless mode. There is no one to ask.
+
+- If `get_job`'s returned `description` is missing or shorter than 300
+  characters: do NOT draft anything. Output the single line
+  `HEADLESS_ABORT: no_description` and stop immediately. No markdown file, no
+  render_doc call.
+- Never second-guess fit or role match in headless mode. The caller already
+  decided to apply (the Apply click, or an auto-apply rule) before this skill
+  ever ran; re-litigating "is this the right role" here is out of scope and
+  must not block the draft.
+- Proceed through Step 7's `render_doc` call passing BOTH `listingId` AND
+  `applicationId` (the id from the `application:<id>` token) on every
+  `render_doc` call in this run, not just the final render.
+- On any other unrecoverable condition (a `render_doc` check that cannot be
+  fixed without asking the candidate something only they would know, a
+  `LOCKED`/`EXISTS` DOCX conflict, or any other dead end): output the single
+  line `HEADLESS_ABORT: <snake_case_reason>` (a short, specific reason, e.g.
+  `HEADLESS_ABORT: docx_locked`) and stop. Never guess an answer that would
+  normally require asking the candidate.
+- Every other rule in this file (role inclusion, format, writing rules,
+  output requirements) still applies in headless mode: headless changes only
+  who gets asked what, never the quality bar.
 
 ---
 
@@ -186,12 +223,18 @@ candidate.
 
 ### Step 2: Load the Job Posting
 
-If `$ARGUMENTS` is a numeric listing id, call `get_job({id: <listingId>})` and
-use its `url`, `company`, and `description` fields as the job posting. Do not
-also call WebFetch on that url: `get_job` already returns the description the
-dashboard stored at scan time, and re-fetching risks pulling a page that has
-since changed or gone stale. Remember the listing id; it is passed to
-`render_doc` as `listingId` in Step 7 and Step 8.
+If `$ARGUMENTS` starts with a numeric listing id, call `get_job({id:
+<listingId>})` and use its `url`, `company`, and `description` fields as the
+job posting. Do not also call WebFetch on that url: `get_job` already returns
+the description the dashboard stored at scan time, and re-fetching risks
+pulling a page that has since changed or gone stale. Remember the listing id;
+it is passed to `render_doc` as `listingId` in Step 7 and Step 8.
+
+If `$ARGUMENTS` also contains an `application:<id>` token, this is a headless
+run (see HEADLESS MODE above). Extract the application id and remember it;
+apply the description-length check (>= 300 characters) immediately after this
+`get_job` call and abort per HEADLESS MODE if it fails, before proceeding to
+Step 3.
 
 Otherwise: if a URL was provided, fetch it. If a file path, read it. If
 neither, ask the candidate to paste the job description.
@@ -244,7 +287,11 @@ for this specific role]
 ```
 
 If any role is in the exclusion list, **stop here and ask for approval** before
-proceeding.
+proceeding (interactive mode). In headless mode, never propose excluding a
+role in the first place: include every role from `data/project-index.md` with
+however few bullets it warrants, and if that is genuinely impossible for some
+reason, abort with `HEADLESS_ABORT: role_inclusion_conflict` rather than
+asking.
 
 ---
 
@@ -328,10 +375,17 @@ Fix any failures before proceeding.
    call (not on the `checkOnly` preflight call): `render_doc({kind:'resume',
    source:'output/markdown/YYYYMMDD-[role-slug].md', outName:'Jordan Reyes -
    [Title]', listingId:<listingId>})`. This links the DOCX to the listing's
-   application and moves it from drafting to docs_ready. The response's
-   `application_link` reports whether the link took effect; if
-   `application_link.ignored` is true, tell the candidate why (the reason
-   field) rather than assuming the link happened silently.
+   application and moves it from drafting to docs_ready. If this is a headless
+   run (an `application:<id>` token was present), ALSO pass `applicationId:
+   <applicationId>` on this same call: `render_doc({kind:'resume',
+   source:'output/markdown/YYYYMMDD-[role-slug].md', outName:'Jordan Reyes -
+   [Title]', listingId:<listingId>, applicationId:<applicationId>})`. This
+   scopes the link to that specific application rather than the listing's
+   most recent one. The response's `application_link` reports whether the
+   link took effect; if `application_link.ignored` is true, tell the
+   candidate why (the reason field) in interactive mode, or abort with
+   `HEADLESS_ABORT: <reason>` in headless mode, rather than assuming the link
+   happened silently.
 
 ---
 

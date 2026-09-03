@@ -818,6 +818,79 @@ posts at all). It handles the `question` kind only -- any other pending-question
 those need a different action this skill does not perform. It never fills the application form itself; only
 the dashboard-driven `src/apply/worker.js` does that, after this skill's own POST resumes the application.
 
+## One-click Apply
+
+`POST /api/listings/:id/apply-now` (the Apply button on every Jobs row and on the application card,
+one-click apply PR A) creates or reuses a `drafting` application for the listing and then runs a fully
+headless chain, with no interactive prompts at any step:
+
+```
+POST /api/listings/:id/apply-now
+        |
+        v  202 immediately (application_id) -- the chain below runs asynchronously, never blocking the response
+        |
+[1] resume-runner.js  --  spawns `claude -p "Run the /write-resume skill with argument <listingId> application:<applicationId>" ...`
+        |                 precheck: listing description must be >= 300 chars, else fails closed with
+        |                 reason "no_description" before any spawn (no cost). Success is decided ENTIRELY
+        |                 by database state after the process exits or times out: the application must be
+        |                 docs_ready AND its resume_doc_id's document row must belong to THIS listing.
+        v
+   ok? --no--> application parks in "drafting"/"failed" with a reason event; chain stops here.
+        |
+       yes (docs_ready, verified)
+        |
+[2] review-runner.js  --  spawns `claude -p "Run the /review-cv skill with argument <markdown-path> listing:<listingId>" ...`
+        |                 the independent headless review Damian required. Parses ONLY a
+        |                 `VERDICT: PASS`/`VERDICT: FAIL` line plus its fenced json block from the result;
+        |                 anything else (no block, malformed json) is "review_unparseable" -- FAIL, never PASS.
+        v
+   VERDICT: PASS? --no--> application stays at "docs_ready" with review_verdict/review_findings stored on
+        |                 the card; Approve stays available for a manual decision. Chain stops here.
+       yes
+        |
+[3] approve() (actor "apply") --> [4] kickApplyRunner (existing src/apply/worker.js submits the application)
+```
+
+**The review gate is the whole point of this chain**: nothing reaches `approve()` -- and therefore nothing
+reaches the real submit worker -- without an independent, freshly-spawned headless process reviewing the
+draft and returning `VERDICT: PASS`. The resume-writing process and the reviewing process never share
+context; a review is never skipped, and an unparseable review result is always treated as a failure, never
+as an implicit pass.
+
+**Headless mode is a skill-level contract, not a runner-level sandbox.** `.claude/skills/write-resume/
+SKILL.md` and `.claude/skills/review-cv/SKILL.md` both detect headless mode from their own arguments
+(`application:<id>` / `listing:<id>`) and are instructed to never ask the user anything and to abort with a
+single `HEADLESS_ABORT: <reason>` line on any unrecoverable condition. The runners enforce this from the
+outside as much as they can (the resume runner's own description-length precheck; DB-only success
+verification, never trusting the CLI's own claimed outcome; a "question-shaped result" heuristic that
+labels a failure `model_asked` rather than ever counting it as success) but cannot force a model to comply
+with an instruction -- see Known blind spots below.
+
+**Natural-language invocation is required.** The headless CLI only expands a slash-command skill when the
+prompt text is natural language, e.g. `-p "Run the /write-resume skill with argument 5871
+application:42"` -- a bare `-p "/write-resume 5871 application:42"` drops the argument silently. Both
+runners build their prompts this way; do not "simplify" this to a bare slash command.
+
+**Env config** (`src/core/config.js`'s `getEnv()`):
+
+| Variable | Default | Meaning |
+|---|---|---|
+| `JOBSEARCH_CLAUDE_BIN` | `~/.local/bin/claude.exe` | path to the headless `claude` CLI |
+| `JOBSEARCH_RESUME_MODEL` | `sonnet` | `--model` for the resume runner |
+| `JOBSEARCH_REVIEW_MODEL` | `sonnet` | `--model` for the review runner |
+| `JOBSEARCH_RESUME_MAX_TURNS` | `80` | `--max-turns` (shared by both runners) |
+| `JOBSEARCH_RESUME_BUDGET_USD` | `5` | `--max-budget-usd` (shared by both runners) |
+| `JOBSEARCH_RESUME_TIMEOUT_MS` | `900000` (15 min) | hard timeout; the runner then `taskkill /T /F`s the process tree (shared by both runners) |
+
+The budget/timeout defaults are a generous multiple of a real measured run (a live headless `/write-resume`
+run against a well-populated listing: $0.28, 38 s, 14 turns), not that measurement itself.
+
+Both runners spawn `claude` detached, with `CLAUDECODE` / `CLAUDE_CODE_ENTRYPOINT` / `CLAUDE_AGENT_ID`
+stripped from the child's environment (the spawning dashboard process may itself be running inside a
+Claude Code session during development; the headless child must never inherit that and think it is a
+nested/resumed session), and `--strict-mcp-config --mcp-config <copy of .mcp.json>` so the child sees only
+the `job-search` MCP server, never whatever else the ambient environment might otherwise supply.
+
 ## Document rendering (`render_doc`)
 
 `render_doc({kind:'resume'|'cover_letter'|'cheatsheet', source, outName?, checkOnly?, force?, allowMissing?})`
@@ -1156,3 +1229,70 @@ detected by the test suite.
   The URL-safety check for report links is structural (domain + path
   pattern) only; unlike a live fetch's `urlguard`, it does not re-resolve DNS
   at report time.
+- **One-click apply (PR A): headless-mode compliance is a skill instruction, not a runner-enforced
+  sandbox.** `.claude/skills/write-resume/SKILL.md` and `.claude/skills/review-cv/SKILL.md` are instructed
+  never to ask the user anything in headless mode, but neither runner can force a model to actually follow
+  that instruction -- a model could still emit a question instead of drafting, or draft against the wrong
+  interpretation of the listing, or otherwise ignore the rule. The runners can only react to what actually
+  happens: resume-runner.js decides success ENTIRELY from database state (never the CLI's own stdout
+  claim), so a model that asks a question instead of drafting simply never flips the application to
+  `docs_ready` and the run fails -- it can never register as a false success. The "question-shaped result"
+  heuristic (ends in `?`, or matches a small set of confirmation-seeking phrases) exists only to give that
+  failure a more specific reason (`model_asked`) than the generic `no_docs_ready` fallback; it is a
+  heuristic over free text, not a proof, and a model that ignores the headless-mode rule in some other
+  shape (drafting against the wrong listing, silently truncating the resume, hallucinating content the
+  posting never asked for) still fails this heuristic's own pattern match and reports the generic reason
+  instead -- the failure is still correctly a failure, just under a less specific label.
+- **A headless run that links the RIGHT document with WRONG content is undetectable by this PR's own
+  verification.** resume-runner.js's success check (spec item 4/5) only proves the resume_doc_id's document
+  row belongs to the correct listing -- it has no opinion on whether the DOCX's actual content is a good,
+  accurate, or even relevant resume for that listing. A model that runs headless, writes a technically
+  well-formed resume with fabricated bullet points or the wrong candidate's employment history, and links
+  it successfully would pass this verification and reach the review gate. **Constructed input that would
+  pass this verification but should not:** a write-resume run that (a) reaches Step 7's `render_doc` call
+  with `listingId`/`applicationId` matching the target application (satisfying the DB check) but (b) drafted
+  the resume body from stale or wrong context -- e.g. a coding bug or prompt-injection in a listing
+  description that caused the model to draft for a DIFFERENT role's requirements while still rendering
+  against the correct listing/application ids. The independent review runner (spec item 6) is the mitigation
+  for exactly this class of gap, not resume-runner.js's own DB check -- but the review is itself a second
+  headless model call reading the same drafted markdown, not a ground-truth source-of-record diff against
+  `data/projects/*.md`; a sufficiently plausible-looking fabrication that both models find internally
+  consistent could pass both gates. Nothing in this PR verifies bullet-level factual accuracy against the
+  candidate's own structured data.
+- **review-runner.js's machine-block parser is intentionally narrow (VERDICT line + one fenced json block
+  immediately after it) and can misfire on legitimate report content.** If the human-readable report ABOVE
+  the machine block ever contains a line that happens to match `/^VERDICT:\s*(PASS|FAIL)\s*$/mi` (e.g. a
+  CV quality-gate report quoting a job posting's own text that says "VERDICT: PASS" for some unrelated
+  reason), `HEADLESS_ABORT_RE`-style parsing in resume-runner.js and `VERDICT_RE` in review-runner.js would
+  match the FIRST occurrence, not necessarily the skill's own intended final block. Neither parser
+  disambiguates "the last VERDICT line in the text" from "the first"; this is an accepted narrow-parsing
+  trade-off (matching exactly what the skill's own machine-block contract specifies), not a defense against
+  adversarial or coincidental text shaped like the sentinel.
+- **`src/core/salary-floor.js`'s `resolveFloor()` pattern for Texas cities does not match this codebase's
+  own `location_norm` vocabulary.** The binding spec's regex is `/^city-.*-tx$/`, but
+  `src/core/normalize.js`'s `normalizeLocation()` never actually produces a `location_norm` value with a
+  `city-` prefix for a city-state pair -- `parseLocation('Houston, TX')` produces the bare value
+  `houston-tx`, not `city-houston-tx` (see `test/normalize.test.js`'s own `city-st shapes` test and this
+  PR's `test/salary-floor.test.js`, which documents the gap in a dedicated test rather than silently
+  reinterpreting the binding spec). The practical effect: a real Texas city listing's `location_norm`
+  ('austin-tx', 'houston-tx', ...) falls through to the HIGHER `relocation` floor (275000) instead of the
+  intended `texas_or_remote` floor (225000) -- only `state-tx` (a bare-state listing with no city) and any
+  `remote-*` value correctly reach the lower floor today. This was implemented exactly as specified because
+  the spec is marked "adversary-amended, binding," but it is very likely an unintended gap between the spec
+  author's understanding of `location_norm`'s shape and the actual vocabulary; it should be reconciled with
+  Damian before this floor logic is trusted for a real Texas-city application.
+- **`onDocumentLinked`'s "more than one drafting application for a listing" warning is defensive code with
+  no integration-test coverage against a live constraint violation.** `sql/012`'s partial unique index
+  (`WHERE state <> 'withdrawn'`) makes constructing that scenario against the real schema impossible without
+  dropping the constraint, which this PR's test suite deliberately does not do (see
+  `test/applications.test.js`'s own comment on that test) to avoid corrupting the shared test database's
+  invariant for other test files running concurrently. The `count(*) > 1` branch itself has never executed
+  under test; only the normal, constraint-holds path (count always 1) is exercised.
+- **`resume-runner.js`'s `findNewestMarkdown()` infers the drafted resume's markdown path from filesystem
+  mtime, not from a database record.** No document row tracks the markdown source the way `render_doc`
+  tracks the rendered DOCX; the runner picks the newest `.md` file under `output/markdown/` modified at or
+  after the run's own start time (with a 2 s back-buffer for mtime granularity). This is single-flight-safe
+  (only one resume run is ever in progress at a time) but is still an inference, not a guarantee: a
+  concurrent, unrelated write to `output/markdown/` from some other process during the run's window (a
+  manual `/write-resume` invocation running at the same moment, outside this dashboard) could in principle
+  cause the wrong file to be picked. Nothing in this PR guards against that specific interleaving.

@@ -21,6 +21,8 @@ import { defaultDeps } from '../src/tools/_shared.js';
 import { createDashboardServer } from '../src/dashboard/server.js';
 import { createScanRunner } from '../src/dashboard/scan-runner.js';
 import { createApplyRunner } from '../src/dashboard/apply-runner.js';
+import { createResumeRunner } from '../src/dashboard/resume-runner.js';
+import { createReviewRunner } from '../src/dashboard/review-runner.js';
 import { createCalendarCache } from '../src/dashboard/calendar-cache.js';
 
 const HERE = path.dirname(fileURLToPath(import.meta.url));
@@ -131,11 +133,29 @@ async function main() {
     spawn: nodeSpawn,
     log,
   });
+  const resumeRunner = createResumeRunner({
+    env,
+    logDir: env.JOBSEARCH_LOG_DIR,
+    repoRoot: repoRoot(),
+    withClient,
+    spawn: nodeSpawn,
+    log,
+  });
+  const reviewRunner = createReviewRunner({
+    env,
+    logDir: env.JOBSEARCH_LOG_DIR,
+    repoRoot: repoRoot(),
+    withClient,
+    spawn: nodeSpawn,
+    log,
+  });
 
   const deps = {
     ...defaultDeps({ withClient, config, env, calendar: makeCalendarProvider(env) }),
     scanRunner,
     applyRunner,
+    resumeRunner,
+    reviewRunner,
     calendarCache: createCalendarCache(),
     credentials: createCredentials(),
     outputRoot: path.join(repoRoot(), 'output'),

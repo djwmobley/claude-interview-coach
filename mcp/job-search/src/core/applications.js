@@ -35,6 +35,9 @@ import { applyMark } from '../tools/mark_jobs.js';
 import { STATUS_GROUPS } from './statuses.js';
 import { resolveOutputPath } from './documents.js';
 import { createFollowup } from './followups.js';
+import { loadConfig } from './config.js';
+import { resolveFloor } from './salary-floor.js';
+import { log as defaultLog } from './logger.js';
 
 /**
  * `created_from` prefix for the unconditional 5-day-nudge follow-up markSubmittedUnwrapped creates below
@@ -82,6 +85,11 @@ const APPLICATION_COLS = [
   'id', 'listing_id', 'ats_type', 'apply_url', 'account_email', 'state', 'resume_doc_id', 'coverletter_doc_id',
   'resume_hash', 'coverletter_hash', 'answers', 'pending_question', 'screenshot_rel_path', 'submitted_at',
   'confirmed_at', 'approved_at', 'confirmation_ref', 'error', 'attempt', 'created_at', 'updated_at',
+  // One-click apply PR A: salary_floor (spec item 1/3, sql/014_application_salary_floor.sql) is the
+  // resolved compensation floor stored at creation time; review_verdict/review_findings (spec item 6) are
+  // the independent headless review's own machine block, stored so the dashboard card can show why an
+  // application parked instead of advancing to approved.
+  'salary_floor', 'review_verdict', 'review_findings',
 ].join(', ');
 
 /**
@@ -165,8 +173,14 @@ async function insertApplicationEvent(client, input) {
  * Create a new application in state 'drafting'. Fails with a clean VALIDATION error (not a raw
  * postgres unique-violation) when an active (non-withdrawn) application already exists for the listing
  * (A6, sql/012_applications.sql's partial unique index).
+ *
+ * One-click apply PR A (spec item 3): resolves and stores `salary_floor` from the listing's own
+ * location_norm/remote_mode via src/core/salary-floor.js's resolveFloor(), using `floors` from
+ * config/auto-apply.json. Reads the listing row FOR UPDATE inside the same transaction as the insert so
+ * the floor recorded on the application always reflects the listing state at the moment of creation, never
+ * a value that could change underneath a concurrent caller.
  * @param {import('pg').ClientBase} client
- * @param {{ listingId: number, atsType?: string, applyUrl?: string|null, accountEmail?: string, actor?: string, note?: string|null }} input
+ * @param {{ listingId: number, atsType?: string, applyUrl?: string|null, accountEmail?: string, actor?: string, note?: string|null, floors?: import('./salary-floor.js').SalaryFloors }} input
  */
 export async function createApplication(client, input) {
   if (typeof input?.listingId !== 'number') throw new JobSearchError('VALIDATION', 'createApplication: listingId is required');
@@ -174,15 +188,22 @@ export async function createApplication(client, input) {
   if (!ATS_TYPES.includes(atsType)) throw new JobSearchError('VALIDATION', `ats_type must be one of ${ATS_TYPES.join(', ')}`);
   const actor = input.actor ?? 'mcp';
   if (!EVENT_ACTORS.includes(actor)) throw new JobSearchError('VALIDATION', `application event actor must be one of ${EVENT_ACTORS.join(', ')}`);
+  const floors = input.floors ?? loadConfig().autoApply.floors;
 
   return withTransaction(client, async (c) => {
+    const listingRes = await c.query('SELECT location_norm, remote_mode FROM ic_job_listings WHERE id = $1 FOR UPDATE', [input.listingId]);
+    if (listingRes.rowCount === 0) throw new JobSearchError('NOT_FOUND', `listing ${input.listingId} not found`);
+    const salaryFloor = resolveFloor(
+      { locationNorm: listingRes.rows[0].location_norm, remoteMode: listingRes.rows[0].remote_mode },
+      floors,
+    );
     /** @type {any} */
     let row;
     try {
       const r = await c.query(
-        `INSERT INTO ic_job_applications (listing_id, ats_type, apply_url, account_email)
-         VALUES ($1, $2, $3, $4) RETURNING ${APPLICATION_COLS}`,
-        [input.listingId, atsType, input.applyUrl ?? null, input.accountEmail ?? 'djwmobley@gmail.com'],
+        `INSERT INTO ic_job_applications (listing_id, ats_type, apply_url, account_email, salary_floor)
+         VALUES ($1, $2, $3, $4, $5) RETURNING ${APPLICATION_COLS}`,
+        [input.listingId, atsType, input.applyUrl ?? null, input.accountEmail ?? 'djwmobley@gmail.com', salaryFloor],
       );
       row = r.rows[0];
     } catch (err) {
@@ -321,14 +342,23 @@ export async function retry(client, id, opts = {}) {
  * Cross-listing integrity: verifies the referenced ic_job_documents row's own listing_id equals the
  * application's listing_id before linking, so a caller cannot (accidentally or otherwise) attach a
  * document that belongs to a different listing's resume/cover-letter to this application.
+ *
+ * Interactive-use only (one-click apply PR A spec item 4): this always targets the listing's most recent
+ * non-withdrawn application, never a specific application id -- see onDocumentLinkedForApplication() below
+ * for the application-scoped path render_doc uses when a headless run supplies applicationId. The partial
+ * unique index (sql/012) makes more than one 'drafting' application for a listing structurally impossible
+ * today, but this logs a warning rather than silently picking one if that invariant is ever violated (e.g.
+ * a future schema change loosens the constraint) -- never a hard failure, since the caller's own document
+ * link already succeeded and must not be undone by a defensive check.
  * @param {import('pg').ClientBase} client
  * @param {number} listingId
  * @param {'resume'|'coverletter'|string} docKind
  * @param {number} docId
- * @param {{ actor?: string }} [opts]
+ * @param {{ actor?: string, log?: (fields: Record<string, string|number|boolean|null>) => void }} [opts]
  */
 export async function onDocumentLinked(client, listingId, docKind, docId, opts = {}) {
   const actor = opts.actor ?? 'mcp';
+  const warn = opts.log ?? ((f) => defaultLog.warn(f));
   return withTransaction(client, async (c) => {
     const appRes = await c.query(
       `SELECT ${APPLICATION_COLS} FROM ic_job_applications WHERE listing_id = $1 AND state <> 'withdrawn' ORDER BY id DESC LIMIT 1 FOR UPDATE`,
@@ -336,6 +366,64 @@ export async function onDocumentLinked(client, listingId, docKind, docId, opts =
     );
     if (appRes.rowCount === 0) return { ignored: true, reason: 'no_application' };
     const app = appRes.rows[0];
+    if (app.state !== 'drafting') return { ignored: true, reason: 'not_drafting' };
+    if (docKind !== 'resume' && docKind !== 'coverletter') return { ignored: true, reason: 'unsupported_doc_kind' };
+
+    const draftingCount = await c.query(`SELECT count(*)::int AS n FROM ic_job_applications WHERE listing_id = $1 AND state = 'drafting'`, [listingId]);
+    if (Number(draftingCount.rows[0].n) > 1) {
+      warn({ evt: 'multiple_drafting_applications_for_listing', listing_id: listingId, count: Number(draftingCount.rows[0].n), linked_application_id: app.id });
+    }
+
+    const docRes = await c.query('SELECT listing_id FROM ic_job_documents WHERE id = $1', [docId]);
+    if (docRes.rowCount === 0) throw new JobSearchError('VALIDATION', `document ${docId} not found`);
+    const docListingId = Number(docRes.rows[0].listing_id);
+    if (docListingId !== Number(listingId)) {
+      throw new JobSearchError('VALIDATION', `document ${docId} belongs to listing ${docListingId}, not listing ${listingId}`, {
+        details: { document_listing_id: docListingId, listing_id: listingId },
+      });
+    }
+
+    const col = docKind === 'resume' ? 'resume_doc_id' : 'coverletter_doc_id';
+    await c.query(`UPDATE ic_job_applications SET ${col} = $2, updated_at = now() WHERE id = $1`, [app.id, docId]);
+
+    if (docKind === 'resume') {
+      const updated = await transitionUnwrapped(c, app.id, 'docs_ready', { actor, note: `resume linked (document ${docId})` }, {});
+      return { ignored: false, application: updated };
+    }
+    const refreshed = await c.query(`SELECT ${APPLICATION_COLS} FROM ic_job_applications WHERE id = $1`, [app.id]);
+    return { ignored: false, application: refreshed.rows[0] };
+  });
+}
+
+/**
+ * Application-scoped counterpart to onDocumentLinked() above (one-click apply PR A spec item 4, "critical"
+ * adversary finding 1): links a document to ONE SPECIFIC application, never "whichever application is most
+ * recent for the listing" -- the headless resume runner always knows exactly which application it is
+ * drafting for and must never let a race (a second application created for the same listing between the
+ * runner starting and render_doc completing) silently attach its resume to the wrong row.
+ *
+ * Verifies the application's own listing_id equals the caller-supplied listingId (defense in depth: a
+ * caller that mismatches applicationId/listingId gets a clear VALIDATION error, not a document linked to
+ * the wrong listing's application) and, like onDocumentLinked, that the referenced document's own
+ * listing_id also matches.
+ * @param {import('pg').ClientBase} client
+ * @param {number} applicationId
+ * @param {number} listingId
+ * @param {'resume'|'coverletter'|string} docKind
+ * @param {number} docId
+ * @param {{ actor?: string }} [opts]
+ */
+export async function onDocumentLinkedForApplication(client, applicationId, listingId, docKind, docId, opts = {}) {
+  const actor = opts.actor ?? 'mcp';
+  return withTransaction(client, async (c) => {
+    const appRes = await c.query(`SELECT ${APPLICATION_COLS} FROM ic_job_applications WHERE id = $1 FOR UPDATE`, [applicationId]);
+    if (appRes.rowCount === 0) throw new JobSearchError('NOT_FOUND', `application ${applicationId} not found`);
+    const app = appRes.rows[0];
+    if (Number(app.listing_id) !== Number(listingId)) {
+      throw new JobSearchError('VALIDATION', `application ${applicationId} belongs to listing ${app.listing_id}, not listing ${listingId}`, {
+        details: { application_listing_id: app.listing_id, listing_id: listingId },
+      });
+    }
     if (app.state !== 'drafting') return { ignored: true, reason: 'not_drafting' };
     if (docKind !== 'resume' && docKind !== 'coverletter') return { ignored: true, reason: 'unsupported_doc_kind' };
 
@@ -444,6 +532,29 @@ export async function recordSubmitRequestSent(client, applicationId) {
   await client.query(
     `INSERT INTO ic_job_application_events (application_id, kind, actor, note) VALUES ($1, 'progress', 'apply', 'submit_request_sent')`,
     [applicationId],
+  );
+}
+
+/**
+ * One-click apply PR A: a standalone note/error/progress application event with no state transition,
+ * for the resume/review runners (src/dashboard/resume-runner.js, src/dashboard/review-runner.js) to log
+ * precheck failures, the spawned CLI's own result JSON (cost/turns/is_error/session_id), and
+ * HEADLESS_ABORT reasons -- the same "own INSERT, not routed through transitionUnwrapped" pattern
+ * recordSubmitRequestSent() above already establishes for a durable, transition-independent event.
+ * @param {import('pg').ClientBase} client
+ * @param {{ applicationId: number, kind: 'note'|'error'|'progress', actor?: string, note?: string|null, meta?: unknown }} input
+ */
+export async function recordApplicationEvent(client, input) {
+  if (!APPLICATION_EVENT_KINDS.includes(input.kind)) {
+    throw new JobSearchError('VALIDATION', `application event kind must be one of ${APPLICATION_EVENT_KINDS.join(', ')}`);
+  }
+  const actor = input.actor ?? 'apply';
+  if (!EVENT_ACTORS.includes(actor)) {
+    throw new JobSearchError('VALIDATION', `application event actor must be one of ${EVENT_ACTORS.join(', ')}`);
+  }
+  await client.query(
+    `INSERT INTO ic_job_application_events (application_id, kind, actor, note, meta) VALUES ($1, $2, $3, $4, $5::jsonb)`,
+    [input.applicationId, input.kind, actor, input.note ?? null, input.meta !== undefined ? JSON.stringify(input.meta) : null],
   );
 }
 

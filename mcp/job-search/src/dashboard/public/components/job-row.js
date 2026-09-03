@@ -20,17 +20,19 @@
  */
 import { h, hLink } from '../lib/dom.js';
 import { stageChip, chipClassName, sourceChip } from './chips.js';
-import { scoreBucket, fitDisplayState } from '../lib/format.js';
+import { scoreBucket, fitDisplayState, applyButtonState } from '../lib/format.js';
 
 export const PRESCORE_TITLE = 'Prescore: deterministic keyword/profile/location/salary score times a noise multiplier, computed at scan time.';
 export const FIT_TITLE = 'Fit: judgment score set by you or an agent, empty until triaged.';
 
 /**
  * @param {any} row a GET /api/listings row (carries url_ok)
- * @param {{ selected: boolean, onToggleSelect: (id: number) => void, onOpen: (id: number) => void, triageBand?: { floor: number, ceiling: number }|null }} opts
+ * @param {{ selected: boolean, onToggleSelect: (id: number) => void, onOpen: (id: number) => void, onApplyNow: (id: number) => void, triageBand?: { floor: number, ceiling: number }|null }} opts
  *   triageBand (jobs-unscored-visibility PR, Change 3): the dashboard's own triage floor/ceiling, from
  *   GET /api/listings' `triage` field, threaded through by pages/jobs.js -- see lib/format.js's
- *   fitDisplayState() for how it is used.
+ *   fitDisplayState() for how it is used. onApplyNow (one-click apply PR A spec item 8): POST
+ *   /api/listings/:id/apply-now, wired by pages/jobs.js -- this component only renders the button and
+ *   delegates the click, matching onOpen/onToggleSelect's own pattern.
  */
 export function jobRow(row, opts) {
   const chip = stageChip(row.status);
@@ -38,6 +40,7 @@ export function jobRow(row, opts) {
   const prescoreCls = `score score--${scoreBucket(row.prescore)}`;
   const fitState = fitDisplayState(row, opts.triageBand);
   const fitCls = `score score--${fitState.bucket}`;
+  const applyState = applyButtonState(row);
   const tr = h('tr', {
     className: 'job-row',
     dataset: { rowId: row.id },
@@ -74,6 +77,15 @@ export function jobRow(row, opts) {
     h('td', { className: `job-row__fit ${fitCls}`, attrs: { title: FIT_TITLE }, text: fitState.label }),
     h('td', { className: 'job-row__first-seen', text: row.first_seen ? new Date(row.first_seen).toLocaleDateString('en-US', { month: 'short', day: 'numeric' }) : 'not set' }),
     h('td', { className: 'job-row__location', text: row.location ?? 'not listed' }),
+    h('td', { className: 'job-row__apply' }, [
+      applyState === null ? null
+        : applyState.actionable
+          ? h('button', {
+            className: 'btn btn--small', attrs: { type: 'button' }, text: applyState.label,
+            on: { click: (ev) => { ev.stopPropagation(); opts.onApplyNow(row.id); } },
+          })
+          : h('span', { className: 'job-row__apply-status', text: applyState.label }),
+    ]),
   ]);
   return tr;
 }

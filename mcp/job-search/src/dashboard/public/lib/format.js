@@ -127,6 +127,40 @@ export function fitDisplayState(row, triageBand) {
   return { label: 'below floor', bucket: 'not-scored', scored: false };
 }
 
+/** One-click apply (PR A spec item 8): job-row.js's Apply-button label for every ic_job_applications
+ * state, distinct wording from components/chips.js's applicationStateChip() (which labels the
+ * application-card's own state chip, e.g. "Docs ready") -- this is a call-to-action label in a narrow
+ * table cell, not a status chip, so it reads as a verb phrase ("Reviewing", "Drafting resume") rather than
+ * a noun. */
+const APPLY_BUTTON_STATE_LABELS = Object.freeze({
+  drafting: 'Drafting resume',
+  docs_ready: 'Reviewing',
+  approved: 'Approved',
+  submitting: 'Submitting',
+  needs_human: 'Needs you',
+  submitted: 'Submitted',
+  confirmed: 'Submitted',
+  failed: 'Failed',
+});
+
+/**
+ * Total classification of a job row's Apply-button state (one-click apply PR A spec item 8). `null` means
+ * the button is hidden entirely -- the two closed statuses ('skip', 'applied') where an Apply action would
+ * be meaningless or redundant. Every other row gets a label; `actionable` is true only when clicking would
+ * actually do something useful (no application yet, or one still mid-draft) -- every other application
+ * state is a live status a click cannot meaningfully advance (the dashboard route 409s a duplicate attempt
+ * regardless, this only decides whether the row renders a clickable button or a plain status label).
+ * @param {{ status?: string|null, application_id?: number|string|null, application_state?: string|null }} row
+ * @returns {{ label: string, actionable: boolean } | null}
+ */
+export function applyButtonState(row) {
+  if (row.status === 'skip' || row.status === 'applied') return null;
+  if (row.application_id === null || row.application_id === undefined) return { label: 'Apply', actionable: true };
+  const state = row.application_state ?? '';
+  const label = Object.prototype.hasOwnProperty.call(APPLY_BUTTON_STATE_LABELS, state) ? APPLY_BUTTON_STATE_LABELS[state] : state || 'Apply';
+  return { label, actionable: state === 'drafting' };
+}
+
 /**
  * Format an ISO date/datetime string as a short human date, e.g. "Aug 27". Invalid/missing input
  * renders as a placeholder dash-free string, never throws.

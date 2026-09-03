@@ -196,11 +196,21 @@ export function buildQuery(a) {
   // external_id for company-detail linking. compactRows()/formatRow() (src/core/compact.js) only ever
   // project a fixed, unrelated set of fields into the MCP tool's own text output, so adding SELECT
   // columns here is inert for every existing query_jobs MCP caller; only the dashboard route reads them.
+  // One-click apply (PR A spec item 8): the listing's most recent non-withdrawn application id/state,
+  // via a LEFT JOIN LATERAL mirroring src/core/applications.js's getApplicationForListing() query
+  // exactly (same ORDER BY id DESC LIMIT 1 "most recent non-withdrawn" rule) -- dashboard-only, like
+  // url/url_normalized/first_seen/etc. above: inert for every existing query_jobs MCP caller
+  // (compactRows()/formatRow() never project these fields), only the dashboard's job-row.js Apply button
+  // reads them.
   const sql = `SELECT l.id, l.title, l.company, l.company_norm, l.location, l.remote_mode, l.posted_at, l.salary_min, l.salary_max,
       l.prescore, l.fit_score, l.status, l.source, l.noise_class, l.url, l.url_normalized, l.external_id,
       l.first_seen, l.last_seen, l.duplicate_of, l.record_kind, l.notes,
+      app.id AS application_id, app.state AS application_state,
       count(*) OVER() AS total
     FROM ic_job_listings l${join}
+    LEFT JOIN LATERAL (
+      SELECT a.id, a.state FROM ic_job_applications a WHERE a.listing_id = l.id AND a.state <> 'withdrawn' ORDER BY a.id DESC LIMIT 1
+    ) app ON true
     WHERE ${where.join(' AND ')}
     ORDER BY ${order}
     LIMIT ${add(a.limit)} OFFSET ${add(a.offset)}`;
