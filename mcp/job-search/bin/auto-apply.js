@@ -52,12 +52,16 @@ import { LOCK_KEY } from '../src/core/scan-run.js';
 import { buildProbeRegistryFromAtsApply } from '../src/apply/probe-registry.js';
 import { INTERMEDIARY_HOSTS } from '../src/apply/apply-target.js';
 import { persistApplyTargetForListing, LIFETIME_PROBE_ATTEMPTS } from '../src/core/apply-target-persist.js';
+import { prepareLinkedInListing, adaptPlaywrightPage } from '../src/apply/linkedin-button-prepare.js';
 import { selectCandidates } from '../src/core/auto-apply-select.js';
 import { createApplication, approve } from '../src/core/applications.js';
 import { createResumeRunner } from '../src/dashboard/resume-runner.js';
 import { createReviewRunner } from '../src/dashboard/review-runner.js';
 import { runApplyWorker } from '../src/apply/worker.js';
 import { connectSession as defaultConnectSession, applyTargetMarkerPath } from '../src/browser/session.js';
+import { makeCapability } from '../src/browser/capability.js';
+import { buildRegistry } from '../src/core/urlguard.js';
+import { defaultAutoApplySummaryFile, writeAutoApplySummary } from '../src/core/auto-apply-state.js';
 
 const USAGE = 'usage: node bin/auto-apply.js [--dry-run] [--json [out]]';
 
@@ -101,18 +105,24 @@ export async function acquireLockWithPoll(client, opts) {
 
 /**
  * The prepare phase: re-probe up to `probeRowCap` listings whose apply target is unresolved or due for
- * re-probe. Pure DB + fetch work (src/core/apply-target-persist.js); the scan-Chrome-session reuse is
- * best-effort housekeeping only (see module doc comment) and never affects this function's own outcome.
+ * re-probe. Every non-LinkedIn row is pure DB + fetch work (src/core/apply-target-persist.js). A LinkedIn
+ * row additionally goes through src/apply/linkedin-button-prepare.js's button-only click probe when
+ * `opts.linkedInBrowser` is available (GAP 1, docs/auto-apply-spec.md section 9) -- when it is not (the
+ * scan Chrome session could not be reached), a LinkedIn row is skipped exactly the way it always was
+ * before that feature existed: left unresolved for a future run, never a thrown error.
  * @param {import('pg').ClientBase} client
  * @param {import('../src/core/config.js').LoadedConfig} config
- * @param {{ now: Date, dryRun: boolean, log: (f: any) => void, fetch?: typeof fetch, lookup?: import('../src/core/urlguard.js').Lookup }} opts
+ * @param {{
+ *   now: Date, dryRun: boolean, log: (f: any) => void, fetch?: typeof fetch, lookup?: import('../src/core/urlguard.js').Lookup,
+ *   linkedInBrowser?: { cap: { goto: (url: string) => Promise<any>, readJson: (name: string, arg?: unknown) => Promise<unknown> }, probeSession: { page: import('../src/apply/linkedin-button-probe.js').ButtonProbePage, session: import('../src/apply/linkedin-button-probe.js').ButtonProbeSession } } | null,
+ * }} opts
  * @returns {Promise<{ attempted: number, resolved: number, unresolved: number, skipped: number }>}
  */
 export async function runPrepare(client, config, opts) {
   const probeRegistry = buildProbeRegistryFromAtsApply(config.atsApply, INTERMEDIARY_HOSTS);
   const stats = { attempted: 0, resolved: 0, unresolved: 0, skipped: 0 };
   const cur = await client.query(
-    `SELECT id, url, url_normalized, apply_probed_at, probe_attempts
+    `SELECT id, url, url_normalized, source, apply_probed_at, probe_attempts
      FROM ic_job_listings
      WHERE coalesce(record_kind,'listing') = 'listing' AND duplicate_of IS NULL AND expired_at IS NULL
        AND (status IS NULL OR status IN ('new', 'maybe', 'shortlisted'))
@@ -128,9 +138,25 @@ export async function runPrepare(client, config, opts) {
     const listing = { id: Number(row.id), url: row.url, url_normalized: row.url_normalized, apply_probed_at: row.apply_probed_at, probe_attempts: Number(row.probe_attempts ?? 0) };
     stats.attempted++;
     try {
-      const result = await persistApplyTargetForListing(client, listing, null, {
-        probeRegistry, reprobeAfterHours: config.autoApply.reprobeAfterHours, now: opts.now, dryRun: opts.dryRun, fetch: opts.fetch, lookup: opts.lookup,
-      });
+      /** @type {{ outcome: string }} */
+      let result;
+      if (row.source === 'linkedin' && opts.linkedInBrowser) {
+        result = await prepareLinkedInListing(client, listing, {
+          cap: opts.linkedInBrowser.cap,
+          probeSession: opts.linkedInBrowser.probeSession,
+          adapterCfg: { dailyPages: config.adapters.adapters.linkedin?.dailyPages ?? 0, dailyDetails: config.adapters.adapters.linkedin?.dailyDetails ?? 0 },
+          probeRegistry, reprobeAfterHours: config.autoApply.reprobeAfterHours, now: opts.now, dryRun: opts.dryRun, fetch: opts.fetch, lookup: opts.lookup,
+          log: opts.log,
+        });
+      } else if (row.source === 'linkedin') {
+        // No scan Chrome session available this run: never attempted, retried next run.
+        stats.skipped++;
+        continue;
+      } else {
+        result = await persistApplyTargetForListing(client, listing, null, {
+          probeRegistry, reprobeAfterHours: config.autoApply.reprobeAfterHours, now: opts.now, dryRun: opts.dryRun, fetch: opts.fetch, lookup: opts.lookup,
+        });
+      }
       if (result.outcome === 'resolved') stats.resolved++;
       else if (result.outcome === 'unresolved') stats.unresolved++;
       else stats.skipped++;
@@ -143,23 +169,41 @@ export async function runPrepare(client, config, opts) {
 }
 
 /**
- * Best-effort scan-Chrome session reuse for the prepare phase (see module doc comment: this CLI's own
- * resolution never actually drives the browser, so a failure here is logged and swallowed, never fatal).
+ * Best-effort scan-Chrome session reuse for the prepare phase. Connects, reconciles the shared apply
+ * target marker (parity with scan-run.js's own getSession()/reconcileTargets() pattern), attaches ONE page
+ * scoped to the 'linkedin' scan source, and returns everything runPrepare's LinkedIn branch needs: the
+ * existing safe, read-only Capability (goto/readJson) plus the raw-page adapter GAP 1's click probe uses.
+ * Returns null on ANY failure (session unreachable, attach failure) -- never throws, never blocks the run;
+ * a null result simply means every LinkedIn row this run is left unresolved for next time (see
+ * runPrepare's own doc comment).
  * @param {typeof defaultConnectSession} connectSession
  * @param {import('../src/core/config.js').Env} env
+ * @param {import('../src/core/config.js').LoadedConfig} config
  * @param {(f: any) => void} log
+ * @returns {Promise<{ cap: any, probeSession: any, close: () => Promise<void> } | null>}
  */
-export async function touchScanSession(connectSession, env, log) {
+export async function openLinkedInBrowser(connectSession, env, config, log) {
   try {
     const session = await connectSession({ cdpUrl: env.SCAN_CDP_URL });
     try {
       await session.reconcileTargets(applyTargetMarkerPath(env.JOBSEARCH_LOG_DIR));
       await session.reconcile();
-    } finally {
+      const signal = new AbortController().signal;
+      const page = await session.attachPage({ signal });
+      const registry = buildRegistry(config);
+      const cap = makeCapability(page, { registry, source: 'linkedin', signal });
+      const { page: probePage, session: probeSessionAdapter } = adaptPlaywrightPage(page);
+      return {
+        cap, probeSession: { page: probePage, session: probeSessionAdapter },
+        close: async () => { await session.closeAll().catch(() => {}); },
+      };
+    } catch (err) {
       await session.closeAll().catch(() => {});
+      throw err;
     }
   } catch (err) {
     log({ evt: 'auto_apply_prepare_session_unavailable', ...errFields(err) });
+    return null;
   }
 }
 
@@ -261,8 +305,12 @@ async function main() {
       process.exit(2);
       return;
     }
-    await touchScanSession(defaultConnectSession, env, log);
-    prepareStats = await runPrepare(lockClient, config, { now, dryRun, log });
+    const linkedInBrowser = await openLinkedInBrowser(defaultConnectSession, env, config, log);
+    try {
+      prepareStats = await runPrepare(lockClient, config, { now, dryRun, log, linkedInBrowser });
+    } finally {
+      if (linkedInBrowser) await linkedInBrowser.close();
+    }
     log({ evt: 'auto_apply_prepare_done', ...prepareStats });
   } finally {
     if (locked) {
@@ -315,6 +363,15 @@ async function main() {
     select: { results: selection.results, cap_used: selection.capUsed, cap_remaining: selection.capRemaining },
     applied: applyResults,
   };
+
+  // GAP 2 (docs/auto-apply-spec.md section 9): the stable, always-overwritten summary bin/remind.js's
+  // daily digest reads (src/core/auto-apply-state.js) -- written on EVERY run, dry run included,
+  // regardless of whether --json was also passed, so the digest always reflects the most recent attempt.
+  try {
+    writeAutoApplySummary(defaultAutoApplySummaryFile(env.JOBSEARCH_LOG_DIR), summary);
+  } catch (err) {
+    log({ evt: 'auto_apply_summary_write_failed', ...errFields(err) });
+  }
 
   if (args.json !== undefined) {
     const file = args.json ?? path.join(env.JOBSEARCH_LOG_DIR, `auto-apply-${new Date().toISOString().replace(/[:.]/g, '-')}.json`);

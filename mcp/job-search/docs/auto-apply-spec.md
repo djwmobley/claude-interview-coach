@@ -141,15 +141,81 @@ new `src/browser/extractors.js` functions, `linkedinApplyLink`/`indeedApplyState
 (cheerio-based anchor-text scan for an "Apply"-shaped link, real and testable without a browser since exec
 boards' `fetch` mode already downloads raw HTML).
 
-## 8. Blind spots (what this PR's own tests cannot detect)
+## 9. Button-only Apply hint capture (LinkedIn, GAP 1)
 
-- **Live DOM.** `linkedinApplyLink`/`indeedApplyState` (`src/browser/extractors.js`) run against
-  `document`/`window.location` in a real browser page; they are exercised here only through fake
-  capability stubs that return canned values, never against a real LinkedIn/Indeed page's actual markup.
+`isExactTarget` (section 4) was corrected to exclude `linkedin_easy`/`indeed_easy` explicitly: without
+that fix, a bare LinkedIn listing URL would classify as `exact` on its own host (`ats-detect.js`'s
+`classifyApplyUrl` is host-only for the `/jobs/view/` shape) and short-circuit resolution before this
+feature ever ran -- `CLASSIFY_ONLY_ATS` in `src/apply/apply-target.js` is a deny-list of the two ATSs this
+codebase already knows, by construction, can never be automated (`src/apply/worker.js`'s `classifyOnly`
+gate), not a hand-picked subset of what auto-apply happens to support.
+
+`src/apply/linkedin-button-probe.js` (pure, no browser dependency): `extractApplyHint(urlStr)` parses
+`applicantTrackingSystemName`/`companyName` from a URL; `probeLinkedInButtonApply(page, session, opts)`
+clicks a given selector EXACTLY ONCE, then polls (default 15 s, `pollIntervalMs` default 500 ms) for either
+a new target opening (closed immediately after reading its URL) or the same tab's own URL gaining the hint
+params. Tested against fully scripted fake page/session objects -- no real browser.
+
+`src/apply/linkedin-button-prepare.js` (lives under `src/apply/`, not `src/core/`, because it constructs a
+raw-Playwright click adapter -- `test/safety.test.js`'s structural safety lint forbids any `.click(` call
+surface outside `src/apply/`) is the integration layer `bin/auto-apply.js`'s prepare phase calls
+per LinkedIn candidate: navigates via the EXISTING safe, read-only Capability (`goto`/`readJson`, never a
+new capability type) and calls the already-shipped `linkedinApplyLink` extractor to observe `{ href,
+buttonOnly }`. An anchor href never reaches the click path at all. A `buttonOnly` result reserves one
+`details` unit against `config/adapters.json`'s `linkedin.dailyDetails` (`src/core/budget.js`'s
+`reserveBudget`, injectable for tests) before clicking -- budget exhaustion or no available browser session
+skips the candidate entirely (no `probe_attempts` increment: no work was attempted). The click's outcome
+(`new_target` / `hint` / `timeout`) becomes an `ApplyDetail` fed into the SAME
+`persistApplyTargetForListing` the rest of prepare uses, so a hint or a timeout still records
+`apply_probed_at`/`probe_attempts` without ever setting `apply_ats`.
+
+`adaptPlaywrightPage` bridges a real Playwright `Page` (as returned by `src/browser/session.js`'s
+`attachPage`) to the probe's minimal interface using `page.click()`/`page.url()`/`page.context().pages()`
+directly -- never `src/apply/apply-capability.js`'s `makeApplyCapability` (that constructor has exactly one
+callsite, `src/apply/worker.js`, enforced by `test/apply-lint.test.js`; this is not the apply pipeline's
+submission path).
+
+## 10. Daily digest wiring (GAP 2)
+
+`src/core/auto-apply-state.js` mirrors `src/core/watchdog-state.js`'s own
+`defaultWatchdogStateFile`/`readWatchdogState` pattern exactly: a single, stable
+`<JOBSEARCH_LOG_DIR>/auto-apply-latest.json` file, overwritten on EVERY `bin/auto-apply.js` run (dry runs
+included) regardless of whether `--json` was also passed, read with the same "any failure means no data,
+never a thrown error" discipline as the watchdog state file.
+
+`collectAutoApply`/`renderAutoApplyText`/`Html`/`Markdown` (`src/core/report.js`) now return a `{ hasRun:
+false }` shape (and a corresponding "no auto-apply run recorded today" string) instead of `null` when no
+summary is available -- the section is ALWAYS rendered into the digest body, never silently omitted,
+distinct from `dashboardHealthLineText`'s own null-means-omit convention (a missing auto-apply run is the
+normal, expected state most days, unlike a genuinely unhealthy dashboard). `src/core/remind.js#runRemind`
+reads the summary file (I/O stays in remind.js, mirroring the watchdog state read; report.js stays pure)
+and appends the three renderers' output into the plain-text, HTML, and markdown bodies alongside the
+existing scan-report and follow-ups sections. `bin/remind.js` wires `autoApplySummaryFile` to
+`defaultAutoApplySummaryFile(env.JOBSEARCH_LOG_DIR)` -- the exact path `bin/auto-apply.js` writes to.
+
+## 11. Known deviations (deliberate, documented per review request)
+
+- **Lock scope.** `bin/auto-apply.js` holds the shared `LOCK_KEY` advisory lock only across the "prepare"
+  phase (poll/exit-2 exactly as specified), releasing it before select/apply run. Holding it through apply
+  would deadlock every `runApplyWorker()` call inside the apply loop, which acquires the SAME lock
+  per-application on its own connection -- see `runApplyWorker`'s own doc comment in `src/apply/worker.js`.
+  This is unchanged from the original design and is not expected to change without a broader rework of how
+  `runApplyWorker` acquires its lock.
+- **`probeRowCap` semantics.** Implemented as a simple overall cap on how many additional listing rows
+  `bin/auto-apply.js`'s prepare phase re-probes per run (`LIMIT $3` in `runPrepare`'s own candidate query),
+  not a more elaborate "N beyond `probeCapPerSource`" formula -- the source text describing this field was
+  ambiguous on the exact relationship between the per-run prepare cap and `scan-run.js`'s own per-source,
+  per-scan-run `probeCapPerSource` counter, which remain two independent counters against two different
+  code paths (prepare vs. opportunistic scan-time persistence).
+
+## 12. Blind spots (what this PR's own tests cannot detect)
+
+- **Live DOM.** `linkedinApplyLink`/`indeedApplyState` (`src/browser/extractors.js`) and the button/anchor
+  selectors `src/apply/linkedin-button-probe.js` clicks run against `document`/`window.location`/a real
+  Playwright `Page` in a real browser page; they are exercised here only through fake capability/page/
+  session stubs that return canned values, never against a real LinkedIn/Indeed page's actual markup or a
+  live click's real side effects (a real Easy Apply modal opening, a real new tab actually navigating).
   The CSS selectors are best-effort and unverified against a live, logged-in session.
-- **Real button clicks.** No adapter in this PR ever clicks an Apply button -- "button-only Apply" is
-  observed (`buttonOnly: true`) but never acted on; `apply_ats_hint` exists for a future click-capable
-  prepare phase, not populated by one yet.
 - **The real one-click apply chain end to end.** `bin/auto-apply.js`'s `applyOneCandidate` is tested
   against fully scripted fakes for `resumeRunner`/`reviewRunner`/`runWorker`; it has never been run against
   a live `claude` CLI spawn or a real ATS submission.
@@ -160,6 +226,7 @@ boards' `fetch` mode already downloads raw HTML).
   into `finalizeListing`/`tryFetchDetail` and unit-tested via `persistApplyTargetForListing` directly and
   via the widened adapters' fake-ctx tests, but no test exercises a full `executeRun()` scan with a real
   adapter producing an `applyDetail` hint end to end.
-- **Report integration.** `collectAutoApply`/`renderAutoApply*` are new, tested functions but are not yet
-  wired into `bin/remind.js`'s daily digest -- a caller still needs to read `bin/auto-apply.js`'s own
-  `--json` output file and pass it in. This is a deliberate scope boundary (see PR body), not an oversight.
+- **The real `openLinkedInBrowser` wiring.** `bin/auto-apply.js`'s own connection to the scan Chrome
+  session (`connectSession`, `session.attachPage`, `makeCapability`) for the button-probe path is
+  exercised only by inspection, not by an automated test against a real or simulated CDP endpoint --
+  `runPrepare`'s own tests inject `linkedInBrowser` directly, bypassing `openLinkedInBrowser` entirely.

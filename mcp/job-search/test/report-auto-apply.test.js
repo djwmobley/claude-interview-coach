@@ -1,6 +1,8 @@
 // @ts-check
 /**
- * src/core/report.js's auto-apply section (auto-apply PR B): collectAutoApply + the three renderers.
+ * src/core/report.js's auto-apply section (auto-apply PR B, GAP 2 update): collectAutoApply + the three
+ * renderers now ALWAYS render a section -- a missing/absent run renders a distinct "no run recorded"
+ * empty state rather than being omitted (docs/auto-apply-spec.md section 9).
  */
 import { test, describe } from 'node:test';
 import assert from 'node:assert/strict';
@@ -15,16 +17,20 @@ function fakeClient(rows) {
   return { async query() { return { rows }; } };
 }
 
-describe('collectAutoApply: null/empty', () => {
-  test('no summary at all -> null', async () => {
-    assert.equal(await collectAutoApply(fakeClient([]), null), null);
-    assert.equal(await collectAutoApply(fakeClient([]), undefined), null);
+describe('collectAutoApply: no run today', () => {
+  test('no summary at all -> { hasRun: false }, no DB query', async () => {
+    let queried = false;
+    const client = { async query() { queried = true; return { rows: [] }; } };
+    assert.deepEqual(await collectAutoApply(client, null), { hasRun: false });
+    assert.deepEqual(await collectAutoApply(client, undefined), { hasRun: false });
+    assert.equal(queried, false);
   });
 
   test('a summary with no results/applied at all still renders zeros, no DB query needed', async () => {
     let queried = false;
     const client = { async query() { queried = true; return { rows: [] }; } };
     const data = await collectAutoApply(client, { select: { results: [] }, applied: [] });
+    assert.equal(data.hasRun, true);
     assert.equal(data.appliedCount, 0);
     assert.equal(data.cappedCount, 0);
     assert.deepEqual(data.skippedByReason, {});
@@ -56,6 +62,7 @@ describe('collectAutoApply: real data', () => {
       applied: [{ listingId: 1, applicationId: 100, outcome: 'applied' }],
     };
     const data = await collectAutoApply(client, summary);
+    assert.equal(data.hasRun, true);
     assert.equal(data.appliedCount, 1);
     assert.equal(data.cappedCount, 2);
     assert.equal(data.capUsed, 3);
@@ -69,16 +76,26 @@ describe('collectAutoApply: real data', () => {
   });
 });
 
-describe('renderers: null in, null out', () => {
-  test('every renderer returns null for a null collectAutoApply result', () => {
-    assert.equal(renderAutoApplyText(null), null);
-    assert.equal(renderAutoApplyHtml(null), null);
-    assert.equal(renderAutoApplyMarkdown(null), null);
+describe('renderers: never omit the section, even with no run today', () => {
+  test('every renderer returns a non-empty "no run recorded" section, never null/empty', () => {
+    for (const [render, marker] of [
+      [renderAutoApplyText, 'no auto-apply run recorded today'],
+      [renderAutoApplyHtml, 'no auto-apply run recorded today'],
+      [renderAutoApplyMarkdown, 'no auto-apply run recorded today'],
+    ]) {
+      for (const input of [null, undefined, { hasRun: false }]) {
+        const out = render(input);
+        assert.equal(typeof out, 'string');
+        assert.ok(out.length > 0);
+        assert.match(out, new RegExp(marker));
+      }
+    }
   });
 });
 
 describe('renderers: unresolved link only passes when it clears the registry', () => {
   const DATA = {
+    hasRun: true,
     dryRun: false,
     appliedCount: 1,
     cappedCount: 0,

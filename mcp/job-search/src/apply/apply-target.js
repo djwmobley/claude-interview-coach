@@ -90,15 +90,26 @@ export function decodeLinkedInSafetyGo(href) {
   return decoded;
 }
 
+/** ATSs that are classify-only (src/apply/adapters/linkedin-easy.js, indeed-easy.js -- worker.js checks
+ * `adapter.classifyOnly` and never automates them). ats-detect.js's own classifyApplyUrl() still reports
+ * 'exact' confidence for these (it is certain about the ATS itself, just not about automatability -- see
+ * that module's own doc comment), so isExactTarget below excludes them explicitly: an "exact" target for
+ * auto-apply purposes must mean "automatable", never merely "identifiable". */
+const CLASSIFY_ONLY_ATS = Object.freeze(['linkedin_easy', 'indeed_easy']);
+
 /**
  * The single automation gate (see module doc comment): confidence === 'exact', with the Workday
- * posting-path refinement. Never an allow-list of `ats` values.
+ * posting-path refinement and the classify-only-ATS exclusion above. Never an allow-list of automatable
+ * `ats` values -- CLASSIFY_ONLY_ATS is a deny-list of the two ATSs this codebase already knows, by
+ * construction, can never be automated (src/apply/worker.js's classifyOnly gate), not a hand-picked subset
+ * of what auto-apply happens to support today.
  * @param {{ ats: string, tenant: string|null, confidence: 'exact'|'inferred'|'low' }|null|undefined} classification
  * @param {string} urlStr the URL `classification` was derived from
  * @returns {boolean}
  */
 export function isExactTarget(classification, urlStr) {
   if (!classification || classification.confidence !== 'exact') return false;
+  if (CLASSIFY_ONLY_ATS.includes(classification.ats)) return false;
   if (classification.ats !== 'workday') return true;
   if (typeof urlStr !== 'string') return false;
   /** @type {URL} */

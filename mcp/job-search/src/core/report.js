@@ -980,15 +980,17 @@ export function renderReportMarkdown(data, registry, googleAuthState, dashboardH
 /**
  * Shape one auto-apply run's JSON summary into report data, looking up title/company/source for the
  * listings that ended up 'apply_target_unresolved' or 'easy_apply_only' (the summary itself only carries
- * bare listing ids) so the report reads like every other section's listing rows. `null` in, `null` out --
- * a caller with no auto-apply run to report on (the feature never ran today, or the file could not be
- * read) omits the section entirely rather than rendering an empty one.
+ * bare listing ids) so the report reads like every other section's listing rows. When `summary` is
+ * missing (the feature never ran today, or its state file could not be read), this returns
+ * `{ hasRun: false }` rather than `null`: the section is ALWAYS rendered (see renderAutoApplyText/Html/
+ * Markdown below), never silently omitted -- a missing run is itself something the operator should see,
+ * not something that quietly disappears from the email.
  * @param {import('pg').ClientBase} client
  * @param {AutoApplySummary|null|undefined} summary
- * @returns {Promise<AutoApplyReportData|null>}
+ * @returns {Promise<{ hasRun: false } | ({ hasRun: true } & AutoApplyReportData)>}
  */
 export async function collectAutoApply(client, summary) {
-  if (!summary || typeof summary !== 'object') return null;
+  if (!summary || typeof summary !== 'object') return { hasRun: false };
   const results = Array.isArray(summary.select?.results) ? /** @type {Array<{ listingId: number, reason: string }>} */ (summary.select.results) : [];
   const applied = Array.isArray(summary.applied) ? summary.applied : [];
   const appliedCount = applied.filter((a) => a && a.outcome === 'applied').length;
@@ -1011,6 +1013,7 @@ export async function collectAutoApply(client, summary) {
     unresolvedRows = r.rows;
   }
   return {
+    hasRun: true,
     dryRun: Boolean(summary.dry_run),
     appliedCount,
     cappedCount,
@@ -1032,13 +1035,15 @@ function skippedReasonsText(data) {
 }
 
 /**
- * Plain-text auto-apply section. `null` in -> `null` out (see collectAutoApply's own doc comment).
- * @param {AutoApplyReportData|null} data
+ * Plain-text auto-apply section. ALWAYS renders a section (see collectAutoApply's own doc comment): a
+ * `{ hasRun: false }` (or falsy/absent) `data` renders a distinct "no run recorded" line rather than
+ * being omitted.
+ * @param {({ hasRun: true } & AutoApplyReportData) | { hasRun: false } | null | undefined} data
  * @param {import('./urlguard.js').Registry} [registry]
- * @returns {string|null}
+ * @returns {string}
  */
 export function renderAutoApplyText(data, registry) {
-  if (!data) return null;
+  if (!data || !data.hasRun) return '== Auto-apply ==\n(no auto-apply run recorded today)';
   const reg = registry ?? { entries: [], httpAllowedHosts: new Set() };
   const lines = [];
   lines.push(`== Auto-apply${data.dryRun ? ' (dry run)' : ''} ==`);
@@ -1055,13 +1060,14 @@ export function renderAutoApplyText(data, registry) {
 }
 
 /**
- * HTML auto-apply section (every field escaped, spec R1.5's discipline applied identically here).
- * @param {AutoApplyReportData|null} data
+ * HTML auto-apply section (every field escaped, spec R1.5's discipline applied identically here). ALWAYS
+ * renders a section -- see renderAutoApplyText's own doc comment.
+ * @param {({ hasRun: true } & AutoApplyReportData) | { hasRun: false } | null | undefined} data
  * @param {import('./urlguard.js').Registry} [registry]
- * @returns {string|null}
+ * @returns {string}
  */
 export function renderAutoApplyHtml(data, registry) {
-  if (!data) return null;
+  if (!data || !data.hasRun) return '<h3>Auto-apply</h3><p>(no auto-apply run recorded today)</p>';
   const esc = escapeHtml;
   const reg = registry ?? { entries: [], httpAllowedHosts: new Set() };
   const parts = [];
@@ -1086,13 +1092,13 @@ export function renderAutoApplyHtml(data, registry) {
 }
 
 /**
- * Markdown auto-apply section.
- * @param {AutoApplyReportData|null} data
+ * Markdown auto-apply section. ALWAYS renders a section -- see renderAutoApplyText's own doc comment.
+ * @param {({ hasRun: true } & AutoApplyReportData) | { hasRun: false } | null | undefined} data
  * @param {import('./urlguard.js').Registry} [registry]
- * @returns {string|null}
+ * @returns {string}
  */
 export function renderAutoApplyMarkdown(data, registry) {
-  if (!data) return null;
+  if (!data || !data.hasRun) return '## Auto-apply\n\n(no auto-apply run recorded today)';
   const reg = registry ?? { entries: [], httpAllowedHosts: new Set() };
   const lines = [];
   lines.push(`## Auto-apply${data.dryRun ? ' (dry run)' : ''}`);

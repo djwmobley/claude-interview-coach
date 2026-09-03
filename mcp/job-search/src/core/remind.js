@@ -12,8 +12,13 @@ import { googleHttp, gmailSend, buildRfc2822, buildRfc2822Multipart, readTokenFi
 import { errFields, JobSearchError } from './errors.js';
 import { loadConfig, DEFAULT_REPORT_HOME_MIN_PRESCORE } from './config.js';
 import { buildRegistry } from './urlguard.js';
-import { buildScanReport, buildReportSubject, renderReportText, renderReportHtml, renderReportMarkdown, writeReportFile, stampReportSent, escapeHtml, homeLocationNormsFor, dashboardHealthLineText } from './report.js';
+import {
+  buildScanReport, buildReportSubject, renderReportText, renderReportHtml, renderReportMarkdown, writeReportFile,
+  stampReportSent, escapeHtml, homeLocationNormsFor, dashboardHealthLineText, collectAutoApply,
+  renderAutoApplyText, renderAutoApplyHtml, renderAutoApplyMarkdown,
+} from './report.js';
 import { readWatchdogState, ackWatchdogRestarts } from './watchdog-state.js';
+import { readAutoApplySummary } from './auto-apply-state.js';
 
 /**
  * One line per item, plain text.
@@ -62,7 +67,7 @@ export function buildDigestHtml(rows, now) {
  *   logError?: (fields: Record<string, string|number|boolean|null>) => void, googleHttp?: typeof googleHttp,
  *   config?: import('./config.js').LoadedConfig, reportProfile?: string,
  *   reportSinceOverride?: Date|null, writeReportFileRoot?: string, skipReportFile?: boolean,
- *   watchdogStateFile?: string|null,
+ *   watchdogStateFile?: string|null, autoApplySummaryFile?: string|null,
  * }} opts reportSinceOverride, when the key is present (including explicitly `null`), bypasses the
  *   ic_report_state marker read (test seam; see report.js's buildScanReport). logError defaults to `log`
  *   when omitted; bin/remind.js wires it to logger.error so the auth-health broken-grant line (see
@@ -70,7 +75,10 @@ export function buildDigestHtml(rows, now) {
  *   watchdog feature): absolute path to bin/watchdog.js's JSON state file; bin/remind.js wires it to
  *   defaultWatchdogStateFile(env.JOBSEARCH_LOG_DIR). Omitted or unreadable means "no watchdog state to
  *   report" (readWatchdogState already returns null for a missing/corrupt file), never a fabricated
- *   healthy status.
+ *   healthy status. autoApplySummaryFile (auto-apply PR B, GAP 2): absolute path to bin/auto-apply.js's
+ *   stable JSON summary file; bin/remind.js wires it to defaultAutoApplySummaryFile(env.JOBSEARCH_LOG_DIR).
+ *   Omitted or unreadable means "no auto-apply run to report", rendered as a distinct empty state, never
+ *   omitted (report.js's collectAutoApply/renderAutoApply*).
  * @returns {Promise<{ code: number, due: number, flipped: number, sent: boolean, stamped: number, subject: string|null, body: string|null, reason: string|null, scopes_ok: boolean|null, expiry: string|null, report_file: string|null, no_scan: boolean, worst_status: string|null, google_auth_state: string|null }>}
  */
 export async function runRemind(opts) {
@@ -162,14 +170,27 @@ export async function runRemind(opts) {
     say({ evt: 'remind_token_failed', ...googleAuthError, scopes_ok: googleScopesOk, state: googleAuthState.state });
   }
 
+  // Auto-apply PR B, GAP 2: read bin/auto-apply.js's stable summary file (I/O lives here, not in
+  // report.js, which stays pure -- mirrors the watchdog state file read above) and shape it via
+  // collectAutoApply. A missing/unreadable file (the feature has never run, or ran before this file
+  // existed) is NOT itself a reason to send today's email (unlike dashboardHealthLine above): an absent
+  // auto-apply run is the normal, expected state on most days, not an operator-facing problem -- but the
+  // section is still ALWAYS rendered into the body below (never silently omitted), per report.js's own
+  // collectAutoApply/renderAutoApply* contract.
+  const autoApplySummary = opts.autoApplySummaryFile ? readAutoApplySummary(opts.autoApplySummaryFile) : null;
+  const autoApplyData = await collectAutoApply(opts.client, autoApplySummary);
+
   const followupsDigest = buildDigest(rows, now);
   const followupsHtml = buildDigestHtml(rows, now);
   const subject = buildReportSubject(report, { followupsDue: rows.length });
   const reportText = renderReportText(report, registry, googleAuthState, dashboardHealthState);
   const reportHtml = renderReportHtml(report, registry, googleAuthState, dashboardHealthState);
-  const text = [reportText, '', followupsDigest.body].join('\n');
-  const html = [reportHtml, followupsHtml].join('\n');
-  const markdown = [renderReportMarkdown(report, registry, googleAuthState, dashboardHealthState), '', `## Follow-ups due: ${rows.length}`, '', ...rows.map((r) => `- ${formatFollowup(r)}`)].join('\n');
+  const autoApplyText = renderAutoApplyText(autoApplyData, registry);
+  const autoApplyHtml = renderAutoApplyHtml(autoApplyData, registry);
+  const autoApplyMarkdown = renderAutoApplyMarkdown(autoApplyData, registry);
+  const text = [reportText, '', autoApplyText, '', followupsDigest.body].join('\n');
+  const html = [reportHtml, autoApplyHtml, followupsHtml].join('\n');
+  const markdown = [renderReportMarkdown(report, registry, googleAuthState, dashboardHealthState), '', autoApplyMarkdown, '', `## Follow-ups due: ${rows.length}`, '', ...rows.map((r) => `- ${formatFollowup(r)}`)].join('\n');
 
   /** @type {string|null} */
   let reportFile = null;

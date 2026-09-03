@@ -33,6 +33,7 @@ import { runRemind } from '../src/core/remind.js';
 import { errFields } from '../src/core/errors.js';
 import { openDashboard } from '../src/core/open-dashboard.js';
 import { defaultWatchdogStateFile } from '../src/core/watchdog-state.js';
+import { defaultAutoApplySummaryFile } from '../src/core/auto-apply-state.js';
 import { resolvePort } from './dashboard.js';
 
 /** Google auth states that force the dashboard open even without --open-dashboard (spec Change 3). */
@@ -83,6 +84,10 @@ async function main() {
       // count. A missing/corrupt file just means "no watchdog state to report" (readWatchdogState
       // already handles that), so this is safe on a machine where the watchdog has never run.
       watchdogStateFile: defaultWatchdogStateFile(env.JOBSEARCH_LOG_DIR),
+      // Auto-apply PR B, GAP 2: the same stable path bin/auto-apply.js writes its summary to on every
+      // run (dry run included). Missing/corrupt just means "no auto-apply run to report" (readAutoApplySummary
+      // already handles that), safe on a machine where auto-apply has never run.
+      autoApplySummaryFile: defaultAutoApplySummaryFile(env.JOBSEARCH_LOG_DIR),
     });
     code = r.code;
     googleAuthState = r.google_auth_state;
