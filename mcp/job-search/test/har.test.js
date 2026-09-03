@@ -13,7 +13,7 @@ import { classifyUrl, buildRegistry, POST_ALLOWED } from '../src/core/urlguard.j
 import { tool as searchJobs } from '../src/tools/search_jobs.js';
 import { wrapHandler } from '../src/tools/_shared.js';
 import { deps as gmailAuthDeps } from '../src/adapters/gmail.js';
-import { newClient, upsertTestProfile, cleanupScan, makeFixtureFetch, makeFakeSession, fakeLookup, testConfig, readJsonFixture, runScanWaiting, memoryReserve, fakeGmailAuthDeps } from './helpers/scan-fixtures.js';
+import { newClient, upsertTestProfile, cleanupScan, makeFixtureFetch, makeFakeSession, fakeLookup, testConfig, readJsonFixture, runScanWaiting, memoryReserve, fakeGmailAuthDeps, FIXTURE_NOW, DEFAULT_MAP, offlineDeps } from './helpers/scan-fixtures.js';
 import { untrustedRows } from '../src/core/compact.js';
 
 const [ROWS_OPEN, , ROWS_CLOSE] = untrustedRows(['x']);
@@ -44,7 +44,7 @@ describe('HAR: full fixture run', () => {
     const config = testConfig();
     const fake = makeFakeSession({ recorder: recorded, indeedCards: readJsonFixture('adapters/indeed-mosaic-cards.json'), linkedinCards: readJsonFixture('adapters/linkedin-cards.json'), listItems: [{ href: '/en/opportunities/cto-1', title: 'Chief Technology Officer', location: 'Dallas, TX' }] });
     const deps = { config, env: { GOOGLE_TOKEN_FILE: 'zz-test-token.json' }, fetch: makeFixtureFetch(undefined, recorded), lookup: fakeLookup, sleep: async () => {}, random: () => 0, reserveBudget: memoryReserve(), connectSession: fake.connectSession };
-    const r = await runScanWaiting({ profile: PROFILE, dryRun: true, wait: true }, deps, { trigger: 'mcp', log: () => {} });
+    const r = await runScanWaiting({ profile: PROFILE, dryRun: true, wait: true }, deps, { trigger: 'mcp', log: () => {}, now: FIXTURE_NOW });
     assert.equal(r.ok, true, JSON.stringify(r.errors));
     // scan-run.test.js briefly disables greenhouse in a parallel process; that is the only error tolerated here.
     assert.ok(['ok', 'partial'].includes(r.status), JSON.stringify(r.errors));
@@ -121,5 +121,20 @@ describe('HAR: full fixture run', () => {
     assert.ok(dataLen <= 5);
     assert.ok(out.content[0].text.length <= 6000, 'response, including the untrusted-rows wrap, still fits the budget');
     assert.ok(Array.isArray(parsed.blind_spots) && parsed.blind_spots.length >= 1);
+  });
+
+  test('regression: the fixture-dated zztest postings only clear the window when `now` is pinned to FIXTURE_NOW, not the real wall clock', async () => {
+    // Reproduces the exact bug that broke the suite's main assertion above: this file's runScanWaiting
+    // call omitted `now`, so runScan's window (opts.now - posted_within_days, scan-run.js) measured the
+    // zztest fixture's fixed 2026-08-23/2026-08-22 postings (see the FIXTURE_NOW doc comment in
+    // scan-fixtures.js) against today's real clock instead of the pinned one, and every posting fell
+    // outside the 7-day window as real time passed. Isolated to the zztest Greenhouse board only, so it
+    // does not depend on the other 7 adapters and stays cheap to run.
+    const zztestOnly = DEFAULT_MAP.filter((m) => m.prefix.includes('zztest'));
+    const runWith = (now) => runScanWaiting({ profile: PROFILE, sources: ['greenhouse'], dryRun: true, wait: true }, offlineDeps({ fetch: makeFixtureFetch(zztestOnly) }), { trigger: 'mcp', log: () => {}, now });
+    const pinned = await runWith(FIXTURE_NOW);
+    assert.equal(pinned.stats.fetched, 2, 'CTO (2026-08-23) and VP (2026-08-22) postings are inside the 7-day window measured from the pinned clock; the 2026-01-02 CIO posting stays outside it either way');
+    const wallClock = await runWith(new Date());
+    assert.equal(wallClock.stats.fetched, 0, 'against the real wall clock, both 2026-08 postings are now outside the 7-day window -- proof that any runScanWaiting call asserting a fixture-dated match count must pass `now: FIXTURE_NOW`');
   });
 });
