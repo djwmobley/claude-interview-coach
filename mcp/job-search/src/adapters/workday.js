@@ -143,7 +143,10 @@ export const workday = defineAdapter({
     const res = await ctx.fetchJson(`https://${u.hostname.toLowerCase()}/wday/cxs/${tenant}/${site}${externalPath}`, { headers: { accept: 'application/json' } });
     const j = /** @type {any} */ (res.json);
     const info = j && j.jobPostingInfo;
-    if (res.status !== 200 || !info || typeof info.jobDescription !== 'string') return { description: null };
-    return { description: info.jobDescription };
+    // Auto-apply PR B: a Workday listing's own URL IS the posting/apply page (it already carries the
+    // `/job/...` segment src/apply/apply-target.js's isExactTarget() requires) -- surfaced regardless of
+    // whether the description fetch itself succeeded.
+    if (res.status !== 200 || !info || typeof info.jobDescription !== 'string') return { description: null, externalApplyUrl: url };
+    return { description: info.jobDescription, externalApplyUrl: url };
   },
 });

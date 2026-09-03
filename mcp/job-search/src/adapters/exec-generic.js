@@ -296,10 +296,29 @@ export const exec = defineAdapter({
         /* skip */
       }
     });
+    // Auto-apply PR B: an anchor whose visible text or href suggests "Apply" is a CANDIDATE apply target,
+    // never itself classified or redirect-chased here -- src/apply/apply-target.js does that later, from
+    // whatever host it actually points at (an exec board's own domain, or an ATS it links out to).
+    let externalApplyUrl = null;
+    const applyAnchor = $('a').filter((_, el) => {
+      const text = $(el).text().trim().toLowerCase();
+      const href = String($(el).attr('href') || '').toLowerCase();
+      return /\bapply\b/.test(text) || /\bapply\b/.test(href);
+    }).first();
+    if (applyAnchor.length) {
+      const href = applyAnchor.attr('href');
+      if (href) {
+        try {
+          externalApplyUrl = new URL(href, url).toString();
+        } catch {
+          externalApplyUrl = null;
+        }
+      }
+    }
     const jp = jobPostingsFromJsonLd(docs)[0];
-    if (jp && typeof jp.description === 'string' && jp.description.trim()) return { description: jp.description };
+    if (jp && typeof jp.description === 'string' && jp.description.trim()) return { description: jp.description, externalApplyUrl };
     const main = $('main, article, [role="main"], #content').first();
     const text = (main.length ? main : $('body')).text().replace(/\s+/g, ' ').trim();
-    return { description: text ? text.slice(0, 20000) : null };
+    return { description: text ? text.slice(0, 20000) : null, externalApplyUrl };
   },
 });

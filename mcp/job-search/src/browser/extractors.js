@@ -174,6 +174,48 @@ export function linkedinJobDetail() {
 }
 
 /**
+ * LinkedIn apply affordance (auto-apply PR B, docs/auto-apply-spec.md): looks for the job detail page's
+ * own Apply control WITHOUT clicking it. Total: an anchor-shaped "Apply"/"Apply on company site" link
+ * (an <a href> whose href is not itself an in-app '#'/javascript: no-op) is reported as `href` for
+ * src/apply/apply-target.js to decode/classify; an Easy Apply BUTTON with no navigable href is reported
+ * as `buttonOnly: true` and never clicked here -- a real button click (when the caller decides to spend
+ * one) is a separate capability action, this extractor only observes the DOM as it already rendered.
+ */
+export function linkedinApplyLink() {
+  const anchor = /** @type {HTMLAnchorElement|null} */ (document.querySelector(
+    'a.jobs-apply-button, a[data-control-name="jobdetails_topcard_iapply"], a.job-apply-button, a[href*="/safety/go/"]',
+  ));
+  if (anchor && anchor.href && !/^(javascript:|#)/i.test(anchor.getAttribute('href') || '')) {
+    return { href: anchor.href, buttonOnly: false };
+  }
+  const button = document.querySelector('button.jobs-apply-button, button[aria-label*="Easy Apply" i]');
+  if (button) return { href: null, buttonOnly: true };
+  return { href: null, buttonOnly: false };
+}
+
+/**
+ * Indeed apply affordance (auto-apply PR B): mirrors linkedinApplyLink()'s shape. Indeed's own Easy Apply
+ * ("applystart") flow never navigates to an external href at all, so a same-origin/`indeed.com` href (or
+ * no href) is reported as easyApplyOnly; an "Apply on company site" anchor pointing OFF indeed.com is
+ * reported as `href` for resolution.
+ */
+export function indeedApplyState() {
+  const anchor = /** @type {HTMLAnchorElement|null} */ (document.querySelector('a[id*="applyButton" i], a.ia-IndeedApplyButton, a[href*="applystart"]'));
+  if (anchor && anchor.href) {
+    let host = '';
+    try {
+      host = new URL(anchor.href, location.href).hostname.toLowerCase();
+    } catch {
+      host = '';
+    }
+    if (host && host !== 'indeed.com' && !host.endsWith('.indeed.com')) {
+      return { href: anchor.href, easyApplyOnly: false };
+    }
+  }
+  return { href: null, easyApplyOnly: true };
+}
+
+/**
  * Generic: plain text of the page body, bounded.
  */
 export function bodyText() {
@@ -213,6 +255,8 @@ export const EXTRACTORS = Object.freeze({
   linkedinJobCards,
   linkedinEmptyState,
   linkedinJobDetail,
+  linkedinApplyLink,
+  indeedApplyState,
   bodyText,
   genericListItems,
 });

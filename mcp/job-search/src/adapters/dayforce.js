@@ -122,6 +122,7 @@ export const dayforce = defineAdapter({
     const $ = cheerio.load(res.text);
     const main = $('main, [role="main"], .posting, #content').first();
     const text = (main.length ? main : $('body')).text().replace(/\s+/g, ' ').trim();
-    return { description: text ? text.slice(0, 20000) : null };
+    // Auto-apply PR B: a Dayforce CandidatePortal listing's own URL IS the apply page.
+    return { description: text ? text.slice(0, 20000) : null, externalApplyUrl: url };
   },
 });

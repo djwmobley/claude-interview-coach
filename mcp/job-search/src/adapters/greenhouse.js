@@ -90,13 +90,16 @@ export const greenhouse = defineAdapter({
     }
   },
   async fetchDetail(listing, ctx) {
-    const n = normalizeUrl(listing.url_normalized ?? listing.url ?? null);
+    const url = listing.url_normalized ?? listing.url ?? null;
+    const n = normalizeUrl(url);
     const m = n.external_id ? /^greenhouse:([a-z0-9-]+)\/(\d+)$/.exec(n.external_id) : null;
     if (!m) return { description: null };
     await ctx.reserveDetail();
     const res = await ctx.fetchJson(`${API}/${m[1]}/jobs/${m[2]}`);
     const j = /** @type {any} */ (res.json);
-    if (res.status !== 200 || !j || typeof j.content !== 'string') return { description: null };
-    return { description: decodeEntities(j.content) };
+    if (res.status !== 200 || !j || typeof j.content !== 'string') return { description: null, externalApplyUrl: url };
+    // Auto-apply PR B: a Greenhouse board's own listing URL IS the apply page (classifyApplyUrl already
+    // resolves it to 'exact' confidence directly), so it is surfaced as-is rather than left null.
+    return { description: decodeEntities(j.content), externalApplyUrl: url };
   },
 });
