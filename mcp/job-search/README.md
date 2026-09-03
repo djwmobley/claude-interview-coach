@@ -907,9 +907,35 @@ hash mismatch. After an intentional config edit run
 `triage.json` is loaded tolerantly (a missing file loads with every field at its schema default, never
 `CONFIG_INVALID`, see "Auto-triage" above), but it is still hashed here: a missing `triage.json`, and a
 missing `triage-candidate.md` (gitignored, personal data, present only on an operator's own machine), both
-hash to a fixed `<missing>` placeholder, so `config.lock.json` still needs a `--write` whenever either
-file's presence or content changes on a given machine, same "config drift must be deliberate" rule every
-other config file gets.
+hash via a non-colliding missing-file marker (a presence byte plus `<missing:NAME>`, so no real file's
+content can collide with it), so `config.lock.json` still needs a `--write` whenever either file's
+presence or content changes on a given machine, same "config drift must be deliberate" rule every other
+config file gets. Hashing also strips a leading UTF-8 BOM and normalizes CRLF/bare-CR to LF first, so a
+git autocrlf checkout, an LF worktree, and a file re-saved with different line endings all still hash
+identically.
+
+**`--write` refuses when any `CONFIG_FILES` entry is missing from disk** -- it never silently hashes a
+missing file into a lock that then mismatches every other checkout. This is why PRs #35 and #36 broke the
+06:34 scheduled scan: a worktree ran `--write` with `config/triage-candidate.md` absent, which hashed as
+`<missing>` under the old (collision-prone) scheme, producing a lock that disagreed with main's (where the
+file is present), so the next unattended `job-search scan` refused with `CONFIG_LOCK_MISMATCH` -- and,
+before this fix, wrote no run row, so the daily report showed a bare `[NO SCAN]` digest with no reason.
+
+**Worktree authors: before running `node bin/config-lock.js --write` in a worktree, copy the gitignored
+`config/triage-candidate.md` from the main checkout into the worktree's `config/` directory first** (it is
+never committed, so a fresh worktree never has it). `--write` fails fast with the missing file's name and
+this same remedy if you forget. Because `triage-candidate.md` never appears in `git diff` (gitignored), a
+PR whose `--write` picked up a *changed* rubric on the author's own machine must call that out explicitly
+in the PR description -- the lock hash moving is otherwise the only visible trace of a rubric content
+change, and a reviewer cannot see the diff to confirm it was intentional.
+
+`node bin/config-lock.js` (check mode, no `--write`) also reports any `CONFIG_FILES` entry missing from
+disk by name, separately from a plain hash mismatch, and the dashboard's `/api/health` endpoint's
+`config_lock_detail` string (alongside the existing `config_lock_ok` boolean) carries the same missing-file
+or stale-hash detail for anyone watching the dashboard rather than the CLI. The lock-freshness test in
+`test/config.test.js` fails on purpose, naming the file and this same copy remedy, when a config-locked
+file is absent from `mcp/job-search/config` -- this is expected in a fresh worktree until the rubric is
+copied in, not a real regression.
 
 ## Embeddings
 

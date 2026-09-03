@@ -32,6 +32,7 @@ import { getEnv, loadConfig, checkConfigLock } from '../src/core/config.js';
 import { createLogger, dailyLogPath, pruneLogs } from '../src/core/logger.js';
 import { errFields } from '../src/core/errors.js';
 import { runScan } from '../src/core/scan-run.js';
+import { connectDedicated } from '../src/core/db.js';
 
 /** Closed list of valid --trigger values; default 'cli'. Anything else is a visible error (see main()). */
 export const SCAN_TRIGGERS = Object.freeze(['cli', 'dashboard']);
@@ -89,6 +90,41 @@ const USAGE = 'usage: node bin/scan.js --profile exec-default [--sources a,b] [-
 export function writeRunMarker(markerFile, runId) {
   fs.mkdirSync(path.dirname(markerFile), { recursive: true });
   fs.writeFileSync(markerFile, JSON.stringify({ run_id: runId }));
+}
+
+/**
+ * A CONFIG_LOCK_MISMATCH refusal happens before runScan() ever inserts an ic_scan_runs row (spec: "no
+ * run row" incident writeup), which is exactly why the 06:34 mismatch produced a bare [NO SCAN] daily
+ * digest instead of a loud failure: report.js's noScan check only looks at whether any run row exists
+ * since the last report. This writes a lightweight, already-finished 'failed' row directly (no
+ * migration: status 'failed', trigger 'cli'/'dashboard', and the errors jsonb column are all already
+ * supported by ic_scan_runs) so buildScanReport() sees a run and report.js can render a loud
+ * "[LOCK MISMATCH]" subject and remedy line instead. Best-effort: a DB failure here only logs a second
+ * error and never changes scan.js's own exit code (already 1 for the mismatch itself).
+ * @param {ReturnType<typeof parseArgs>} args
+ * @param {ReturnType<typeof checkConfigLock>} lock
+ * @param {(f: Record<string, string|number|boolean|null>) => void} log
+ */
+export async function recordConfigLockMismatchRun(args, lock, log) {
+  let client;
+  try {
+    client = await connectDedicated();
+    await client.query(
+      `INSERT INTO ic_scan_runs (profile, trigger, dry_run, config_hash, status, started_at, finished_at, errors)
+       VALUES ($1, $2, $3, $4, 'failed', now(), now(), $5::jsonb)`,
+      [args.profile, args.trigger, args.dryRun, lock.actual, JSON.stringify([{ source: null, code: 'CONFIG_LOCK_MISMATCH', message: lock.detail }])],
+    );
+  } catch (err) {
+    log({ evt: 'config_lock_mismatch_run_row_failed', ...errFields(err) });
+  } finally {
+    if (client) {
+      try {
+        await client.end();
+      } catch {
+        /* ignore */
+      }
+    }
+  }
 }
 
 /**
@@ -184,8 +220,9 @@ async function main() {
 
   const lock = checkConfigLock();
   if (!lock.ok && !args.acceptConfigChange) {
-    const out = { ok: false, code: 'CONFIG_LOCK_MISMATCH', message: 'config/*.json differs from config.lock.json', hint: 'review the change, then run node bin/config-lock.js --write, or pass --accept-config-change for this run', expected: lock.expected, actual: lock.actual };
-    log({ evt: 'config_lock_mismatch', expected: lock.expected, actual: lock.actual });
+    const out = { ok: false, code: 'CONFIG_LOCK_MISMATCH', message: 'config/*.json differs from config.lock.json', hint: 'review the change, then run node bin/config-lock.js --write, or pass --accept-config-change for this run', expected: lock.expected, actual: lock.actual, missing: lock.missing };
+    log({ evt: 'config_lock_mismatch', expected: lock.expected, actual: lock.actual, missing: lock.missing.join(',') });
+    await recordConfigLockMismatchRun(args, lock, log);
     console.log(JSON.stringify(out));
     process.exit(1);
   }

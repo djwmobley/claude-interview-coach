@@ -517,6 +517,15 @@ export async function buildScanReport(client, opts = {}) {
   const since = effectiveSince ?? new Date(now.getTime() - 24 * 3600000);
   const runs = await collectRuns(client, effectiveSince ? since : null);
   const noScan = runs.length === 0 && isWeekdayInTz(now, timezone);
+  // A CONFIG_LOCK_MISMATCH refusal (bin/scan.js's recordConfigLockMismatchRun) writes a lightweight
+  // 'failed' run row carrying this error code specifically so this report can tell "config drift blocked
+  // the scan" apart from every other failure and from the bare [NO SCAN] case (runs.length === 0):
+  // without this row noScan above would be true and the operator would see an empty digest with no
+  // reason, which is the incident this exists to prevent.
+  const lockMismatchRun = runs.find((r) => r.errors.some((e) => e.code === 'CONFIG_LOCK_MISMATCH'));
+  const lockMismatch = lockMismatchRun
+    ? { run_id: lockMismatchRun.run_id, message: (lockMismatchRun.errors.find((e) => e.code === 'CONFIG_LOCK_MISMATCH') ?? {}).message ?? 'config/*.json differs from config.lock.json' }
+    : null;
   const lookAtThese = await collectLookAtThese(client, since, topN);
   const suspectUnclassified = await collectSuspectAndUnclassified(client, since, 10);
   const homeLocations = await collectHomeLocations(client, since, homeLocationNorms, homeMinPrescore);
@@ -530,6 +539,7 @@ export async function buildScanReport(client, opts = {}) {
     dayKey: dayKeyInTz(now, timezone),
     runs,
     noScan,
+    lockMismatch,
     worstStatus,
     lookAtThese,
     suspectUnclassified,
@@ -552,7 +562,11 @@ export async function buildScanReport(client, opts = {}) {
  */
 export function buildReportSubject(data, extra = {}) {
   const prefixes = [];
-  if (data.noScan) prefixes.push('[NO SCAN]');
+  // Loud and specific beats the generic [SCAN FAILED]/[NO SCAN] prefixes: a config-lock mismatch is a
+  // deliberate, actionable state (someone needs to run config-lock.js --write, or copy a missing
+  // worktree file), not an ordinary scan failure.
+  if (data.lockMismatch) prefixes.push('[LOCK MISMATCH]');
+  else if (data.noScan) prefixes.push('[NO SCAN]');
   else if (data.worstStatus !== 'ok') prefixes.push(`[SCAN ${String(data.worstStatus).toUpperCase()}]`);
   const parts = [`Job scan report ${data.dayKey}`];
   const newCount = data.lookAtThese.rows.length;
@@ -682,7 +696,10 @@ export function renderReportText(data, registry, googleAuthState, dashboardHealt
   const lines = [];
   lines.push(`Job scan report for ${data.dayKey} (times ${data.timezone})`);
   lines.push('');
-  if (data.noScan) {
+  if (data.lockMismatch) {
+    lines.push(`LOCK MISMATCH: ${data.lockMismatch.message}`);
+    lines.push('');
+  } else if (data.noScan) {
     lines.push('NO SCAN: no scan run has completed since the last report, on a day one was expected.');
     lines.push('');
   }
@@ -760,7 +777,8 @@ export function renderReportHtml(data, registry, googleAuthState, dashboardHealt
   };
   const parts = [];
   parts.push(`<h2>Job scan report for ${esc(data.dayKey)} (times ${esc(data.timezone)})</h2>`);
-  if (data.noScan) parts.push('<p><strong>NO SCAN</strong>: no scan run has completed since the last report, on a day one was expected.</p>');
+  if (data.lockMismatch) parts.push(`<p><strong>LOCK MISMATCH</strong>: ${esc(data.lockMismatch.message)}</p>`);
+  else if (data.noScan) parts.push('<p><strong>NO SCAN</strong>: no scan run has completed since the last report, on a day one was expected.</p>');
   if (googleAuthState !== undefined) parts.push(`<p>${esc(googleAuthLineText(googleAuthState))}</p>`);
   const dashboardLineHtml = dashboardHealthLineText(dashboardHealthState ?? null);
   if (dashboardLineHtml) parts.push(`<p>${esc(dashboardLineHtml)}</p>`);
@@ -808,7 +826,10 @@ export function renderReportMarkdown(data, registry, googleAuthState, dashboardH
   lines.push('');
   lines.push(`Times shown in ${data.timezone}.`);
   lines.push('');
-  if (data.noScan) {
+  if (data.lockMismatch) {
+    lines.push(`**LOCK MISMATCH**: ${data.lockMismatch.message}`);
+    lines.push('');
+  } else if (data.noScan) {
     lines.push('**NO SCAN**: no scan run has completed since the last report, on a day one was expected.');
     lines.push('');
   }

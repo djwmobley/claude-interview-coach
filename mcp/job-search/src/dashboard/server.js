@@ -190,10 +190,14 @@ export function createDashboardServer(deps, opts = {}) {
       dbOk = false;
     }
     let configLockOk = null;
+    let configLockDetail = null;
     try {
-      configLockOk = checkConfigLock().ok;
+      const lock = checkConfigLock();
+      configLockOk = lock.ok;
+      configLockDetail = lock.detail;
     } catch {
       configLockOk = null;
+      configLockDetail = null;
     }
     let calendarOk = false;
     try {
@@ -209,6 +213,7 @@ export function createDashboardServer(deps, opts = {}) {
       startedAt: d.startedAt ?? null,
       db_ok: dbOk,
       config_lock_ok: configLockOk,
+      config_lock_detail: configLockDetail,
       calendar_ok: calendarOk,
       banner: Array.isArray(/** @type {any} */ (d).healthBanner) ? /** @type {any} */ (d).healthBanner : [],
     });

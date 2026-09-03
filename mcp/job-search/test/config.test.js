@@ -14,7 +14,7 @@ import path from 'node:path';
 import { fileURLToPath } from 'node:url';
 import fs from 'node:fs';
 import os from 'node:os';
-import { alertSendersSchema, GMAIL_PARSER_NAMES, loadConfig, triageSchema, atsApplySchema, CONFIG_FILES, computeConfigHash, loadTriageCandidateSummary, checkConfigLock } from '../src/core/config.js';
+import { alertSendersSchema, GMAIL_PARSER_NAMES, loadConfig, triageSchema, atsApplySchema, CONFIG_FILES, computeConfigHash, loadTriageCandidateSummary, checkConfigLock, writeConfigLock, missingConfigFiles } from '../src/core/config.js';
 import { PARSERS } from '../src/adapters/gmail-parsers.js';
 import { CONFIG_DIR } from './helpers/scan-fixtures.js';
 
@@ -228,7 +228,121 @@ describe('config.lock.json freshness against the REAL config dir (guardurl fix: 
     // spawned-child tests elsewhere in this suite do that for isolation; this in-process test does not).
     // This must fail if someone edits config/adapters.json without re-running `node bin/config-lock.js --write`.
     const r = checkConfigLock();
-    assert.equal(r.ok, true, `config.lock.json is stale: expected=${r.expected} actual=${r.actual} -- run \`node bin/config-lock.js --write\``);
+    // r.detail names any missing file and the copy remedy (worktree authors: copy the gitignored
+    // config/triage-candidate.md from the main checkout in before running this suite), or the
+    // stale-hash remedy otherwise, so a failure here is immediately actionable, not just "expected !=
+    // actual". See PRs #35/#36's incident: a worktree --write with the rubric absent produced a lock
+    // that mismatched main's, and the next unattended scan refused with no run row and no reason shown.
+    assert.equal(r.ok, true, r.detail);
+    assert.deepEqual(r.missing, [], `CONFIG_FILES entries missing on disk: ${r.missing.join(', ')} -- ${r.detail}`);
+  });
+});
+
+describe('config-lock missing-file handling (config-lock rubric incident: PRs #35/#36 --write with the rubric absent)', () => {
+  /**
+   * Seed every CONFIG_FILES entry into `dir`, skipping any name in `skip`. CONFIG_DIR (the test fixture
+   * config dir) never has triage-candidate.md (gitignored personal data, absent even from fixtures) --
+   * a placeholder is written for it here so a caller that only wants ONE deliberately-missing file
+   * doesn't also get triage-candidate.md as an incidental second one.
+   */
+  function seedConfigDir(dir, skip = []) {
+    for (const name of CONFIG_FILES) {
+      if (skip.includes(name)) continue;
+      const src = path.join(CONFIG_DIR, name);
+      if (fs.existsSync(src)) fs.copyFileSync(src, path.join(dir, name));
+      else fs.writeFileSync(path.join(dir, name), `placeholder content for ${name}\n`);
+    }
+  }
+
+  test('writeConfigLock() refuses when a CONFIG_FILES entry is missing, naming the file and the copy remedy', () => {
+    const tmp = fs.mkdtempSync(path.join(os.tmpdir(), 'config-lock-write-missing-'));
+    const prevDir = process.env.JOBSEARCH_CONFIG_DIR;
+    const prevLock = process.env.JOBSEARCH_CONFIG_LOCK;
+    try {
+      // noise-rules.json is present in CONFIG_DIR; leave it out of the tmp dir on purpose.
+      seedConfigDir(tmp, ['noise-rules.json']);
+      process.env.JOBSEARCH_CONFIG_DIR = tmp;
+      process.env.JOBSEARCH_CONFIG_LOCK = path.join(tmp, 'config.lock.json');
+      assert.throws(
+        () => writeConfigLock(),
+        (err) => {
+          assert.equal(err.code, 'CONFIG_INVALID');
+          assert.match(err.message, /noise-rules\.json/);
+          assert.match(err.message, /copy the gitignored file from the main checkout into this worktree's config\/ then rerun/);
+          return true;
+        },
+      );
+      assert.equal(fs.existsSync(path.join(tmp, 'config.lock.json')), false, 'a refused write must not create config.lock.json');
+    } finally {
+      if (prevDir === undefined) delete process.env.JOBSEARCH_CONFIG_DIR; else process.env.JOBSEARCH_CONFIG_DIR = prevDir;
+      if (prevLock === undefined) delete process.env.JOBSEARCH_CONFIG_LOCK; else process.env.JOBSEARCH_CONFIG_LOCK = prevLock;
+      fs.rmSync(tmp, { recursive: true, force: true });
+    }
+  });
+
+  test('checkConfigLock() reports missing file names in both r.missing and r.detail', () => {
+    const tmp = fs.mkdtempSync(path.join(os.tmpdir(), 'config-lock-check-missing-'));
+    const prevDir = process.env.JOBSEARCH_CONFIG_DIR;
+    const prevLock = process.env.JOBSEARCH_CONFIG_LOCK;
+    try {
+      seedConfigDir(tmp, ['ats-apply.json']);
+      process.env.JOBSEARCH_CONFIG_DIR = tmp;
+      process.env.JOBSEARCH_CONFIG_LOCK = path.join(tmp, 'no-such-lock.json'); // never written in this test
+      const r = checkConfigLock();
+      assert.deepEqual(r.missing, ['ats-apply.json']);
+      assert.match(r.detail, /ats-apply\.json/);
+      assert.match(r.detail, /copy the gitignored file from the main checkout into this worktree's config\/ then rerun/);
+      assert.equal(missingConfigFiles(tmp).includes('ats-apply.json'), true);
+    } finally {
+      if (prevDir === undefined) delete process.env.JOBSEARCH_CONFIG_DIR; else process.env.JOBSEARCH_CONFIG_DIR = prevDir;
+      if (prevLock === undefined) delete process.env.JOBSEARCH_CONFIG_LOCK; else process.env.JOBSEARCH_CONFIG_LOCK = prevLock;
+      fs.rmSync(tmp, { recursive: true, force: true });
+    }
+  });
+
+  test('a missing file\'s hash sentinel does not collide with a real file whose content is the sentinel text', () => {
+    // dirA: triage-candidate.md genuinely absent (hashed via the missing-file presence-byte branch).
+    const dirA = fs.mkdtempSync(path.join(os.tmpdir(), 'config-lock-sentinel-absent-'));
+    // dirB: triage-candidate.md PRESENT on disk, its content literally the missing-marker text.
+    const dirB = fs.mkdtempSync(path.join(os.tmpdir(), 'config-lock-sentinel-literal-'));
+    try {
+      seedConfigDir(dirA, ['triage-candidate.md']);
+      seedConfigDir(dirB);
+      fs.writeFileSync(path.join(dirB, 'triage-candidate.md'), '<missing:triage-candidate.md>');
+      const hashA = computeConfigHash(dirA);
+      const hashB = computeConfigHash(dirB);
+      assert.notEqual(hashA, hashB, 'a present file whose content equals the missing-marker text must not hash identically to the file being absent');
+    } finally {
+      fs.rmSync(dirA, { recursive: true, force: true });
+      fs.rmSync(dirB, { recursive: true, force: true });
+    }
+  });
+
+  test('a leading UTF-8 BOM and bare-CR line endings hash identically to the clean LF file', () => {
+    const clean = fs.mkdtempSync(path.join(os.tmpdir(), 'config-lock-normalize-clean-'));
+    const bom = fs.mkdtempSync(path.join(os.tmpdir(), 'config-lock-normalize-bom-'));
+    const cr = fs.mkdtempSync(path.join(os.tmpdir(), 'config-lock-normalize-cr-'));
+    try {
+      seedConfigDir(clean, ['triage-candidate.md']);
+      seedConfigDir(bom, ['triage-candidate.md']);
+      seedConfigDir(cr, ['triage-candidate.md']);
+      // The real fixture file is already CRLF on disk (Windows checkout); normalize to LF first so
+      // ".replace(/\n/g, '\r\n')" below doesn't double up an existing \r into \r\r\n.
+      const raw = fs.readFileSync(path.join(CONFIG_DIR, 'noise-rules.json'), 'utf8');
+      const original = raw.replace(/\r\n/g, '\n').replace(/\r/g, '\n');
+      fs.writeFileSync(path.join(clean, 'noise-rules.json'), original);
+      fs.writeFileSync(path.join(bom, 'noise-rules.json'), '\uFEFF' + original.replace(/\n/g, '\r\n'));
+      fs.writeFileSync(path.join(cr, 'noise-rules.json'), original.replace(/\n/g, '\r'));
+      const hashClean = computeConfigHash(clean);
+      const hashBom = computeConfigHash(bom);
+      const hashCr = computeConfigHash(cr);
+      assert.equal(hashBom, hashClean, 'a leading BOM plus CRLF must hash identically to the clean LF file');
+      assert.equal(hashCr, hashClean, 'bare-CR line endings must hash identically to the clean LF file');
+    } finally {
+      fs.rmSync(clean, { recursive: true, force: true });
+      fs.rmSync(bom, { recursive: true, force: true });
+      fs.rmSync(cr, { recursive: true, force: true });
+    }
   });
 });
 

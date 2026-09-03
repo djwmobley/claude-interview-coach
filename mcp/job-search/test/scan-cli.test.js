@@ -175,8 +175,21 @@ describe('scan.js CLI', () => {
     assert.equal(r.code, 1, r.out + r.err);
     const out = JSON.parse(r.out.trim());
     assert.equal(out.code, 'CONFIG_LOCK_MISMATCH');
-    const q = await client.query('SELECT count(*)::int AS n FROM ic_scan_runs WHERE profile = $1 AND started_at > now() - interval \'5 seconds\'', [PROFILE]);
-    void q;
+    // The mismatch refusal happens before runScan() would insert its own run row (spec: no run row
+    // means report.js's noScan check never fires, producing a bare [NO SCAN] digest with no reason).
+    // bin/scan.js's recordConfigLockMismatchRun writes a lightweight already-finished 'failed' row with
+    // the CONFIG_LOCK_MISMATCH error so the daily report can render a loud [LOCK MISMATCH] instead.
+    const q = await client.query(
+      `SELECT status, errors FROM ic_scan_runs WHERE profile = $1 AND started_at > now() - interval '5 seconds' ORDER BY id DESC LIMIT 1`,
+      [PROFILE],
+    );
+    assert.equal(q.rows.length, 1, 'a failed run row should be written for a config-lock mismatch');
+    assert.equal(q.rows[0].status, 'failed');
+    assert.equal(q.rows[0].errors.length, 1);
+    assert.equal(q.rows[0].errors[0].code, 'CONFIG_LOCK_MISMATCH');
+    // This test config dir never includes the gitignored triage-candidate.md (real repos and CI alike),
+    // so checkConfigLock()'s detail always takes the "missing" branch here.
+    assert.match(q.rows[0].errors[0].message, /missing config file\(s\): triage-candidate\.md/);
     let r2;
     for (let i = 0; i < 60; i++) {
       r2 = await runCli(['--profile', PROFILE, '--dry-run', '--sources', 'greenhouse', '--accept-config-change']);

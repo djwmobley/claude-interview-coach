@@ -54,12 +54,20 @@ function main() {
     process.exit(1);
   }
   if (write) {
-    const hash = writeConfigLock();
+    let hash;
+    try {
+      hash = writeConfigLock();
+    } catch (err) {
+      const f = errFields(err);
+      process.stdout.write(`config.lock.json NOT written: ${f.err_code}: ${f.err_message}\n`);
+      process.exit(1);
+    }
     process.stdout.write(`config.lock.json written: ${hash}\n`);
     process.exit(0);
   }
   const r = checkConfigLock();
   process.stdout.write(`config lock ${r.ok ? 'OK' : 'MISMATCH'}: expected=${r.expected ?? 'none'} actual=${r.actual}\n`);
+  if (r.missing.length) process.stdout.write(`missing: ${r.missing.join(', ')}\n`);
   process.exit(r.ok ? 0 : 2);
 }
 

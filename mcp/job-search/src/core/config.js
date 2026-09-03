@@ -575,8 +575,32 @@ export function loadTriageCandidateSummary(dir) {
 }
 
 /**
- * sha256 over the raw bytes of every config file, in CONFIG_FILES order, with
- * the filename mixed in so renames change the hash.
+ * Strip a leading UTF-8 BOM and normalize CRLF/bare-CR to LF, so a git autocrlf checkout, an LF
+ * worktree, and a file saved with old-Mac line endings all hash identically.
+ * @param {string} text
+ */
+function normalizeConfigText(text) {
+  const noBom = text.charCodeAt(0) === 0xfeff ? text.slice(1) : text;
+  return noBom.replace(/\r\n/g, '\n').replace(/\r/g, '\n');
+}
+
+/**
+ * List of CONFIG_FILES entries absent from `dir`.
+ * @param {string} dir
+ */
+export function missingConfigFiles(dir = getEnv().JOBSEARCH_CONFIG_DIR) {
+  return CONFIG_FILES.filter((name) => !fs.existsSync(path.join(dir, name)));
+}
+
+/** Remedy text shared by writeConfigLock()'s refusal and checkConfigLock()'s detail string. */
+export const MISSING_CONFIG_REMEDY = "copy the gitignored file from the main checkout into this worktree's config/ then rerun";
+
+/**
+ * sha256 over the raw bytes of every config file, in CONFIG_FILES order, with the filename mixed in so
+ * renames change the hash. A missing file is hashed as a presence byte (0x00) followed by a
+ * '<missing:NAME>' marker; a present file is hashed as a distinct presence byte (0x01) followed by its
+ * normalized content -- the two channels never collide, even if a real file's content happens to equal
+ * the literal missing-marker text for some other file name.
  * @param {string} [dir]
  */
 export function computeConfigHash(dir = getEnv().JOBSEARCH_CONFIG_DIR) {
@@ -584,10 +608,12 @@ export function computeConfigHash(dir = getEnv().JOBSEARCH_CONFIG_DIR) {
   for (const name of CONFIG_FILES) {
     h.update(name + '\n');
     try {
-      // Line endings are normalized so git autocrlf checkouts and LF worktrees agree on the hash.
-      h.update(fs.readFileSync(path.join(dir, name), 'utf8').replace(/\r\n/g, '\n'));
+      const text = fs.readFileSync(path.join(dir, name), 'utf8');
+      h.update(Buffer.from([1]));
+      h.update(normalizeConfigText(text));
     } catch {
-      h.update('<missing>');
+      h.update(Buffer.from([0]));
+      h.update(`<missing:${name}>`);
     }
     h.update('\n');
   }
@@ -639,11 +665,16 @@ export function configLockPath() {
 }
 
 /**
- * Compare the live config hash with config.lock.json.
- * @returns {{ ok: boolean, expected: string|null, actual: string }}
+ * Compare the live config hash with config.lock.json. `missing` names any CONFIG_FILES entry absent
+ * from the config dir (a worktree that never got the gitignored rubric copied into it, most often);
+ * `detail` is a human string for CLI/dashboard surfaces -- naming the missing files and the copy remedy
+ * when any are missing, otherwise the stale-hash remedy.
+ * @returns {{ ok: boolean, expected: string|null, actual: string, missing: string[], detail: string }}
  */
 export function checkConfigLock() {
-  const actual = computeConfigHash();
+  const dir = getEnv().JOBSEARCH_CONFIG_DIR;
+  const actual = computeConfigHash(dir);
+  const missing = missingConfigFiles(dir);
   let expected = null;
   try {
     const lock = JSON.parse(fs.readFileSync(configLockPath(), 'utf8'));
@@ -651,15 +682,32 @@ export function checkConfigLock() {
   } catch {
     expected = null;
   }
-  return { ok: expected === actual, expected, actual };
+  const ok = expected === actual;
+  const detail = missing.length
+    ? `missing config file(s): ${missing.join(', ')} -- ${MISSING_CONFIG_REMEDY}`
+    : ok
+      ? 'config.lock.json matches the live config files'
+      : `config.lock.json is stale: expected=${expected ?? 'none'} actual=${actual} -- run node bin/config-lock.js --write`;
+  return { ok, expected, actual, missing, detail };
 }
 
 /**
- * Write config.lock.json for the current config files.
+ * Write config.lock.json for the current config files. Refuses (throws CONFIG_INVALID) when any
+ * CONFIG_FILES entry is missing from the config dir, naming every missing file and the copy remedy --
+ * writing a lock hashed with a missing file's placeholder is exactly the incident this guards against
+ * (a worktree --write with the gitignored rubric absent produced a lock that mismatched the real one on
+ * main, so the next unattended run refused with CONFIG_LOCK_MISMATCH and no run row).
  * @returns {string} the hash written
  */
 export function writeConfigLock() {
-  const hash = computeConfigHash();
+  const dir = getEnv().JOBSEARCH_CONFIG_DIR;
+  const missing = missingConfigFiles(dir);
+  if (missing.length) {
+    throw new JobSearchError('CONFIG_INVALID', `cannot write config.lock.json: missing config file(s): ${missing.join(', ')} -- ${MISSING_CONFIG_REMEDY}`, {
+      details: { missing: missing.join(',') },
+    });
+  }
+  const hash = computeConfigHash(dir);
   const body = { sha256: hash, files: [...CONFIG_FILES], updated_at: new Date().toISOString() };
   fs.writeFileSync(configLockPath(), JSON.stringify(body, null, 2) + '\n');
   return hash;

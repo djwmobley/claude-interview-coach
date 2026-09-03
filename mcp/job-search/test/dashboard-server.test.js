@@ -219,6 +219,13 @@ describe('health', () => {
     assert.equal(r.json.db_ok, true);
     assert.equal(typeof r.json.pid, 'number');
   });
+
+  test('config_lock_detail carries the human string, not just config_lock_ok (config-lock rubric incident: PRs #35/#36)', async () => {
+    const r = await req('GET', '/api/health');
+    assert.equal(typeof r.json.config_lock_ok, 'boolean');
+    assert.equal(typeof r.json.config_lock_detail, 'string');
+    assert.ok(r.json.config_lock_detail.length > 0);
+  });
 });
 
 describe('listings', () => {
