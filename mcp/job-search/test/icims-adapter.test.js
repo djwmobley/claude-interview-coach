@@ -171,7 +171,7 @@ describe('icims adapter', () => {
     const result = await icims.run(cap, ctx);
     assert.equal(result.outcome, 'needs_human');
     assert.equal(result.pendingQuestion.kind, 'question');
-    assert.equal(matchCalled, false, 'a salary-shaped label must route through resolveSalaryAnswer, never the generic bank matcher');
+    assert.equal(matchCalled, false, 'a salary-shaped label must route through classifyCompensationLabel, never the generic bank matcher');
     assert.equal(cap.calls.some((c) => c[0] === 'fill' && /^\d+(\.\d+)?$/.test(String(c[2]))), false, 'no fill call may carry a bare number for an unresolved salary question');
   });
 

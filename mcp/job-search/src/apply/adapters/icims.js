@@ -213,7 +213,8 @@ export const icims = {
     const uploadResult = await uploadDocumentsIfPresent(cap, ctx);
     if (!uploadResult.ok) return { outcome: 'needs_human', pendingQuestion: uploadResult.pendingQuestion };
 
-    // (5) Screening questions via the bank; salary routes through resolveSalaryAnswer first.
+    // (5) Screening questions via the bank; a compensation-family label is routed through
+    // classifyCompensationLabel (see answerCustomFields above) before the generic matcher ever runs.
     const questionResult = await answerCustomFields(cap, ctx);
     if (questionResult.parked) {
       return { outcome: 'needs_human', pendingQuestion: questionResult.pendingQuestion };
