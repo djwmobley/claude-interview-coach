@@ -9,6 +9,7 @@ import assert from 'node:assert/strict';
 import fs from 'node:fs';
 import os from 'node:os';
 import path from 'node:path';
+import { JobSearchError, errFields } from '../src/core/errors.js';
 import {
   parseArgs, acquireLockWithPoll, applyOneCandidate, runPrepare, datedRunJsonPath, writeRunJsonNoOverwrite,
   AutoApplyLockedError, createFinish, runLifecycle,
@@ -484,6 +485,103 @@ describe('runLifecycle + createFinish: every terminal exit writes a phase:"done"
       }, { summary, finish, log: () => {} });
       assert.deepEqual(exitCodes, [2]);
       assert.ok(fs.existsSync(path.join(dir, 'auto-apply-2026-09-04-0707-2.json')));
+    } finally {
+      fs.rmSync(dir, { recursive: true, force: true });
+    }
+  });
+
+  // Residual gap fixed here (spec-adversary finding on the follow-up PR): the apply exclusion gate config
+  // load used to run BEFORE runLifecycle was ever entered, in its own try/catch that only handled
+  // CONFIG_INVALID and bare-rethrew anything else -- that bare rethrow escaped runLifecycle entirely and
+  // fell to main().catch() at the bottom of bin/auto-apply.js, which never calls finish(), leaving
+  // latest.json stuck at a non-'done' phase and skipping the dated run JSON. These two tests replicate the
+  // exact try/catch bin/auto-apply.js now runs as the FIRST statements inside runLifecycle's own body (a
+  // fake loadExclusionConfig stands in for the real one, since it is not itself an injectable seam) to
+  // prove both outcomes now reach a terminal, phase:'done' summary either way.
+  test('exclusion_config_load_error_writes_terminal_state_with_outcome_error', async () => {
+    const dir = fs.mkdtempSync(path.join(os.tmpdir(), 'auto-apply-lifecycle-test-'));
+    try {
+      const { summary, finish, latestFile, exitCodes } = makeFinishHarness(dir);
+      // Simulates loadExclusionConfig() throwing something OTHER than CONFIG_INVALID -- e.g. a filesystem
+      // permission error, or any other unexpected failure reading config/apply-exclusions.json.
+      const loadExclusionConfigFn = () => { throw new JobSearchError('DB_UNAVAILABLE', 'disk read failed'); };
+      await runLifecycle(async () => {
+        let exclusionConfig;
+        try {
+          exclusionConfig = loadExclusionConfigFn();
+        } catch (err) {
+          const f = errFields(err);
+          if (f.err_code !== 'CONFIG_INVALID') throw err;
+          Object.assign(summary, { ok: false, no_apply: { file: 'config/apply-exclusions.json', message: f.err_message } });
+          await finish(1);
+          return;
+        }
+        void exclusionConfig;
+        await finish(0); // unreached in this test -- the fake always throws
+      }, { summary, finish, log: () => {} });
+
+      assert.deepEqual(exitCodes, [1]);
+      assert.equal(summary.phase, 'done');
+      assert.equal(summary.outcome, 'error');
+      assert.equal(summary.ok, false);
+      assert.equal(summary.no_apply, undefined); // never conflated with the CONFIG_INVALID outcome
+      assert.match(summary.error.message, /disk read failed/);
+
+      const latest = JSON.parse(fs.readFileSync(latestFile, 'utf8'));
+      assert.equal(latest.phase, 'done');
+      assert.equal(latest.outcome, 'error');
+
+      const datedFiles = fs.readdirSync(dir).filter((f) => f.startsWith('auto-apply-2026-09-04-'));
+      assert.equal(datedFiles.length, 1);
+      const dated = JSON.parse(fs.readFileSync(path.join(dir, datedFiles[0]), 'utf8'));
+      assert.equal(dated.phase, 'done');
+      assert.equal(dated.outcome, 'error');
+    } finally {
+      fs.rmSync(dir, { recursive: true, force: true });
+    }
+  });
+
+  test('config_invalid_still_writes_terminal_state', async () => {
+    const dir = fs.mkdtempSync(path.join(os.tmpdir(), 'auto-apply-lifecycle-test-'));
+    try {
+      const { summary, finish, latestFile, exitCodes } = makeFinishHarness(dir);
+      const loadExclusionConfigFn = () => { throw new JobSearchError('CONFIG_INVALID', 'apply-exclusions.json missing or unreadable: config/apply-exclusions.json'); };
+      await runLifecycle(async () => {
+        let exclusionConfig;
+        try {
+          exclusionConfig = loadExclusionConfigFn();
+        } catch (err) {
+          const f = errFields(err);
+          if (f.err_code !== 'CONFIG_INVALID') throw err;
+          Object.assign(summary, { ok: false, no_apply: { file: 'config/apply-exclusions.json', message: f.err_message } });
+          await finish(1);
+          return;
+        }
+        void exclusionConfig;
+        await finish(0); // unreached in this test -- the fake always throws
+      }, { summary, finish, log: () => {} });
+
+      // Behavior identical to before this fix: exit 1, no_apply set with the file/message, outcome/error
+      // NEVER set (CONFIG_INVALID stays its own distinct path, never conflated with the generic 'error'
+      // outcome) -- but it now ALSO reaches a terminal record, which is the actual point of this test.
+      assert.deepEqual(exitCodes, [1]);
+      assert.equal(summary.phase, 'done');
+      assert.equal(summary.ok, false);
+      assert.equal(summary.outcome, undefined);
+      assert.equal(summary.error, undefined);
+      assert.match(summary.no_apply.message, /apply-exclusions\.json missing or unreadable/);
+      assert.equal(summary.no_apply.file, 'config/apply-exclusions.json');
+
+      const latest = JSON.parse(fs.readFileSync(latestFile, 'utf8'));
+      assert.equal(latest.phase, 'done');
+      assert.equal(latest.ok, false);
+      assert.ok(latest.no_apply);
+
+      const datedFiles = fs.readdirSync(dir).filter((f) => f.startsWith('auto-apply-2026-09-04-'));
+      assert.equal(datedFiles.length, 1);
+      const dated = JSON.parse(fs.readFileSync(path.join(dir, datedFiles[0]), 'utf8'));
+      assert.equal(dated.phase, 'done');
+      assert.ok(dated.no_apply);
     } finally {
       fs.rmSync(dir, { recursive: true, force: true });
     }

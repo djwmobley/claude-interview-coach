@@ -561,33 +561,45 @@ async function main() {
 
   const finish = createFinish({ summary, summaryFile, logDir: env.JOBSEARCH_LOG_DIR, now, timezone, jsonArg: args.json, log });
 
-  // Apply exclusion gate config (spec section 2, amendment A4): loaded ONCE here, before the wait loop even
-  // starts, and reused by BOTH the prepare-phase pre-filter and select -- a missing/invalid
-  // config/apply-exclusions.json is a hard error that stops the whole run before prepare OR select ever
-  // touch a listing, mirroring [NO SCAN]/[LOCK MISMATCH]'s existing loud-failure shape. This one still exits
-  // through its own dedicated `finish(1)` rather than runLifecycle below: it is a distinct, well-understood
-  // outcome (no_apply) that predates this fix and is deliberately never conflated with the generic 'error'
-  // outcome runLifecycle assigns to everything else.
-  /** @type {import('../src/apply/exclusions.js').ExclusionConfig} */
-  let exclusionConfig;
-  try {
-    exclusionConfig = loadExclusionConfig(config.configDir);
-  } catch (err) {
-    const f = errFields(err);
-    if (f.err_code !== 'CONFIG_INVALID') throw err;
-    log({ evt: 'auto_apply_no_apply_config_invalid', ...f });
-    Object.assign(summary, { ok: false, no_apply: { file: exclusionConfigPath(config.configDir), message: f.err_message } });
-    await finish(1);
-    return;
-  }
-
-  // runLifecycle (spec-adversary finding on the original PR, fixed here): EVERY remaining exit path --
-  // normal completion, the still-running-at-deadline early return, a failed lock acquisition
-  // (AutoApplyLockedError), and any other uncaught exception from wait/prepare/select/apply -- now routes
-  // through `finish()` with an explicit `summary.outcome` (ok / scan_still_running / locked / error), so
-  // latest.json and the dated run JSON are NEVER left describing a mid-run phase for a process that has
-  // already exited. Nothing after this point calls process.exit directly except inside `finish` itself.
+  // runLifecycle (spec-adversary finding on the original PR, fixed here; residual gap fixed here too):
+  // EVERY exit path from this point on -- the apply exclusion gate config load, normal completion, the
+  // still-running-at-deadline early return, a failed lock acquisition (AutoApplyLockedError), and any other
+  // uncaught exception from wait/prepare/select/apply -- routes through `finish()` with an explicit
+  // `summary.outcome` (ok / scan_still_running / locked / error), so latest.json and the dated run JSON are
+  // NEVER left describing a mid-run phase for a process that has already exited. Nothing after this point
+  // calls process.exit directly except inside `finish` itself.
+  //
+  // Residual gap (spec-adversary finding on the follow-up PR): the exclusion-config load used to run BEFORE
+  // this call, in its own try/catch that only handled CONFIG_INVALID and bare-rethrew everything else --
+  // that bare rethrow escaped runLifecycle entirely and fell all the way to main().catch() at the bottom of
+  // this file, which never calls `finish()`, leaving latest.json stuck at a non-'done' phase and skipping
+  // the dated run JSON. Moving the load inside `body` (below) means ANY throw from it -- CONFIG_INVALID
+  // included -- is now inside runLifecycle's own try, so a non-CONFIG_INVALID failure is caught by
+  // runLifecycle's generic catch (outcome 'error', same exit code 1 as before) exactly like every other
+  // uncaught error in this body, and CONFIG_INVALID keeps its own distinct `no_apply` outcome and message,
+  // just now reached via the SAME `body`/`finish` plumbing instead of a separate exit path above it.
   await runLifecycle(async () => {
+    // Apply exclusion gate config (spec section 2, amendment A4): loaded ONCE here, before the wait loop
+    // even starts, and reused by BOTH the prepare-phase pre-filter and select -- a missing/invalid
+    // config/apply-exclusions.json is a hard error that stops the whole run before prepare OR select ever
+    // touch a listing, mirroring [NO SCAN]/[LOCK MISMATCH]'s existing loud-failure shape. CONFIG_INVALID
+    // still exits through its own dedicated `finish(1)` and `no_apply` outcome rather than falling through
+    // to runLifecycle's own generic 'error' catch below: it is a distinct, well-understood outcome that
+    // predates this fix and is deliberately never conflated with the generic 'error' outcome runLifecycle
+    // assigns to everything else it did not already handle itself.
+    /** @type {import('../src/apply/exclusions.js').ExclusionConfig} */
+    let exclusionConfig;
+    try {
+      exclusionConfig = loadExclusionConfig(config.configDir);
+    } catch (err) {
+      const f = errFields(err);
+      if (f.err_code !== 'CONFIG_INVALID') throw err;
+      log({ evt: 'auto_apply_no_apply_config_invalid', ...f });
+      Object.assign(summary, { ok: false, no_apply: { file: exclusionConfigPath(config.configDir), message: f.err_message } });
+      await finish(1);
+      return;
+    }
+
     const softDeadline = localDeadline(now, timezone, config.autoApply.waitDeadlineLocal);
     const hardDeadline = localDeadline(now, timezone, config.autoApply.waitHardDeadlineLocal);
 
