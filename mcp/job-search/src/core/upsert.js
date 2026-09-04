@@ -14,7 +14,7 @@ import { normalizeLegacyRow } from './normalize.js';
 import { classifyNoise } from './noise.js';
 import { JobSearchError } from './errors.js';
 import { recordEvent } from './events.js';
-import { matchTest, surfaceException, stickyEligibleFor } from './sticky-skip.js';
+import { isStickyStatus, matchTest, surfaceException, stickyEligibleFor } from './sticky-skip.js';
 
 /**
  * sha256 over the searchable profile fields (spec 2.3 `rev`).
@@ -308,6 +308,43 @@ export async function findStickySkipRoot(client, rec, decision) {
 }
 
 /**
+ * Sticky-skip check for the SAME-ROW repost branches (1a-repost-same-id, 1b-repost-same-url):
+ * classify() has already established identity via an EXACT (source, external_id) or url_normalized
+ * match, so unlike findStickySkipRoot() above (which is fed a pool of near-miss candidates and must
+ * filter them with matchTest()), no MATCH-TEST is needed here -- only STICKY-ELIGIBLE(root) and
+ * SURFACE-EXCEPTION(rec, root), mirroring resolveItem's own reasoning (spec part A) that an
+ * already-established identity does not need to be re-verified, only gated on eligibility and the
+ * surface exception.
+ * @param {import('pg').ClientBase} client
+ * @param {import('./normalize.js').NormalizedListing} rec
+ * @param {number} targetId decision.target.id for the 1a/1b branch
+ * @returns {Promise<{ id: number, status: string }|null>}
+ */
+export async function findStickySkipRootForSameRow(client, rec, targetId) {
+  const t = (await client.query('SELECT id, duplicate_of FROM ic_job_listings WHERE id = $1', [targetId])).rows[0];
+  if (!t) return null;
+  const rootId = t.duplicate_of != null ? Number(t.duplicate_of) : Number(t.id);
+  const root = (await client.query(
+    `SELECT id, status, source, url_normalized, title_norm, company_norm, location_norm, salary_max, apply_url
+     FROM ic_job_listings WHERE id = $1`,
+    [rootId],
+  )).rows[0];
+  if (!root || !isStickyStatus(root.status)) return null;
+  const cand = {
+    url_normalized: rec.url_normalized ?? null,
+    source: rec.source ?? null,
+    title_norm: rec.title_norm ?? null,
+    company_norm: rec.company_norm ?? null,
+    location_norm: rec.location_norm ?? null,
+    salary_max: rec.salary_max ?? null,
+    apply_url: /** @type {string|null} */ (null), // an incoming scan record never carries a resolved apply_url of its own
+  };
+  if (surfaceException(cand, root)) return null;
+  const eligible = await stickyEligibleFor(client, root.id, root.status);
+  return eligible ? { id: Number(root.id), status: String(root.status) } : null;
+}
+
+/**
  * Persist one classify() decision. Runs inside a SAVEPOINT.
  * @param {import('pg').ClientBase} client
  * @param {import('./normalize.js').NormalizedListing} rec
@@ -324,13 +361,32 @@ export async function applyDecision(client, rec, decision, ctx) {
     if (decision.outcome === 'update' || decision.branch === '1a-repost-same-id' || decision.branch === '1b-repost-same-url') {
       const target = /** @type {import('./dedup.js').ListingRow} */ (decision.target);
       const first = await recordRunItem(c, ctx.runId, target.id, rec.source, decision.outcome, ctx.pageIndex ?? null);
-      id = await updateListing(c, rec, decision, ctx, { bumpTimesSeen: first });
-      if (decision.queue && decision.reason) {
-        queued = await enqueueReview(c, { runId: ctx.runId, candidate: candidateSnapshot(rec), candidateId: id, matches: decision.matches, reason: decision.reason, statusAtCreate: target.status ?? null });
-      }
       const repostBranch = decision.branch === '1a-repost-same-id' || decision.branch === '1b-repost-same-url';
-      const status = repostBranch && decision.inherit && decision.inherit.status !== null ? decision.inherit.status : (target.status ?? null);
-      return { id, outcome: decision.outcome, queued, branch: decision.branch, status };
+      // Sticky-skip check for the SAME-ROW repost branches (spec part B, independent-review fix): a
+      // human-skipped/passed/lost listing reappearing under the identical external_id or url_normalized
+      // is exactly "a later sighting of the same real-world posting" -- only gated when this row would
+      // otherwise queue (decision.queue is Boolean(inheritStatus(target.status).queueReason), the same
+      // total-classification trigger findStickySkipRoot() uses for the new-listing path above).
+      let stickyRoot = null;
+      if (repostBranch && decision.queue && decision.reason) {
+        stickyRoot = await findStickySkipRootForSameRow(c, rec, target.id);
+      }
+      const effective = stickyRoot
+        ? { ...decision, inherit: { status: stickyRoot.status, queueReason: null }, queue: false, reason: null }
+        : decision;
+      id = await updateListing(c, rec, effective, ctx, { bumpTimesSeen: first });
+      if (effective.queue && effective.reason) {
+        queued = await enqueueReview(c, { runId: ctx.runId, candidate: candidateSnapshot(rec), candidateId: id, matches: effective.matches, reason: effective.reason, statusAtCreate: target.status ?? null });
+      }
+      if (stickyRoot) {
+        await recordEvent(c, {
+          listingId: id, kind: 'status', fromStatus: target.status ?? null, toStatus: stickyRoot.status, note: 'sticky skip', actor: 'auto', runId: ctx.runId ?? null, at: ctx.now ?? new Date(),
+        });
+      }
+      const status = repostBranch && effective.inherit && effective.inherit.status !== null ? effective.inherit.status : (target.status ?? null);
+      return {
+        id, outcome: decision.outcome, queued, branch: decision.branch, status, stickySkipMerged: Boolean(stickyRoot), stickySkipRootId: stickyRoot?.id ?? null,
+      };
     }
 
     // New-listing path: outcome new / ambiguous / cross_source_dup / repost (branch 3-repost or

@@ -178,13 +178,18 @@ const createdIds = [];
 async function insertListing(o = {}) {
   const n = Math.floor(Math.random() * 1e9);
   const url = o.url ?? `https://example.test/${SRC}/${n}`;
+  // 'ext' in o (not o.ext ?? default): insertRootFromListing explicitly passes ext: null when the real
+  // normalizeListing() output has no external_id (a generic host) -- that null must be stored as-is,
+  // never silently replaced by the auto-generated default, or a same-url branch-1b test can never see
+  // the bothNull condition it needs.
+  const ext = 'ext' in o ? o.ext : `${SRC}:${n}`;
   const r = await client.query(
     `INSERT INTO ic_job_listings
        (title, company, status, url, url_normalized, source, external_id, record_kind, location, posted_at,
         company_norm, title_norm, location_norm, dedup_hash, last_seen, duplicate_of, salary_max, apply_url)
      VALUES ($1,$2,$3,$4,$4,$5,$6,'listing','Houston, TX',current_date,$7,$8,$9,md5($4),now(),$10,$11,$12) RETURNING id`,
     [
-      o.title ?? 'CTO', CO, o.status ?? null, url, o.source ?? SRC, o.ext ?? `${SRC}:${n}`,
+      o.title ?? 'CTO', CO, o.status ?? null, url, o.source ?? SRC, ext,
       o.companyNorm ?? 'zz stickyskip co', o.titleNorm ?? 'chief technology officer', o.locationNorm ?? 'houston-tx',
       o.dup ?? null, o.salaryMax ?? null, o.applyUrl ?? null,
     ],
@@ -426,6 +431,103 @@ describe('sticky-skip part B: scan-time auto-merge (applyDecision / findStickySk
     const row = (await client.query('SELECT status FROM ic_job_listings WHERE id = $1', [applied.id])).rows[0];
     assert.equal(row.status, 'review');
   });
+
+  test('1a-repost-same-id: human-skip root reactivates IN PLACE at the sticky status, no reopened_skip queue row (independent-review finding 1)', async () => {
+    const linkedinId = String(910000000 + (process.pid % 9000000));
+    const raw = { title: 'VP of Payments', company: 'Acme Linked Payments', location: 'Houston, TX', url: `https://www.linkedin.com/jobs/view/${linkedinId}/`, source: 'linkedin' };
+    const root = await insertRootFromListing(raw, { status: 'skip' });
+    await insertStatusEvent({ listingId: root, toStatus: 'skip', actor: 'dashboard', note: null });
+
+    const rec = normalizeListing({ ...raw, description: null }, OPTS);
+    assert.ok(rec.external_id, 'premise: a linkedin canonical URL normalizes to a real external_id');
+    const lookups = makePgLookups(client);
+    const decision = await classify(rec, lookups, {});
+    assert.equal(decision.branch, '1a-repost-same-id');
+    assert.equal(decision.queue, true, 'premise: an ordinary repost of a skipped root would otherwise queue (reopened_skip)');
+
+    const applied = await withTransaction(client, (c) => applyDecision(c, rec, decision, { runId: null, now: new Date() }));
+    assert.equal(applied.id, root, 'same-row branch: the existing row is reactivated in place, never a new row');
+    assert.equal(/** @type {any} */ (applied).stickySkipMerged, true);
+    assert.equal(applied.queued, null);
+    assert.equal(applied.status, 'skip');
+
+    const row = (await client.query('SELECT status FROM ic_job_listings WHERE id = $1', [root])).rows[0];
+    assert.equal(row.status, 'skip');
+    const openQueue = (await client.query('SELECT count(*)::int AS n FROM ic_job_review_queue WHERE candidate_id = $1 AND resolved_at IS NULL', [root])).rows[0].n;
+    assert.equal(openQueue, 0, 'no reopened_skip queue row');
+    const events = await listEvents(client, root);
+    assert.equal(events.filter((e) => e.note === 'sticky skip').length, 1);
+  });
+
+  test('1a-repost-same-id: auto skip_low root is NOT eligible, falls through to ordinary reopened_skip', async () => {
+    const linkedinId = String(920000000 + (process.pid % 9000000));
+    const raw = { title: 'VP of Payments Low', company: 'Acme Linked Low', location: 'Houston, TX', url: `https://www.linkedin.com/jobs/view/${linkedinId}/`, source: 'linkedin' };
+    const root = await insertRootFromListing(raw, { status: 'skip' });
+    await insertStatusEvent({ listingId: root, toStatus: 'skip', actor: 'auto', note: 'auto-triage: prescore 8 < floor 20' });
+
+    const rec = normalizeListing({ ...raw, description: null }, OPTS);
+    const lookups = makePgLookups(client);
+    const decision = await classify(rec, lookups, {});
+    assert.equal(decision.branch, '1a-repost-same-id');
+
+    const applied = await withTransaction(client, (c) => applyDecision(c, rec, decision, { runId: null, now: new Date() }));
+    assert.equal(applied.id, root);
+    assert.equal(/** @type {any} */ (applied).stickySkipMerged, false);
+    assert.ok(applied.queued, 'falls back to an ordinary queued row');
+    const row = (await client.query('SELECT status FROM ic_job_listings WHERE id = $1', [root])).rows[0];
+    assert.equal(row.status, 'review');
+    const openQueue = (await client.query('SELECT reason FROM ic_job_review_queue WHERE candidate_id = $1 AND resolved_at IS NULL', [root])).rows;
+    assert.equal(openQueue.length, 1);
+    assert.equal(openQueue[0].reason, 'reopened_skip');
+  });
+
+  test('1a-repost-same-id: SURFACE-EXCEPTION (salary jump > 10%) blocks the merge, falls through to ordinary reopened_skip', async () => {
+    const linkedinId = String(930000000 + (process.pid % 9000000));
+    const raw = { title: 'VP of Payments Surface', company: 'Acme Linked Surface', location: 'Houston, TX', url: `https://www.linkedin.com/jobs/view/${linkedinId}/`, source: 'linkedin' };
+    const root = await insertRootFromListing(raw, { status: 'skip', salaryMax: 200000 });
+    await insertStatusEvent({ listingId: root, toStatus: 'skip', actor: 'dashboard', note: null });
+
+    const rec = normalizeListing({ ...raw, description: null, salaryMin: 250000, salaryMax: 250000 }, OPTS);
+    const lookups = makePgLookups(client);
+    const decision = await classify(rec, lookups, {});
+    assert.equal(decision.branch, '1a-repost-same-id');
+
+    const applied = await withTransaction(client, (c) => applyDecision(c, rec, decision, { runId: null, now: new Date() }));
+    assert.equal(applied.id, root);
+    assert.equal(/** @type {any} */ (applied).stickySkipMerged, false, 'surface exception must block the merge');
+    assert.ok(applied.queued);
+    const row = (await client.query('SELECT status FROM ic_job_listings WHERE id = $1', [root])).rows[0];
+    assert.equal(row.status, 'review');
+  });
+
+  test('1b-repost-same-url: human-lost root reactivates IN PLACE at the sticky status, no reopened_lost queue row (independent-review finding 1)', async () => {
+    const raw = { title: 'Director of Growth', company: 'Acme Residual Growth', location: 'Houston, TX', url: `https://example.test/${SRC}/1b-same-url`, source: 'manual' };
+    const root = await insertRootFromListing(raw, { status: 'lost' });
+    await insertStatusEvent({ listingId: root, toStatus: 'lost', actor: 'cli', note: null });
+
+    // SAME url as the root (branch 1b keys off an exact url_normalized match, unlike 3-repost's
+    // dedup_hash match against a DIFFERENT url) -- both sides carry a null external_id (a generic,
+    // non-adapter host), so bothNull+contentMatch (matching title_norm) is what routes this to 1b.
+    const rec = normalizeListing({ ...raw, description: null }, OPTS);
+    assert.equal(rec.external_id, null, 'premise: a generic host normalizes to no external_id, forcing the url-match path');
+    const lookups = makePgLookups(client);
+    const decision = await classify(rec, lookups, {});
+    assert.equal(decision.branch, '1b-repost-same-url');
+    assert.equal(decision.queue, true, 'premise: an ordinary repost of a lost root would otherwise queue (reopened_lost)');
+
+    const applied = await withTransaction(client, (c) => applyDecision(c, rec, decision, { runId: null, now: new Date() }));
+    assert.equal(applied.id, root, 'same-row branch: the existing row is reactivated in place, never a new row');
+    assert.equal(/** @type {any} */ (applied).stickySkipMerged, true);
+    assert.equal(applied.queued, null);
+    assert.equal(applied.status, 'lost');
+
+    const row = (await client.query('SELECT status FROM ic_job_listings WHERE id = $1', [root])).rows[0];
+    assert.equal(row.status, 'lost');
+    const openQueue = (await client.query('SELECT count(*)::int AS n FROM ic_job_review_queue WHERE candidate_id = $1 AND resolved_at IS NULL', [root])).rows[0].n;
+    assert.equal(openQueue, 0, 'no reopened_lost queue row');
+    const events = await listEvents(client, root);
+    assert.equal(events.filter((e) => e.note === 'sticky skip').length, 1);
+  });
 });
 
 describe('sticky-skip part C: classifyForStickySkip (pure)', () => {
@@ -509,6 +611,47 @@ describe('sticky-skip part C: bulkResolve mode "sticky-skip"', () => {
     assert.equal(row.duplicate_of, root);
     const otherRow = (await client.query('SELECT status FROM ic_job_listings WHERE id = $1', [otherCand])).rows[0];
     assert.equal(otherRow.status, 'review', 'left open, not touched');
+  });
+});
+
+describe('sticky-skip part C: mode "stale" leaves sticky-eligible rows for mode "sticky-skip" (independent-review finding 2)', () => {
+  test('an aged reopened_skip row with an eligible root is NOT separated by stale mode: left_for_sticky_skip, untouched', async () => {
+    const root = await insertListing({ status: 'skip', titleNorm: 'stale sticky gate', locationNorm: 'houston-tx' });
+    await insertStatusEvent({ listingId: root, toStatus: 'skip', actor: 'dashboard', note: null });
+    const cand = await insertListing({ status: 'review', titleNorm: 'stale sticky gate', locationNorm: 'houston-tx' });
+    const q = await insertQueueItem({ candidateId: cand, matches: [root], reason: 'reopened_skip' });
+    await client.query(`UPDATE ic_job_review_queue SET created_at = now() - interval '90 days' WHERE id = $1`, [q]);
+
+    // Control row: aged too, but no sticky match at all -- stale mode must still separate this one
+    // normally, proving the sticky gate only carves out rows that actually classify as a merge.
+    const plainCand = await insertListing({ status: 'review', titleNorm: 'stale plain aged' });
+    const q2 = await insertQueueItem({ candidateId: plainCand, matches: [], reason: 'title_similar_same_company' });
+    await client.query(`UPDATE ic_job_review_queue SET created_at = now() - interval '90 days' WHERE id = $1`, [q2]);
+
+    const out = await bulkResolve(deps, { mode: 'stale', dryRun: false, confirm: true, reviewAutoSeparateDays: 30 });
+    assert.ok(out.ids.left_for_sticky_skip.includes(q), 'the sticky-eligible aged row is carved out, not separated');
+    assert.ok(!out.ids.separated.includes(q), 'never separated by stale mode');
+    assert.ok(out.counts.left_for_sticky_skip >= 1);
+    assert.ok(out.ids.separated.includes(q2), 'a plain aged row with no sticky match still separates normally');
+
+    const candRow = (await client.query('SELECT status FROM ic_job_listings WHERE id = $1', [cand])).rows[0];
+    assert.equal(candRow.status, 'review', 'listing untouched');
+    const qRow = (await client.query('SELECT resolved_at FROM ic_job_review_queue WHERE id = $1', [q])).rows[0];
+    assert.equal(qRow.resolved_at, null, 'queue row stays open, ready for mode:sticky-skip');
+  });
+
+  test('dry-run reports left_for_sticky_skip with zero writes, same as a live run', async () => {
+    const root = await insertListing({ status: 'lost', titleNorm: 'stale sticky dry', locationNorm: 'dallas-tx' });
+    await insertStatusEvent({ listingId: root, toStatus: 'lost', actor: 'mcp', note: null });
+    const cand = await insertListing({ status: 'review', titleNorm: 'stale sticky dry', locationNorm: 'dallas-tx' });
+    const q = await insertQueueItem({ candidateId: cand, matches: [root], reason: 'reopened_lost' });
+    await client.query(`UPDATE ic_job_review_queue SET created_at = now() - interval '90 days' WHERE id = $1`, [q]);
+
+    const out = await bulkResolve(deps, { mode: 'stale', dryRun: true, confirm: false, reviewAutoSeparateDays: 30 });
+    assert.equal(out.dryRun, true);
+    assert.ok(out.ids.left_for_sticky_skip.includes(q));
+    const qRow = (await client.query('SELECT resolved_at FROM ic_job_review_queue WHERE id = $1', [q])).rows[0];
+    assert.equal(qRow.resolved_at, null);
   });
 });
 

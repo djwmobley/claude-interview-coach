@@ -58,12 +58,19 @@ Modes:
 - `reason`: separates every open item whose `reason` equals the given value, with no further
   per-item classification. The given reason must be one of the closed nine values in section 4.
 - `stale`: separates every open item older than `reviewAutoSeparateDays` (from
-  `config/adapters.json`'s `dedup.reviewAutoSeparateDays`, default 30), with no further
-  classification. This is deliberately broader than the existing `autoSeparate()` (which only fires
-  when the candidate's status is unchanged since queuing): `stale` mode is an explicit, human-triggered
-  action, and `resolveItem`'s own separate branch is already safe to call regardless, since it only
-  clears status back to null when the status is still `review`. Running `stale` mode after
-  `autoSeparate` has already claimed some of the same rows is expected, not an error.
+  `config/adapters.json`'s `dedup.reviewAutoSeparateDays`, default 30) -- but ONLY after first
+  classifying each aged row with the same `classifyForStickySkip()` check `sticky-skip` mode uses
+  (independent-review fix): a row whose match resolves to a STICKY-ELIGIBLE root is left untouched
+  here, tallied under `counts.left_for_sticky_skip` / `ids.left_for_sticky_skip`, never separated just
+  because it aged past the threshold. This closes the gap where aging alone used to bypass the
+  `reopened_skip` refusal above -- a `reopened_skip` item with an eligible root now stays queued for
+  `mode:'sticky-skip'` regardless of age. Every row that does NOT classify as a sticky merge proceeds
+  through the ordinary separate path, unchanged, and is deliberately broader than the existing
+  `autoSeparate()` (which only fires when the candidate's status is unchanged since queuing): `stale`
+  mode is an explicit, human-triggered action, and `resolveItem`'s own separate branch is already safe
+  to call regardless, since it only clears status back to null when the status is still `review`.
+  Running `stale` mode after `autoSeparate` has already claimed some of the same rows is expected, not
+  an error.
 - `sticky-skip`: snapshots every open item of ANY reason (unlike `rule`, which only ever considers
   `title_similar_same_company`), and for each one evaluates MATCH-TEST and SURFACE-EXCEPTION
   (`classifyForStickySkip()`, `src/core/review-bulk.js`) against every id in the item's `matches[]`.
@@ -100,14 +107,15 @@ appended for `reason` mode (for example `resolved:separate:bulk:reason:branch1_c
 listing's own event history can always tell a bulk separation apart from a one-at-a-time human
 resolve, and can identify which mode and (for reason mode) which reason drove it.
 
-Return shape (the `merged`/`ids.merged` fields are additive, populated only by `sticky-skip` mode --
-every other mode leaves them at `0`/`[]`):
+Return shape (`merged`/`ids.merged` are additive, populated only by `sticky-skip` mode;
+`left_for_sticky_skip`/`ids.left_for_sticky_skip` are additive, populated only by `stale` mode -- every
+other mode leaves all four at `0`/`[]`):
 
 ```
 {
   mode, dryRun,
-  counts: { separate, merged, leave_by_reason: {...}, skipped_by_reason: {...}, errors },
-  ids: { separated: [...], merged: [...], skipped: [...], errors: [{ id, message }] },
+  counts: { separate, merged, left_for_sticky_skip, leave_by_reason: {...}, skipped_by_reason: {...}, errors },
+  ids: { separated: [...], merged: [...], left_for_sticky_skip: [...], skipped: [...], errors: [{ id, message }] },
 }
 ```
 

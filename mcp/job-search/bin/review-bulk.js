@@ -54,6 +54,9 @@ function printTable(out) {
   console.log(`mode: ${out.mode}  dry_run: ${out.dryRun}`);
   if (out.mode === 'sticky-skip') console.log(`merged: ${out.counts.merged}`);
   else console.log(`separate: ${out.counts.separate}`);
+  if (out.counts.left_for_sticky_skip) {
+    console.log(`left_for_sticky_skip: ${out.counts.left_for_sticky_skip} (rerun --mode sticky-skip for these)`);
+  }
   const leaveEntries = Object.entries(out.counts.leave_by_reason);
   if (leaveEntries.length) {
     console.log('leave_by_reason:');

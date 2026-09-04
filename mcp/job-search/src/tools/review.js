@@ -203,6 +203,41 @@ export async function autoSeparate(c, days, now = new Date()) {
 }
 
 /**
+ * Load open queue rows (optionally narrowed by `whereSql`, appended after "WHERE resolved_at IS
+ * NULL"), each row's candidate and match-root data (with STICKY-ELIGIBLE precomputed via
+ * stickyEligibleFor()), and classify each with classifyForStickySkip(). Shared by mode 'sticky-skip'
+ * (no extra where clause: every open item, any reason) and mode 'stale' (aged rows only) -- so 'stale'
+ * mode's separate pass never bypasses the same STICKY-ELIGIBLE gate 'sticky-skip' mode itself uses; a
+ * row is either both, or neither, depending on where the caller wants it resolved from.
+ * @param {{ withClient: <T>(fn: (c: import('pg').PoolClient) => Promise<T>) => Promise<T> }} deps
+ * @param {string} whereSql SQL appended after "WHERE resolved_at IS NULL" (e.g. '' or an 'AND ...' clause)
+ * @param {unknown[]} params bound starting at $1 in `whereSql` (the base query binds nothing itself)
+ * @returns {Promise<{ id: number, decision: import('../core/review-bulk.js').StickySkipDecision }[]>}
+ */
+async function classifyOpenQueueForStickySkip(deps, whereSql, params) {
+  return deps.withClient(async (c) => {
+    const q = await c.query(`SELECT id, candidate_id, matches, reason, resolution FROM ic_job_review_queue WHERE resolved_at IS NULL ${whereSql} ORDER BY id`, params);
+    const ROOT_COLS = 'id, status, source, url_normalized, title_norm, company_norm, location_norm, salary_max, apply_url';
+    /** @type {{ id: number, decision: import('../core/review-bulk.js').StickySkipDecision }[]} */
+    const out = [];
+    for (const item of q.rows) {
+      const candidate = item.candidate_id == null ? null : (await c.query(`SELECT ${ROOT_COLS} FROM ic_job_listings WHERE id = $1`, [item.candidate_id])).rows[0] ?? null;
+      const matchIds = Array.isArray(item.matches) ? item.matches : [];
+      /** @type {any[]} */
+      const roots = [];
+      for (const mid of matchIds) {
+        const rr = (await c.query(`SELECT ${ROOT_COLS} FROM ic_job_listings WHERE id = $1`, [mid])).rows[0];
+        if (!rr) { roots.push(null); continue; }
+        const sticky_eligible = await stickyEligibleFor(c, rr.id, rr.status);
+        roots.push({ ...rr, sticky_eligible });
+      }
+      out.push({ id: Number(item.id), decision: classifyForStickySkip(item, candidate, roots) });
+    }
+    return out;
+  });
+}
+
+/**
  * Bulk-separate the open review queue (review-bulk spec S2). Only ever performs 'separate' -- never
  * merge or repost -- on items the caller selects by mode:
  *
@@ -277,10 +312,10 @@ export async function bulkResolve(deps, opts) {
   const note = opts.mode === 'reason' ? `resolved:separate:bulk:reason:${opts.reason}` : `resolved:separate:bulk:${opts.mode}`;
 
   const counts = {
-    separate: 0, merged: 0, leave_by_reason: /** @type {Record<string, number>} */ ({}), skipped_by_reason: /** @type {Record<string, number>} */ ({}), errors: 0,
+    separate: 0, merged: 0, left_for_sticky_skip: 0, leave_by_reason: /** @type {Record<string, number>} */ ({}), skipped_by_reason: /** @type {Record<string, number>} */ ({}), errors: 0,
   };
   const ids = {
-    separated: /** @type {number[]} */ ([]), merged: /** @type {number[]} */ ([]), skipped: /** @type {number[]} */ ([]), errors: /** @type {{id: number, message: string}[]} */ ([]),
+    separated: /** @type {number[]} */ ([]), merged: /** @type {number[]} */ ([]), left_for_sticky_skip: /** @type {number[]} */ ([]), skipped: /** @type {number[]} */ ([]), errors: /** @type {{id: number, message: string}[]} */ ([]),
   };
   const bumpLeave = (/** @type {string} */ r) => { counts.leave_by_reason[r] = (counts.leave_by_reason[r] ?? 0) + 1; };
   const bumpSkip = (/** @type {number} */ id, /** @type {string} */ r) => { counts.skipped_by_reason[r] = (counts.skipped_by_reason[r] ?? 0) + 1; ids.skipped.push(id); };
@@ -291,30 +326,11 @@ export async function bulkResolve(deps, opts) {
   const mergeTargetByQueueId = new Map();
 
   if (opts.mode === 'sticky-skip') {
-    const rows = await deps.withClient(async (c) => {
-      const q = await c.query(`SELECT id, candidate_id, matches, reason, resolution FROM ic_job_review_queue WHERE resolved_at IS NULL ORDER BY id`);
-      const ROOT_COLS = 'id, status, source, url_normalized, title_norm, company_norm, location_norm, salary_max, apply_url';
-      /** @type {{ item: any, candidate: any, roots: any[] }[]} */
-      const out = [];
-      for (const item of q.rows) {
-        const candidate = item.candidate_id == null ? null : (await c.query(`SELECT ${ROOT_COLS} FROM ic_job_listings WHERE id = $1`, [item.candidate_id])).rows[0] ?? null;
-        const matchIds = Array.isArray(item.matches) ? item.matches : [];
-        const roots = [];
-        for (const mid of matchIds) {
-          const rr = (await c.query(`SELECT ${ROOT_COLS} FROM ic_job_listings WHERE id = $1`, [mid])).rows[0];
-          if (!rr) { roots.push(null); continue; }
-          const sticky_eligible = await stickyEligibleFor(c, rr.id, rr.status);
-          roots.push({ ...rr, sticky_eligible });
-        }
-        out.push({ item, candidate, roots });
-      }
-      return out;
-    });
-    for (const { item, candidate, roots } of rows) {
-      const decision = classifyForStickySkip(item, candidate, roots);
+    const classified = await classifyOpenQueueForStickySkip(deps, '', []);
+    for (const { id, decision } of classified) {
       if (decision.decision === 'leave') { bumpLeave(decision.reason); continue; }
-      targetIds.push(item.id);
-      mergeTargetByQueueId.set(item.id, decision.targetId);
+      targetIds.push(id);
+      mergeTargetByQueueId.set(id, decision.targetId);
     }
   } else if (opts.mode === 'rule') {
     const rows = await deps.withClient(async (c) => {
@@ -338,11 +354,23 @@ export async function bulkResolve(deps, opts) {
     const r = await deps.withClient((c) => c.query('SELECT id FROM ic_job_review_queue WHERE resolved_at IS NULL AND reason = $1 ORDER BY id', [opts.reason]));
     targetIds = r.rows.map((row) => Number(row.id));
   } else {
-    const r = await deps.withClient((c) => c.query(
-      `SELECT id FROM ic_job_review_queue WHERE resolved_at IS NULL AND created_at < $1::timestamptz - make_interval(days => $2) ORDER BY id`,
-      [now, days],
-    ));
-    targetIds = r.rows.map((row) => Number(row.id));
+    // 'stale' mode (independent-review fix): classify every aged open row through
+    // classifyForStickySkip() FIRST -- a row whose match resolves to a STICKY-ELIGIBLE root (spec part
+    // C's own gating) is left untouched here rather than separated wholesale just because it aged past
+    // reviewAutoSeparateDays. Tallied under counts.left_for_sticky_skip / ids.left_for_sticky_skip so
+    // the caller can follow up with mode:'sticky-skip' explicitly; a row that does NOT classify as a
+    // sticky merge proceeds through the ordinary separate path below, unchanged.
+    const classified = await classifyOpenQueueForStickySkip(
+      deps, 'AND created_at < $1::timestamptz - make_interval(days => $2)', [now, days],
+    );
+    for (const { id, decision } of classified) {
+      if (decision.decision === 'merge') {
+        counts.left_for_sticky_skip++;
+        ids.left_for_sticky_skip.push(id);
+        continue;
+      }
+      targetIds.push(id);
+    }
   }
 
   if (dryRun) {
