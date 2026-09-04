@@ -118,6 +118,12 @@ export const USER_AGENT = 'job-search-mcp/0.1 (interview-coach; read-only scanne
  * @property {number} stale_dropped
  * @property {number} detail_fetched
  * @property {number} detail_skipped_budget rows queued for a detail fetch (outcome new/ambiguous, prescore gate met) but skipped because the source's daily/per-run budget ran out mid-source (spec R4.2, decision 22)
+ * @property {number} dedup_sticky_skip_merged rows that would otherwise have created a review-queue row
+ *   but instead auto-merged into a STICKY-ELIGIBLE skip/passed/lost root (sticky-skip spec part B,
+ *   src/core/upsert.js's findStickySkipRoot()); also counted under `cross_source_dup` above, since the
+ *   persisted shape is the same (a new row, duplicate_of the root, no queue entry) -- this is the count
+ *   of that subset specifically caused by sticky-skip rather than an ordinary corroborated cross-source
+ *   match.
  * @property {number} adopted
  * @property {number} expired
  * @property {Record<string, number>} pages_by_source
@@ -280,7 +286,10 @@ async function executeRun(p) {
   const noiseKnownSources = new Set(Object.keys(config.adapters.adapters));
 
   /** @type {RunStats} */
-  const stats = { fetched: 0, new: 0, updated: 0, cross_source_dup: 0, repost: 0, ambiguous: 0, errors: 0, unembedded: 0, stale_dropped: 0, detail_fetched: 0, detail_skipped_budget: 0, adopted: 0, expired: 0, pages_by_source: {} };
+  const stats = {
+    fetched: 0, new: 0, updated: 0, cross_source_dup: 0, repost: 0, ambiguous: 0, errors: 0, unembedded: 0, stale_dropped: 0,
+    detail_fetched: 0, detail_skipped_budget: 0, dedup_sticky_skip_merged: 0, adopted: 0, expired: 0, pages_by_source: {},
+  };
   // Seeded with anything the caller already knew about before this run started (scan-never-skip fix): a
   // config-lock mismatch, an unlocked rubric, or a self-healed/failed Chrome launch. Each carries
   // severity:'warning' so the status computation at finalize below ignores it; a run-level failure this
@@ -530,10 +539,16 @@ async function executeRun(p) {
    *   when this row went through a detail fetch AND the adapter returned an apply-target hint
    */
   async function finalizeListing(s, ev, rec, decision, ps, psRaw, noiseClass, detailSkipped, applyDetail = null) {
-    /** @type {{ id: number|null, outcome: string, queued: number|null, branch: string }} */
+    /** @type {{ id: number|null, outcome: string, queued: number|null, branch: string, status?: string|null, stickySkipMerged?: boolean }} */
     let applied;
     if (dryRun) {
-      applied = { id: null, outcome: decision.outcome, queued: decision.queue ? -1 : null, branch: decision.branch };
+      // A dry run never reaches applyDecision/findStickySkipRoot (no DB writes at all in dry-run mode),
+      // so `status` here is decision.js's own pre-persistence approximation, same as before sticky-skip
+      // existed -- it cannot reflect a sticky-skip merge a live run might have made instead.
+      applied = {
+        id: null, outcome: decision.outcome, queued: decision.queue ? -1 : null, branch: decision.branch,
+        status: decision.outcome === 'ambiguous' ? 'review' : decision.inherit?.status ?? null,
+      };
     } else {
       let embedding = null;
       if (decision.outcome !== 'update') {
@@ -555,6 +570,7 @@ async function executeRun(p) {
     else if (applied.outcome === 'cross_source_dup') stats.cross_source_dup++;
     else if (applied.outcome === 'repost') stats.repost++;
     else if (applied.outcome === 'ambiguous') stats.ambiguous++;
+    if (applied.stickySkipMerged) stats.dedup_sticky_skip_merged++;
     rows.push({
       id: applied.id,
       title: rec.title,
@@ -566,7 +582,7 @@ async function executeRun(p) {
       salary_max: rec.salary_max,
       prescore: ps,
       noise_class: noiseClass,
-      status: decision.outcome === 'ambiguous' ? 'review' : decision.inherit?.status ?? null,
+      status: applied.status ?? null,
       source: rec.source,
       outcome: applied.outcome,
     });

@@ -175,7 +175,10 @@ describe('bulkResolve: mode "reason"', () => {
 
   test('an already-resolved item counts as skipped, not an error (a concurrent resolve lands between bulkResolve\'s own selection query and its per-item resolveItem call)', async () => {
     const cand = await insertListing({ status: 'review' });
-    const q = await insertQueueItem({ candidateId: cand, reason: 'reopened_skip' });
+    // reason is incidental to this race-timing test -- 'reopened_skip' is refused for mode:'reason' by
+    // the sticky-skip spec (part C: those items now resolve via mode:'sticky-skip' instead), so this
+    // uses a different closed reason that exercises the exact same already-resolved race path.
+    const q = await insertQueueItem({ candidateId: cand, reason: 'concurrent_review' });
     // bulkResolve re-queries open items at execution time, so resolving the item BEFORE bulkResolve
     // even runs would just make its own SELECT exclude the row entirely -- that would never exercise the
     // already-resolved catch branch in the per-item loop. To exercise it for real, a second, independent
@@ -197,7 +200,7 @@ describe('bulkResolve: mode "reason"', () => {
         return fn(client);
       },
     };
-    const out = await bulkResolve(racyDeps, { mode: 'reason', reason: 'reopened_skip', dryRun: false, confirm: true });
+    const out = await bulkResolve(racyDeps, { mode: 'reason', reason: 'concurrent_review', dryRun: false, confirm: true });
     assert.equal(out.counts.errors, 0);
     assert.equal(out.counts.skipped_by_reason.already_resolved, 1);
     assert.deepEqual(out.ids.skipped, [q]);

@@ -13,6 +13,8 @@ import { classify, LISTING_COLUMNS, makePgLookups } from './dedup.js';
 import { normalizeLegacyRow } from './normalize.js';
 import { classifyNoise } from './noise.js';
 import { JobSearchError } from './errors.js';
+import { recordEvent } from './events.js';
+import { matchTest, surfaceException, stickyEligibleFor } from './sticky-skip.js';
 
 /**
  * sha256 over the searchable profile fields (spec 2.3 `rev`).
@@ -239,12 +241,79 @@ export async function updateListing(client, rec, decision, ctx, flags) {
 }
 
 /**
+ * Scan-time sticky-skip auto-merge (sticky-skip spec part B). Only ever consulted from applyDecision's
+ * NEW-LISTING path below (never the same-row update path, 1a/1b -- those never insert a "new listing"
+ * at all, they reactivate the same DB row in place). Called ONLY when `decision.queue` is true: that is
+ * exactly "a new listing would otherwise create a queue row (any reason)", classify()'s own total
+ * classification of when a queue row is required.
+ *
+ * Gathers every id classify() already surfaced as related to this record -- `decision.matches`, plus
+ * `decision.rootId`/`decision.repostOf`/`decision.target?.id` when set -- resolves each to its true
+ * root (one hop via duplicate_of; the no-chains invariant means one hop is always enough), and for
+ * every DISTINCT root runs MATCH-TEST(rec, root) + SURFACE-EXCEPTION(rec, root) + STICKY-ELIGIBLE(root).
+ * The lowest-id qualifying root wins (spec: "auto-merge ... into the lowest-id such root"). Returns
+ * null when no root qualifies, so the caller's ordinary queued path runs unchanged.
+ *
+ * No table scan: this only ever looks at ids classify() already found via its own indexed lookups, so
+ * it adds at most a handful of point queries to an already-queued candidate, never a new search.
+ * @param {import('pg').ClientBase} client
+ * @param {import('./normalize.js').NormalizedListing} rec
+ * @param {import('./dedup.js').Decision} decision
+ * @returns {Promise<{ id: number, status: string }|null>}
+ */
+export async function findStickySkipRoot(client, rec, decision) {
+  if (!decision.queue) return null;
+  /** @type {Set<number>} */
+  const pool = new Set((decision.matches ?? []).filter((n) => typeof n === 'number'));
+  if (decision.rootId != null) pool.add(decision.rootId);
+  if (decision.repostOf != null) pool.add(decision.repostOf);
+  if (decision.target?.id != null) pool.add(decision.target.id);
+  if (pool.size === 0) return null;
+
+  const matched = await client.query('SELECT id, duplicate_of FROM ic_job_listings WHERE id = ANY($1::int[])', [[...pool]]);
+  /** @type {Set<number>} */
+  const rootIds = new Set();
+  for (const row of matched.rows) rootIds.add(row.duplicate_of != null ? Number(row.duplicate_of) : Number(row.id));
+  if (rootIds.size === 0) return null;
+
+  const roots = await client.query(
+    `SELECT id, status, source, url_normalized, title_norm, company_norm, location_norm, salary_max, apply_url
+     FROM ic_job_listings WHERE id = ANY($1::int[]) AND duplicate_of IS NULL`,
+    [[...rootIds]],
+  );
+
+  const cand = {
+    url_normalized: rec.url_normalized ?? null,
+    url_kind: rec.url_kind ?? null,
+    source: rec.source ?? null,
+    title_norm: rec.title_norm ?? null,
+    company_norm: rec.company_norm ?? null,
+    location_norm: rec.location_norm ?? null,
+    salary_max: rec.salary_max ?? null,
+    apply_url: /** @type {string|null} */ (null), // an incoming scan record never carries a resolved apply_url of its own
+  };
+
+  /** @type {{ id: number, status: string }[]} */
+  const eligible = [];
+  for (const root of roots.rows) {
+    if (!matchTest(cand, root)) continue;
+    if (surfaceException(cand, root)) continue;
+    // eslint-disable-next-line no-await-in-loop -- root pool is small (classify()'s own match sets), sequential is fine and keeps this readable
+    const isEligible = await stickyEligibleFor(client, root.id, root.status);
+    if (isEligible) eligible.push({ id: Number(root.id), status: String(root.status) });
+  }
+  if (eligible.length === 0) return null;
+  eligible.sort((a, b) => a.id - b.id);
+  return eligible[0];
+}
+
+/**
  * Persist one classify() decision. Runs inside a SAVEPOINT.
  * @param {import('pg').ClientBase} client
  * @param {import('./normalize.js').NormalizedListing} rec
  * @param {import('./dedup.js').Decision} decision
  * @param {ApplyContext} ctx
- * @returns {Promise<{ id: number, outcome: string, queued: number|null, branch: string }>}
+ * @returns {Promise<{ id: number, outcome: string, queued: number|null, branch: string, status: string|null, stickySkipMerged?: boolean, stickySkipRootId?: number|null }>}
  */
 export async function applyDecision(client, rec, decision, ctx) {
   return withSavepoint(client, async (c) => {
@@ -259,25 +328,58 @@ export async function applyDecision(client, rec, decision, ctx) {
       if (decision.queue && decision.reason) {
         queued = await enqueueReview(c, { runId: ctx.runId, candidate: candidateSnapshot(rec), candidateId: id, matches: decision.matches, reason: decision.reason, statusAtCreate: target.status ?? null });
       }
-      return { id, outcome: decision.outcome, queued, branch: decision.branch };
+      const repostBranch = decision.branch === '1a-repost-same-id' || decision.branch === '1b-repost-same-url';
+      const status = repostBranch && decision.inherit && decision.inherit.status !== null ? decision.inherit.status : (target.status ?? null);
+      return { id, outcome: decision.outcome, queued, branch: decision.branch, status };
     }
-    const inserted = await insertListing(c, rec, decision, ctx);
-    id = inserted.id;
-    await recordRunItem(c, ctx.runId, id, rec.source, decision.outcome, ctx.pageIndex ?? null);
+
+    // New-listing path: outcome new / ambiguous / cross_source_dup / repost (branch 3-repost or
+    // 6-state-remote-dup all insert a fresh row anchored to their match; 1a/1b above never reach here).
+    // Sticky-skip check (spec part B) runs only when this candidate would otherwise create a queue row.
+    let effective = decision;
+    let stickyRoot = null;
     if (decision.queue && decision.reason) {
-      const statusAtCreate = decision.outcome === 'ambiguous' ? 'review' : decision.inherit?.status ?? null;
-      queued = await enqueueReview(c, { runId: ctx.runId, candidate: candidateSnapshot(rec), candidateId: id, matches: decision.matches, reason: decision.reason, statusAtCreate });
+      stickyRoot = await findStickySkipRoot(c, rec, decision);
+      if (stickyRoot) {
+        effective = {
+          ...decision,
+          outcome: 'cross_source_dup',
+          rootId: stickyRoot.id,
+          repostOf: null,
+          inherit: { status: stickyRoot.status, queueReason: null },
+          queue: false,
+          reason: null,
+        };
+      }
+    }
+
+    const inserted = await insertListing(c, rec, effective, ctx);
+    id = inserted.id;
+    await recordRunItem(c, ctx.runId, id, rec.source, effective.outcome, ctx.pageIndex ?? null);
+    if (effective.queue && effective.reason) {
+      const statusAtCreate = effective.outcome === 'ambiguous' ? 'review' : effective.inherit?.status ?? null;
+      queued = await enqueueReview(c, { runId: ctx.runId, candidate: candidateSnapshot(rec), candidateId: id, matches: effective.matches, reason: effective.reason, statusAtCreate });
     } else if (inserted.conflictAnchor !== null) {
       // Defense in depth: classify() should never hand back a non-queued decision whose key
       // physically collided with a live row (only the ambiguous url_reuse / branch1_conflict
       // branches do that, and both already set queue+reason -- see insertListing's doc comment).
       // If some other decision shape ever reaches here, insertListing still had to auto-anchor
       // duplicate_of to avoid a 23505 crash; that anchoring must never happen silently, so it gets
-      // its own review-queue entry even though the decision itself didn't ask for one.
-      const statusAtCreate = decision.outcome === 'ambiguous' ? 'review' : decision.inherit?.status ?? null;
+      // its own review-queue entry even though the decision itself didn't ask for one. (A sticky-skip
+      // merge's `effective.rootId` is a real, already-verified root, so this branch is not expected to
+      // ever fire for a sticky-merged row -- included anyway as the same defense-in-depth net.)
+      const statusAtCreate = effective.outcome === 'ambiguous' ? 'review' : effective.inherit?.status ?? null;
       queued = await enqueueReview(c, { runId: ctx.runId, candidate: candidateSnapshot(rec), candidateId: id, matches: [inserted.conflictAnchor], reason: 'insert_conflict_auto_anchored', statusAtCreate });
     }
-    return { id, outcome: decision.outcome, queued, branch: decision.branch };
+    if (stickyRoot) {
+      await recordEvent(c, {
+        listingId: id, kind: 'status', fromStatus: null, toStatus: stickyRoot.status, note: 'sticky skip', actor: 'auto', runId: ctx.runId ?? null, at: ctx.now ?? new Date(),
+      });
+    }
+    const status = effective.outcome === 'ambiguous' ? 'review' : effective.inherit?.status ?? null;
+    return {
+      id, outcome: effective.outcome, queued, branch: decision.branch, status, stickySkipMerged: Boolean(stickyRoot), stickySkipRootId: stickyRoot?.id ?? null,
+    };
   });
 }
 

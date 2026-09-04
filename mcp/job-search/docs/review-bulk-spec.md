@@ -5,10 +5,13 @@ not have to re-derive the classification rule or the closed reason lists from th
 
 ## 1. Scope
 
-This feature only ever performs the `separate` resolution against `ic_job_review_queue`, in bulk,
-across three modes: `rule`, `reason`, and `stale`. It never merges and never reposts. Every other
-resolution (`merge`, `repost`) stays a one-at-a-time human action through the existing `review` MCP
-tool action `resolve`, or the dashboard Review page's per-card buttons.
+Four modes: `rule`, `reason`, and `stale` only ever perform the `separate` resolution against
+`ic_job_review_queue`, in bulk. `sticky-skip` (added by the sticky-skip spec, part C) is the one mode
+that performs `merge` instead -- into a STICKY-ELIGIBLE root: a matched root listing whose status is
+`skip`/`passed`/`lost` and whose most recent status-change event to that status was either a human
+(dashboard/mcp/cli) or an auto-triage `skip_noise` call. `repost` is never performed in bulk by any
+mode; it stays a one-at-a-time human action through the existing `review` MCP tool action `resolve`,
+or the dashboard Review page's per-card buttons.
 
 ## 2. The rule-mode classifier (S1)
 
@@ -61,6 +64,19 @@ Modes:
   action, and `resolveItem`'s own separate branch is already safe to call regardless, since it only
   clears status back to null when the status is still `review`. Running `stale` mode after
   `autoSeparate` has already claimed some of the same rows is expected, not an error.
+- `sticky-skip`: snapshots every open item of ANY reason (unlike `rule`, which only ever considers
+  `title_similar_same_company`), and for each one evaluates MATCH-TEST and SURFACE-EXCEPTION
+  (`classifyForStickySkip()`, `src/core/review-bulk.js`) against every id in the item's `matches[]`.
+  When at least one match resolves to a STICKY-ELIGIBLE root that MATCH-TEST accepts and
+  SURFACE-EXCEPTION does not reject, the item resolves as `merge` into the LOWEST-id such root, via
+  `resolveItem({resolution:'merge', targetId})` -- which re-derives STICKY-ELIGIBLE itself, inside its
+  own transaction, so a race between this mode's own read-only classification pass and the live resolve
+  is always caught there. Rows that fail classification stay open, tallied under
+  `counts.leave_by_reason` with one of `STICKY_SKIP_LEAVE_REASONS` (`not_open`, `candidate_missing`,
+  `no_matches`, `no_sticky_match`). `mode: 'reason'` with `reason: 'reopened_skip'` is refused (a
+  VALIDATION error naming `sticky-skip`): those items now resolve here, where STICKY-ELIGIBLE is
+  re-checked per candidate, rather than being separated wholesale regardless of who skipped the root or
+  why.
 
 A live run (`dryRun: false`) requires `confirm: true`, checked inside `bulkResolve` itself so every
 surface (MCP tool, CLI, dashboard route) gets the identical guarantee, not just whichever boundary
@@ -84,13 +100,14 @@ appended for `reason` mode (for example `resolved:separate:bulk:reason:branch1_c
 listing's own event history can always tell a bulk separation apart from a one-at-a-time human
 resolve, and can identify which mode and (for reason mode) which reason drove it.
 
-Return shape:
+Return shape (the `merged`/`ids.merged` fields are additive, populated only by `sticky-skip` mode --
+every other mode leaves them at `0`/`[]`):
 
 ```
 {
   mode, dryRun,
-  counts: { separate, leave_by_reason: {...}, skipped_by_reason: {...}, errors },
-  ids: { separated: [...], skipped: [...], errors: [{ id, message }] },
+  counts: { separate, merged, leave_by_reason: {...}, skipped_by_reason: {...}, errors },
+  ids: { separated: [...], merged: [...], skipped: [...], errors: [{ id, message }] },
 }
 ```
 
@@ -110,6 +127,11 @@ any query runs:
 - `cross_source_uncorroborated`
 - `company_similar_same_title`
 
+`reopened_skip` remains in this list (other code still checks membership against it), but passing it
+as `mode: 'reason'`'s `reason` is refused with a VALIDATION error pointing at `mode: 'sticky-skip'`
+(section 3): a blanket separate of every `reopened_skip` item regardless of who skipped the root, or
+why, is no longer available -- `sticky-skip` mode re-checks STICKY-ELIGIBLE per candidate instead.
+
 ## 5. The untriaged effect
 
 Every bulk separation, regardless of mode, sends the candidate back to untriaged (`status` set to
@@ -122,10 +144,10 @@ manual separations would. This is an accepted, documented side effect, not a bug
 
 - **MCP tool**: `review` gains `action: 'bulk'` with `mode`, `reason`, `dry_run` (boolean, default
   `true`), and `confirm` (boolean, default `false`).
-- **CLI**: `bin/review-bulk.js --mode rule|reason|stale [--reason <reason>] [--dry-run | --no-dry-run
-  --confirm]`. `--dry-run` is the default. A live run needs both `--no-dry-run` and `--confirm`;
-  `bulkResolve` itself is the single place that rule is enforced, so the CLI, the MCP tool, and the
-  dashboard route can never drift out of sync with each other.
+- **CLI**: `bin/review-bulk.js --mode rule|reason|stale|sticky-skip [--reason <reason>] [--dry-run |
+  --no-dry-run --confirm]`. `--dry-run` is the default. A live run needs both `--no-dry-run` and
+  `--confirm`; `bulkResolve` itself is the single place that rule is enforced, so the CLI, the MCP tool,
+  and the dashboard route can never drift out of sync with each other.
 - **Dashboard**: the Review page gets a reason filter, whose options come from `GET
   /api/review/reasons` (the DB's current universe of open reasons), never from whichever page of rows
   the client already loaded. Selecting a reason shows a bulk bar ("Return N to untriaged") backed by a
