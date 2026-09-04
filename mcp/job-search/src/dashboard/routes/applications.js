@@ -19,7 +19,8 @@ import {
 import { classifyApplyUrl } from '../../apply/ats-detect.js';
 import { resolveLatestApplicationScreenshot } from '../../apply/screenshot.js';
 import { appendLearnedLabel } from '../../apply/answers.js';
-import { packageRoot } from '../../core/config.js';
+import { packageRoot, loadConfig } from '../../core/config.js';
+import { classifyExclusion, loadExclusionConfig, HARD_BRANCHES } from '../../apply/exclusions.js';
 import { sendJson } from '../http.js';
 
 const ANSWER_BANK_PATH = path.join(packageRoot(), 'data', 'apply-answers.md');
@@ -28,6 +29,69 @@ const ANSWER_BANK_PATH = path.join(packageRoot(), 'data', 'apply-answers.md');
  * link -- the world (the listing's own description, or the operator's data files) may well have changed
  * since a stale drafting row was first created, so a fresh draft is safer than trusting a week-old link. */
 const STALE_DRAFTING_MS = 7 * 24 * 60 * 60 * 1000;
+
+/**
+ * Full listing columns the apply exclusion gate (src/apply/exclusions.js) needs -- one-click Apply's own
+ * gate check at creation/reuse time. NOT the same query GET /api/listings/:id already runs (this route
+ * only needs the exclusion-relevant subset).
+ * @param {import('../server.js').DashboardDeps} deps
+ * @param {number} listingId
+ */
+async function fetchExclusionListing(deps, listingId) {
+  const r = await deps.withClient((c) => c.query(
+    `SELECT id, company, company_norm, title, title_norm, apply_url, url, url_normalized, description
+     FROM ic_job_listings WHERE id = $1`,
+    [listingId],
+  ));
+  if (r.rowCount === 0) throw new JobSearchError('NOT_FOUND', `listing ${listingId} not found`);
+  const row = r.rows[0];
+  return {
+    id: Number(row.id), company: row.company ?? null, companyNorm: row.company_norm ?? null,
+    title: row.title ?? null, titleNorm: row.title_norm ?? null, applyUrl: row.apply_url ?? null,
+    sourceUrl: row.url_normalized ?? row.url ?? null, description: row.description ?? null,
+  };
+}
+
+/**
+ * Apply exclusion gate (one-click Apply's own entry point, spec item 4): classify the listing before any
+ * application row is created or reused. Returns `null` when eligible to proceed (branch 'eligible', or a
+ * NEEDS_HUMAN branch the caller explicitly overrode). Otherwise sends the 409 response itself and returns
+ * `true` so the caller stops. `excludeApplicationId` is the listing's own currently-drafting application
+ * (if any) being re-clicked -- see classifyExclusion's own doc comment on that field for why it must be
+ * excluded from the already-applied checks here (this route's pre-existing DUPLICATE_APPLICATION handling
+ * already governs re-entry into that same row).
+ * @param {import('../server.js').DashboardDeps} deps
+ * @param {import('http').ServerResponse} res
+ * @param {number} listingId
+ * @param {{ excludeApplicationId?: number|null, override?: boolean }} opts
+ * @returns {Promise<boolean>} true when the route already responded and must stop
+ */
+export async function applyExclusionGate(deps, res, listingId, opts) {
+  const configDir = deps.config?.configDir ?? loadConfig().configDir;
+  let exclusionConfig;
+  try {
+    exclusionConfig = loadExclusionConfig(configDir);
+  } catch (err) {
+    if (err instanceof JobSearchError && err.code === 'CONFIG_INVALID') {
+      sendJson(res, 409, { ok: false, code: 'APPLY_EXCLUDED', branch: 'config_invalid', reason: err.message, message: err.message });
+      return true;
+    }
+    throw err;
+  }
+  const listing = await fetchExclusionListing(deps, listingId);
+  const verdict = await deps.withClient((c) => classifyExclusion(listing, {
+    client: c, config: exclusionConfig, excludeApplicationId: opts.excludeApplicationId ?? null,
+  }));
+  if (verdict.branch === 'eligible') return false;
+  if (HARD_BRANCHES.includes(verdict.branch)) {
+    sendJson(res, 409, { ok: false, code: 'APPLY_EXCLUDED', branch: verdict.branch, reason: verdict.reason, message: verdict.reason });
+    return true;
+  }
+  // NEEDS_HUMAN branch: proceed only on an explicit override; otherwise surface it for a human decision.
+  if (opts.override === true) return false;
+  sendJson(res, 409, { ok: false, code: 'APPLY_NEEDS_OVERRIDE', branch: verdict.branch, reason: verdict.reason, message: verdict.reason });
+  return true;
+}
 
 /**
  * Best-effort, non-blocking: start the apply runner for an application that just landed in 'approved'.
@@ -135,8 +199,24 @@ export function register(router, deps, streamHub) {
   router.register('POST', '/api/listings/:id/apply-now', async (ctx) => {
     const listingId = Number(ctx.params.id);
     if (!Number.isInteger(listingId) || listingId <= 0) throw new JobSearchError('VALIDATION', 'id must be a positive integer');
+    const body = /** @type {any} */ (ctx.body) ?? {};
+    const override = body.override === true;
 
     let app = await deps.withClient((c) => getApplicationForListing(c, listingId));
+
+    // Apply exclusion gate (spec item 4): never submit to a job already applied to, or to a blocked
+    // employer. Runs before any application row is created or reused; excludes THIS listing's own
+    // currently-drafting application (if any) from the already-applied checks -- see applyExclusionGate's
+    // doc comment.
+    // deps.applyExclusionGate is a test seam ONLY (never set by production wiring): lets a test exercising
+    // unrelated apply-now behavior with a shared listing fixture across many test cases bypass the gate's
+    // own cross-listing DB lookups. Defaults to the real gate.
+    const gate = deps.applyExclusionGate ?? applyExclusionGate;
+    const blocked = await gate(deps, ctx.res, listingId, {
+      excludeApplicationId: app ? app.id : null, override,
+    });
+    if (blocked) return;
+
     if (app) {
       if (app.state !== 'drafting') {
         return sendJson(ctx.res, 409, {

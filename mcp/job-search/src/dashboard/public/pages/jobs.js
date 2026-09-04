@@ -196,14 +196,32 @@ export async function render(container, params, app) {
   /** One-click apply (PR A spec item 8): kicks off POST /api/listings/:id/apply-now. 409 (an active
    * application already exists past drafting) is a normal, expected outcome -- e.g. a second click while
    * the chain is already running -- surfaced as an informational toast, never an error toast. */
+  // Apply exclusion gate, NEEDS_HUMAN branch: listing ids awaiting a SECOND Apply click to confirm the
+  // override -- the dashboard-wide "no native window.confirm/prompt/alert" rule (test/dashboard-lint.test.js)
+  // means this is a click-again-to-confirm flow (same spirit as components/confirm-button.js's two-step
+  // button, applied here via a toast prompt since job-row.js's Apply button is a plain, re-rendered-per-load
+  // button rather than a standalone confirmButton() instance) rather than a modal dialog.
+  const pendingOverride = new Set();
+
   async function applyNow(id) {
-    const outcome = handleOutcome(await postJson(`/api/listings/${id}/apply-now`, {}));
+    const override = pendingOverride.has(id);
+    const outcome = handleOutcome(await postJson(`/api/listings/${id}/apply-now`, override ? { override: true } : {}));
     if (outcome.kind === 'ok') {
+      pendingOverride.delete(id);
       showToast({ message: 'Applying: drafting resume.' });
       load();
     } else if (outcome.kind === 'duplicate_application') {
+      pendingOverride.delete(id);
       showToast({ message: 'This listing already has an active application.' });
       load();
+    } else if (outcome.kind === 'apply_excluded') {
+      // Apply exclusion gate, HARD branch: never overridable from the dashboard.
+      pendingOverride.delete(id);
+      showToast({ message: `Blocked: ${outcome.reason}`, tone: 'error' });
+    } else if (outcome.kind === 'apply_needs_override') {
+      // Apply exclusion gate, NEEDS_HUMAN branch: click Apply again to proceed anyway.
+      pendingOverride.add(id);
+      showToast({ message: `${outcome.reason} Click Apply again to proceed anyway.`, tone: 'error' });
     }
   }
 

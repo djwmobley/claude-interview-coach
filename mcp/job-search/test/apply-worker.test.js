@@ -16,8 +16,9 @@ import { pgConnectionConfig, loadConfig } from '../src/core/config.js';
 import { ensureAuxSchema } from '../src/core/schema.js';
 import { createApplication, transition, getApplication, approve } from '../src/core/applications.js';
 import { LOCK_KEY as SCAN_LOCK_KEY } from '../src/core/scan-run.js';
-import { runApplyWorker, LOCK_KEY as APPLY_LOCK_KEY } from '../src/apply/worker.js';
+import { runApplyWorker, preSubmitExclusionRecheck, LOCK_KEY as APPLY_LOCK_KEY } from '../src/apply/worker.js';
 import { ADAPTERS } from '../src/apply/adapters/index.js';
+import { BUILT_IN_BLOCKED } from '../src/apply/exclusions.js';
 
 const CO = `ZZ-TEST-APPLYWORKER-${process.pid}`;
 /** @type {pg.Client} */
@@ -84,6 +85,15 @@ function fakeSession() {
   };
 }
 
+/** baseDeps()'s default apply-exclusion-gate bypass (see its own doc comment): performs the SAME
+ * approved -> submitting transition the real preSubmitExclusionRecheck always performs first, but skips
+ * the exclusion classification entirely, so the worker's own subsequent state machine (submitting ->
+ * submitted/needs_human/failed) is completely unaffected by this file's shared fixtures. */
+async function alwaysEligible(client, app) {
+  await transition(client, app.id, 'submitting', { actor: 'apply', note: 'worker started' });
+  return { branch: 'eligible', reason: 'test bypass', evidence: {} };
+}
+
 function baseDeps(extra = {}) {
   return {
     config: loadConfig(),
@@ -92,6 +102,14 @@ function baseDeps(extra = {}) {
     connectSession: async () => fakeSession(),
     log: () => {},
     progress: () => {},
+    // This file's OTHER describe blocks all share the literal 'apply worker test co' / 'apply worker
+    // test' company/title fixture across many test cases in the SAME run (seedApprovedApplication()
+    // above) -- the apply exclusion gate's own "already applied elsewhere with this company+title" DB
+    // lookup (src/apply/exclusions.js's classifyExclusion, branch c) would otherwise see an EARLIER
+    // sibling test's own non-withdrawn application and incorrectly block this one. Bypassed by default
+    // here; the "apply exclusion gate" describe block below explicitly restores the real function (and
+    // uses its own unique-per-test fixtures) to test the gate itself.
+    preSubmitExclusionRecheck: alwaysEligible,
     ...extra,
   };
 }
@@ -393,5 +411,92 @@ describe('runApplyWorker: one-click apply PR A spec item 3 -- effective bank sal
     const seen = {};
     await runApplyWorker(id, baseDeps({ adapters: { greenhouse: probeAdapter(seen) }, answerBank: sharedBank }));
     assert.equal(sharedBank.meta.salary_floor, 150000, 'the ORIGINAL bank object passed by the caller is untouched -- a second application sharing it must see its own floor, not a leaked one');
+  });
+});
+
+describe('apply exclusion gate: pre-submit recheck (worker.js\'s own transition to submitting)', () => {
+  const EXCL_CFG = { blockedCompanies: [...BUILT_IN_BLOCKED], appliedHistory: [] };
+
+  /** Unlike seedApprovedApplication() (shared 'apply worker test co' / 'apply worker test' fixture reused
+   * by every OTHER describe block in this file), this describe block's own classifyExclusion branch c/d
+   * checks look across ALL listings sharing a company+title -- so each test here needs its own unique
+   * company_norm/title_norm to avoid colliding with sibling tests' own non-withdrawn applications. */
+  async function seedApprovedApplicationUnique() {
+    const n = Math.floor(Math.random() * 1e9);
+    // Single-token, non-dictionary strings (no shared words like "test"/"co"/"apply") -- branch c/d's
+    // company match is a BIDIRECTIONAL subset check, so any fixture built from common words risks a false
+    // match against some other test file's own listing sharing one of those words as its entire
+    // company_norm. A random single token can never be a subset of, or a superset containing, anything
+    // else already in this shared test database.
+    const companyNorm = `zzexclworkerco${n}`;
+    const titleNorm = `zzexclworkerrole${n}`;
+    const r = await verifyClient.query(
+      `INSERT INTO ic_job_listings (title, company, source, external_id, record_kind, company_norm, title_norm, location_norm, dedup_hash, last_seen)
+       VALUES ('Apply Worker Excl Test', $1, $2, $3, 'listing', $4, $5, 'legacy-unknown', $6, now()) RETURNING id`,
+      [CO, `zz-test-applyworker-excl-${process.pid}`, `zz-test-applyworker-excl-${process.pid}:${n}`, companyNorm, titleNorm, `zz-applyworker-excl-hash-${n}`],
+    );
+    const listingId = Number(r.rows[0].id);
+    listingIds.push(listingId);
+    const created = await createApplication(verifyClient, { listingId, atsType: 'greenhouse', applyUrl: 'https://boards.greenhouse.io/acme/jobs/12345', actor: 'mcp' });
+    await transition(verifyClient, created.id, 'docs_ready', { actor: 'dashboard' });
+    await verifyClient.query(`UPDATE ic_job_applications SET state = 'approved' WHERE id = $1`, [created.id]);
+    return created.id;
+  }
+
+  test('eligible: preSubmitExclusionRecheck transitions approved -> submitting and excludes its OWN row', async () => {
+    const id = await seedApprovedApplicationUnique();
+    const app = await getApplication(verifyClient, id);
+    const verdict = await preSubmitExclusionRecheck(verifyClient, app, EXCL_CFG, { actor: 'apply' });
+    assert.equal(verdict.branch, 'eligible');
+    const row = await getApplication(verifyClient, id);
+    assert.equal(row.state, 'submitting');
+  });
+
+  test('a race: a DIFFERENT application appears on a duplicate listing between select and submit -> aborts to needs_human', async () => {
+    const id = await seedApprovedApplicationUnique();
+    const app = await getApplication(verifyClient, id);
+    // Simulate the race: after this application was approved, a second listing sharing its dedup root
+    // picked up its own non-withdrawn application (e.g. a duplicate discovered by a later scan, applied to
+    // through a completely different path).
+    const n = Math.floor(Math.random() * 1e9);
+    const dupRes = await verifyClient.query(
+      `INSERT INTO ic_job_listings (title, company, source, external_id, record_kind, company_norm, title_norm, location_norm, dedup_hash, last_seen, duplicate_of)
+       VALUES ('Apply Worker Test Dup', $1, $2, $3, 'listing', 'zz-race-dup-company', 'zz-race-dup-title', 'legacy-unknown', $4, now(), $5) RETURNING id`,
+      [CO, `zz-test-applyworker-dup-${process.pid}`, `zz-test-applyworker-dup-${process.pid}:${n}`, `zz-applyworker-dup-hash-${n}`, app.listing_id],
+    );
+    const dupListingId = Number(dupRes.rows[0].id);
+    listingIds.push(dupListingId);
+    await createApplication(verifyClient, { listingId: dupListingId, actor: 'mcp' });
+
+    const verdict = await preSubmitExclusionRecheck(verifyClient, app, EXCL_CFG, { actor: 'apply' });
+    assert.equal(verdict.branch, 'already_applied_listing');
+    const row = await getApplication(verifyClient, id);
+    assert.equal(row.state, 'needs_human');
+    assert.equal(row.pending_question.kind, 'apply_exclusion');
+  });
+
+  test('runApplyWorker end to end: the pre-submit recheck blocks BEFORE the adapter ever runs', async () => {
+    const id = await seedApprovedApplicationUnique();
+    const app = await getApplication(verifyClient, id);
+    const n = Math.floor(Math.random() * 1e9);
+    const dupRes = await verifyClient.query(
+      `INSERT INTO ic_job_listings (title, company, source, external_id, record_kind, company_norm, title_norm, location_norm, dedup_hash, last_seen, duplicate_of)
+       VALUES ('Apply Worker Test Dup2', $1, $2, $3, 'listing', 'zz-race-dup2-company', 'zz-race-dup2-title', 'legacy-unknown', $4, now(), $5) RETURNING id`,
+      [CO, `zz-test-applyworker-dup2-${process.pid}`, `zz-test-applyworker-dup2-${process.pid}:${n}`, `zz-applyworker-dup2-hash-${n}`, app.listing_id],
+    );
+    const dupListingId = Number(dupRes.rows[0].id);
+    listingIds.push(dupListingId);
+    await createApplication(verifyClient, { listingId: dupListingId, actor: 'mcp' });
+
+    let adapterRan = false;
+    const fakeAdapters = { greenhouse: { ats: 'greenhouse', requires: [], classifyOnly: false, uploadHosts: [], async run() { adapterRan = true; return { outcome: 'submitted', confirmationRef: 'should-never-happen' }; } } };
+    // Restores the REAL gate for this one test (baseDeps() bypasses it by default -- see its own doc
+    // comment); this test's own fixture is unique-per-run (seedApprovedApplicationUnique above) so the
+    // real gate's DB-wide lookups are safe here.
+    const result = await runApplyWorker(id, baseDeps({ adapters: fakeAdapters, exclusionConfig: EXCL_CFG, preSubmitExclusionRecheck }));
+    assert.equal(result.status, 'needs_human');
+    assert.equal(adapterRan, false, 'the adapter must never run once the pre-submit recheck aborts');
+    const row = await getApplication(verifyClient, id);
+    assert.equal(row.state, 'needs_human');
   });
 });

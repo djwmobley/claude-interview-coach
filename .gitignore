@@ -40,3 +40,9 @@ mcp/job-search/config/triage-candidate.lock
 # Apply pipeline slice 4: the screening-question answer bank is personal data (EEO answers, salary
 # floor), never committed. mcp/job-search/data/apply-answers.example.md (tracked) documents the format.
 mcp/job-search/data/apply-answers.md
+# Apply exclusion gate: blocked companies + applied-history are personal data (past employers, prior
+# applications), never committed. mcp/job-search/config/apply-exclusions.example.json (tracked) documents
+# the format. Never a CONFIG_FILES member and never part of config.lock.json (same treatment as
+# triage-candidate.md above): its own presence/validity is checked at run time by src/apply/exclusions.js,
+# not at config-lock time.
+mcp/job-search/config/apply-exclusions.json

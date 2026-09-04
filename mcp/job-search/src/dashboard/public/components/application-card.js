@@ -17,34 +17,61 @@ import { showToast } from '../lib/toast.js';
 import { chipClassName, applicationStateChip } from './chips.js';
 import { credentialPrompt } from './credential-prompt.js';
 
+/** Apply exclusion gate (src/apply/exclusions.js): branches that are never overridable from the dashboard. */
+const HARD_EXCLUSION_BRANCHES = new Set(['blocked_company', 'already_applied_listing', 'already_applied_history']);
+
 /**
- * @param {{ listing: any, application: any|null, ats: any, documents: any[], onChanged: () => void }} opts
+ * @param {{ listing: any, application: any|null, ats: any, documents: any[], onChanged: () => void, applyExclusion?: { branch: string|null, reason: string|null, error?: string }|null }} opts
  */
 export function applicationCard(opts) {
-  const { listing, application, ats, documents } = opts;
+  const { listing, application, ats, documents, applyExclusion } = opts;
+  const excludedHard = Boolean(applyExclusion && applyExclusion.branch && HARD_EXCLUSION_BRANCHES.has(applyExclusion.branch));
+  const excludedNeedsHuman = Boolean(applyExclusion && applyExclusion.branch && !excludedHard && applyExclusion.branch !== 'eligible');
+
+  // Apply exclusion gate, NEEDS_HUMAN branch: this card instance's own click-again-to-confirm flag -- the
+  // dashboard-wide "no native window.confirm/prompt/alert" rule (test/dashboard-lint.test.js) rules out a
+  // modal dialog here too, so a first click on a NEEDS_HUMAN listing shows a toast and arms this flag; a
+  // second click sends the explicit override.
+  let overrideArmed = false;
+
+  /** POST /api/listings/:id/apply-now, optionally with an explicit override (NEEDS_HUMAN branches only --
+   * see routes/applications.js's applyExclusionGate). @param {boolean} [override] */
+  async function postApplyNow(override) {
+    const outcome = handleOutcome(await postJson(`/api/listings/${listing.id}/apply-now`, override ? { override: true } : {}));
+    if (outcome.kind === 'ok') {
+      overrideArmed = false;
+      showToast({ message: 'Applying: drafting resume.' });
+      opts.onChanged();
+    } else if (outcome.kind === 'duplicate_application') {
+      overrideArmed = false;
+      showToast({ message: 'An application already exists for this listing.' });
+      opts.onChanged();
+    } else if (outcome.kind === 'apply_excluded') {
+      overrideArmed = false;
+      showToast({ message: `Blocked: ${outcome.reason}`, tone: 'error' });
+    } else if (outcome.kind === 'apply_needs_override') {
+      overrideArmed = true;
+      showToast({ message: `${outcome.reason} Click Apply now again to proceed anyway.`, tone: 'error' });
+    }
+  }
 
   // One-click apply (PR A spec item 8): available whenever there is no application yet, or the existing
   // one is still 'drafting' -- the same "create-or-reuse a drafting row" range POST /api/listings/:id/
   // apply-now itself accepts (routes/applications.js). Runs the full resume -> review -> approve -> apply
   // chain; distinct from "Create application" below, which only creates the row for the existing manual
-  // /write-resume copy-paste flow.
-  const applyNowButton = (!application || application.state === 'drafting') ? h('button', {
-    className: 'btn btn--primary',
-    attrs: { type: 'button' },
-    text: 'Apply now',
-    on: {
-      click: async () => {
-        const outcome = handleOutcome(await postJson(`/api/listings/${listing.id}/apply-now`, {}));
-        if (outcome.kind === 'ok') {
-          showToast({ message: 'Applying: drafting resume.' });
-          opts.onChanged();
-        } else if (outcome.kind === 'duplicate_application') {
-          showToast({ message: 'An application already exists for this listing.' });
-          opts.onChanged();
-        }
-      },
-    },
-  }) : null;
+  // /write-resume copy-paste flow. Apply exclusion gate: a HARD branch disables the button entirely and
+  // shows the reason in its place; a NEEDS_HUMAN branch keeps the button live but postApplyNow() above
+  // handles the server's 409 by asking for an explicit confirm-to-override.
+  const applyNowButton = (!application || application.state === 'drafting')
+    ? (excludedHard
+      ? h('span', { className: 'application-card__excluded', text: `Apply blocked: ${applyExclusion.reason}` })
+      : h('button', {
+        className: 'btn btn--primary',
+        attrs: { type: 'button' },
+        text: excludedNeedsHuman ? 'Apply now (needs review)' : 'Apply now',
+        on: { click: () => postApplyNow(overrideArmed) },
+      }))
+    : null;
 
   if (!application) {
     return h('div', { className: 'application-card' }, [

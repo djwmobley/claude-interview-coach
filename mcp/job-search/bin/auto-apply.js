@@ -54,6 +54,7 @@ import { INTERMEDIARY_HOSTS } from '../src/apply/apply-target.js';
 import { persistApplyTargetForListing, LIFETIME_PROBE_ATTEMPTS } from '../src/core/apply-target-persist.js';
 import { prepareLinkedInListing, adaptPlaywrightPage } from '../src/apply/linkedin-button-prepare.js';
 import { selectCandidates } from '../src/core/auto-apply-select.js';
+import { exclusionConfigPath } from '../src/apply/exclusions.js';
 import { createApplication, approve } from '../src/core/applications.js';
 import { createResumeRunner } from '../src/dashboard/resume-runner.js';
 import { createReviewRunner } from '../src/dashboard/review-runner.js';
@@ -335,6 +336,32 @@ async function main() {
       fitFloor: config.autoApply.fitFloor, floors: config.autoApply.floors, atsAllow: config.autoApply.atsAllow,
       dailyCap: config.autoApply.dailyCap, now, timezone: config.adapters.run.timezone,
     });
+  } catch (err) {
+    // Apply exclusion gate (spec section 2): a missing/invalid config/apply-exclusions.json is a hard
+    // error -- never a silent fallback to the tracked .example.json. This run stops before select or apply
+    // ever runs; the daily report's own [NO APPLY] line (src/core/report.js's renderAutoApply*) names the
+    // exact file so the operator fixes it, mirroring [NO SCAN]/[LOCK MISMATCH]'s existing loud-failure shape.
+    const f = errFields(err);
+    if (f.err_code === 'CONFIG_INVALID') {
+      await selectClient.end().catch(() => {});
+      log({ evt: 'auto_apply_no_apply_config_invalid', ...f });
+      const noApplySummary = {
+        ok: false, dry_run: dryRun, prepare: prepareStats,
+        no_apply: { file: exclusionConfigPath(config.configDir), message: f.err_message },
+        applied: [],
+      };
+      try {
+        writeAutoApplySummary(defaultAutoApplySummaryFile(env.JOBSEARCH_LOG_DIR), noApplySummary);
+      } catch (writeErr) {
+        log({ evt: 'auto_apply_summary_write_failed', ...errFields(writeErr) });
+      }
+      console.log(JSON.stringify(noApplySummary));
+      await closePool().catch(() => {});
+      process.exit(1);
+      return;
+    }
+    await selectClient.end().catch(() => {});
+    throw err;
   } finally {
     await selectClient.end().catch(() => {});
   }

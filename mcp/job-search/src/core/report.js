@@ -983,6 +983,10 @@ export function renderReportMarkdown(data, registry, googleAuthState, dashboardH
  * @property {boolean} [dry_run]
  * @property {{ results?: Array<{ listingId: number, reason: string }>, cap_used?: number, cap_remaining?: number }} [select]
  * @property {Array<{ listingId: number, applicationId?: number, outcome: string }>} [applied]
+ * @property {boolean} [ok]
+ * @property {{ file: string, message: string }} [no_apply] apply exclusion gate: a missing/invalid
+ *   config/apply-exclusions.json aborted the run before select ever ran (bin/auto-apply.js exits non-zero
+ *   on this; the report renders a loud [NO APPLY] line naming the file, mirroring [NO SCAN]/[LOCK MISMATCH]).
  */
 
 /**
@@ -1006,10 +1010,13 @@ export function renderReportMarkdown(data, registry, googleAuthState, dashboardH
  * not something that quietly disappears from the email.
  * @param {import('pg').ClientBase} client
  * @param {AutoApplySummary|null|undefined} summary
- * @returns {Promise<{ hasRun: false } | ({ hasRun: true } & AutoApplyReportData)>}
+ * @returns {Promise<{ hasRun: false, noApply?: { file: string, message: string } } | ({ hasRun: true } & AutoApplyReportData)>}
  */
 export async function collectAutoApply(client, summary) {
   if (!summary || typeof summary !== 'object') return { hasRun: false };
+  if (summary.ok === false && summary.no_apply) {
+    return { hasRun: false, noApply: { file: summary.no_apply.file, message: summary.no_apply.message } };
+  }
   const results = Array.isArray(summary.select?.results) ? /** @type {Array<{ listingId: number, reason: string }>} */ (summary.select.results) : [];
   const applied = Array.isArray(summary.applied) ? summary.applied : [];
   const appliedCount = applied.filter((a) => a && a.outcome === 'applied').length;
@@ -1062,6 +1069,9 @@ function skippedReasonsText(data) {
  * @returns {string}
  */
 export function renderAutoApplyText(data, registry) {
+  if (data && !data.hasRun && data.noApply) {
+    return `== Auto-apply ==\n[NO APPLY]: config/apply-exclusions.json is missing or invalid (${data.noApply.file}): ${data.noApply.message}`;
+  }
   if (!data || !data.hasRun) return '== Auto-apply ==\n(no auto-apply run recorded today)';
   const reg = registry ?? { entries: [], httpAllowedHosts: new Set() };
   const lines = [];
@@ -1086,8 +1096,11 @@ export function renderAutoApplyText(data, registry) {
  * @returns {string}
  */
 export function renderAutoApplyHtml(data, registry) {
-  if (!data || !data.hasRun) return '<h3>Auto-apply</h3><p>(no auto-apply run recorded today)</p>';
   const esc = escapeHtml;
+  if (data && !data.hasRun && data.noApply) {
+    return `<h3>Auto-apply</h3><p><strong>[NO APPLY]</strong>: config/apply-exclusions.json is missing or invalid (${esc(data.noApply.file)}): ${esc(data.noApply.message)}</p>`;
+  }
+  if (!data || !data.hasRun) return '<h3>Auto-apply</h3><p>(no auto-apply run recorded today)</p>';
   const reg = registry ?? { entries: [], httpAllowedHosts: new Set() };
   const parts = [];
   parts.push(`<h3>Auto-apply${data.dryRun ? ' (dry run)' : ''}</h3>`);
@@ -1117,6 +1130,9 @@ export function renderAutoApplyHtml(data, registry) {
  * @returns {string}
  */
 export function renderAutoApplyMarkdown(data, registry) {
+  if (data && !data.hasRun && data.noApply) {
+    return `## Auto-apply\n\n**[NO APPLY]**: config/apply-exclusions.json is missing or invalid (${data.noApply.file}): ${data.noApply.message}`;
+  }
   if (!data || !data.hasRun) return '## Auto-apply\n\n(no auto-apply run recorded today)';
   const reg = registry ?? { entries: [], httpAllowedHosts: new Set() };
   const lines = [];

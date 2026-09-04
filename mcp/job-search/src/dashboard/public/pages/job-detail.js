@@ -184,6 +184,7 @@ export async function render(container, params, app) {
     // application row (or null) the same way it already nests documents/followups/prescore_breakdown.
     const applicationPanel = applicationCard({
       listing, application: outcome.body.application ?? null, ats: outcome.body.ats, documents: docs, onChanged: load,
+      applyExclusion: outcome.body.apply_exclusion ?? null,
     });
 
     const prescoreBreakdownCard = prescoreBreakdownPanel(outcome.body.prescore_breakdown, listing);
