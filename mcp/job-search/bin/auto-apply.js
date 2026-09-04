@@ -96,6 +96,104 @@ import { launchChrome } from './scan.js';
 
 const USAGE = 'usage: node bin/auto-apply.js [--dry-run] [--json [out]]';
 
+/** Thrown by main()'s prepare phase when acquireLockWithPoll's poll window expires without ever acquiring
+ * the lock -- a distinct, catchable signal (rather than a direct console.log/process.exit inline) so the
+ * SAME outer routing (runLifecycle below) that catches every other uncaught error also catches this one and
+ * always writes a terminal (phase 'done') summary before the process exits. Never thrown anywhere else. */
+export class AutoApplyLockedError extends Error {
+  constructor(message) {
+    super(message);
+    this.name = 'AutoApplyLockedError';
+  }
+}
+
+/**
+ * Builds the `finish(code)` closure every terminal exit routes through (see runLifecycle below and
+ * main()'s own usage): marks the run done, writes the always-overwritten latest.json, writes the
+ * never-overwritten dated run JSON (spec amendment A6, unconditional -- not only under --json), optionally
+ * ALSO writes the user-requested --json file, prints the summary, closes the pool, exits. Every external
+ * effect (file writes, pool close, process exit) is injected so this is fully testable without a real
+ * filesystem-adjacent side effect surface beyond a caller-supplied temp directory, and without ever calling
+ * the real process.exit (which would kill the test process).
+ * @param {{
+ *   summary: any, summaryFile: string, logDir: string, now: Date, timezone: string, jsonArg: string|null|undefined,
+ *   log: (f: any) => void,
+ *   writeSummaryFn?: typeof writeAutoApplySummary, writeDatedFn?: typeof writeRunJsonNoOverwrite,
+ *   datedPathFn?: typeof datedRunJsonPath, closePoolFn?: () => Promise<void>, exitFn?: (code: number) => void,
+ * }} opts
+ * @returns {(code: number) => Promise<void>}
+ */
+export function createFinish(opts) {
+  const writeSummaryFn = opts.writeSummaryFn ?? writeAutoApplySummary;
+  const writeDatedFn = opts.writeDatedFn ?? writeRunJsonNoOverwrite;
+  const datedPathFn = opts.datedPathFn ?? datedRunJsonPath;
+  const closePoolFn = opts.closePoolFn ?? closePool;
+  const exitFn = opts.exitFn ?? ((code) => process.exit(code));
+  const persist = () => {
+    try {
+      writeSummaryFn(opts.summaryFile, opts.summary);
+    } catch (err) {
+      opts.log({ evt: 'auto_apply_summary_write_failed', ...errFields(err) });
+    }
+  };
+  return async (code) => {
+    opts.summary.phase = 'done';
+    persist();
+    try {
+      const dated = writeDatedFn(datedPathFn(opts.logDir, opts.now, opts.timezone), opts.summary);
+      opts.log({ evt: 'auto_apply_run_json_written', file: path.basename(dated) });
+    } catch (err) {
+      opts.log({ evt: 'auto_apply_run_json_write_failed', ...errFields(err) });
+    }
+    if (opts.jsonArg !== undefined) {
+      const file = opts.jsonArg ?? path.join(opts.logDir, `auto-apply-${new Date().toISOString().replace(/[:.]/g, '-')}.json`);
+      try {
+        fs.mkdirSync(path.dirname(file), { recursive: true });
+        fs.writeFileSync(file, JSON.stringify(opts.summary, null, 2) + '\n');
+        opts.log({ evt: 'auto_apply_json_written', file: path.basename(file) });
+      } catch (err) {
+        opts.log({ evt: 'auto_apply_json_write_failed', ...errFields(err) });
+      }
+    }
+    console.log(JSON.stringify(opts.summary));
+    await closePoolFn().catch(() => {});
+    exitFn(code);
+  };
+}
+
+/**
+ * The single routing point EVERY terminal exit passes through (spec-adversary finding on the original PR:
+ * a failed lock acquisition and any uncaught exception both used to bypass `finish()` entirely, leaving
+ * latest.json stuck at a non-'done' phase and skipping the dated run JSON for a process that had already
+ * exited). Runs `body()`; on success, `body` itself is responsible for calling `finish(0)` at whatever point
+ * it decides the run is complete (the still-running-at-deadline early return included) -- this wrapper only
+ * exists to catch what `body` does NOT catch itself: an AutoApplyLockedError (outcome 'locked', exit 2) or
+ * any other thrown error (outcome 'error', exit 1), setting `summary.outcome`/`summary.ok`/`summary.error`
+ * and routing to `finish` either way, so a `phase: 'done'` summary is written no matter how the run ends.
+ * @param {() => Promise<void>} body
+ * @param {{ summary: any, finish: (code: number) => Promise<void>, log: (f: any) => void }} opts
+ * @returns {Promise<void>}
+ */
+export async function runLifecycle(body, opts) {
+  try {
+    await body();
+  } catch (err) {
+    if (err instanceof AutoApplyLockedError) {
+      opts.log({ evt: 'auto_apply_locked' });
+      opts.summary.ok = false;
+      opts.summary.outcome = 'locked';
+      await opts.finish(2);
+      return;
+    }
+    const f = errFields(err);
+    opts.log({ evt: 'auto_apply_uncaught_error', ...f });
+    opts.summary.ok = false;
+    opts.summary.outcome = 'error';
+    opts.summary.error = { message: String(f.err_message ?? (err instanceof Error ? err.message : String(err))), code: f.err_code ?? null };
+    await opts.finish(1);
+  }
+}
+
 /** @param {string[]} argv */
 export function parseArgs(argv) {
   /** @type {{ dryRun: boolean, json: string|null|undefined, help: boolean }} */
@@ -461,41 +559,15 @@ async function main() {
   };
   persist();
 
-  /**
-   * Every terminal exit (LOCKED excluded -- see main()'s own comment there) flows through here: mark the
-   * run done, write the always-overwritten latest.json, write the never-overwritten dated run JSON (spec
-   * amendment A6, unconditional -- not only under --json), optionally ALSO write the user-requested
-   * --json file, print the summary, close the pool, exit.
-   * @param {number} code
-   */
-  const finish = async (code) => {
-    summary.phase = 'done';
-    persist();
-    try {
-      const dated = writeRunJsonNoOverwrite(datedRunJsonPath(env.JOBSEARCH_LOG_DIR, now, timezone), summary);
-      log({ evt: 'auto_apply_run_json_written', file: path.basename(dated) });
-    } catch (err) {
-      log({ evt: 'auto_apply_run_json_write_failed', ...errFields(err) });
-    }
-    if (args.json !== undefined) {
-      const file = args.json ?? path.join(env.JOBSEARCH_LOG_DIR, `auto-apply-${new Date().toISOString().replace(/[:.]/g, '-')}.json`);
-      try {
-        fs.mkdirSync(path.dirname(file), { recursive: true });
-        fs.writeFileSync(file, JSON.stringify(summary, null, 2) + '\n');
-        log({ evt: 'auto_apply_json_written', file: path.basename(file) });
-      } catch (err) {
-        log({ evt: 'auto_apply_json_write_failed', ...errFields(err) });
-      }
-    }
-    console.log(JSON.stringify(summary));
-    await closePool().catch(() => {});
-    process.exit(code);
-  };
+  const finish = createFinish({ summary, summaryFile, logDir: env.JOBSEARCH_LOG_DIR, now, timezone, jsonArg: args.json, log });
 
   // Apply exclusion gate config (spec section 2, amendment A4): loaded ONCE here, before the wait loop even
   // starts, and reused by BOTH the prepare-phase pre-filter and select -- a missing/invalid
   // config/apply-exclusions.json is a hard error that stops the whole run before prepare OR select ever
-  // touch a listing, mirroring [NO SCAN]/[LOCK MISMATCH]'s existing loud-failure shape.
+  // touch a listing, mirroring [NO SCAN]/[LOCK MISMATCH]'s existing loud-failure shape. This one still exits
+  // through its own dedicated `finish(1)` rather than runLifecycle below: it is a distinct, well-understood
+  // outcome (no_apply) that predates this fix and is deliberately never conflated with the generic 'error'
+  // outcome runLifecycle assigns to everything else.
   /** @type {import('../src/apply/exclusions.js').ExclusionConfig} */
   let exclusionConfig;
   try {
@@ -509,144 +581,155 @@ async function main() {
     return;
   }
 
-  const softDeadline = localDeadline(now, timezone, config.autoApply.waitDeadlineLocal);
-  const hardDeadline = localDeadline(now, timezone, config.autoApply.waitHardDeadlineLocal);
+  // runLifecycle (spec-adversary finding on the original PR, fixed here): EVERY remaining exit path --
+  // normal completion, the still-running-at-deadline early return, a failed lock acquisition
+  // (AutoApplyLockedError), and any other uncaught exception from wait/prepare/select/apply -- now routes
+  // through `finish()` with an explicit `summary.outcome` (ok / scan_still_running / locked / error), so
+  // latest.json and the dated run JSON are NEVER left describing a mid-run phase for a process that has
+  // already exited. Nothing after this point calls process.exit directly except inside `finish` itself.
+  await runLifecycle(async () => {
+    const softDeadline = localDeadline(now, timezone, config.autoApply.waitDeadlineLocal);
+    const hardDeadline = localDeadline(now, timezone, config.autoApply.waitHardDeadlineLocal);
 
-  let scanState = { state: 'finished_today', detail: { runId: null, status: null } };
-  if (config.autoApply.waitForScan) {
-    const waitClient = await connectDedicated();
-    try {
-      scanState = await waitForScan(waitClient, {
-        timezone, softDeadline, hardDeadline, pollSeconds: config.autoApply.waitPollSeconds,
-        staleHeartbeatMinutes: config.autoApply.waitStaleHeartbeatMinutes, log,
-        queryLatestScanRun: defaultQueryLatestScanRun,
-      });
-    } finally {
-      await waitClient.end().catch(() => {});
+    let scanState = { state: 'finished_today', detail: { runId: null, status: null } };
+    if (config.autoApply.waitForScan) {
+      const waitClient = await connectDedicated();
+      try {
+        scanState = await waitForScan(waitClient, {
+          timezone, softDeadline, hardDeadline, pollSeconds: config.autoApply.waitPollSeconds,
+          staleHeartbeatMinutes: config.autoApply.waitStaleHeartbeatMinutes, log,
+          queryLatestScanRun: defaultQueryLatestScanRun,
+        });
+      } finally {
+        await waitClient.end().catch(() => {});
+      }
+      log({ evt: 'auto_apply_wait_done', state: scanState.state, deadline_hit: /** @type {any} */ (scanState).deadlineHit ?? null });
     }
-    log({ evt: 'auto_apply_wait_done', state: scanState.state, deadline_hit: /** @type {any} */ (scanState).deadlineHit ?? null });
-  }
-  summary.wait = { state: scanState.state, soft_deadline: softDeadline.toISOString(), hard_deadline: hardDeadline.toISOString() };
+    summary.wait = { state: scanState.state, soft_deadline: softDeadline.toISOString(), hard_deadline: hardDeadline.toISOString() };
 
-  const boundedLockMinutes = Math.max(0, (hardDeadline.getTime() - Date.now()) / 60000);
+    // Bounded by (hard deadline - now) in EVERY state, finished_today included: nothing should wait past
+    // the hard deadline for the advisory lock no matter why we got here -- even a scan that finished
+    // cleanly could still find the lock held by some other process, and that wait must not extend past the
+    // same hard deadline the scan-still-running path itself respects.
+    const boundedLockMinutes = Math.max(0, (hardDeadline.getTime() - Date.now()) / 60000);
 
-  if (scanState.state === 'running' || scanState.state === 'stalled') {
-    // Hard deadline reached while the scan is still actively in progress: the scan owns Chrome and the
-    // advisory lock, so prepare and apply are skipped entirely this run -- only select runs, read-only, so
-    // the report still explains where things stand (spec amendment A2).
-    warnings.push({ code: 'SCAN_STILL_RUNNING_AT_DEADLINE', severity: 'warning', state: scanState.state, detail: scanState.detail });
+    if (scanState.state === 'running' || scanState.state === 'stalled') {
+      // Hard deadline reached while the scan is still actively in progress: the scan owns Chrome and the
+      // advisory lock, so prepare and apply are skipped entirely this run -- only select runs, read-only, so
+      // the report still explains where things stand (spec amendment A2).
+      warnings.push({ code: 'SCAN_STILL_RUNNING_AT_DEADLINE', severity: 'warning', state: scanState.state, detail: scanState.detail });
+      summary.outcome = 'scan_still_running';
+      summary.phase = 'selecting';
+      persist();
+      const selectClient = await connectDedicated();
+      try {
+        const selection = await selectCandidates(selectClient, {
+          fitFloor: config.autoApply.fitFloor, floors: config.autoApply.floors, atsAllow: config.autoApply.atsAllow,
+          dailyCap: config.autoApply.dailyCap, now, timezone, exclusionConfig,
+        });
+        log({ evt: 'auto_apply_select_done', cap_used: selection.capUsed, cap_remaining: selection.capRemaining, eligible: selection.eligible.length });
+        Object.assign(summary, {
+          ok: true,
+          select: { results: selection.results, cap_used: selection.capUsed, cap_remaining: selection.capRemaining, dailyCap: selection.dailyCap, funnel: selection.funnel },
+        });
+      } finally {
+        await selectClient.end().catch(() => {});
+      }
+      await finish(0);
+      return;
+    }
+
+    if (scanState.state === 'failed') warnings.push({ code: 'SCAN_FAILED', severity: 'warning', detail: scanState.detail });
+    else if (scanState.state === 'never_started') warnings.push({ code: 'SCAN_NOT_FINISHED', severity: 'warning', detail: scanState.detail });
+    else if (scanState.state === 'unknown') warnings.push({ code: 'SCAN_STATE_UNKNOWN', severity: 'warning', detail: scanState.detail });
+
+    if (scanState.state !== 'finished_today') {
+      try {
+        const chrome = await launchChrome(env, log);
+        if (chrome.warning) warnings.push(/** @type {any} */ (chrome.warning));
+      } catch (err) {
+        const f = errFields(err);
+        log({ evt: 'auto_apply_chrome_launch_failed', ...f });
+        warnings.push({ code: 'CHROME_LAUNCH_FAILED', severity: 'warning', err_code: f.err_code, err_message: f.err_message });
+      }
+    }
+
+    summary.phase = 'preparing';
+    persist();
+
+    const lockClient = await connectDedicated();
+    let locked = false;
+    /** @type {any} */
+    let prepareStats = null;
+    try {
+      locked = await acquireLockWithPoll(lockClient, { lockMinutes: boundedLockMinutes, pollSeconds: config.autoApply.pollSeconds, log });
+      if (!locked) {
+        // Thrown, never exited inline here -- runLifecycle's own catch is the ONLY place that turns this
+        // into a terminal, phase:'done' summary (outcome 'locked', exit 2). See AutoApplyLockedError's doc.
+        throw new AutoApplyLockedError('could not acquire the advisory lock before the deadline');
+      }
+      const linkedInBrowser = await openLinkedInBrowser(defaultConnectSession, env, config, log);
+      try {
+        prepareStats = await runPrepare(lockClient, config, { now, dryRun, log, linkedInBrowser, exclusionConfig });
+      } finally {
+        if (linkedInBrowser) await linkedInBrowser.close();
+      }
+      log({ evt: 'auto_apply_prepare_done', ...prepareStats });
+    } finally {
+      if (locked) {
+        try {
+          await lockClient.query('SELECT pg_advisory_unlock($1::bigint)', [LOCK_KEY]);
+        } catch {
+          /* connection gone: the lock dies with it */
+        }
+      }
+      try {
+        await lockClient.end();
+      } catch {
+        /* ignore */
+      }
+    }
+    summary.prepare = prepareStats;
     summary.phase = 'selecting';
     persist();
+
     const selectClient = await connectDedicated();
+    /** @type {any} */
+    let selection;
     try {
-      const selection = await selectCandidates(selectClient, {
+      selection = await selectCandidates(selectClient, {
         fitFloor: config.autoApply.fitFloor, floors: config.autoApply.floors, atsAllow: config.autoApply.atsAllow,
         dailyCap: config.autoApply.dailyCap, now, timezone, exclusionConfig,
-      });
-      log({ evt: 'auto_apply_select_done', cap_used: selection.capUsed, cap_remaining: selection.capRemaining, eligible: selection.eligible.length });
-      Object.assign(summary, {
-        ok: true,
-        select: { results: selection.results, cap_used: selection.capUsed, cap_remaining: selection.capRemaining, dailyCap: selection.dailyCap, funnel: selection.funnel },
       });
     } finally {
       await selectClient.end().catch(() => {});
     }
-    await finish(0);
-    return;
-  }
+    log({ evt: 'auto_apply_select_done', cap_used: selection.capUsed, cap_remaining: selection.capRemaining, eligible: selection.eligible.length });
+    summary.select = { results: selection.results, cap_used: selection.capUsed, cap_remaining: selection.capRemaining, dailyCap: selection.dailyCap, funnel: selection.funnel };
 
-  if (scanState.state === 'failed') warnings.push({ code: 'SCAN_FAILED', severity: 'warning', detail: scanState.detail });
-  else if (scanState.state === 'never_started') warnings.push({ code: 'SCAN_NOT_FINISHED', severity: 'warning', detail: scanState.detail });
-  else if (scanState.state === 'unknown') warnings.push({ code: 'SCAN_STATE_UNKNOWN', severity: 'warning', detail: scanState.detail });
-
-  if (scanState.state !== 'finished_today') {
-    try {
-      const chrome = await launchChrome(env, log);
-      if (chrome.warning) warnings.push(/** @type {any} */ (chrome.warning));
-    } catch (err) {
-      const f = errFields(err);
-      log({ evt: 'auto_apply_chrome_launch_failed', ...f });
-      warnings.push({ code: 'CHROME_LAUNCH_FAILED', severity: 'warning', err_code: f.err_code, err_message: f.err_message });
-    }
-  }
-
-  summary.phase = 'preparing';
-  persist();
-
-  const lockClient = await connectDedicated();
-  let locked = false;
-  /** @type {any} */
-  let prepareStats = null;
-  try {
-    locked = await acquireLockWithPoll(lockClient, { lockMinutes: boundedLockMinutes, pollSeconds: config.autoApply.pollSeconds, log });
-    if (!locked) {
-      log({ evt: 'auto_apply_locked' });
-      console.log(JSON.stringify({ ok: false, status: 'locked' }));
-      await lockClient.end().catch(() => {});
-      await closePool().catch(() => {});
-      process.exit(2);
-      return;
-    }
-    const linkedInBrowser = await openLinkedInBrowser(defaultConnectSession, env, config, log);
-    try {
-      prepareStats = await runPrepare(lockClient, config, { now, dryRun, log, linkedInBrowser, exclusionConfig });
-    } finally {
-      if (linkedInBrowser) await linkedInBrowser.close();
-    }
-    log({ evt: 'auto_apply_prepare_done', ...prepareStats });
-  } finally {
-    if (locked) {
-      try {
-        await lockClient.query('SELECT pg_advisory_unlock($1::bigint)', [LOCK_KEY]);
-      } catch {
-        /* connection gone: the lock dies with it */
+    const outputRoot = path.join(repoRoot(), 'output');
+    /** @type {any[]} */
+    const applyResults = [];
+    if (!dryRun && selection.eligible.length) {
+      summary.phase = 'applying';
+      persist();
+      const runnerDeps = { env, logDir: env.JOBSEARCH_LOG_DIR, repoRoot: repoRoot(), withClient, spawn };
+      const resumeRunner = createResumeRunner(runnerDeps);
+      const reviewRunner = createReviewRunner(runnerDeps);
+      for (const row of selection.eligible) {
+        const r = await applyOneCandidate(row, {
+          withClientFn: withClient, resumeRunner, reviewRunner, runWorker: runApplyWorker, outputRoot, env, log,
+        });
+        applyResults.push(r);
+        log({ evt: 'auto_apply_candidate_done', ...r });
       }
     }
-    try {
-      await lockClient.end();
-    } catch {
-      /* ignore */
-    }
-  }
-  summary.prepare = prepareStats;
-  summary.phase = 'selecting';
-  persist();
 
-  const selectClient = await connectDedicated();
-  /** @type {any} */
-  let selection;
-  try {
-    selection = await selectCandidates(selectClient, {
-      fitFloor: config.autoApply.fitFloor, floors: config.autoApply.floors, atsAllow: config.autoApply.atsAllow,
-      dailyCap: config.autoApply.dailyCap, now, timezone, exclusionConfig,
-    });
-  } finally {
-    await selectClient.end().catch(() => {});
-  }
-  log({ evt: 'auto_apply_select_done', cap_used: selection.capUsed, cap_remaining: selection.capRemaining, eligible: selection.eligible.length });
-  summary.select = { results: selection.results, cap_used: selection.capUsed, cap_remaining: selection.capRemaining, dailyCap: selection.dailyCap, funnel: selection.funnel };
-
-  const outputRoot = path.join(repoRoot(), 'output');
-  /** @type {any[]} */
-  const applyResults = [];
-  if (!dryRun && selection.eligible.length) {
-    summary.phase = 'applying';
-    persist();
-    const runnerDeps = { env, logDir: env.JOBSEARCH_LOG_DIR, repoRoot: repoRoot(), withClient, spawn };
-    const resumeRunner = createResumeRunner(runnerDeps);
-    const reviewRunner = createReviewRunner(runnerDeps);
-    for (const row of selection.eligible) {
-      const r = await applyOneCandidate(row, {
-        withClientFn: withClient, resumeRunner, reviewRunner, runWorker: runApplyWorker, outputRoot, env, log,
-      });
-      applyResults.push(r);
-      log({ evt: 'auto_apply_candidate_done', ...r });
-    }
-  }
-
-  summary.ok = true;
-  summary.applied = applyResults;
-  await finish(0);
+    summary.ok = true;
+    summary.outcome = 'ok';
+    summary.applied = applyResults;
+    await finish(0);
+  }, { summary, finish, log });
 }
 
 const isMain = process.argv[1] && path.resolve(process.argv[1]) === fileURLToPath(import.meta.url);

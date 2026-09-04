@@ -997,6 +997,11 @@ export function renderReportMarkdown(data, registry, googleAuthState, dashboardH
  *   CHROME_LAUNCH_FAILED, rendered in that fixed order regardless of push order.
  * @property {any} [prepare] bin/auto-apply.js's runPrepare() stats for this run, or null when prepare was
  *   skipped (spec amendment A2's still-running-at-deadline path never runs it).
+ * @property {string} [outcome] runLifecycle fix: 'ok'|'scan_still_running'|'locked'|'error', set only once
+ *   `phase` reaches 'done' -- distinguishes a genuinely completed run (possibly with zero results) from one
+ *   that died before finishing (locked/error), which must never render as either in-progress or a quiet
+ *   zero-result success.
+ * @property {{ message: string, code: string|null }} [error] present only when `outcome` is 'error'.
  */
 
 /**
@@ -1079,6 +1084,16 @@ export async function collectAutoApply(client, summary) {
   // all (every summary written before this fix) is never treated as in-progress.
   if (typeof summary.phase === 'string' && summary.phase !== 'done') {
     return { hasRun: true, inProgress: true, phase: summary.phase, startedAt: typeof summary.started_at === 'string' ? summary.started_at : null };
+  }
+  // runLifecycle fix (bin/auto-apply.js): a run that reached phase 'done' via a LOCKED exit or an uncaught
+  // error carries an explicit `outcome` of 'locked'/'error' rather than 'ok' -- render that as a loud
+  // warning line, never as a completed run that happened to select/apply zero (the same distinction the
+  // in-progress branch above draws for a mid-run summary).
+  if (summary.outcome === 'locked') {
+    return { hasRun: true, outcome: 'locked' };
+  }
+  if (summary.outcome === 'error') {
+    return { hasRun: true, outcome: 'error', error: summary.error && typeof summary.error === 'object' ? summary.error : null };
   }
   const results = Array.isArray(summary.select?.results) ? /** @type {Array<{ listingId: number, reason: string }>} */ (summary.select.results) : [];
   const applied = Array.isArray(summary.applied) ? summary.applied : [];
@@ -1166,6 +1181,13 @@ export function renderAutoApplyText(data, registry) {
     const d = /** @type {any} */ (data);
     return `== Auto-apply (in progress) ==\nphase: ${d.phase}${d.startedAt ? ` (started ${d.startedAt})` : ''}`;
   }
+  if (data && data.hasRun && /** @type {any} */ (data).outcome === 'locked') {
+    return '== Auto-apply ==\n[AUTO-APPLY LOCKED]: could not acquire the advisory lock before the deadline';
+  }
+  if (data && data.hasRun && /** @type {any} */ (data).outcome === 'error') {
+    const msg = /** @type {any} */ (data).error?.message ?? 'unknown error';
+    return `== Auto-apply ==\n[AUTO-APPLY ERROR]: ${msg}`;
+  }
   if (!data || !data.hasRun) return '== Auto-apply ==\n(no auto-apply run recorded today)';
   const reg = registry ?? { entries: [], httpAllowedHosts: new Set() };
   const lines = [];
@@ -1202,6 +1224,13 @@ export function renderAutoApplyHtml(data, registry) {
   if (data && data.hasRun && /** @type {any} */ (data).inProgress) {
     const d = /** @type {any} */ (data);
     return `<h3>Auto-apply (in progress)</h3><p>phase: ${esc(d.phase)}${d.startedAt ? ` (started ${esc(d.startedAt)})` : ''}</p>`;
+  }
+  if (data && data.hasRun && /** @type {any} */ (data).outcome === 'locked') {
+    return '<h3>Auto-apply</h3><p><strong>[AUTO-APPLY LOCKED]</strong>: could not acquire the advisory lock before the deadline</p>';
+  }
+  if (data && data.hasRun && /** @type {any} */ (data).outcome === 'error') {
+    const msg = /** @type {any} */ (data).error?.message ?? 'unknown error';
+    return `<h3>Auto-apply</h3><p><strong>[AUTO-APPLY ERROR]</strong>: ${esc(msg)}</p>`;
   }
   if (!data || !data.hasRun) return '<h3>Auto-apply</h3><p>(no auto-apply run recorded today)</p>';
   const reg = registry ?? { entries: [], httpAllowedHosts: new Set() };
@@ -1244,6 +1273,13 @@ export function renderAutoApplyMarkdown(data, registry) {
   if (data && data.hasRun && /** @type {any} */ (data).inProgress) {
     const d = /** @type {any} */ (data);
     return `## Auto-apply (in progress)\n\nphase: ${d.phase}${d.startedAt ? ` (started ${d.startedAt})` : ''}`;
+  }
+  if (data && data.hasRun && /** @type {any} */ (data).outcome === 'locked') {
+    return '## Auto-apply\n\n**[AUTO-APPLY LOCKED]**: could not acquire the advisory lock before the deadline';
+  }
+  if (data && data.hasRun && /** @type {any} */ (data).outcome === 'error') {
+    const msg = /** @type {any} */ (data).error?.message ?? 'unknown error';
+    return `## Auto-apply\n\n**[AUTO-APPLY ERROR]**: ${msg}`;
   }
   if (!data || !data.hasRun) return '## Auto-apply\n\n(no auto-apply run recorded today)';
   const reg = registry ?? { entries: [], httpAllowedHosts: new Set() };

@@ -287,3 +287,57 @@ describe('renderers: prepare-phase stats line (spec amendment A7)', () => {
     assert.doesNotMatch(renderAutoApplyText(data), /prepare:/);
   });
 });
+
+describe('collectAutoApply/renderers: report_renders_locked_and_error_outcomes_as_warnings (runLifecycle fix)', () => {
+  test('outcome "locked" (phase done) renders as [AUTO-APPLY LOCKED], never in-progress and never a quiet zero-result completion', async () => {
+    const client = { async query() { return { rows: [] }; } };
+    const summary = { phase: 'done', ok: false, outcome: 'locked', select: null, applied: [] };
+    const data = await collectAutoApply(client, summary);
+    assert.equal(data.hasRun, true);
+    assert.equal(/** @type {any} */ (data).outcome, 'locked');
+    assert.equal(/** @type {any} */ (data).inProgress, undefined);
+    for (const render of [renderAutoApplyText, renderAutoApplyHtml, renderAutoApplyMarkdown]) {
+      const out = render(data);
+      assert.match(out, /AUTO-APPLY LOCKED/);
+      assert.doesNotMatch(out, /in progress/i);
+      assert.doesNotMatch(out, /no auto-apply run recorded today/);
+      assert.doesNotMatch(out, /applied 0/); // never rendered as a completed zero-result run
+    }
+  });
+
+  test('outcome "error" (phase done) renders as [AUTO-APPLY ERROR] with the message, never in-progress or a quiet completion', async () => {
+    const client = { async query() { return { rows: [] }; } };
+    const summary = { phase: 'done', ok: false, outcome: 'error', error: { message: 'boom: something threw', code: null }, select: null, applied: [] };
+    const data = await collectAutoApply(client, summary);
+    assert.equal(data.hasRun, true);
+    assert.equal(/** @type {any} */ (data).outcome, 'error');
+    assert.deepEqual(/** @type {any} */ (data).error, { message: 'boom: something threw', code: null });
+    for (const render of [renderAutoApplyText, renderAutoApplyHtml, renderAutoApplyMarkdown]) {
+      const out = render(data);
+      assert.match(out, /AUTO-APPLY ERROR/);
+      assert.match(out, /boom: something threw/);
+      assert.doesNotMatch(out, /in progress/i);
+      assert.doesNotMatch(out, /no auto-apply run recorded today/);
+    }
+  });
+
+  test('an outcome "error" summary missing its own error object still renders cleanly with a fallback message', async () => {
+    const client = { async query() { return { rows: [] }; } };
+    const summary = { phase: 'done', ok: false, outcome: 'error', select: null, applied: [] };
+    const data = await collectAutoApply(client, summary);
+    assert.equal(/** @type {any} */ (data).error, null);
+    for (const render of [renderAutoApplyText, renderAutoApplyHtml, renderAutoApplyMarkdown]) {
+      assert.doesNotThrow(() => render(data));
+      assert.match(render(data), /unknown error/);
+    }
+  });
+
+  test('outcome "ok" is unaffected -- a genuinely completed zero-result run still renders normally', async () => {
+    const client = { async query() { return { rows: [] }; } };
+    const summary = { phase: 'done', ok: true, outcome: 'ok', select: { results: [], cap_used: 0, cap_remaining: 5 }, applied: [] };
+    const data = await collectAutoApply(client, summary);
+    assert.equal(/** @type {any} */ (data).outcome, undefined); // not carried through for the normal path -- only locked/error short-circuit
+    assert.equal(data.appliedCount, 0);
+    assert.doesNotMatch(renderAutoApplyText(data), /AUTO-APPLY (LOCKED|ERROR)/);
+  });
+});

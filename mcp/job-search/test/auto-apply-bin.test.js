@@ -11,6 +11,7 @@ import os from 'node:os';
 import path from 'node:path';
 import {
   parseArgs, acquireLockWithPoll, applyOneCandidate, runPrepare, datedRunJsonPath, writeRunJsonNoOverwrite,
+  AutoApplyLockedError, createFinish, runLifecycle,
 } from '../bin/auto-apply.js';
 
 /** A candidate row from runPrepare's own SELECT, with every field the new pre-filters/caps need. */
@@ -378,6 +379,111 @@ describe('datedRunJsonPath / writeRunJsonNoOverwrite (spec amendment A6)', () =>
       assert.deepEqual(JSON.parse(fs.readFileSync(second, 'utf8')), { run: 2 });
       const third = writeRunJsonNoOverwrite(base, { run: 3 });
       assert.equal(third, path.join(dir, 'auto-apply-2026-09-04-0707-3.json'));
+    } finally {
+      fs.rmSync(dir, { recursive: true, force: true });
+    }
+  });
+});
+
+describe('runLifecycle + createFinish: every terminal exit writes a phase:"done" summary (spec-adversary fix)', () => {
+  /** A createFinish() wired to a temp directory, with process.exit and closePool both stubbed out so the
+   * test process is never actually terminated. Returns { finish, latestFile, logDir, exitCodes }. */
+  function makeFinishHarness(dir) {
+    const summary = { ok: null, phase: 'preparing', started_at: '2026-09-04T11:55:00.000Z', dry_run: false, warnings: [], prepare: null, select: null, applied: [] };
+    const latestFile = path.join(dir, 'auto-apply-latest.json');
+    const exitCodes = [];
+    const finish = createFinish({
+      summary, summaryFile: latestFile, logDir: dir, now: new Date('2026-09-04T12:07:00.000Z'),
+      timezone: 'America/Chicago', jsonArg: undefined, log: () => {},
+      closePoolFn: async () => {}, exitFn: (code) => { exitCodes.push(code); },
+    });
+    return { summary, finish, latestFile, dir, exitCodes };
+  }
+
+  test('locked_exit_writes_terminal_latest_and_dated_json', async () => {
+    const dir = fs.mkdtempSync(path.join(os.tmpdir(), 'auto-apply-lifecycle-test-'));
+    try {
+      const { summary, finish, latestFile, exitCodes } = makeFinishHarness(dir);
+      await runLifecycle(async () => {
+        throw new AutoApplyLockedError('could not acquire the advisory lock before the deadline');
+      }, { summary, finish, log: () => {} });
+
+      assert.deepEqual(exitCodes, [2]);
+      assert.equal(summary.phase, 'done');
+      assert.equal(summary.outcome, 'locked');
+      assert.equal(summary.ok, false);
+
+      const latest = JSON.parse(fs.readFileSync(latestFile, 'utf8'));
+      assert.equal(latest.phase, 'done');
+      assert.equal(latest.outcome, 'locked');
+
+      const datedFiles = fs.readdirSync(dir).filter((f) => f.startsWith('auto-apply-2026-09-04-'));
+      assert.equal(datedFiles.length, 1);
+      const dated = JSON.parse(fs.readFileSync(path.join(dir, datedFiles[0]), 'utf8'));
+      assert.equal(dated.phase, 'done');
+      assert.equal(dated.outcome, 'locked');
+    } finally {
+      fs.rmSync(dir, { recursive: true, force: true });
+    }
+  });
+
+  test('uncaught_error_writes_terminal_state_with_outcome_error', async () => {
+    const dir = fs.mkdtempSync(path.join(os.tmpdir(), 'auto-apply-lifecycle-test-'));
+    try {
+      const { summary, finish, latestFile, exitCodes } = makeFinishHarness(dir);
+      await runLifecycle(async () => {
+        throw new Error('boom: something in prepare/select/apply threw');
+      }, { summary, finish, log: () => {} });
+
+      assert.deepEqual(exitCodes, [1]);
+      assert.equal(summary.phase, 'done');
+      assert.equal(summary.outcome, 'error');
+      assert.equal(summary.ok, false);
+      assert.match(summary.error.message, /boom: something in prepare\/select\/apply threw/);
+
+      const latest = JSON.parse(fs.readFileSync(latestFile, 'utf8'));
+      assert.equal(latest.phase, 'done');
+      assert.equal(latest.outcome, 'error');
+      assert.match(latest.error.message, /boom/);
+
+      const datedFiles = fs.readdirSync(dir).filter((f) => f.startsWith('auto-apply-2026-09-04-'));
+      assert.equal(datedFiles.length, 1);
+    } finally {
+      fs.rmSync(dir, { recursive: true, force: true });
+    }
+  });
+
+  test('normal completion (body calls finish itself) is untouched by runLifecycle -- no outcome is forced', async () => {
+    const dir = fs.mkdtempSync(path.join(os.tmpdir(), 'auto-apply-lifecycle-test-'));
+    try {
+      const { summary, finish, latestFile, exitCodes } = makeFinishHarness(dir);
+      await runLifecycle(async () => {
+        summary.ok = true;
+        summary.outcome = 'ok';
+        await finish(0);
+      }, { summary, finish, log: () => {} });
+
+      assert.deepEqual(exitCodes, [0]);
+      assert.equal(summary.outcome, 'ok');
+      const latest = JSON.parse(fs.readFileSync(latestFile, 'utf8'));
+      assert.equal(latest.outcome, 'ok');
+    } finally {
+      fs.rmSync(dir, { recursive: true, force: true });
+    }
+  });
+
+  test('a same-minute collision on the dated file still succeeds (a -2 file appears), never throws out of runLifecycle', async () => {
+    const dir = fs.mkdtempSync(path.join(os.tmpdir(), 'auto-apply-lifecycle-test-'));
+    try {
+      // Pre-seed the dated file this run's own createFinish() will target (America/Chicago local time,
+      // 07:07 for the 12:07 UTC `now` makeFinishHarness uses), forcing a -2 collision.
+      fs.writeFileSync(path.join(dir, 'auto-apply-2026-09-04-0707.json'), '{}\n');
+      const { summary, finish, exitCodes } = makeFinishHarness(dir);
+      await runLifecycle(async () => {
+        throw new AutoApplyLockedError('locked');
+      }, { summary, finish, log: () => {} });
+      assert.deepEqual(exitCodes, [2]);
+      assert.ok(fs.existsSync(path.join(dir, 'auto-apply-2026-09-04-0707-2.json')));
     } finally {
       fs.rmSync(dir, { recursive: true, force: true });
     }
