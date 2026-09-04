@@ -47,6 +47,10 @@ export function computeProfileRev(p) {
  * @property {boolean} [detailSkipped] true when a detail fetch was queued for this row but skipped for budget reasons (spec R4.2, decision 22)
  * @property {string|null} [embedding] pgvector literal `[a,b,...]` or null
  * @property {Date} [now]
+ * @property {number} [stickyFloor] current triage floor (config/triage.json's `deterministic.floor`,
+ *   default 40 -- src/core/sticky-skip.js's DEFAULT_STICKY_FLOOR), used ONLY to gate an auto-actor
+ *   STICKY-ELIGIBLE root against `prescore` above (auto-skip-sticky spec). Omitted callers fall back to
+ *   DEFAULT_STICKY_FLOOR inside stickyEligibleFor().
  */
 
 /**
@@ -250,7 +254,8 @@ export async function updateListing(client, rec, decision, ctx, flags) {
  * Gathers every id classify() already surfaced as related to this record -- `decision.matches`, plus
  * `decision.rootId`/`decision.repostOf`/`decision.target?.id` when set -- resolves each to its true
  * root (one hop via duplicate_of; the no-chains invariant means one hop is always enough), and for
- * every DISTINCT root runs MATCH-TEST(rec, root) + SURFACE-EXCEPTION(rec, root) + STICKY-ELIGIBLE(root).
+ * every DISTINCT root runs MATCH-TEST(rec, root) + SURFACE-EXCEPTION(rec, root) + STICKY-ELIGIBLE(root,
+ * gated on `ctx.prescore` -- this candidate's own, already-computed prescore -- against `ctx.stickyFloor`).
  * The lowest-id qualifying root wins (spec: "auto-merge ... into the lowest-id such root"). Returns
  * null when no root qualifies, so the caller's ordinary queued path runs unchanged.
  *
@@ -259,9 +264,13 @@ export async function updateListing(client, rec, decision, ctx, flags) {
  * @param {import('pg').ClientBase} client
  * @param {import('./normalize.js').NormalizedListing} rec
  * @param {import('./dedup.js').Decision} decision
+ * @param {ApplyContext} ctx `ctx.prescore` (the candidate's own prescore, already computed by the scan
+ *   loop before applyDecision runs -- see src/core/scan-run.js's finalizeListing) and `ctx.stickyFloor`
+ *   are the only fields read here; a null/undefined `ctx.prescore` means an auto-actor root never
+ *   qualifies (never merge a candidate with no known prescore into an auto-skipped root).
  * @returns {Promise<{ id: number, status: string }|null>}
  */
-export async function findStickySkipRoot(client, rec, decision) {
+export async function findStickySkipRoot(client, rec, decision, ctx = {}) {
   if (!decision.queue) return null;
   /** @type {Set<number>} */
   const pool = new Set((decision.matches ?? []).filter((n) => typeof n === 'number'));
@@ -299,7 +308,7 @@ export async function findStickySkipRoot(client, rec, decision) {
     if (!matchTest(cand, root)) continue;
     if (surfaceException(cand, root)) continue;
     // eslint-disable-next-line no-await-in-loop -- root pool is small (classify()'s own match sets), sequential is fine and keeps this readable
-    const isEligible = await stickyEligibleFor(client, root.id, root.status);
+    const isEligible = await stickyEligibleFor(client, root.id, root.status, ctx.prescore ?? null, ctx.stickyFloor);
     if (isEligible) eligible.push({ id: Number(root.id), status: String(root.status) });
   }
   if (eligible.length === 0) return null;
@@ -318,9 +327,11 @@ export async function findStickySkipRoot(client, rec, decision) {
  * @param {import('pg').ClientBase} client
  * @param {import('./normalize.js').NormalizedListing} rec
  * @param {number} targetId decision.target.id for the 1a/1b branch
+ * @param {ApplyContext} ctx `ctx.prescore` (the candidate's own, already-computed prescore) and
+ *   `ctx.stickyFloor` gate an auto-actor root the same way findStickySkipRoot() above does.
  * @returns {Promise<{ id: number, status: string }|null>}
  */
-export async function findStickySkipRootForSameRow(client, rec, targetId) {
+export async function findStickySkipRootForSameRow(client, rec, targetId, ctx = {}) {
   const t = (await client.query('SELECT id, duplicate_of FROM ic_job_listings WHERE id = $1', [targetId])).rows[0];
   if (!t) return null;
   const rootId = t.duplicate_of != null ? Number(t.duplicate_of) : Number(t.id);
@@ -340,7 +351,7 @@ export async function findStickySkipRootForSameRow(client, rec, targetId) {
     apply_url: /** @type {string|null} */ (null), // an incoming scan record never carries a resolved apply_url of its own
   };
   if (surfaceException(cand, root)) return null;
-  const eligible = await stickyEligibleFor(client, root.id, root.status);
+  const eligible = await stickyEligibleFor(client, root.id, root.status, ctx.prescore ?? null, ctx.stickyFloor);
   return eligible ? { id: Number(root.id), status: String(root.status) } : null;
 }
 
@@ -369,7 +380,7 @@ export async function applyDecision(client, rec, decision, ctx) {
       // total-classification trigger findStickySkipRoot() uses for the new-listing path above).
       let stickyRoot = null;
       if (repostBranch && decision.queue && decision.reason) {
-        stickyRoot = await findStickySkipRootForSameRow(c, rec, target.id);
+        stickyRoot = await findStickySkipRootForSameRow(c, rec, target.id, ctx);
       }
       const effective = stickyRoot
         ? { ...decision, inherit: { status: stickyRoot.status, queueReason: null }, queue: false, reason: null }
@@ -395,7 +406,7 @@ export async function applyDecision(client, rec, decision, ctx) {
     let effective = decision;
     let stickyRoot = null;
     if (decision.queue && decision.reason) {
-      stickyRoot = await findStickySkipRoot(c, rec, decision);
+      stickyRoot = await findStickySkipRoot(c, rec, decision, ctx);
       if (stickyRoot) {
         effective = {
           ...decision,

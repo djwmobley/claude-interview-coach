@@ -9,9 +9,16 @@ Four modes: `rule`, `reason`, and `stale` only ever perform the `separate` resol
 `ic_job_review_queue`, in bulk. `sticky-skip` (added by the sticky-skip spec, part C) is the one mode
 that performs `merge` instead -- into a STICKY-ELIGIBLE root: a matched root listing whose status is
 `skip`/`passed`/`lost` and whose most recent status-change event to that status was either a human
-(dashboard/mcp/cli) or an auto-triage `skip_noise` call. `repost` is never performed in bulk by any
-mode; it stays a one-at-a-time human action through the existing `review` MCP tool action `resolve`,
-or the dashboard Review page's per-card buttons.
+(dashboard/mcp/cli) actor -- always eligible -- or an `auto` actor (auto-triage skip_low, skip_noise,
+model band, or any other note; the note text is no longer inspected). An `auto`-actor event is
+STICKY-ELIGIBLE only when BOTH: the queue item's own CANDIDATE listing has a non-null stored `prescore`
+strictly below the current triage floor (`config/triage.json`'s `deterministic.floor`, default 40, the
+same source `src/core/triage.js` reads), AND the root carries no event of any kind other than `status`
+recorded after that status event (an operator note/edit since the auto skip means a human has touched
+the root, so it is no longer purely an unattended decision). A candidate with no recorded prescore never
+qualifies a root this way (auto-skip-sticky spec). `repost` is never performed in bulk by any mode; it
+stays a one-at-a-time human action through the existing `review` MCP tool action `resolve`, or the
+dashboard Review page's per-card buttons.
 
 ## 2. The rule-mode classifier (S1)
 

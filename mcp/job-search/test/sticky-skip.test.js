@@ -40,22 +40,41 @@ describe('sticky-skip: STICKY_STATUSES / isStickyStatus', () => {
 });
 
 describe('sticky-skip: isStickyEligible (STICKY-ELIGIBLE)', () => {
-  test('human actor (dashboard/mcp/cli) on a sticky status is eligible', () => {
+  test('human actor (dashboard/mcp/cli) on a sticky status is eligible, regardless of candidate prescore', () => {
     for (const actor of ['dashboard', 'mcp', 'cli']) {
       for (const status of STICKY_STATUSES) {
         assert.equal(isStickyEligible(status, { actor, note: null }), true, `${actor}/${status}`);
+        // human skip still eligible regardless of prescore (auto-skip-sticky spec): a human decision
+        // never consults candidatePrescore/floor at all, so a high candidate prescore changes nothing.
+        assert.equal(isStickyEligible(status, { actor, note: null }, { candidatePrescore: 95, floor: 40 }), true, `${actor}/${status} high prescore`);
       }
     }
   });
-  test('auto actor on skip with a skip_noise-shaped note is eligible', () => {
-    assert.equal(isStickyEligible('skip', { actor: 'auto', note: 'auto-triage: noise_class=suspect' }), true);
+  test('auto actor, candidate prescore strictly below floor, no later non-status event -> eligible (note text irrelevant)', () => {
+    for (const note of ['auto-triage: noise_class=suspect', 'auto-triage: prescore 12 < floor 20', 'model band: skip', 'freeform note']) {
+      assert.equal(isStickyEligible('skip', { actor: 'auto', note }, { candidatePrescore: 10, floor: 40, hasLaterNonStatusEvent: false }), true, note);
+    }
   });
-  test('auto actor on skip with a skip_low-shaped note is NOT eligible', () => {
-    assert.equal(isStickyEligible('skip', { actor: 'auto', note: 'auto-triage: prescore 12 < floor 20' }), false);
+  test('auto actor, candidate prescore equal to floor -> NOT eligible ("strictly below", not "at or below")', () => {
+    assert.equal(isStickyEligible('skip', { actor: 'auto', note: null }, { candidatePrescore: 40, floor: 40 }), false);
   });
-  test('auto actor on passed/lost (auto-triage never sets those) is not eligible even with a noise-shaped note', () => {
-    assert.equal(isStickyEligible('passed', { actor: 'auto', note: 'auto-triage: noise_class=suspect' }), false);
-    assert.equal(isStickyEligible('lost', { actor: 'auto', note: 'auto-triage: noise_class=suspect' }), false);
+  test('auto actor, candidate prescore above floor -> NOT eligible', () => {
+    assert.equal(isStickyEligible('skip', { actor: 'auto', note: null }, { candidatePrescore: 55, floor: 40 }), false);
+  });
+  test('auto actor, candidate prescore null -> NOT eligible, even below floor were it not null', () => {
+    assert.equal(isStickyEligible('skip', { actor: 'auto', note: null }, { candidatePrescore: null, floor: 40 }), false);
+    assert.equal(isStickyEligible('skip', { actor: 'auto', note: null }), false, 'no auto opts at all');
+  });
+  test('auto actor, floor omitted -> falls back to DEFAULT_STICKY_FLOOR (40)', () => {
+    assert.equal(isStickyEligible('skip', { actor: 'auto', note: null }, { candidatePrescore: 39 }), true);
+    assert.equal(isStickyEligible('skip', { actor: 'auto', note: null }, { candidatePrescore: 40 }), false);
+  });
+  test('auto actor, a later non-status event on the root -> NOT eligible even with a qualifying prescore', () => {
+    assert.equal(isStickyEligible('skip', { actor: 'auto', note: null }, { candidatePrescore: 10, floor: 40, hasLaterNonStatusEvent: true }), false);
+  });
+  test('auto actor on passed/lost is eligible under the same prescore rule (auto-triage never sets those in practice, but the classification is generic)', () => {
+    assert.equal(isStickyEligible('passed', { actor: 'auto', note: 'auto-triage: noise_class=suspect' }, { candidatePrescore: 10, floor: 40 }), true);
+    assert.equal(isStickyEligible('lost', { actor: 'auto', note: 'auto-triage: noise_class=suspect' }, { candidatePrescore: 10, floor: 40 }), true);
   });
   test('no event at all is not eligible (fail closed)', () => {
     assert.equal(isStickyEligible('skip', null), false);
@@ -64,9 +83,10 @@ describe('sticky-skip: isStickyEligible (STICKY-ELIGIBLE)', () => {
   test('a non-sticky status is never eligible regardless of actor', () => {
     assert.equal(isStickyEligible('applied', { actor: 'dashboard', note: null }), false);
   });
-  test('seed/migration actor is not eligible (not in the human set, not auto)', () => {
+  test('seed/migration/apply actor is not eligible (not in the human set, not auto)', () => {
     assert.equal(isStickyEligible('skip', { actor: 'seed', note: null }), false);
     assert.equal(isStickyEligible('skip', { actor: 'migration', note: null }), false);
+    assert.equal(isStickyEligible('skip', { actor: 'apply', note: null }, { candidatePrescore: 10, floor: 40 }), false);
   });
 });
 
@@ -173,7 +193,7 @@ let deps;
 const createdIds = [];
 
 /**
- * @param {Partial<{ title: string, status: string|null, companyNorm: string, titleNorm: string, locationNorm: string, url: string, ext: string, dup: number|null, salaryMax: number|null, applyUrl: string|null, source: string }>} o
+ * @param {Partial<{ title: string, status: string|null, companyNorm: string, titleNorm: string, locationNorm: string, url: string, ext: string, dup: number|null, salaryMax: number|null, applyUrl: string|null, source: string, prescore: number|null }>} o
  */
 async function insertListing(o = {}) {
   const n = Math.floor(Math.random() * 1e9);
@@ -186,12 +206,12 @@ async function insertListing(o = {}) {
   const r = await client.query(
     `INSERT INTO ic_job_listings
        (title, company, status, url, url_normalized, source, external_id, record_kind, location, posted_at,
-        company_norm, title_norm, location_norm, dedup_hash, last_seen, duplicate_of, salary_max, apply_url)
-     VALUES ($1,$2,$3,$4,$4,$5,$6,'listing','Houston, TX',current_date,$7,$8,$9,md5($4),now(),$10,$11,$12) RETURNING id`,
+        company_norm, title_norm, location_norm, dedup_hash, last_seen, duplicate_of, salary_max, apply_url, prescore)
+     VALUES ($1,$2,$3,$4,$4,$5,$6,'listing','Houston, TX',current_date,$7,$8,$9,md5($4),now(),$10,$11,$12,$13) RETURNING id`,
     [
       o.title ?? 'CTO', CO, o.status ?? null, url, o.source ?? SRC, ext,
       o.companyNorm ?? 'zz stickyskip co', o.titleNorm ?? 'chief technology officer', o.locationNorm ?? 'houston-tx',
-      o.dup ?? null, o.salaryMax ?? null, o.applyUrl ?? null,
+      o.dup ?? null, o.salaryMax ?? null, o.applyUrl ?? null, o.prescore ?? null,
     ],
   );
   const id = Number(r.rows[0].id);
@@ -285,7 +305,7 @@ describe('sticky-skip part A: resolveItem merge/repost into a STICKY-ELIGIBLE ro
     assert.equal(openQueue, 0, 'no reopened_lost queue row inserted');
   });
 
-  test('auto skip_low root is sticky but NOT eligible: behaves exactly as before (reopens to review, inserts a reopened_skip queue row)', async () => {
+  test('auto skip_low root, candidate has NO prescore: NOT eligible (reopens to review, inserts a reopened_skip queue row)', async () => {
     const root = await insertListing({ status: 'skip', titleNorm: 'vp payments low', locationNorm: 'houston-tx' });
     await insertStatusEvent({ listingId: root, toStatus: 'skip', actor: 'auto', note: 'auto-triage: prescore 12 < floor 20' });
     const cand = await insertListing({ status: 'review', titleNorm: 'vp payments low 2', locationNorm: 'dallas-tx' });
@@ -299,6 +319,69 @@ describe('sticky-skip part A: resolveItem merge/repost into a STICKY-ELIGIBLE ro
     const openQueue = (await client.query('SELECT reason FROM ic_job_review_queue WHERE candidate_id = $1 AND resolved_at IS NULL', [cand])).rows;
     assert.equal(openQueue.length, 1);
     assert.equal(openQueue[0].reason, 'reopened_skip');
+  });
+
+  test('auto-skip-sticky: auto skip_low root becomes eligible when the CANDIDATE\'s own stored prescore is strictly below the triage floor', async () => {
+    const root = await insertListing({ status: 'skip', titleNorm: 'vp payments low elig', locationNorm: 'houston-tx' });
+    await insertStatusEvent({ listingId: root, toStatus: 'skip', actor: 'auto', note: 'auto-triage: prescore 12 < floor 40' });
+    const cand = await insertListing({ status: 'review', titleNorm: 'vp payments low elig 2', locationNorm: 'dallas-tx', prescore: 10 });
+    const q = await insertQueueItem({ candidateId: cand, matches: [root], reason: 'title_similar_same_company' });
+
+    const out = await withTransaction(client, (c) => resolveItem(c, { queueId: q, resolution: 'merge', targetId: root, stickyFloor: 40 }));
+    assert.equal(out.status, 'skip');
+    assert.equal(/** @type {any} */ (out).sticky, true);
+    const row = (await client.query('SELECT status, duplicate_of FROM ic_job_listings WHERE id = $1', [cand])).rows[0];
+    assert.equal(row.status, 'skip');
+    assert.equal(row.duplicate_of, root);
+    const openQueue = (await client.query('SELECT count(*)::int AS n FROM ic_job_review_queue WHERE candidate_id = $1 AND resolved_at IS NULL', [cand])).rows[0].n;
+    assert.equal(openQueue, 0, 'no reopened_skip queue row');
+  });
+
+  test('auto-skip-sticky: candidate prescore EQUAL to the floor is NOT eligible ("strictly below", not "at or below")', async () => {
+    const root = await insertListing({ status: 'skip', titleNorm: 'vp payments floor equal', locationNorm: 'houston-tx' });
+    await insertStatusEvent({ listingId: root, toStatus: 'skip', actor: 'auto', note: 'auto-triage: noise_class=suspect' });
+    const cand = await insertListing({ status: 'review', titleNorm: 'vp payments floor equal 2', locationNorm: 'dallas-tx', prescore: 40 });
+    const q = await insertQueueItem({ candidateId: cand, matches: [root], reason: 'title_similar_same_company' });
+
+    const out = await withTransaction(client, (c) => resolveItem(c, { queueId: q, resolution: 'merge', targetId: root, stickyFloor: 40 }));
+    assert.equal(/** @type {any} */ (out).sticky, false);
+    assert.equal(out.status, 'review');
+  });
+
+  test('auto-skip-sticky: model-band auto skip with candidate prescore below floor is eligible (freeform note, not skip_noise-shaped)', async () => {
+    const root = await insertListing({ status: 'skip', titleNorm: 'vp payments model band', locationNorm: 'houston-tx' });
+    await insertStatusEvent({ listingId: root, toStatus: 'skip', actor: 'auto', note: 'model band: not a fit for this profile' });
+    const cand = await insertListing({ status: 'review', titleNorm: 'vp payments model band 2', locationNorm: 'dallas-tx', prescore: 5 });
+    const q = await insertQueueItem({ candidateId: cand, matches: [root], reason: 'title_similar_same_company' });
+
+    const out = await withTransaction(client, (c) => resolveItem(c, { queueId: q, resolution: 'merge', targetId: root, stickyFloor: 40 }));
+    assert.equal(/** @type {any} */ (out).sticky, true);
+    assert.equal(out.status, 'skip');
+  });
+
+  test('auto-skip-sticky: an auto skip followed by a later non-status event on the root is NOT eligible, even with a qualifying candidate prescore', async () => {
+    const root = await insertListing({ status: 'skip', titleNorm: 'vp payments later event', locationNorm: 'houston-tx' });
+    await insertStatusEvent({ listingId: root, toStatus: 'skip', actor: 'auto', note: 'auto-triage: prescore 12 < floor 40' });
+    // A later, non-status event (e.g. a human note left on the root after the auto skip) means the root
+    // was touched since -- no longer a purely unattended auto decision.
+    await recordEvent(client, { listingId: root, kind: 'note', note: 'operator left a note after the auto skip', actor: 'dashboard' });
+    const cand = await insertListing({ status: 'review', titleNorm: 'vp payments later event 2', locationNorm: 'dallas-tx', prescore: 5 });
+    const q = await insertQueueItem({ candidateId: cand, matches: [root], reason: 'title_similar_same_company' });
+
+    const out = await withTransaction(client, (c) => resolveItem(c, { queueId: q, resolution: 'merge', targetId: root, stickyFloor: 40 }));
+    assert.equal(/** @type {any} */ (out).sticky, false, 'a later non-status event on the root blocks eligibility');
+    assert.equal(out.status, 'review');
+  });
+
+  test('auto-skip-sticky: human skip still eligible regardless of the candidate\'s prescore', async () => {
+    const root = await insertListing({ status: 'skip', titleNorm: 'vp payments human floor', locationNorm: 'houston-tx' });
+    await insertStatusEvent({ listingId: root, toStatus: 'skip', actor: 'dashboard', note: null });
+    const cand = await insertListing({ status: 'review', titleNorm: 'vp payments human floor 2', locationNorm: 'dallas-tx', prescore: 95 });
+    const q = await insertQueueItem({ candidateId: cand, matches: [root], reason: 'title_similar_same_company' });
+
+    const out = await withTransaction(client, (c) => resolveItem(c, { queueId: q, resolution: 'merge', targetId: root, stickyFloor: 40 }));
+    assert.equal(/** @type {any} */ (out).sticky, true);
+    assert.equal(out.status, 'skip');
   });
 
   test('sticky status with no recorded status-change event at all is NOT eligible (fail closed)', async () => {
@@ -414,7 +497,7 @@ describe('sticky-skip part B: scan-time auto-merge (applyDecision / findStickySk
     assert.equal(row.status, 'review');
   });
 
-  test('an auto skip_low root never auto-merges (not STICKY-ELIGIBLE): queues normally', async () => {
+  test('an auto skip_low root never auto-merges when the incoming candidate has NO prescore in ctx (not STICKY-ELIGIBLE): queues normally', async () => {
     const raw = { title: 'Director of Low Prescore', company: 'Acme Low Widgets', location: 'Houston, TX', url: `https://example.test/${SRC}/lowskip-root`, source: 'greenhouse' };
     const root = await insertRootFromListing(raw, { status: 'skip' });
     await insertStatusEvent({ listingId: root, toStatus: 'skip', actor: 'auto', note: 'auto-triage: prescore 10 < floor 25' });
@@ -425,6 +508,46 @@ describe('sticky-skip part B: scan-time auto-merge (applyDecision / findStickySk
     assert.equal(decision.branch, '3-repost');
 
     const applied = await withTransaction(client, (c) => applyDecision(c, rec, decision, { runId: null, now: new Date() }));
+    createdIds.push(applied.id);
+    assert.equal(/** @type {any} */ (applied).stickySkipMerged, false);
+    assert.ok(applied.queued);
+    const row = (await client.query('SELECT status FROM ic_job_listings WHERE id = $1', [applied.id])).rows[0];
+    assert.equal(row.status, 'review');
+  });
+
+  test('auto-skip-sticky: scan path passes the incoming candidate\'s own ctx.prescore -- an auto skip_low root auto-merges when it is below ctx.stickyFloor', async () => {
+    const raw = { title: 'Director of Low Prescore Eligible', company: 'Acme Low Eligible Widgets', location: 'Houston, TX', url: `https://example.test/${SRC}/lowskip-elig-root`, source: 'greenhouse' };
+    const root = await insertRootFromListing(raw, { status: 'skip' });
+    await insertStatusEvent({ listingId: root, toStatus: 'skip', actor: 'auto', note: 'auto-triage: prescore 10 < floor 40' });
+
+    const rec = normalizeListing({ ...raw, url: `https://example.test/${SRC}/lowskip-elig-new`, description: null }, OPTS);
+    const lookups = makePgLookups(client);
+    const decision = await classify(rec, lookups, {});
+    assert.equal(decision.branch, '3-repost');
+
+    // ctx.prescore is the candidate's own, already-computed prescore (src/core/scan-run.js passes it
+    // as `ps`, computed before applyDecision runs); ctx.stickyFloor is the current triage floor.
+    const applied = await withTransaction(client, (c) => applyDecision(c, rec, decision, { runId: null, now: new Date(), prescore: 8, stickyFloor: 40 }));
+    createdIds.push(applied.id);
+    assert.equal(/** @type {any} */ (applied).stickySkipMerged, true);
+    assert.equal(applied.queued, null);
+    assert.equal(applied.status, 'skip');
+    const row = (await client.query('SELECT status, duplicate_of FROM ic_job_listings WHERE id = $1', [applied.id])).rows[0];
+    assert.equal(row.status, 'skip');
+    assert.equal(row.duplicate_of, root);
+  });
+
+  test('auto-skip-sticky: scan path -- ctx.prescore at or above ctx.stickyFloor never merges into an auto-skipped root', async () => {
+    const raw = { title: 'Director of High Prescore', company: 'Acme High Widgets', location: 'Houston, TX', url: `https://example.test/${SRC}/highskip-root`, source: 'greenhouse' };
+    const root = await insertRootFromListing(raw, { status: 'skip' });
+    await insertStatusEvent({ listingId: root, toStatus: 'skip', actor: 'auto', note: 'auto-triage: prescore 10 < floor 40' });
+
+    const rec = normalizeListing({ ...raw, url: `https://example.test/${SRC}/highskip-new`, description: null }, OPTS);
+    const lookups = makePgLookups(client);
+    const decision = await classify(rec, lookups, {});
+    assert.equal(decision.branch, '3-repost');
+
+    const applied = await withTransaction(client, (c) => applyDecision(c, rec, decision, { runId: null, now: new Date(), prescore: 55, stickyFloor: 40 }));
     createdIds.push(applied.id);
     assert.equal(/** @type {any} */ (applied).stickySkipMerged, false);
     assert.ok(applied.queued);
@@ -479,6 +602,28 @@ describe('sticky-skip part B: scan-time auto-merge (applyDecision / findStickySk
     const openQueue = (await client.query('SELECT reason FROM ic_job_review_queue WHERE candidate_id = $1 AND resolved_at IS NULL', [root])).rows;
     assert.equal(openQueue.length, 1);
     assert.equal(openQueue[0].reason, 'reopened_skip');
+  });
+
+  test('auto-skip-sticky: 1a-repost-same-id auto skip_low root becomes eligible when ctx.prescore is below ctx.stickyFloor (findStickySkipRootForSameRow)', async () => {
+    const linkedinId = String(925000000 + (process.pid % 9000000));
+    const raw = { title: 'VP of Payments Low Eligible', company: 'Acme Linked Low Eligible', location: 'Houston, TX', url: `https://www.linkedin.com/jobs/view/${linkedinId}/`, source: 'linkedin' };
+    const root = await insertRootFromListing(raw, { status: 'skip' });
+    await insertStatusEvent({ listingId: root, toStatus: 'skip', actor: 'auto', note: 'auto-triage: prescore 8 < floor 40' });
+
+    const rec = normalizeListing({ ...raw, description: null }, OPTS);
+    const lookups = makePgLookups(client);
+    const decision = await classify(rec, lookups, {});
+    assert.equal(decision.branch, '1a-repost-same-id');
+
+    const applied = await withTransaction(client, (c) => applyDecision(c, rec, decision, { runId: null, now: new Date(), prescore: 6, stickyFloor: 40 }));
+    assert.equal(applied.id, root);
+    assert.equal(/** @type {any} */ (applied).stickySkipMerged, true);
+    assert.equal(applied.queued, null);
+    assert.equal(applied.status, 'skip');
+    const row = (await client.query('SELECT status FROM ic_job_listings WHERE id = $1', [root])).rows[0];
+    assert.equal(row.status, 'skip');
+    const openQueue = (await client.query('SELECT count(*)::int AS n FROM ic_job_review_queue WHERE candidate_id = $1 AND resolved_at IS NULL', [root])).rows[0].n;
+    assert.equal(openQueue, 0, 'no reopened_skip queue row');
   });
 
   test('1a-repost-same-id: SURFACE-EXCEPTION (salary jump > 10%) blocks the merge, falls through to ordinary reopened_skip', async () => {
@@ -611,6 +756,28 @@ describe('sticky-skip part C: bulkResolve mode "sticky-skip"', () => {
     assert.equal(row.duplicate_of, root);
     const otherRow = (await client.query('SELECT status FROM ic_job_listings WHERE id = $1', [otherCand])).rows[0];
     assert.equal(otherRow.status, 'review', 'left open, not touched');
+  });
+
+  test('auto-skip-sticky: bulk path reads the STORED ic_job_listings.prescore of the queue row\'s candidate, not a freshly recomputed value', async () => {
+    const lowRoot = await insertListing({ status: 'skip', titleNorm: 'bulk sticky low prescore', locationNorm: 'houston-tx' });
+    await insertStatusEvent({ listingId: lowRoot, toStatus: 'skip', actor: 'auto', note: 'auto-triage: prescore 9 < floor 40' });
+    const lowCand = await insertListing({ status: 'review', titleNorm: 'bulk sticky low prescore', locationNorm: 'houston-tx', prescore: 9 });
+    const lowQ = await insertQueueItem({ candidateId: lowCand, matches: [lowRoot], reason: 'reopened_skip' });
+
+    const highRoot = await insertListing({ status: 'skip', titleNorm: 'bulk sticky high prescore', locationNorm: 'houston-tx' });
+    await insertStatusEvent({ listingId: highRoot, toStatus: 'skip', actor: 'auto', note: 'auto-triage: noise_class=suspect' });
+    const highCand = await insertListing({ status: 'review', titleNorm: 'bulk sticky high prescore', locationNorm: 'houston-tx', prescore: 72 });
+    const highQ = await insertQueueItem({ candidateId: highCand, matches: [highRoot], reason: 'reopened_skip' });
+
+    const out = await bulkResolve(deps, { mode: 'sticky-skip', dryRun: false, confirm: true, stickyFloor: 40 });
+    assert.ok(out.ids.merged.includes(lowQ), 'candidate stored prescore below the floor merges');
+    assert.ok(!out.ids.merged.includes(highQ), 'candidate stored prescore at/above the floor never merges');
+
+    const lowRow = (await client.query('SELECT status, duplicate_of FROM ic_job_listings WHERE id = $1', [lowCand])).rows[0];
+    assert.equal(lowRow.status, 'skip');
+    assert.equal(lowRow.duplicate_of, lowRoot);
+    const highRow = (await client.query('SELECT status FROM ic_job_listings WHERE id = $1', [highCand])).rows[0];
+    assert.equal(highRow.status, 'review', 'left open, not merged');
   });
 });
 
