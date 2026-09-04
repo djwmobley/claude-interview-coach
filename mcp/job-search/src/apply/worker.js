@@ -22,12 +22,13 @@ import fs from 'node:fs';
 import path from 'node:path';
 import crypto from 'node:crypto';
 import { getEnv, loadConfig, packageRoot, repoRoot } from '../core/config.js';
-import { connectDedicated as defaultConnectDedicated } from '../core/db.js';
+import { connectDedicated as defaultConnectDedicated, withTransaction } from '../core/db.js';
 import { errFields } from '../core/errors.js';
 import { log as defaultLog } from '../core/logger.js';
 import {
-  getApplication, transition, markSubmitted, recordSubmitRequestSent, hasSubmitRequestSentThisAttempt,
+  getApplication, transition, transitionUnwrapped, markSubmitted, recordSubmitRequestSent, hasSubmitRequestSentThisAttempt,
 } from '../core/applications.js';
+import { classifyExclusion, loadExclusionConfig, walkDuplicateRoot } from './exclusions.js';
 import { resolveOutputPath } from '../core/documents.js';
 import { hostsForAts } from './ats-detect.js';
 import { parseAnswerBank, matchQuestion } from './answers.js';
@@ -40,6 +41,68 @@ import { findVerificationMessage } from './gmail-verify.js';
 
 /** Same numeric key as src/core/scan-run.js's LOCK_KEY -- see the module doc comment. Never a different key. */
 export const LOCK_KEY = 730193001;
+
+/** Namespace for the pre-submit exclusion recheck's 2-key pg_advisory_xact_lock (see
+ * preSubmitExclusionRecheck below). A 2-key advisory lock occupies a wholly separate key space from a
+ * 1-key one, so this can never collide with LOCK_KEY above regardless of what integer is chosen here --
+ * this specific value has no other significance. */
+export const EXCLUSION_LOCK_NAMESPACE = 907010001;
+
+/**
+ * Apply exclusion gate, pre-submit recheck (spec item 4): re-runs the FULL classifyExclusion inside the
+ * SAME transaction that moves the application from 'approved' to 'submitting', holding
+ * pg_advisory_xact_lock on the listing's dedup root for the duration of that transaction -- so a second
+ * application racing to submit against a listing sharing the same root serializes here rather than both
+ * passing the check and both submitting. Aborts to 'needs_human' (never 'failed': this is not a technical
+ * failure, it is new information that surfaced between Approve and submit) when no longer eligible.
+ *
+ * `excludeApplicationId: applicationId` is passed to classifyExclusion so THIS application's own
+ * (currently 'approved', about to become 'submitting') row never counts as "already applied" against
+ * itself -- see classifyExclusion's own doc comment on that field. A DIFFERENT application (a duplicate
+ * listing, or the same company+title, that reached a non-withdrawn state after this one was approved) is
+ * exactly what this recheck exists to catch.
+ * @param {import('pg').ClientBase} client
+ * @param {{ id: number, listing_id: number, apply_url: string|null }} app
+ * @param {import('./exclusions.js').ExclusionConfig} exclusionConfig
+ * @param {{ actor?: string }} [opts]
+ * @returns {Promise<import('./exclusions.js').ExclusionResult>}
+ */
+export async function preSubmitExclusionRecheck(client, app, exclusionConfig, opts = {}) {
+  const actor = opts.actor ?? 'apply';
+  return withTransaction(client, async (c) => {
+    const rootId = await walkDuplicateRoot(c, app.listing_id);
+    await c.query('SELECT pg_advisory_xact_lock($1::int, $2::int)', [EXCLUSION_LOCK_NAMESPACE, rootId]);
+    const listingRes = await c.query(
+      `SELECT id, company, company_norm, title, title_norm, apply_url, url, url_normalized, description
+       FROM ic_job_listings WHERE id = $1`,
+      [app.listing_id],
+    );
+    // A listing row that has vanished between Approve and submit is itself a "no longer eligible" outcome
+    // -- never treated as a silent pass.
+    const verdict = listingRes.rowCount === 0
+      ? { branch: 'unknown_company', reason: 'listing no longer found at pre-submit recheck', evidence: {} }
+      : await classifyExclusion(
+        {
+          id: Number(listingRes.rows[0].id), company: listingRes.rows[0].company ?? null, companyNorm: listingRes.rows[0].company_norm ?? null,
+          title: listingRes.rows[0].title ?? null, titleNorm: listingRes.rows[0].title_norm ?? null, applyUrl: listingRes.rows[0].apply_url ?? null,
+          sourceUrl: listingRes.rows[0].url_normalized ?? listingRes.rows[0].url ?? null, description: listingRes.rows[0].description ?? null,
+        },
+        { client: c, config: exclusionConfig, excludeApplicationId: app.id },
+      );
+    // TRANSITIONS has no approved -> needs_human edge (only approved -> submitting|withdrawn): this always
+    // moves to 'submitting' first (exactly the transition worker.js's own caller used to make directly),
+    // then -- still inside this same transaction, so nothing outside ever observes the intermediate state
+    // -- re-routes on to 'needs_human' when no longer eligible (submitting -> needs_human IS a legal edge).
+    await transitionUnwrapped(c, app.id, 'submitting', { actor, note: 'worker started' }, {});
+    if (verdict.branch !== 'eligible') {
+      await transitionUnwrapped(c, app.id, 'needs_human', {
+        actor, note: `pre-submit exclusion recheck aborted: ${verdict.reason}`,
+        pending_question: { kind: 'apply_exclusion', label: `Pre-submit check found: ${verdict.reason}. Review before applying.`, page_url: app.apply_url },
+      }, {});
+    }
+    return verdict;
+  });
+}
 
 /** Hard per-application timeout (amended spec: "hard 6-minute abort"). */
 export const APPLY_TIMEOUT_MS = 6 * 60 * 1000;
@@ -113,6 +176,12 @@ function hashLinkedFile(outputRoot, relPath) {
  *   default). An adapter never touches env.GOOGLE_TOKEN_FILE or google.js directly.
  * @property {(ms: number) => Promise<void>} [sleep] apply pipeline slice 6 test seam: ctx.sleep, used by an
  *   adapter's own bounded poll loop (e.g. Workday's verify-email wait). Real `setTimeout` by default.
+ * @property {import('./exclusions.js').ExclusionConfig} [exclusionConfig] apply exclusion gate test seam:
+ *   override config/apply-exclusions.json's loaded shape (src/apply/exclusions.js's loadExclusionConfig by
+ *   default). A missing/invalid file is a hard error here exactly as it is for auto-apply's select phase.
+ * @property {typeof preSubmitExclusionRecheck} [preSubmitExclusionRecheck] test seam ONLY -- see
+ *   preSubmitExclusionRecheck's own export for why a test suite with shared company/title fixtures across
+ *   many unrelated test cases needs this. Never set by bin/apply.js or bin/auto-apply.js.
  */
 
 /**
@@ -130,6 +199,13 @@ export async function runApplyWorker(applicationId, deps = {}) {
   const adapters = deps.adapters ?? ADAPTERS;
   const outputRoot = deps.outputRoot ?? path.join(repoRoot(), 'output');
   const bank = deps.answerBank ?? loadAnswerBank();
+  const exclusionConfig = deps.exclusionConfig ?? loadExclusionConfig(config.configDir);
+  // Test seam only (never overridden by bin/apply.js or bin/auto-apply.js): lets a test exercising
+  // unrelated worker behavior with a shared company/title fixture opt out of the exclusion gate's own
+  // cross-listing "already applied elsewhere with this company+title" DB lookup (branch c/d), which would
+  // otherwise see every OTHER test in the same file/run that reused the same fixture and reached a
+  // non-withdrawn state. Defaults to the real gate.
+  const runPreSubmitExclusionRecheck = deps.preSubmitExclusionRecheck ?? preSubmitExclusionRecheck;
   const credentials = deps.credentials ?? {
     read: (/** @type {string} */ tenantHost) => readCredential(credentialTarget(tenantHost)),
     write: (/** @type {string} */ tenantHost, /** @type {string} */ username, /** @type {string} */ password) => writeCredential(credentialTarget(tenantHost), username, password),
@@ -161,7 +237,17 @@ export async function runApplyWorker(applicationId, deps = {}) {
       return { ok: true, status: 'skipped', state: app.state };
     }
 
-    await transition(client, applicationId, 'submitting', { actor: 'apply', note: 'worker started' });
+    // Apply exclusion gate, pre-submit recheck (spec item 4): the FULL classifyExclusion runs again here,
+    // inside the same transaction that moves approved -> submitting, under an advisory lock on the
+    // listing's dedup root -- see preSubmitExclusionRecheck's own doc comment. New information that
+    // surfaced between Approve and now (a duplicate listing applied to elsewhere, a config change) parks
+    // the application in needs_human instead of ever reaching the adapter.
+    const preSubmitVerdict = await runPreSubmitExclusionRecheck(client, app, exclusionConfig, { actor: 'apply' });
+    if (preSubmitVerdict.branch !== 'eligible') {
+      log({ evt: 'apply_presubmit_exclusion_blocked', application_id: applicationId, branch: preSubmitVerdict.branch });
+      progress({ applicationId, message: 'needs_human' });
+      return { ok: true, status: 'needs_human' };
+    }
     progress({ applicationId, message: 'submitting' });
     log({ evt: 'apply_started', application_id: applicationId, ats: app.ats_type });
 

@@ -1,0 +1,12 @@
+{
+  "_comment": "Apply exclusion gate (src/apply/exclusions.js). Copy this file to apply-exclusions.json (gitignored, personal data) in the same directory and fill in real values. blocked_companies: employer names, ON TOP OF the built-in ['Immunotec','Advisicon'] which can never be removed -- matched by whole-token subset, not substring (see the module doc comment). applied_history: every prior application, one entry per role; title is optional -- an entry with no title matches on company only and produces the applied_company_other_role (needs-human) branch rather than the hard already_applied_history block. Missing or invalid JSON here is a hard error for both the scheduled auto-apply run and the dashboard's one-click Apply; this example file is never read as a fallback.",
+  "blocked_companies": [],
+  "applied_history": [
+    {
+      "company": "Example Corp",
+      "title": "Chief Technology Officer",
+      "applied_on": "2026-01-15",
+      "source": "example-key"
+    }
+  ]
+}

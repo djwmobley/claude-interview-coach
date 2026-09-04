@@ -22,6 +22,8 @@ import { US_ABBRS } from './normalize.js';
 import { resolveFloor } from './salary-floor.js';
 import { ABSENT_LOCATION, LEGACY_UNKNOWN_LOCATION } from './normalize.js';
 import { HOURLY_RE } from '../apply/answers.js';
+import { classifyExclusion, EXCLUSION_BRANCHES, loadExclusionConfig } from '../apply/exclusions.js';
+import { loadConfig } from './config.js';
 
 /**
  * Hourly-pay signal (Damian's ruling, spec item D): true when `salaryPeriod === 'hour'` (the structured,
@@ -76,6 +78,10 @@ export function isUsLocation(locationNorm) {
  * the evaluation precedence: the first matching branch wins, exactly like src/core/salary-floor.js's own
  * "first match wins" total classification. */
 export const CLOSED_REASONS = Object.freeze([
+  // Apply exclusion gate (src/apply/exclusions.js): runs before every reason below, one 'exclusion_'-
+  // prefixed reason per non-eligible EXCLUSION_BRANCHES entry (its own 'eligible' branch simply falls
+  // through to the checks below, never adding a reason of its own).
+  ...EXCLUSION_BRANCHES.filter((b) => b !== 'eligible').map((b) => `exclusion_${b}`),
   'not_scored', 'below_fit', 'human_fit_override', 'duplicate_of', 'not_us', 'salary_below_floor',
   'active_application', 'no_description', 'apply_target_unresolved', 'easy_apply_only', 'ats_not_allowed',
   'confidence_not_exact', 'hourly_pay', 'daily_cap', 'eligible',
@@ -103,6 +109,12 @@ export const CLOSED_REASONS = Object.freeze([
  * @property {string|null} applyAts
  * @property {string|null} applyConfidence
  * @property {boolean} applyEasyOnly
+ * @property {string|null} [company] ic_job_listings.company -- apply exclusion gate input
+ * @property {string|null} [companyNorm] ic_job_listings.company_norm -- apply exclusion gate input
+ * @property {string|null} [title] ic_job_listings.title -- apply exclusion gate input
+ * @property {string|null} [titleNorm] ic_job_listings.title_norm -- apply exclusion gate input
+ * @property {string|null} [sourceUrl] ic_job_listings.url_normalized (falling back to url) -- apply
+ *   exclusion gate's blocked_company_suspect check
  */
 
 /**
@@ -134,6 +146,30 @@ export function classifyCandidate(row, ctx) {
   if (row.applyConfidence !== 'exact') return 'confidence_not_exact';
   if (isHourlyPaySignal(row.salaryPeriod ?? null, row.salaryRaw ?? null)) return 'hourly_pay';
   return 'eligible';
+}
+
+/**
+ * Total classification: the apply exclusion gate (src/apply/exclusions.js), then -- only when that
+ * returns 'eligible' -- everything classifyCandidate() already checks. Requires a DB client because the
+ * exclusion gate's already_applied_listing/previously_withdrawn/already_applied_history branches all query
+ * ic_job_listings/ic_job_applications (dedup-tree walking and title similarity are not computable from a
+ * plain row object alone).
+ * @param {import('pg').ClientBase} client
+ * @param {CandidateRow} row
+ * @param {{ fitFloor: number, floors: import('./salary-floor.js').SalaryFloors, atsAllow: string[], exclusionConfig: import('../apply/exclusions.js').ExclusionConfig }} ctx
+ * @returns {Promise<Exclude<typeof CLOSED_REASONS[number], 'daily_cap'>>}
+ */
+export async function classifyCandidateWithExclusions(client, row, ctx) {
+  const excl = await classifyExclusion(
+    {
+      id: row.listingId, company: row.company ?? null, companyNorm: row.companyNorm ?? null,
+      title: row.title ?? null, titleNorm: row.titleNorm ?? null, applyUrl: row.applyUrl ?? null,
+      sourceUrl: row.sourceUrl ?? null, description: row.description ?? null,
+    },
+    { client, config: ctx.exclusionConfig },
+  );
+  if (excl.branch !== 'eligible') return /** @type {any} */ (`exclusion_${excl.branch}`);
+  return classifyCandidate(row, ctx);
 }
 
 /**
@@ -243,6 +279,7 @@ export async function fetchCandidateRows(client) {
     SELECT
       l.id AS listing_id, l.fit_score, l.duplicate_of, l.location_norm, l.remote_mode,
       l.salary_max, l.salary_period, l.salary_raw, l.description, l.apply_url, l.apply_ats, l.apply_ats_confidence, l.apply_easy_only,
+      l.company, l.company_norm, l.title, l.title_norm, coalesce(l.url_normalized, l.url) AS source_url,
       (SELECT actor FROM ic_job_events e WHERE e.listing_id = l.id AND e.kind = 'fit' ORDER BY e.at DESC, e.id DESC LIMIT 1) AS fit_actor,
       EXISTS (SELECT 1 FROM ic_job_applications a WHERE a.listing_id = l.id AND a.state <> 'withdrawn') AS has_active_application
     FROM ic_job_listings l
@@ -268,6 +305,11 @@ export async function fetchCandidateRows(client) {
     applyAts: row.apply_ats ?? null,
     applyConfidence: row.apply_ats_confidence ?? null,
     applyEasyOnly: Boolean(row.apply_easy_only),
+    company: row.company ?? null,
+    companyNorm: row.company_norm ?? null,
+    title: row.title ?? null,
+    titleNorm: row.title_norm ?? null,
+    sourceUrl: row.source_url ?? null,
   }));
 }
 
@@ -283,15 +325,27 @@ export async function fetchCandidateRows(client) {
  * Full select phase: fetch, classify, dedup, cap. Total and deterministic given the same input rows and
  * `now` -- no randomness, no hidden state.
  * @param {import('pg').ClientBase} client
- * @param {{ fitFloor: number, floors: import('./salary-floor.js').SalaryFloors, atsAllow: string[], dailyCap: number, now: Date, timezone: string, fetchCandidateRows?: (client: import('pg').ClientBase) => Promise<CandidateRow[]>, countAutoApprovedToday?: (client: import('pg').ClientBase, now: Date, timezone: string) => Promise<number> }} opts
+ * @param {{ fitFloor: number, floors: import('./salary-floor.js').SalaryFloors, atsAllow: string[], dailyCap: number, now: Date, timezone: string, fetchCandidateRows?: (client: import('pg').ClientBase) => Promise<CandidateRow[]>, countAutoApprovedToday?: (client: import('pg').ClientBase, now: Date, timezone: string) => Promise<number>, exclusionConfig?: import('../apply/exclusions.js').ExclusionConfig, classifyCandidateWithExclusions?: (client: import('pg').ClientBase, row: CandidateRow, ctx: any) => Promise<string> }} opts
  * @returns {Promise<SelectResult>}
  */
 export async function selectCandidates(client, opts) {
   const fetchRows = opts.fetchCandidateRows ?? fetchCandidateRows;
   const countToday = opts.countAutoApprovedToday ?? countAutoApprovedToday;
+  // Test seam: a caller exercising only the dedup/cap logic (no real DB client, no apply-exclusions.json
+  // on disk) can inject a stub here -- e.g. `async (c, row, ctx) => classifyCandidate(row, ctx)` -- to skip
+  // the exclusion gate's own DB queries entirely. Production code (bin/auto-apply.js) never sets this.
+  const classify = opts.classifyCandidateWithExclusions ?? classifyCandidateWithExclusions;
   const rows = await fetchRows(client);
-  const ctx = { fitFloor: opts.fitFloor, floors: opts.floors, atsAllow: opts.atsAllow };
-  const classified = rows.map((row) => ({ row, reason: classifyCandidate(row, ctx) }));
+  // Apply exclusion gate config (spec: "auto-apply loads once per run"): loaded once here, reused for
+  // every row this call classifies. A missing/invalid file throws CONFIG_INVALID and this whole select
+  // phase aborts -- bin/auto-apply.js's own top-level catch turns that into the run's non-zero exit and
+  // [NO APPLY] report line (spec section 2), exactly like every other hard-error config in this pipeline.
+  const exclusionConfig = opts.exclusionConfig ?? loadExclusionConfig(loadConfig().configDir);
+  const ctx = { fitFloor: opts.fitFloor, floors: opts.floors, atsAllow: opts.atsAllow, exclusionConfig };
+  const classified = [];
+  for (const row of rows) {
+    classified.push({ row, reason: await classify(client, row, ctx) });
+  }
   const deduped = dedupResolvedTargets(classified);
   const capUsed = await countToday(client, opts.now, opts.timezone);
   const remaining = Math.max(0, opts.dailyCap - capUsed);

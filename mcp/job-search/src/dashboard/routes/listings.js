@@ -19,6 +19,8 @@ import { prescoreParts } from '../../core/prescore.js';
 import { weightedPrescore, getDefaultNoiseRules } from '../../core/noise.js';
 import { classifyApplyUrl } from '../../apply/ats-detect.js';
 import { getApplicationForListing } from '../../core/applications.js';
+import { classifyExclusion, loadExclusionConfig } from '../../apply/exclusions.js';
+import { loadConfig } from '../../core/config.js';
 import { sendJson } from '../http.js';
 
 /** @param {Record<string,string>} q @param {string} key */
@@ -165,7 +167,7 @@ export function register(router, deps, streamHub) {
       `SELECT id, title, company, location, location_norm, remote_mode, posted_at, salary_min, salary_max, salary_raw,
               prescore, prescore_raw, noise_class, fit_score, status, source, url, url_normalized, external_id, notes,
               description, first_seen, last_seen, times_seen, duplicate_of, repost_of, expired_at, stale, record_kind,
-              search_profile, detail_skipped, marked_at, company_norm, title_norm
+              search_profile, detail_skipped, marked_at, company_norm, title_norm, apply_url
        FROM ic_job_listings WHERE id = $1`,
       [id],
     ));
@@ -194,6 +196,27 @@ export function register(router, deps, streamHub) {
     // the CURRENT ats-detect.js rules rather than a stale value frozen at scan time. url_normalized wins
     // over the raw url the same way GET /api/listings' url_ok computation already does above.
     const ats = classifyApplyUrl(listing.url_normalized ?? listing.url ?? null);
+    // Apply exclusion gate (spec item 4): computed fresh on every request, one row, cheap enough for a
+    // detail-page load (unlike GET /api/listings' own list of many rows, which deliberately does NOT run
+    // this per row -- see the PR body's blind-spots note). `application` (already fetched above) excludes
+    // ITS OWN listing's currently-drafting/approved row from the already-applied checks, matching
+    // one-click Apply's own applyExclusionGate() in routes/applications.js. A missing/invalid config file
+    // never 500s this page -- it renders as an `error` field the UI shows as a loud, unmissable notice.
+    let applyExclusion;
+    try {
+      const configDir = deps.config?.configDir ?? loadConfig().configDir;
+      const exclusionConfig = loadExclusionConfig(configDir);
+      applyExclusion = await deps.withClient((c) => classifyExclusion(
+        {
+          id: listing.id, company: listing.company, companyNorm: listing.company_norm, title: listing.title,
+          titleNorm: listing.title_norm, applyUrl: listing.apply_url, sourceUrl: listing.url_normalized ?? listing.url,
+          description: listing.description,
+        },
+        { client: c, config: exclusionConfig, excludeApplicationId: application ? application.id : null },
+      ));
+    } catch (err) {
+      applyExclusion = { branch: null, reason: null, error: err instanceof Error ? err.message.slice(0, 300) : String(err).slice(0, 300) };
+    }
     sendJson(ctx.res, 200, {
       ok: true,
       row: listing,
@@ -201,6 +224,7 @@ export function register(router, deps, streamHub) {
       documents,
       suggestions,
       followups,
+      apply_exclusion: applyExclusion,
       open_review: openReview.rows,
       duplicates: duplicates.rows,
       also_posted: alsoPosted.rows,

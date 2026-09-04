@@ -6,7 +6,7 @@
  * with fake resumeRunner/reviewRunner/applyRunner so the chain's own branching is directly observable
  * without a real headless claude process.
  */
-import { test, describe, before, after, beforeEach } from 'node:test';
+import { test, describe, before, after, beforeEach, afterEach } from 'node:test';
 import assert from 'node:assert/strict';
 import fs from 'node:fs';
 import os from 'node:os';
@@ -18,8 +18,12 @@ import { withClient, closePool } from '../src/core/db.js';
 import { createDashboardServer } from '../src/dashboard/server.js';
 import { createCalendarCache } from '../src/dashboard/calendar-cache.js';
 import { createApplication, getApplication, transition, listApplicationEvents } from '../src/core/applications.js';
+import { applyExclusionGate as realApplyExclusionGate } from '../src/dashboard/routes/applications.js';
 
 const CO = `ZZ-TEST-APPLYNOW-${process.pid}`;
+/** @type {any} the dashboard's own deps object, hoisted so a later describe block can temporarily swap
+ *  `applyExclusionGate` back to the real gate for its own tests, then restore the bypass. */
+let deps;
 /** @type {pg.Client} */
 let verifyClient;
 /** @type {string} */
@@ -90,7 +94,7 @@ before(async () => {
     fs.mkdirSync(path.join(outputRoot, dir), { recursive: true });
   }
 
-  const deps = {
+  deps = {
     withClient,
     config: loadConfig(),
     env: {
@@ -110,6 +114,13 @@ before(async () => {
     version: 'test',
     startedAt: new Date().toISOString(),
     healthBanner: [],
+    // This file's other tests share a single 'Apply Now Test' / 'apply now test co' listing fixture
+    // (seedListing() below) across many test cases in one run -- the apply exclusion gate's own
+    // cross-listing "already applied elsewhere with this company+title" DB lookup would otherwise see an
+    // EARLIER sibling test's own non-withdrawn application and incorrectly block this one. Bypassed by
+    // default; the "apply exclusion gate" describe block further down restores the real gate (imported as
+    // realApplyExclusionGate) with its own unique-per-test fixtures to test the gate itself.
+    applyExclusionGate: async () => false,
   };
   app = createDashboardServer(/** @type {any} */ (deps));
   await app.listen(0, '127.0.0.1');
@@ -243,5 +254,65 @@ describe('POST /api/listings/:id/apply-now: 409 duplicate', () => {
     const r = await req('POST', `/api/listings/${listingId}/apply-now`);
     assert.equal(r.status, 202);
     assert.equal(r.json.application_id, created.id);
+  });
+});
+
+describe('POST /api/listings/:id/apply-now: apply exclusion gate (real gate restored, unique fixtures)', () => {
+  /** Restores the real gate for one test, then restores the bypass -- see deps.applyExclusionGate's own
+   * doc comment above (this file's other describe blocks share one listing fixture across many tests). */
+  beforeEach(() => { deps.applyExclusionGate = realApplyExclusionGate; });
+  afterEach(() => { deps.applyExclusionGate = async () => false; });
+
+  /** Unique-per-test company/title (never the shared 'apply now test co' / 'apply now test' literal) --
+   * see seedListing()'s own sibling tests for why a subset-matching company gate needs this. */
+  async function seedUniqueListing(o = {}) {
+    const n = Math.floor(Math.random() * 1e9);
+    const r = await verifyClient.query(
+      `INSERT INTO ic_job_listings (title, company, source, external_id, record_kind, company_norm, title_norm, location_norm, dedup_hash, last_seen, apply_url)
+       VALUES ($1, $2, $3, $4, 'listing', $5, $6, 'legacy-unknown', $7, now(), $8) RETURNING id`,
+      [
+        o.title ?? 'Apply Now Excl Test', o.company ?? CO, `zz-test-applynow-excl-${process.pid}`,
+        `zz-test-applynow-excl-${process.pid}:${n}`, o.companyNorm ?? `zzapplynowexclco${n}`, o.titleNorm ?? `zzapplynowexclrole${n}`,
+        `zz-applynow-excl-hash-${n}`, o.applyUrl ?? null,
+      ],
+    );
+    const id = Number(r.rows[0].id);
+    listingIds.push(id);
+    return id;
+  }
+
+  test('a blocked company is rejected with APPLY_EXCLUDED, no application row created', async () => {
+    const listingId = await seedUniqueListing({ company: 'Immunotec Research Ltd', companyNorm: 'immunotec research' });
+    const r = await req('POST', `/api/listings/${listingId}/apply-now`);
+    assert.equal(r.status, 409);
+    assert.equal(r.json.code, 'APPLY_EXCLUDED');
+    assert.equal(r.json.branch, 'blocked_company');
+    const app = await verifyClient.query('SELECT id FROM ic_job_applications WHERE listing_id = $1', [listingId]);
+    assert.equal(app.rowCount, 0);
+  });
+
+  test('an unknown company (NEEDS_HUMAN) is rejected with APPLY_NEEDS_OVERRIDE unless override:true is sent', async () => {
+    const listingId = await seedUniqueListing({ company: 'N/A', companyNorm: 'n a' });
+    const blocked = await req('POST', `/api/listings/${listingId}/apply-now`);
+    assert.equal(blocked.status, 409);
+    assert.equal(blocked.json.code, 'APPLY_NEEDS_OVERRIDE');
+    assert.equal(blocked.json.branch, 'unknown_company');
+    const overridden = await req('POST', `/api/listings/${listingId}/apply-now`, { body: { override: true } });
+    assert.equal(overridden.status, 202);
+  });
+
+  test('an eligible listing proceeds normally (202) with no override needed', async () => {
+    const listingId = await seedUniqueListing();
+    const r = await req('POST', `/api/listings/${listingId}/apply-now`);
+    assert.equal(r.status, 202);
+  });
+
+  test('re-clicking Apply on a listing\'s own still-drafting application is never blocked as already_applied_listing', async () => {
+    const listingId = await seedUniqueListing();
+    const first = await req('POST', `/api/listings/${listingId}/apply-now`);
+    assert.equal(first.status, 202);
+    const second = await req('POST', `/api/listings/${listingId}/apply-now`);
+    assert.equal(second.status, 202);
+    assert.equal(second.json.application_id, first.json.application_id);
   });
 });

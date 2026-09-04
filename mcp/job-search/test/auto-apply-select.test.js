@@ -3,11 +3,16 @@
  * src/core/auto-apply-select.js (auto-apply PR B): isUsLocation, classifyCandidate's closed reason enum,
  * dedup, the daily cap, and the local-midnight cap-counting boundary.
  */
-import { test, describe } from 'node:test';
+import { test, describe, before, after } from 'node:test';
 import assert from 'node:assert/strict';
+import pg from 'pg';
+import { pgConnectionConfig } from '../src/core/config.js';
+import { ensureAuxSchema } from '../src/core/schema.js';
+import { createApplication } from '../src/core/applications.js';
+import { BUILT_IN_BLOCKED } from '../src/apply/exclusions.js';
 import {
-  isUsLocation, classifyCandidate, dedupResolvedTargets, applyDailyCap, startOfDayInTz,
-  countAutoApprovedToday, selectCandidates, CLOSED_REASONS,
+  isUsLocation, classifyCandidate, classifyCandidateWithExclusions, dedupResolvedTargets, applyDailyCap,
+  startOfDayInTz, countAutoApprovedToday, selectCandidates, CLOSED_REASONS,
 } from '../src/core/auto-apply-select.js';
 
 const FLOORS = { texas_or_remote: 225000, relocation: 275000 };
@@ -114,7 +119,11 @@ describe('classifyCandidate: one reason per test, closed enum', () => {
     });
   });
 
-  test('every non-daily_cap CLOSED_REASONS member is reachable', () => {
+  test('every non-daily_cap, non-exclusion_* CLOSED_REASONS member is reachable from classifyCandidate() alone', () => {
+    // The apply exclusion gate's own reasons ('exclusion_*') are produced by classifyCandidateWithExclusions
+    // (DB-backed, see the describe block below and test/exclusions.test.js), never by this pure,
+    // synchronous classifyCandidate() -- so they are deliberately excluded from this particular
+    // reachability check rather than this test needing a database connection.
     const reachable = new Set([
       classifyCandidate(row({ fitScore: null }), CTX),
       classifyCandidate(row({ fitScore: 50, fitActor: 'auto' }), CTX),
@@ -132,7 +141,7 @@ describe('classifyCandidate: one reason per test, closed enum', () => {
       classifyCandidate(row(), CTX),
     ]);
     for (const reason of CLOSED_REASONS) {
-      if (reason === 'daily_cap') continue;
+      if (reason === 'daily_cap' || reason.startsWith('exclusion_')) continue;
       assert.ok(reachable.has(reason), `reason "${reason}" was never produced by any test row`);
     }
   });
@@ -235,6 +244,9 @@ describe('selectCandidates: end-to-end with injected fetch/count', () => {
       now: new Date('2026-09-03T14:00:00Z'), timezone: 'UTC',
       fetchCandidateRows: async () => rows,
       countAutoApprovedToday: async () => 0,
+      // This describe block exercises dedup/cap logic only, with no real DB client -- skip the apply
+      // exclusion gate's own DB-backed classification (see test/exclusions.test.js for that coverage).
+      classifyCandidateWithExclusions: async (c, r, ctx) => classifyCandidate(r, ctx),
     });
     assert.equal(result.capUsed, 0);
     assert.equal(result.eligible.length, 1);
@@ -248,6 +260,7 @@ describe('selectCandidates: end-to-end with injected fetch/count', () => {
       now: new Date(), timezone: 'UTC',
       fetchCandidateRows: async () => rows,
       countAutoApprovedToday: async () => 0,
+      classifyCandidateWithExclusions: async (c, r, ctx) => classifyCandidate(r, ctx),
     });
     assert.deepEqual(result.results.map((r) => r.reason), ['eligible', 'duplicate_of']);
     assert.equal(result.eligible.length, 1);
@@ -261,10 +274,76 @@ describe('selectCandidates: end-to-end with injected fetch/count', () => {
       now: new Date(), timezone: 'UTC',
       fetchCandidateRows: async () => rows,
       countAutoApprovedToday: async () => 4, // only 1 slot left
+      classifyCandidateWithExclusions: async (c, r, ctx) => classifyCandidate(r, ctx),
     });
     assert.equal(result.capUsed, 4);
     assert.equal(result.eligible.length, 1);
     assert.equal(result.capRemaining, 0);
     assert.deepEqual(result.results.map((r) => r.reason), ['eligible', 'daily_cap', 'daily_cap']);
+  });
+});
+
+describe('classifyCandidateWithExclusions: the apply exclusion gate runs FIRST, before every other reason', () => {
+  const CO = `ZZ-TEST-AUTOAPPLY-EXCL-${process.pid}`;
+  /** @type {pg.Client} */
+  let client;
+  /** @type {number[]} */
+  const listingIds = [];
+
+  /** @param {Partial<{ company: string, companyNorm: string }>} o */
+  async function insertListing(o = {}) {
+    const n = Math.floor(Math.random() * 1e9);
+    const r = await client.query(
+      `INSERT INTO ic_job_listings (title, company, source, external_id, record_kind, company_norm, title_norm, location_norm, dedup_hash, last_seen)
+       VALUES ('Auto Apply Excl Test', $1, $2, $3, 'listing', $4, 'auto apply excl test', 'legacy-unknown', $5, now()) RETURNING id`,
+      [o.company ?? CO, `zz-test-autoapply-excl-${process.pid}`, `zz-test-autoapply-excl-${process.pid}:${n}`, o.companyNorm ?? 'auto apply excl test co', `zz-autoapply-excl-hash-${n}`],
+    );
+    const id = Number(r.rows[0].id);
+    listingIds.push(id);
+    return id;
+  }
+
+  before(async () => {
+    client = new pg.Client(pgConnectionConfig());
+    await client.connect();
+    await ensureAuxSchema(client);
+  });
+  after(async () => {
+    if (listingIds.length) {
+      await client.query('DELETE FROM ic_job_application_events WHERE application_id IN (SELECT id FROM ic_job_applications WHERE listing_id = ANY($1::int[]))', [listingIds]);
+      await client.query('DELETE FROM ic_job_applications WHERE listing_id = ANY($1::int[])', [listingIds]);
+      await client.query('DELETE FROM ic_job_events WHERE listing_id = ANY($1::int[])', [listingIds]);
+      await client.query('DELETE FROM ic_job_listings WHERE id = ANY($1::int[])', [listingIds]);
+    }
+    await client.end();
+  });
+
+  const exclusionCtx = (extra = {}) => ({ fitFloor: 70, floors: FLOORS, atsAllow: ['greenhouse'], exclusionConfig: { blockedCompanies: [...BUILT_IN_BLOCKED], appliedHistory: [] }, ...extra });
+
+  test('a blocked company reports exclusion_blocked_company even when every other field would be eligible', async () => {
+    const listingId = await insertListing({ company: 'Immunotec Research Ltd', companyNorm: 'immunotec research' });
+    const reason = await classifyCandidateWithExclusions(client, row({ listingId, company: 'Immunotec Research Ltd', companyNorm: 'immunotec research', titleNorm: 'engineer' }), exclusionCtx());
+    assert.equal(reason, 'exclusion_blocked_company');
+  });
+
+  test('an already-applied listing reports exclusion_already_applied_listing, never reaching below_fit/duplicate_of/etc.', async () => {
+    const listingId = await insertListing();
+    await createApplication(client, { listingId, actor: 'mcp' });
+    // fitScore below floor AND duplicateOf set -- would classify as human_fit_override/duplicate_of if the
+    // exclusion gate were not checked first.
+    const reason = await classifyCandidateWithExclusions(client, row({ listingId, fitScore: 10, fitActor: 'dashboard', duplicateOf: 999 }), exclusionCtx());
+    assert.equal(reason, 'exclusion_already_applied_listing');
+  });
+
+  test('an eligible listing (per the exclusion gate) falls through to classifyCandidate\'s own reason', async () => {
+    const listingId = await insertListing({ company: 'Wholly Unrelated Co', companyNorm: 'wholly unrelated co' });
+    const reason = await classifyCandidateWithExclusions(client, row({ listingId, company: 'Wholly Unrelated Co', companyNorm: 'wholly unrelated co', fitScore: null }), exclusionCtx());
+    assert.equal(reason, 'not_scored');
+  });
+
+  test('an eligible listing with everything else eligible reaches "eligible"', async () => {
+    const listingId = await insertListing({ company: 'Wholly Unrelated Co Two', companyNorm: 'wholly unrelated co two' });
+    const reason = await classifyCandidateWithExclusions(client, row({ listingId, company: 'Wholly Unrelated Co Two', companyNorm: 'wholly unrelated co two' }), exclusionCtx());
+    assert.equal(reason, 'eligible');
   });
 });
