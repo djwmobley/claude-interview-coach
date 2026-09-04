@@ -77,11 +77,14 @@ async function uniqueConflict(c, cand) {
 /**
  * Resolve one queue item. Runs inside the caller's transaction. Exported for tests.
  * @param {import('pg').ClientBase} c
- * @param {{ queueId: number, resolution: 'merge'|'separate'|'repost', targetId?: number|null, now?: Date, auto?: boolean, actor?: 'dashboard'|'mcp'|'cli'|'migration'|'seed', note?: string }} r
+ * @param {{ queueId: number, resolution: 'merge'|'separate'|'repost', targetId?: number|null, now?: Date, auto?: boolean, actor?: 'dashboard'|'mcp'|'cli'|'migration'|'seed', note?: string, stickyFloor?: number }} r
  *   actor defaults to 'mcp' (dashboard PR 2 passes 'dashboard' for its own mutating requests). `note`
  *   overrides the default 'resolved:separate' event note on the separate branch only (bulkResolve below
  *   passes 'resolved:separate:bulk:<mode>[:<reason>]' so a listing's event history can tell a bulk
- *   separation apart from a one-at-a-time human resolve).
+ *   separation apart from a one-at-a-time human resolve). `stickyFloor` (auto-skip-sticky spec) is the
+ *   current triage floor (config/triage.json's `deterministic.floor`) gating an auto-actor
+ *   STICKY-ELIGIBLE root against the CANDIDATE's own stored prescore; omitted callers fall back to
+ *   sticky-skip.js's DEFAULT_STICKY_FLOOR.
  */
 export async function resolveItem(c, r) {
   const now = r.now ?? new Date();
@@ -94,7 +97,7 @@ export async function resolveItem(c, r) {
     await c.query(`UPDATE ic_job_review_queue SET resolution = 'separate', resolved_at = $2 WHERE id = $1`, [item.id, now]);
     return { queue_id: item.id, resolution: 'separate', candidate_id: null, note: 'no candidate row; closed' };
   }
-  const cand = (await c.query('SELECT id, source, external_id, url_normalized, status, duplicate_of, repost_of FROM ic_job_listings WHERE id = $1 FOR UPDATE', [item.candidate_id])).rows[0];
+  const cand = (await c.query('SELECT id, source, external_id, url_normalized, status, duplicate_of, repost_of, prescore FROM ic_job_listings WHERE id = $1 FOR UPDATE', [item.candidate_id])).rows[0];
   if (!cand) throw new JobSearchError('NOT_FOUND', `candidate ${item.candidate_id} missing`);
   const matches = /** @type {number[]} */ (item.matches ?? []).filter((m) => m !== cand.id);
 
@@ -131,9 +134,11 @@ export async function resolveItem(c, r) {
     throw new JobSearchError('VALIDATION', 'target resolves to the candidate itself');
   }
   // Re-read the target root's status inside this transaction (spec part A), then STICKY-ELIGIBLE for
-  // it. A sticky-but-ineligible root (e.g. an auto skip_low) behaves exactly as before this change:
-  // inheritStatus() below still routes it to 'review' with a reopened_<status> queue insert on repost.
-  const sticky = await loadStickyEligibility(c, root.id);
+  // it, gated on THIS candidate's own stored prescore (auto-skip-sticky spec) against the current
+  // triage floor. A sticky-but-ineligible root (e.g. an auto skip_low whose candidate has no known
+  // prescore, or one at/above the floor) behaves exactly as before this change: inheritStatus() below
+  // still routes it to 'review' with a reopened_<status> queue insert on repost.
+  const sticky = await loadStickyEligibility(c, root.id, cand.prescore ?? null, r.stickyFloor);
   const inh = inheritStatus(root.status);
 
   if (r.resolution === 'merge') {
@@ -212,23 +217,27 @@ export async function autoSeparate(c, days, now = new Date()) {
  * @param {{ withClient: <T>(fn: (c: import('pg').PoolClient) => Promise<T>) => Promise<T> }} deps
  * @param {string} whereSql SQL appended after "WHERE resolved_at IS NULL" (e.g. '' or an 'AND ...' clause)
  * @param {unknown[]} params bound starting at $1 in `whereSql` (the base query binds nothing itself)
+ * @param {number} [floor] current triage floor (config/triage.json's `deterministic.floor`); gates each
+ *   auto-actor root against THIS item's own candidate's STORED `ic_job_listings.prescore` -- the same
+ *   value the row already carries, not recomputed here (auto-skip-sticky spec, bulk path). Omitted
+ *   falls back to sticky-skip.js's DEFAULT_STICKY_FLOOR.
  * @returns {Promise<{ id: number, decision: import('../core/review-bulk.js').StickySkipDecision }[]>}
  */
-async function classifyOpenQueueForStickySkip(deps, whereSql, params) {
+async function classifyOpenQueueForStickySkip(deps, whereSql, params, floor) {
   return deps.withClient(async (c) => {
     const q = await c.query(`SELECT id, candidate_id, matches, reason, resolution FROM ic_job_review_queue WHERE resolved_at IS NULL ${whereSql} ORDER BY id`, params);
     const ROOT_COLS = 'id, status, source, url_normalized, title_norm, company_norm, location_norm, salary_max, apply_url';
     /** @type {{ id: number, decision: import('../core/review-bulk.js').StickySkipDecision }[]} */
     const out = [];
     for (const item of q.rows) {
-      const candidate = item.candidate_id == null ? null : (await c.query(`SELECT ${ROOT_COLS} FROM ic_job_listings WHERE id = $1`, [item.candidate_id])).rows[0] ?? null;
+      const candidate = item.candidate_id == null ? null : (await c.query(`SELECT ${ROOT_COLS}, prescore FROM ic_job_listings WHERE id = $1`, [item.candidate_id])).rows[0] ?? null;
       const matchIds = Array.isArray(item.matches) ? item.matches : [];
       /** @type {any[]} */
       const roots = [];
       for (const mid of matchIds) {
         const rr = (await c.query(`SELECT ${ROOT_COLS} FROM ic_job_listings WHERE id = $1`, [mid])).rows[0];
         if (!rr) { roots.push(null); continue; }
-        const sticky_eligible = await stickyEligibleFor(c, rr.id, rr.status);
+        const sticky_eligible = await stickyEligibleFor(c, rr.id, rr.status, candidate?.prescore ?? null, floor);
         roots.push({ ...rr, sticky_eligible });
       }
       out.push({ id: Number(item.id), decision: classifyForStickySkip(item, candidate, roots) });
@@ -289,7 +298,10 @@ async function classifyOpenQueueForStickySkip(deps, whereSql, params) {
  * stay open, tallied in `counts.leave_by_reason` with one of `STICKY_SKIP_LEAVE_REASONS`.
  *
  * @param {{ withClient: <T>(fn: (c: import('pg').PoolClient) => Promise<T>) => Promise<T> }} deps
- * @param {{ mode: 'rule'|'reason'|'stale'|'sticky-skip', reason?: string, dryRun: boolean, confirm: boolean, actor?: 'dashboard'|'mcp'|'cli', reviewAutoSeparateDays?: number, now?: Date }} opts
+ * @param {{ mode: 'rule'|'reason'|'stale'|'sticky-skip', reason?: string, dryRun: boolean, confirm: boolean, actor?: 'dashboard'|'mcp'|'cli', reviewAutoSeparateDays?: number, now?: Date, stickyFloor?: number }} opts
+ *   `stickyFloor` (auto-skip-sticky spec): current triage floor, threaded into `classifyForStickySkip`'s
+ *   root eligibility ('sticky-skip'/'stale' modes) and into `resolveItem`'s own re-check ('sticky-skip'
+ *   mode's live resolve). Omitted falls back to sticky-skip.js's DEFAULT_STICKY_FLOOR.
  */
 export async function bulkResolve(deps, opts) {
   if (!REVIEW_BULK_MODES.includes(opts.mode)) throw new JobSearchError('VALIDATION', `mode must be one of ${REVIEW_BULK_MODES.join(', ')}`);
@@ -326,7 +338,7 @@ export async function bulkResolve(deps, opts) {
   const mergeTargetByQueueId = new Map();
 
   if (opts.mode === 'sticky-skip') {
-    const classified = await classifyOpenQueueForStickySkip(deps, '', []);
+    const classified = await classifyOpenQueueForStickySkip(deps, '', [], opts.stickyFloor);
     for (const { id, decision } of classified) {
       if (decision.decision === 'leave') { bumpLeave(decision.reason); continue; }
       targetIds.push(id);
@@ -361,7 +373,7 @@ export async function bulkResolve(deps, opts) {
     // the caller can follow up with mode:'sticky-skip' explicitly; a row that does NOT classify as a
     // sticky merge proceeds through the ordinary separate path below, unchanged.
     const classified = await classifyOpenQueueForStickySkip(
-      deps, 'AND created_at < $1::timestamptz - make_interval(days => $2)', [now, days],
+      deps, 'AND created_at < $1::timestamptz - make_interval(days => $2)', [now, days], opts.stickyFloor,
     );
     for (const { id, decision } of classified) {
       if (decision.decision === 'merge') {
@@ -394,7 +406,7 @@ export async function bulkResolve(deps, opts) {
         // this function's own classification pass and resolveItem's re-check (see resolveItem's own
         // re-read-inside-the-transaction comment) -- either way the queue item still resolves, just
         // without a bulk-specific note text.
-        const out = await deps.withClient((c) => withTransaction(c, (c2) => resolveItem(c2, { queueId, resolution: 'merge', targetId, actor, now })));
+        const out = await deps.withClient((c) => withTransaction(c, (c2) => resolveItem(c2, { queueId, resolution: 'merge', targetId, actor, now, stickyFloor: opts.stickyFloor })));
         if (out.resolution === 'merge') {
           counts.merged++;
           ids.merged.push(queueId);
@@ -434,9 +446,12 @@ export const tool = {
   schema,
   async handler(a, deps) {
     const days = deps.config ? deps.config.adapters.dedup.reviewAutoSeparateDays : 30;
+    const stickyFloor = deps.config ? deps.config.triage.deterministic.floor : undefined;
     if (a.action === 'bulk') {
       if (!a.mode) throw new JobSearchError('VALIDATION', 'mode is required for action:"bulk"');
-      const out = await bulkResolve(deps, { mode: a.mode, reason: a.reason, dryRun: a.dry_run, confirm: a.confirm, actor: 'mcp', reviewAutoSeparateDays: days });
+      const out = await bulkResolve(deps, {
+        mode: a.mode, reason: a.reason, dryRun: a.dry_run, confirm: a.confirm, actor: 'mcp', reviewAutoSeparateDays: days, stickyFloor,
+      });
       return { ok: true, ...out };
     }
     if (a.action === 'list') {
@@ -468,7 +483,7 @@ export const tool = {
     return deps.withClient(async (c) => {
       await c.query('BEGIN');
       try {
-        const out = await resolveItem(c, { queueId: a.queue_id, resolution: a.resolution, targetId: a.target_id ?? null });
+        const out = await resolveItem(c, { queueId: a.queue_id, resolution: a.resolution, targetId: a.target_id ?? null, stickyFloor });
         await c.query('COMMIT');
         return { ok: true, ...out };
       } catch (err) {

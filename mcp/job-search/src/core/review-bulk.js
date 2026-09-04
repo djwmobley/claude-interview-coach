@@ -108,7 +108,11 @@ export const STICKY_SKIP_LEAVE_REASONS = Object.freeze(['not_open', 'candidate_m
  * @property {number|null} [salary_max]
  * @property {string|null} [apply_url]
  * @property {boolean} sticky_eligible caller-computed STICKY-ELIGIBLE (src/core/sticky-skip.js's
- *   stickyEligibleFor -- a DB read this pure function cannot do itself)
+ *   stickyEligibleFor -- a DB read this pure function cannot do itself). Since the auto-skip-sticky
+ *   spec, an auto-actor root's eligibility already bakes in a comparison of the QUEUE ITEM'S OWN
+ *   candidate's stored prescore against the current triage floor (and a check for a later non-status
+ *   event on the root) -- both are folded into this one boolean by the caller before this function ever
+ *   runs, so this classifier itself never reasons about prescore or floors directly.
  */
 
 /**

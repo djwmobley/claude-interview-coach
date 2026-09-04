@@ -15,6 +15,16 @@
  * STICKY-ELIGIBLE requires the target's most recent status-change event, which is a DB read; the
  * `stickyEligibleFor`/`loadStickyEligibility` helpers below are the one place that read runs, so A, B,
  * and C never re-implement it with slightly different SQL.
+ *
+ * auto-skip-sticky amendment: an `actor: 'auto'` status event (skip_low, skip_noise, model band, or any
+ * other freeform note -- the note text is no longer inspected at all) is STICKY-ELIGIBLE when BOTH (a)
+ * the CANDIDATE listing's own prescore is non-null and strictly below the current triage floor
+ * (config/triage.json's `deterministic.floor`, default 40, same source src/core/triage.js reads), AND
+ * (b) the root carries no event of any kind other than 'status' recorded after that status event (an
+ * operator note/edit after the auto skip means a human touched the root since, so it is no longer purely
+ * an unattended auto decision). This is a per-candidate gate, not a per-root one: the same auto-skipped
+ * root can be sticky for one low-prescore candidate and not for another, higher-prescore one, so the
+ * candidate's prescore is always an explicit input here, never read off the root row.
  */
 import { isLocationEligible } from './normalize.js';
 import { STICKY_STATUSES } from './statuses.js';
@@ -27,14 +37,12 @@ export function isStickyStatus(status) {
 }
 
 /**
- * Auto-triage's skip_noise reason always starts with this exact prefix (src/core/triage.js's
- * classifyForTriage: `` `auto-triage: noise_class=${row.noise_class ?? 'null'}` ``, written verbatim as
- * the event note via applyMark's statusNote -> recordEvent note passthrough). skip_low's reason starts
- * with `auto-triage: prescore ` instead, so this prefix alone disambiguates the two without re-running
- * classifyForTriage or re-parsing its full message. Any other auto note (e.g. auto_new's fit-only
- * reason, which is never a status change to 'skip') never matches this prefix either.
+ * Fallback floor used only when a caller does not supply one explicitly (old direct callers, tests).
+ * Mirrors config.js's `triageSchema.deterministic.floor` default -- production call sites always pass
+ * the REAL configured floor (config/triage.json, or this same default when triage.json is absent), so
+ * this constant only matters when a caller genuinely has no config available.
  */
-const AUTO_SKIP_NOISE_NOTE_PREFIX = 'auto-triage: noise_class=';
+export const DEFAULT_STICKY_FLOOR = 40;
 
 /**
  * STICKY-ELIGIBLE (spec Definitions), given the root's status and its most recent kind='status' event
@@ -42,38 +50,66 @@ const AUTO_SKIP_NOISE_NOTE_PREFIX = 'auto-triage: noise_class=';
  * (e.g. very old, pre-event-log data, or a row whose status was set some other way) is never eligible:
  * fail closed, per this repo's total-classification convention (an allow-list's failure mode is silent
  * escape; friction -- staying queued for ordinary review -- is the safer default here).
+ *
+ * Total classification over `event.actor`: 'dashboard'/'mcp'/'cli' (a human decision) is always
+ * eligible; 'auto' is eligible only when BOTH conditions in `auto` hold (see module doc comment above);
+ * every other actor (seed, migration, apply, or any other value) is never eligible.
  * @param {string|null|undefined} rootStatus
  * @param {{ actor: string, note: string|null }|null|undefined} event
+ * @param {{ candidatePrescore?: number|null, floor?: number, hasLaterNonStatusEvent?: boolean }} [auto]
+ *   only consulted when `event.actor === 'auto'`: `candidatePrescore` is the CANDIDATE listing's own
+ *   prescore (never the root's), `floor` is the current triage floor (defaults to DEFAULT_STICKY_FLOOR
+ *   when omitted), `hasLaterNonStatusEvent` is whether the root carries a kind<>'status' event recorded
+ *   after the status event being checked.
  */
-export function isStickyEligible(rootStatus, event) {
+export function isStickyEligible(rootStatus, event, auto) {
   if (!isStickyStatus(rootStatus)) return false;
   if (!event) return false;
   if (event.actor === 'dashboard' || event.actor === 'mcp' || event.actor === 'cli') return true;
-  if (event.actor === 'auto' && rootStatus === 'skip' && typeof event.note === 'string' && event.note.startsWith(AUTO_SKIP_NOISE_NOTE_PREFIX)) {
-    return true;
+  if (event.actor === 'auto') {
+    if (auto?.hasLaterNonStatusEvent) return false;
+    const candidatePrescore = auto?.candidatePrescore;
+    if (candidatePrescore == null) return false;
+    const floor = typeof auto?.floor === 'number' ? auto.floor : DEFAULT_STICKY_FLOOR;
+    return Number(candidatePrescore) < floor;
   }
-  // An auto skip_low (or any other 'auto'-actor note, including a mismatched/garbled one) is not
-  // eligible: only an explicit human decision or an auto-triage skip_noise call counts.
+  // seed/migration/apply (or any actor outside EVENT_ACTORS that somehow reaches here): never eligible.
   return false;
 }
 
 /**
  * Read the most recent kind='status' event on `rootId` whose to_status equals `rootStatus`, and report
- * STICKY-ELIGIBLE. Runs on the caller's client/transaction, so a caller already holding a transaction
- * (resolveItem, applyDecision's savepoint, bulkResolve's per-item transaction) gets a read consistent
- * with everything else it just wrote/read in that same transaction.
+ * STICKY-ELIGIBLE for `candidatePrescore` against `floor`. Runs on the caller's client/transaction, so a
+ * caller already holding a transaction (resolveItem, applyDecision's savepoint, bulkResolve's per-item
+ * transaction) gets a read consistent with everything else it just wrote/read in that same transaction.
+ *
+ * The "any event of any kind other than status recorded after that status event" check only ever runs
+ * when the found event's actor is 'auto' (the only branch that needs it) -- a non-sticky or
+ * human-actor root never pays for the extra query.
  * @param {import('pg').ClientBase} client
  * @param {number} rootId
  * @param {string|null|undefined} rootStatus
+ * @param {number|null} [candidatePrescore] the CANDIDATE listing's own prescore; only consulted on the
+ *   'auto'-actor branch, ignored otherwise
+ * @param {number} [floor] current triage floor; defaults to DEFAULT_STICKY_FLOOR when omitted
  * @returns {Promise<boolean>}
  */
-export async function stickyEligibleFor(client, rootId, rootStatus) {
+export async function stickyEligibleFor(client, rootId, rootStatus, candidatePrescore = null, floor = DEFAULT_STICKY_FLOOR) {
   if (!isStickyStatus(rootStatus)) return false;
   const r = await client.query(
-    `SELECT actor, note FROM ic_job_events WHERE listing_id = $1 AND kind = 'status' AND to_status = $2 ORDER BY at DESC, id DESC LIMIT 1`,
+    `SELECT id, at, actor, note FROM ic_job_events WHERE listing_id = $1 AND kind = 'status' AND to_status = $2 ORDER BY at DESC, id DESC LIMIT 1`,
     [rootId, rootStatus],
   );
-  return isStickyEligible(rootStatus, r.rows[0] ?? null);
+  const event = r.rows[0] ?? null;
+  let hasLaterNonStatusEvent = false;
+  if (event && event.actor === 'auto') {
+    const later = await client.query(
+      `SELECT 1 FROM ic_job_events WHERE listing_id = $1 AND kind <> 'status' AND (at, id) > ($2, $3) LIMIT 1`,
+      [rootId, event.at, event.id],
+    );
+    hasLaterNonStatusEvent = later.rowCount > 0;
+  }
+  return isStickyEligible(rootStatus, event, { candidatePrescore, floor, hasLaterNonStatusEvent });
 }
 
 /**
@@ -82,12 +118,14 @@ export async function stickyEligibleFor(client, rootId, rootStatus) {
  * a non-sticky root (the common case) never pays for the event query at all.
  * @param {import('pg').ClientBase} client
  * @param {number} rootId
+ * @param {number|null} [candidatePrescore] the CANDIDATE listing's own prescore (see stickyEligibleFor)
+ * @param {number} [floor] current triage floor; defaults to DEFAULT_STICKY_FLOOR when omitted
  * @returns {Promise<{ eligible: boolean, status: string|null }>}
  */
-export async function loadStickyEligibility(client, rootId) {
+export async function loadStickyEligibility(client, rootId, candidatePrescore = null, floor = DEFAULT_STICKY_FLOOR) {
   const r = await client.query('SELECT status FROM ic_job_listings WHERE id = $1', [rootId]);
   const status = r.rows[0]?.status ?? null;
-  const eligible = await stickyEligibleFor(client, rootId, status);
+  const eligible = await stickyEligibleFor(client, rootId, status, candidatePrescore, floor);
   return { eligible, status };
 }
 

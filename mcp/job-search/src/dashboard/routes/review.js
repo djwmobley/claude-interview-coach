@@ -90,6 +90,7 @@ export function register(router, deps, streamHub) {
       dryRun,
       confirm,
       actor: 'dashboard',
+      stickyFloor: deps.config ? deps.config.triage.deterministic.floor : undefined,
     });
     if (!dryRun && out.counts.separate > 0) streamHub?.notifyChanged('events');
     sendJson(ctx.res, 200, { ok: true, ...out });
@@ -104,7 +105,9 @@ export function register(router, deps, streamHub) {
     const result = await deps.withClient(async (c) => {
       await c.query('BEGIN');
       try {
-        const out = await resolveItem(c, { queueId, resolution: b.resolution, targetId, actor: 'dashboard' });
+        const out = await resolveItem(c, {
+          queueId, resolution: b.resolution, targetId, actor: 'dashboard', stickyFloor: deps.config ? deps.config.triage.deterministic.floor : undefined,
+        });
         await c.query('COMMIT');
         return out;
       } catch (err) {

@@ -561,7 +561,11 @@ async function executeRun(p) {
       }
       applied = await withTransaction(client, (c) => applyDecision(c, rec, decision, {
         runId, pageIndex: ev.pageIndex, searchProfile: profile.name, profileRev: profile.rev,
-        prescore: ps, prescoreRaw: psRaw, noiseClass, detailSkipped, embedding, now,
+        // stickyFloor (auto-skip-sticky spec): same config source triage.js reads (config/triage.json's
+        // deterministic.floor, default 40), so findStickySkipRoot/findStickySkipRootForSameRow gate an
+        // auto-actor STICKY-ELIGIBLE root on this row's own already-computed prescore (`ps` above)
+        // against the SAME floor auto-triage itself would use to decide skip_low.
+        prescore: ps, prescoreRaw: psRaw, noiseClass, detailSkipped, embedding, now, stickyFloor: config.triage.deterministic.floor,
       }));
     }
     if (!dryRun && applyDetail && applied.id) await maybeSaveApplyTarget(s.name, applied.id, rec, applyDetail);

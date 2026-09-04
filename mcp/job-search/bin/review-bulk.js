@@ -103,6 +103,7 @@ async function main() {
       confirm: args.confirm,
       actor: 'cli',
       reviewAutoSeparateDays: config ? config.adapters.dedup.reviewAutoSeparateDays : 30,
+      stickyFloor: config ? config.triage.deterministic.floor : undefined,
     });
     printTable(out);
     process.exit(0);
