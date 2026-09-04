@@ -11,5 +11,13 @@
   "probeRowCap": 3,
   "reprobeAfterHours": 48,
   "lockMinutes": 40,
-  "pollSeconds": 30
+  "pollSeconds": 30,
+  "waitForScan": true,
+  "waitDeadlineLocal": "07:40",
+  "waitHardDeadlineLocal": "07:55",
+  "waitPollSeconds": 60,
+  "waitStaleHeartbeatMinutes": 10,
+  "probeFitFloor": 70,
+  "probeRowCapWithBrowser": 40,
+  "probeTimeBudgetMs": 600000
 }

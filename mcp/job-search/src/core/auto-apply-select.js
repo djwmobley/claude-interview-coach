@@ -88,6 +88,58 @@ export const CLOSED_REASONS = Object.freeze([
 ]);
 
 /**
+ * Ordered funnel gates (spec amendment A5): a reporting-only view over CLOSED_REASONS' own declared
+ * evaluation-precedence order, collapsing every exclusion_* reason into one "exclusions" stage and the
+ * three fit-related reasons (not_scored/below_fit/human_fit_override) into one "fit" stage. Built directly
+ * from a single classify() pass per row -- never a second evaluation -- so `funnel[gate]` is simply
+ * "rows whose already-computed reason has not yet been consumed by this gate or an earlier one".
+ * `daily_cap` is deliberately excluded: the spec applies the cap AFTER the funnel's own `eligible` count
+ * and reports it separately ("applied N of cap 5"), never as a funnel stage.
+ */
+export const GATES = Object.freeze([
+  { name: 'exclusions', reasons: Object.freeze(EXCLUSION_BRANCHES.filter((b) => b !== 'eligible').map((b) => `exclusion_${b}`)) },
+  { name: 'fit', reasons: Object.freeze(['not_scored', 'below_fit', 'human_fit_override']) },
+  { name: 'duplicate_of', reasons: Object.freeze(['duplicate_of']) },
+  { name: 'not_us', reasons: Object.freeze(['not_us']) },
+  { name: 'salary_below_floor', reasons: Object.freeze(['salary_below_floor']) },
+  { name: 'active_application', reasons: Object.freeze(['active_application']) },
+  { name: 'no_description', reasons: Object.freeze(['no_description']) },
+  { name: 'easy_apply_only', reasons: Object.freeze(['easy_apply_only']) },
+  { name: 'apply_target_unresolved', reasons: Object.freeze(['apply_target_unresolved']) },
+  { name: 'ats_not_allowed', reasons: Object.freeze(['ats_not_allowed']) },
+  { name: 'confidence_not_exact', reasons: Object.freeze(['confidence_not_exact']) },
+  { name: 'hourly_pay', reasons: Object.freeze(['hourly_pay']) },
+]);
+
+/** Gate names in the funnel's own rendered order, `eligible` last (see GATES' own doc comment). */
+export const FUNNEL_STAGES = Object.freeze([...GATES.map((g) => g.name), 'eligible']);
+
+/**
+ * Pure, total, sequential funnel: `considered` (input length), then one non-increasing count per GATES
+ * entry (each gate's count = the previous stage's count minus however many rows' reason falls in THIS
+ * gate's reason set), ending in `eligible` = the count of rows whose reason is literally 'eligible'. No
+ * second classification pass -- every count here is derived purely from the `reason` each row already
+ * carries from a single classify() call.
+ * @param {Array<{ row: CandidateRow, reason: string }>} classified rows already classified (pre-dedup, pre-cap)
+ * @returns {Record<'considered'|typeof FUNNEL_STAGES[number], number>}
+ */
+export function computeFunnel(classified) {
+  /** @type {Record<string, number>} */
+  const reasonCounts = {};
+  for (const entry of classified) reasonCounts[entry.reason] = (reasonCounts[entry.reason] ?? 0) + 1;
+  /** @type {Record<string, number>} */
+  const funnel = { considered: classified.length };
+  let remaining = classified.length;
+  for (const gate of GATES) {
+    const failedHere = gate.reasons.reduce((sum, r) => sum + (reasonCounts[r] ?? 0), 0);
+    remaining -= failedHere;
+    funnel[gate.name] = remaining;
+  }
+  funnel.eligible = remaining;
+  return /** @type {any} */ (funnel);
+}
+
+/**
  * @typedef {Object} CandidateRow
  * @property {number} listingId
  * @property {number|null} fitScore ic_job_listings.fit_score
@@ -319,6 +371,9 @@ export async function fetchCandidateRows(client) {
  * @property {CandidateRow[]} eligible the rows selected to actually apply through this run, in order
  * @property {number} capUsed slots already consumed today before this run
  * @property {number} capRemaining slots left after `eligible` (never negative)
+ * @property {number} dailyCap the configured daily cap this run used (spec amendment A7: "applied N of cap 5")
+ * @property {ReturnType<typeof computeFunnel>} funnel sequential gate counts (spec amendment A5), computed
+ *   from the same single classify() pass as `results` -- never a second evaluation.
  */
 
 /**
@@ -346,6 +401,7 @@ export async function selectCandidates(client, opts) {
   for (const row of rows) {
     classified.push({ row, reason: await classify(client, row, ctx) });
   }
+  const funnel = computeFunnel(classified);
   const deduped = dedupResolvedTargets(classified);
   const capUsed = await countToday(client, opts.now, opts.timezone);
   const remaining = Math.max(0, opts.dailyCap - capUsed);
@@ -356,5 +412,7 @@ export async function selectCandidates(client, opts) {
     eligible,
     capUsed,
     capRemaining: Math.max(0, remaining - eligible.length),
+    dailyCap: opts.dailyCap,
+    funnel,
   };
 }

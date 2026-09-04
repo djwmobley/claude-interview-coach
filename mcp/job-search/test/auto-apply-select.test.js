@@ -12,7 +12,7 @@ import { createApplication } from '../src/core/applications.js';
 import { BUILT_IN_BLOCKED } from '../src/apply/exclusions.js';
 import {
   isUsLocation, classifyCandidate, classifyCandidateWithExclusions, dedupResolvedTargets, applyDailyCap,
-  startOfDayInTz, countAutoApprovedToday, selectCandidates, CLOSED_REASONS,
+  startOfDayInTz, countAutoApprovedToday, selectCandidates, CLOSED_REASONS, GATES, FUNNEL_STAGES, computeFunnel,
 } from '../src/core/auto-apply-select.js';
 
 const FLOORS = { texas_or_remote: 225000, relocation: 275000 };
@@ -280,6 +280,13 @@ describe('selectCandidates: end-to-end with injected fetch/count', () => {
     assert.equal(result.eligible.length, 1);
     assert.equal(result.capRemaining, 0);
     assert.deepEqual(result.results.map((r) => r.reason), ['eligible', 'daily_cap', 'daily_cap']);
+    // spec amendment A5: the funnel is built from the pre-cap classify() pass, so all three rows still show
+    // up as 'eligible' at the funnel's own final stage even though the cap later downgrades two of them --
+    // funnel.eligible and "applied N of cap M" are deliberately two different numbers (cap is reported
+    // separately, never folded into a funnel stage).
+    assert.equal(result.funnel.considered, 3);
+    assert.equal(result.funnel.eligible, 3);
+    assert.equal(result.dailyCap, 5);
   });
 });
 
@@ -345,5 +352,95 @@ describe('classifyCandidateWithExclusions: the apply exclusion gate runs FIRST, 
     const listingId = await insertListing({ company: 'Wholly Unrelated Co Two', companyNorm: 'wholly unrelated co two' });
     const reason = await classifyCandidateWithExclusions(client, row({ listingId, company: 'Wholly Unrelated Co Two', companyNorm: 'wholly unrelated co two' }), exclusionCtx());
     assert.equal(reason, 'eligible');
+  });
+});
+
+describe('computeFunnel: sequential funnel derived from a single classify() pass (spec amendment A5)', () => {
+  test('GATES reasons plus eligible partition every non-daily_cap CLOSED_REASONS value exactly once', () => {
+    const covered = new Set();
+    for (const gate of GATES) {
+      for (const r of gate.reasons) {
+        assert.equal(covered.has(r), false, `reason ${r} claimed by more than one gate`);
+        covered.add(r);
+      }
+    }
+    covered.add('eligible');
+    const expected = CLOSED_REASONS.filter((r) => r !== 'daily_cap');
+    assert.deepEqual([...covered].sort(), [...expected].sort());
+  });
+
+  test('a single row failing at gate 1 (exclusions) reduces funnel.exclusions by exactly one, every later gate matches (no recovery)', () => {
+    const classified = [
+      { row: row({ listingId: 1 }), reason: 'exclusion_blocked_company' },
+      { row: row({ listingId: 2 }), reason: 'eligible' },
+    ];
+    const funnel = computeFunnel(classified);
+    assert.equal(funnel.considered, 2);
+    assert.equal(funnel.exclusions, 1);
+    for (const stage of FUNNEL_STAGES.slice(1)) assert.equal(funnel[stage], 1, `stage ${stage}`);
+    assert.equal(funnel.eligible, 1);
+  });
+
+  test('first step = considered minus fails at gate 1; each subsequent step = previous minus fails at that gate; final = eligible', () => {
+    const classified = [
+      { row: row({ listingId: 1 }), reason: 'exclusion_blocked_company' },
+      { row: row({ listingId: 2 }), reason: 'not_scored' },
+      { row: row({ listingId: 3 }), reason: 'duplicate_of' },
+      { row: row({ listingId: 4 }), reason: 'not_us' },
+      { row: row({ listingId: 5 }), reason: 'salary_below_floor' },
+      { row: row({ listingId: 6 }), reason: 'active_application' },
+      { row: row({ listingId: 7 }), reason: 'no_description' },
+      { row: row({ listingId: 8 }), reason: 'easy_apply_only' },
+      { row: row({ listingId: 9 }), reason: 'apply_target_unresolved' },
+      { row: row({ listingId: 10 }), reason: 'ats_not_allowed' },
+      { row: row({ listingId: 11 }), reason: 'confidence_not_exact' },
+      { row: row({ listingId: 12 }), reason: 'hourly_pay' },
+      { row: row({ listingId: 13 }), reason: 'eligible' },
+      { row: row({ listingId: 14 }), reason: 'eligible' },
+    ];
+    const funnel = computeFunnel(classified);
+    assert.equal(funnel.considered, 14);
+    let remaining = 14;
+    for (const gate of GATES) {
+      remaining -= 1; // exactly one row fails at each gate in this fixture
+      assert.equal(funnel[gate.name], remaining, `gate ${gate.name}`);
+    }
+    assert.equal(funnel.eligible, 2);
+  });
+
+  test('funnel totals equal considered: considered minus every non-eligible reason equals funnel.eligible', () => {
+    const classified = [
+      { row: row({ listingId: 1 }), reason: 'below_fit' },
+      { row: row({ listingId: 2 }), reason: 'human_fit_override' },
+      { row: row({ listingId: 3 }), reason: 'not_scored' },
+      { row: row({ listingId: 4 }), reason: 'exclusion_unknown_company' },
+      { row: row({ listingId: 5 }), reason: 'eligible' },
+      { row: row({ listingId: 6 }), reason: 'eligible' },
+      { row: row({ listingId: 7 }), reason: 'eligible' },
+    ];
+    const funnel = computeFunnel(classified);
+    const totalFails = classified.filter((c) => c.reason !== 'eligible').length;
+    assert.equal(funnel.considered - totalFails, funnel.eligible);
+    assert.equal(funnel.eligible, 3);
+  });
+
+  test('an empty classified list is total: every stage is zero, never throws', () => {
+    const funnel = computeFunnel([]);
+    assert.equal(funnel.considered, 0);
+    for (const stage of FUNNEL_STAGES) assert.equal(funnel[stage], 0);
+  });
+
+  test('multiple rows failing the SAME gate all count against that one gate', () => {
+    const classified = [
+      { row: row({ listingId: 1 }), reason: 'not_us' },
+      { row: row({ listingId: 2 }), reason: 'not_us' },
+      { row: row({ listingId: 3 }), reason: 'not_us' },
+      { row: row({ listingId: 4 }), reason: 'eligible' },
+    ];
+    const funnel = computeFunnel(classified);
+    assert.equal(funnel.exclusions, 4); // nothing failed the exclusions/fit gates
+    assert.equal(funnel.fit, 4);
+    assert.equal(funnel.not_us, 1); // three rows fell out here
+    assert.equal(funnel.eligible, 1);
   });
 });
