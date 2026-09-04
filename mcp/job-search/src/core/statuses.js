@@ -43,6 +43,14 @@ export function groupOf(status) {
 }
 
 /**
+ * STICKY statuses (sticky-skip spec, Definitions): a listing carrying one of these was a closed human
+ * (or auto-triage skip_noise) decision. A later repost/cross-source-dup/merge candidate for the SAME
+ * real-world posting silently inherits it, instead of reopening for review, when the root also passes
+ * STICKY-ELIGIBLE -- see src/core/sticky-skip.js for that check plus MATCH-TEST/SURFACE-EXCEPTION.
+ */
+export const STICKY_STATUSES = Object.freeze(['skip', 'passed', 'lost']);
+
+/**
  * Target-selection precedence for dedup (src/core/dedup.js's selectTarget): best (lowest index) first.
  * `review` ranks first (pr1-spec-decisions.md): a pending review row stays the merge target until
  * resolved, so a second arrival never silently picks a different row out from under an open review item.

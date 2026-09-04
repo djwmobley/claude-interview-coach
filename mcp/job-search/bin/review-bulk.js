@@ -2,12 +2,17 @@
 // @ts-check
 /**
  * Review-queue bulk-resolve CLI (review-bulk spec S3c). Thin wrapper over bulkResolve()
- * (src/tools/review.js): re-queries open review-queue items at execution time and separates the ones
- * mode 'rule' | 'reason' | 'stale' selects. Only ever performs 'separate' -- never merge or repost.
+ * (src/tools/review.js): re-queries open review-queue items at execution time and resolves the ones
+ * the selected mode picks. 'rule' | 'reason' | 'stale' only ever separate; 'sticky-skip' (sticky-skip
+ * spec part C) is the one mode that merges -- into a STICKY-ELIGIBLE root -- instead.
  *
  *   node bin/review-bulk.js --mode rule [--dry-run | --no-dry-run --confirm]
  *   node bin/review-bulk.js --mode reason --reason title_similar_same_company [--dry-run | --no-dry-run --confirm]
  *   node bin/review-bulk.js --mode stale [--dry-run | --no-dry-run --confirm]
+ *   node bin/review-bulk.js --mode sticky-skip [--dry-run | --no-dry-run --confirm]
+ *
+ * `--mode reason --reason reopened_skip` is refused: those items now resolve via `--mode sticky-skip`,
+ * which re-checks STICKY-ELIGIBLE per candidate instead of separating every reopened_skip row alike.
  *
  * --dry-run is the default (zero writes, prints a preview count table). A live run needs BOTH
  * --no-dry-run AND --confirm; --no-dry-run alone is refused by bulkResolve() itself (dryRun false
@@ -34,7 +39,7 @@ function parseArgs(argv) {
     else if (a === '--no-dry-run') out.dryRun = false;
     else if (a === '--confirm') out.confirm = true;
     else if (a === '--help' || a === '-h') {
-      console.log('usage: node bin/review-bulk.js --mode rule|reason|stale [--reason <reason>] [--dry-run | --no-dry-run --confirm]');
+      console.log('usage: node bin/review-bulk.js --mode rule|reason|stale|sticky-skip [--reason <reason>] [--dry-run | --no-dry-run --confirm]');
       process.exit(0);
     } else {
       console.error(`unrecognized argument: ${a}`);
@@ -47,7 +52,11 @@ function parseArgs(argv) {
 /** @param {Awaited<ReturnType<typeof bulkResolve>>} out */
 function printTable(out) {
   console.log(`mode: ${out.mode}  dry_run: ${out.dryRun}`);
-  console.log(`separate: ${out.counts.separate}`);
+  if (out.mode === 'sticky-skip') console.log(`merged: ${out.counts.merged}`);
+  else console.log(`separate: ${out.counts.separate}`);
+  if (out.counts.left_for_sticky_skip) {
+    console.log(`left_for_sticky_skip: ${out.counts.left_for_sticky_skip} (rerun --mode sticky-skip for these)`);
+  }
   const leaveEntries = Object.entries(out.counts.leave_by_reason);
   if (leaveEntries.length) {
     console.log('leave_by_reason:');
@@ -67,7 +76,7 @@ function printTable(out) {
 async function main() {
   const args = parseArgs(process.argv.slice(2));
   if (!args.mode) {
-    console.error('--mode rule|reason|stale is required');
+    console.error('--mode rule|reason|stale|sticky-skip is required');
     process.exit(1);
   }
   /** @type {import('../src/core/config.js').LoadedConfig|null} */

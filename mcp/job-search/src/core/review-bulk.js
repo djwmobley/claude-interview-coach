@@ -15,6 +15,7 @@
  * bar (and not the exact token-key bar) stays queued for ordinary, one-at-a-time review.
  */
 import { isLocationEligible, isRemoteLocation, titleTokenKey } from './normalize.js';
+import { isStickyStatus, matchTest, surfaceException } from './sticky-skip.js';
 
 /** The one rule this module currently knows how to auto-separate. */
 export const BULK_SEPARATE_RULE = 'same_title_diff_location';
@@ -90,4 +91,69 @@ export function classifyForBulkSeparate(item, candidate, match) {
   if (candidate.location_norm === match.location_norm) return { decision: 'leave', reason: 'location_same' };
   if (isRemoteLocation(candidate.location_norm) || isRemoteLocation(match.location_norm)) return { decision: 'leave', reason: 'remote_involved' };
   return { decision: 'separate', rule: BULK_SEPARATE_RULE };
+}
+
+/** The closed list of reasons `classifyForStickySkip` can hand back on the leave branch, in precedence order. */
+export const STICKY_SKIP_LEAVE_REASONS = Object.freeze(['not_open', 'candidate_missing', 'no_matches', 'no_sticky_match']);
+
+/**
+ * @typedef {Object} StickySkipRootRow
+ * @property {number} id
+ * @property {string|null} [status]
+ * @property {string|null} [source]
+ * @property {string|null} [url_normalized]
+ * @property {string|null} [title_norm]
+ * @property {string|null} [company_norm]
+ * @property {string|null} [location_norm]
+ * @property {number|null} [salary_max]
+ * @property {string|null} [apply_url]
+ * @property {boolean} sticky_eligible caller-computed STICKY-ELIGIBLE (src/core/sticky-skip.js's
+ *   stickyEligibleFor -- a DB read this pure function cannot do itself)
+ */
+
+/**
+ * @typedef {{ decision: 'merge', targetId: number } | { decision: 'leave', reason: typeof STICKY_SKIP_LEAVE_REASONS[number] }} StickySkipDecision
+ */
+
+/**
+ * Total classification for bulk mode 'sticky-skip' (sticky-skip spec part C): every open queue item,
+ * of ANY reason (unlike 'rule' mode, which only ever looks at `title_similar_same_company`), maps to
+ * either 'merge' (a target id to resolve through, via `review({resolution:'merge'})`/`resolveItem`) or
+ * 'leave' with a reason. Never throws: a missing candidate or an empty/unresolvable match list is a
+ * leave branch, not an exception.
+ *
+ * Precedence: `not_open` (already resolved) > `candidate_missing` (candidate row gone or item carries
+ * no candidate_id) > `no_matches` (the item's `matches[]` is empty) > `no_sticky_match` (none of the
+ * item's match ids resolved to a row this caller loaded, or none of those rows is a STICKY-ELIGIBLE
+ * root that MATCH-TEST accepts and SURFACE-EXCEPTION does not reject).
+ *
+ * When multiple of the item's `matches[]` qualify, the LOWEST id wins (spec part B's same tie-break,
+ * reused here for consistency): this function does not itself re-verify STICKY-ELIGIBLE at merge time
+ * -- `resolveItem` does that inside its own transaction (spec part A), so a race between this preview
+ * and the live run is caught there, not here.
+ * @param {{ resolution?: string|null, reason?: string, matches?: number[] }|null|undefined} item the open review-queue row
+ * @param {{ id?: number }|null|undefined} candidate the candidate listing row (item.candidate_id)
+ * @param {(StickySkipRootRow|null|undefined)[]} roots one entry per id in `item.matches`, in the SAME
+ *   order, `null`/`undefined` where the caller could not load that id (deleted since queuing)
+ * @returns {StickySkipDecision}
+ */
+export function classifyForStickySkip(item, candidate, roots) {
+  if (!item || item.resolution != null) return { decision: 'leave', reason: 'not_open' };
+  if (!candidate || candidate.id == null) return { decision: 'leave', reason: 'candidate_missing' };
+  const matches = Array.isArray(item.matches) ? item.matches : [];
+  if (matches.length === 0) return { decision: 'leave', reason: 'no_matches' };
+  const cand = /** @type {StickySkipRootRow} */ (/** @type {unknown} */ (candidate));
+  /** @type {{ id: number, status: string }[]} */
+  const eligible = [];
+  for (const root of roots ?? []) {
+    if (!root) continue;
+    if (!isStickyStatus(root.status)) continue;
+    if (!root.sticky_eligible) continue;
+    if (!matchTest(cand, root)) continue;
+    if (surfaceException(cand, root)) continue;
+    eligible.push({ id: root.id, status: /** @type {string} */ (root.status) });
+  }
+  if (eligible.length === 0) return { decision: 'leave', reason: 'no_sticky_match' };
+  eligible.sort((a, b) => a.id - b.id);
+  return { decision: 'merge', targetId: eligible[0].id };
 }
