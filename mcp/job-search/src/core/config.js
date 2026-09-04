@@ -397,6 +397,27 @@ export const autoApplySchema = z.object({
   reprobeAfterHours: z.number().int().positive().default(48),
   lockMinutes: z.number().int().positive().default(40),
   pollSeconds: z.number().int().positive().default(30),
+  // Scan-wait fix (2026-09-04 race between the 06:55 auto-apply task and a late-starting scan): one
+  // deadline-aware wait loop, two America/Chicago local-time deadlines. waitDeadlineLocal (soft) bounds how
+  // long auto-apply waits on a scan that has not even started, or has already failed/is unreadable
+  // (never_started/failed/unknown) before self-healing Chrome and proceeding anyway. waitHardDeadlineLocal
+  // (hard) bounds how long it waits on a scan that IS actively running/stalled -- past that, prepare/apply
+  // are skipped entirely (Chrome and the advisory lock belong to the scan) and select runs read-only for
+  // the report. waitStaleHeartbeatMinutes mirrors adapters.json's own run.heartbeatStaleMinutes (default
+  // 10) but is a SEPARATE key here since auto-apply's wait loop is a distinct consumer that should not
+  // silently start tracking scan.js's own reaper threshold if that one is ever retuned independently.
+  waitForScan: z.boolean().default(true),
+  waitDeadlineLocal: z.string().regex(/^\d{1,2}:\d{2}$/, 'waitDeadlineLocal must be "HH:MM"').default('07:40'),
+  waitHardDeadlineLocal: z.string().regex(/^\d{1,2}:\d{2}$/, 'waitHardDeadlineLocal must be "HH:MM"').default('07:55'),
+  waitPollSeconds: z.number().int().positive().default(60),
+  waitStaleHeartbeatMinutes: z.number().int().positive().default(10),
+  // Probe throughput fix: probeFitFloor/probeRowCapWithBrowser widen the prepare-phase query beyond the
+  // old single probeRowCap (3) for rows that never need a browser (everything but LinkedIn); LinkedIn rows
+  // still cap at probeRowCap regardless of browser availability (spec amendment A1). probeTimeBudgetMs
+  // bounds the whole prepare phase by wall-clock time, checked between rows only, never mid-row.
+  probeFitFloor: z.number().int().min(0).max(100).default(70),
+  probeRowCapWithBrowser: z.number().int().positive().default(40),
+  probeTimeBudgetMs: z.number().int().positive().default(600000),
 });
 
 export const companyAliasesSchema = z.object({

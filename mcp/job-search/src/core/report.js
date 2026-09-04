@@ -987,6 +987,21 @@ export function renderReportMarkdown(data, registry, googleAuthState, dashboardH
  * @property {{ file: string, message: string }} [no_apply] apply exclusion gate: a missing/invalid
  *   config/apply-exclusions.json aborted the run before select ever ran (bin/auto-apply.js exits non-zero
  *   on this; the report renders a loud [NO APPLY] line naming the file, mirroring [NO SCAN]/[LOCK MISMATCH]).
+ * @property {string} [phase] scan-wait fix (spec amendment A2): 'waiting'|'preparing'|'selecting'|
+ *   'applying'|'done', written at process start and rewritten at every phase change so bin/remind.js's
+ *   digest can tell a run still in flight from a completed one with genuinely zero results. Absent on
+ *   every summary written before this fix -- collectAutoApply treats that the same as 'done'.
+ * @property {string} [started_at] ISO instant the run began (set alongside `phase`).
+ * @property {Array<{ code: string, severity: 'warning', [k: string]: any }>} [warnings] spec amendment A7:
+ *   SCAN_NOT_FINISHED / SCAN_STILL_RUNNING_AT_DEADLINE / SCAN_FAILED / SCAN_STATE_UNKNOWN /
+ *   CHROME_LAUNCH_FAILED, rendered in that fixed order regardless of push order.
+ * @property {any} [prepare] bin/auto-apply.js's runPrepare() stats for this run, or null when prepare was
+ *   skipped (spec amendment A2's still-running-at-deadline path never runs it).
+ * @property {string} [outcome] runLifecycle fix: 'ok'|'scan_still_running'|'locked'|'error', set only once
+ *   `phase` reaches 'done' -- distinguishes a genuinely completed run (possibly with zero results) from one
+ *   that died before finishing (locked/error), which must never render as either in-progress or a quiet
+ *   zero-result success.
+ * @property {{ message: string, code: string|null }} [error] present only when `outcome` is 'error'.
  */
 
 /**
@@ -998,7 +1013,53 @@ export function renderReportMarkdown(data, registry, googleAuthState, dashboardH
  * @property {number|null} capRemaining
  * @property {Record<string, number>} skippedByReason every non-'eligible', non-'daily_cap' reason -> count
  * @property {Array<{ id: number, title: string, company: string, source: string|null, url: string|null, linkedinDeepLink: string|null }>} unresolved
+ * @property {Array<{ code: string, severity: 'warning', [k: string]: any }>} warnings
+ * @property {Record<string, number>|null} funnel spec amendment A5's sequential gate counts, or null when
+ *   this run's summary carries none (older summaries, or the read-only still-running-at-deadline path
+ *   before select ever wrote one -- never thrown, never fabricated).
+ * @property {number|null} dailyCap
+ * @property {{ attempted?: number, resolved?: number, unresolved?: number, skipped?: number, skippedByReason?: Record<string, number>, stoppedBy?: string|null, remaining?: number }|null} prepare
+ *   the prepare-phase stats bin/auto-apply.js's runPrepare() returned, or null when prepare was skipped
+ *   this run (the still-running-at-deadline path, dry-run before any prepare ran, or an older summary).
  */
+
+/** Fixed rendering order for auto-apply warnings (spec amendment A7) -- any code not in this list still
+ * renders, appended after every known code, never silently dropped. */
+export const AUTO_APPLY_WARNING_ORDER = Object.freeze([
+  'SCAN_NOT_FINISHED', 'SCAN_STILL_RUNNING_AT_DEADLINE', 'SCAN_FAILED', 'SCAN_STATE_UNKNOWN', 'CHROME_LAUNCH_FAILED',
+]);
+
+/**
+ * @param {Array<{ code: string, [k: string]: any }>} warnings
+ * @returns {Array<{ code: string, [k: string]: any }>}
+ */
+function orderedWarnings(warnings) {
+  const list = Array.isArray(warnings) ? warnings.filter(Boolean) : [];
+  const known = AUTO_APPLY_WARNING_ORDER.flatMap((code) => list.filter((w) => w.code === code));
+  const unknown = list.filter((w) => !AUTO_APPLY_WARNING_ORDER.includes(w.code));
+  return [...known, ...unknown];
+}
+
+/** Funnel gate names in rendered order (matches src/core/auto-apply-select.js's own FUNNEL_STAGES). */
+const FUNNEL_LINE_STAGES = Object.freeze([
+  'exclusions', 'fit', 'duplicate_of', 'not_us', 'salary_below_floor', 'active_application', 'no_description',
+  'easy_apply_only', 'apply_target_unresolved', 'ats_not_allowed', 'confidence_not_exact', 'hourly_pay', 'eligible',
+]);
+
+/**
+ * "funnel: considered N > exclusions N > fit N > ... > eligible N, applied N of cap M" (spec amendment A7).
+ * Returns null when `data.funnel` is absent (an older summary, or the still-running-at-deadline path
+ * before a funnel was ever computed).
+ * @param {AutoApplyReportData} data
+ * @returns {string|null}
+ */
+function funnelLine(data) {
+  if (!data.funnel || typeof data.funnel !== 'object') return null;
+  const parts = [`considered ${data.funnel.considered ?? 0}`];
+  for (const stage of FUNNEL_LINE_STAGES) parts.push(`${stage} ${data.funnel[stage] ?? 0}`);
+  const cap = data.dailyCap ?? '?';
+  return `funnel: ${parts.join(' > ')}, applied ${data.appliedCount} of cap ${cap}`;
+}
 
 /**
  * Shape one auto-apply run's JSON summary into report data, looking up title/company/source for the
@@ -1010,12 +1071,29 @@ export function renderReportMarkdown(data, registry, googleAuthState, dashboardH
  * not something that quietly disappears from the email.
  * @param {import('pg').ClientBase} client
  * @param {AutoApplySummary|null|undefined} summary
- * @returns {Promise<{ hasRun: false, noApply?: { file: string, message: string } } | ({ hasRun: true } & AutoApplyReportData)>}
+ * @returns {Promise<{ hasRun: false, noApply?: { file: string, message: string } } | { hasRun: true, inProgress: true, phase: string, startedAt: string|null } | ({ hasRun: true } & AutoApplyReportData)>}
  */
 export async function collectAutoApply(client, summary) {
   if (!summary || typeof summary !== 'object') return { hasRun: false };
   if (summary.ok === false && summary.no_apply) {
     return { hasRun: false, noApply: { file: summary.no_apply.file, message: summary.no_apply.message } };
+  }
+  // Scan-wait fix (spec amendment A2): a summary written mid-run (phase set and not yet 'done') is a
+  // DIFFERENT thing from a completed run that genuinely selected/applied zero -- render that distinction
+  // rather than silently reading partial fields as if the run had finished. A summary with no `phase` at
+  // all (every summary written before this fix) is never treated as in-progress.
+  if (typeof summary.phase === 'string' && summary.phase !== 'done') {
+    return { hasRun: true, inProgress: true, phase: summary.phase, startedAt: typeof summary.started_at === 'string' ? summary.started_at : null };
+  }
+  // runLifecycle fix (bin/auto-apply.js): a run that reached phase 'done' via a LOCKED exit or an uncaught
+  // error carries an explicit `outcome` of 'locked'/'error' rather than 'ok' -- render that as a loud
+  // warning line, never as a completed run that happened to select/apply zero (the same distinction the
+  // in-progress branch above draws for a mid-run summary).
+  if (summary.outcome === 'locked') {
+    return { hasRun: true, outcome: 'locked' };
+  }
+  if (summary.outcome === 'error') {
+    return { hasRun: true, outcome: 'error', error: summary.error && typeof summary.error === 'object' ? summary.error : null };
   }
   const results = Array.isArray(summary.select?.results) ? /** @type {Array<{ listingId: number, reason: string }>} */ (summary.select.results) : [];
   const applied = Array.isArray(summary.applied) ? summary.applied : [];
@@ -1046,6 +1124,10 @@ export async function collectAutoApply(client, summary) {
     capUsed: typeof summary.select?.cap_used === 'number' ? summary.select.cap_used : null,
     capRemaining: typeof summary.select?.cap_remaining === 'number' ? summary.select.cap_remaining : null,
     skippedByReason,
+    warnings: orderedWarnings(/** @type {any} */ (summary).warnings ?? []),
+    funnel: /** @type {any} */ (summary).select?.funnel && typeof /** @type {any} */ (summary).select.funnel === 'object' ? /** @type {any} */ (summary).select.funnel : null,
+    dailyCap: typeof /** @type {any} */ (summary).select?.dailyCap === 'number' ? /** @type {any} */ (summary).select.dailyCap : null,
+    prepare: summary.prepare && typeof summary.prepare === 'object' ? /** @type {any} */ (summary.prepare) : null,
     unresolved: unresolvedRows.map((r) => {
       const url = r.url_normalized ?? r.url ?? null;
       const isLinkedin = typeof r.source === 'string' && r.source === 'linkedin';
@@ -1060,6 +1142,29 @@ function skippedReasonsText(data) {
   return parts.length ? parts.join(', ') : '(none)';
 }
 
+/** One rendered line per warning, in AUTO_APPLY_WARNING_ORDER order (see orderedWarnings). @param {{ code: string, [k: string]: any }} w */
+function warningLineText(w) {
+  const extra = [];
+  if (w.state) extra.push(`state=${w.state}`);
+  if (w.err_message) extra.push(String(w.err_message));
+  if (typeof w.attempts === 'number') extra.push(`attempts=${w.attempts}`);
+  return `[${w.code}]${extra.length ? ` ${extra.join(' ')}` : ''}`;
+}
+
+/** Prepare-phase stats line (spec amendment A7: "probed, resolved, skipped by reason, stopped_by"), or null
+ * when prepare never ran this run. @param {AutoApplyReportData} data */
+function prepareStatsText(data) {
+  if (!data.prepare) return null;
+  const p = data.prepare;
+  const reasons = Object.entries(p.skippedByReason ?? {}).map(([k, v]) => `${k}=${v}`);
+  const parts = [
+    `probed ${p.attempted ?? 0}`, `resolved ${p.resolved ?? 0}`, `unresolved ${p.unresolved ?? 0}`,
+    `skipped ${p.skipped ?? 0}${reasons.length ? ` (${reasons.join(', ')})` : ''}`,
+  ];
+  if (p.stoppedBy) parts.push(`stopped_by=${p.stoppedBy} remaining=${p.remaining ?? 0}`);
+  return `prepare: ${parts.join(', ')}`;
+}
+
 /**
  * Plain-text auto-apply section. ALWAYS renders a section (see collectAutoApply's own doc comment): a
  * `{ hasRun: false }` (or falsy/absent) `data` renders a distinct "no run recorded" line rather than
@@ -1072,10 +1177,26 @@ export function renderAutoApplyText(data, registry) {
   if (data && !data.hasRun && data.noApply) {
     return `== Auto-apply ==\n[NO APPLY]: config/apply-exclusions.json is missing or invalid (${data.noApply.file}): ${data.noApply.message}`;
   }
+  if (data && data.hasRun && /** @type {any} */ (data).inProgress) {
+    const d = /** @type {any} */ (data);
+    return `== Auto-apply (in progress) ==\nphase: ${d.phase}${d.startedAt ? ` (started ${d.startedAt})` : ''}`;
+  }
+  if (data && data.hasRun && /** @type {any} */ (data).outcome === 'locked') {
+    return '== Auto-apply ==\n[AUTO-APPLY LOCKED]: could not acquire the advisory lock before the deadline';
+  }
+  if (data && data.hasRun && /** @type {any} */ (data).outcome === 'error') {
+    const msg = /** @type {any} */ (data).error?.message ?? 'unknown error';
+    return `== Auto-apply ==\n[AUTO-APPLY ERROR]: ${msg}`;
+  }
   if (!data || !data.hasRun) return '== Auto-apply ==\n(no auto-apply run recorded today)';
   const reg = registry ?? { entries: [], httpAllowedHosts: new Set() };
   const lines = [];
   lines.push(`== Auto-apply${data.dryRun ? ' (dry run)' : ''} ==`);
+  for (const w of (data.warnings ?? [])) lines.push(warningLineText(w));
+  const fLine = funnelLine(data);
+  if (fLine) lines.push(fLine);
+  const pLine = prepareStatsText(data);
+  if (pLine) lines.push(pLine);
   lines.push(`applied ${data.appliedCount} | capped ${data.cappedCount} | cap used ${data.capUsed ?? '?'} | cap remaining ${data.capRemaining ?? '?'}`);
   lines.push(`skipped: ${skippedReasonsText(data)}`);
   lines.push(`unresolved apply targets (${data.unresolved.length}):`);
@@ -1100,10 +1221,26 @@ export function renderAutoApplyHtml(data, registry) {
   if (data && !data.hasRun && data.noApply) {
     return `<h3>Auto-apply</h3><p><strong>[NO APPLY]</strong>: config/apply-exclusions.json is missing or invalid (${esc(data.noApply.file)}): ${esc(data.noApply.message)}</p>`;
   }
+  if (data && data.hasRun && /** @type {any} */ (data).inProgress) {
+    const d = /** @type {any} */ (data);
+    return `<h3>Auto-apply (in progress)</h3><p>phase: ${esc(d.phase)}${d.startedAt ? ` (started ${esc(d.startedAt)})` : ''}</p>`;
+  }
+  if (data && data.hasRun && /** @type {any} */ (data).outcome === 'locked') {
+    return '<h3>Auto-apply</h3><p><strong>[AUTO-APPLY LOCKED]</strong>: could not acquire the advisory lock before the deadline</p>';
+  }
+  if (data && data.hasRun && /** @type {any} */ (data).outcome === 'error') {
+    const msg = /** @type {any} */ (data).error?.message ?? 'unknown error';
+    return `<h3>Auto-apply</h3><p><strong>[AUTO-APPLY ERROR]</strong>: ${esc(msg)}</p>`;
+  }
   if (!data || !data.hasRun) return '<h3>Auto-apply</h3><p>(no auto-apply run recorded today)</p>';
   const reg = registry ?? { entries: [], httpAllowedHosts: new Set() };
   const parts = [];
   parts.push(`<h3>Auto-apply${data.dryRun ? ' (dry run)' : ''}</h3>`);
+  for (const w of (data.warnings ?? [])) parts.push(`<p><strong>${esc(warningLineText(w))}</strong></p>`);
+  const fLine = funnelLine(data);
+  if (fLine) parts.push(`<p>${esc(fLine)}</p>`);
+  const pLine = prepareStatsText(data);
+  if (pLine) parts.push(`<p>${esc(pLine)}</p>`);
   parts.push(`<p>applied ${data.appliedCount}, capped ${data.cappedCount}, cap used ${data.capUsed ?? '?'}, cap remaining ${data.capRemaining ?? '?'}</p>`);
   parts.push(`<p>skipped: ${esc(skippedReasonsText(data))}</p>`);
   if (data.unresolved.length) {
@@ -1133,11 +1270,28 @@ export function renderAutoApplyMarkdown(data, registry) {
   if (data && !data.hasRun && data.noApply) {
     return `## Auto-apply\n\n**[NO APPLY]**: config/apply-exclusions.json is missing or invalid (${data.noApply.file}): ${data.noApply.message}`;
   }
+  if (data && data.hasRun && /** @type {any} */ (data).inProgress) {
+    const d = /** @type {any} */ (data);
+    return `## Auto-apply (in progress)\n\nphase: ${d.phase}${d.startedAt ? ` (started ${d.startedAt})` : ''}`;
+  }
+  if (data && data.hasRun && /** @type {any} */ (data).outcome === 'locked') {
+    return '## Auto-apply\n\n**[AUTO-APPLY LOCKED]**: could not acquire the advisory lock before the deadline';
+  }
+  if (data && data.hasRun && /** @type {any} */ (data).outcome === 'error') {
+    const msg = /** @type {any} */ (data).error?.message ?? 'unknown error';
+    return `## Auto-apply\n\n**[AUTO-APPLY ERROR]**: ${msg}`;
+  }
   if (!data || !data.hasRun) return '## Auto-apply\n\n(no auto-apply run recorded today)';
   const reg = registry ?? { entries: [], httpAllowedHosts: new Set() };
   const lines = [];
   lines.push(`## Auto-apply${data.dryRun ? ' (dry run)' : ''}`);
   lines.push('');
+  for (const w of (data.warnings ?? [])) lines.push(`**${warningLineText(w)}**`);
+  if ((data.warnings ?? []).length) lines.push('');
+  const fLine = funnelLine(data);
+  if (fLine) { lines.push(fLine); lines.push(''); }
+  const pLine = prepareStatsText(data);
+  if (pLine) { lines.push(pLine); lines.push(''); }
   lines.push(`applied ${data.appliedCount}, capped ${data.cappedCount}, cap used ${data.capUsed ?? '?'}, cap remaining ${data.capRemaining ?? '?'}`);
   lines.push('');
   lines.push(`skipped: ${skippedReasonsText(data)}`);
