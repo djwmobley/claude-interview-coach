@@ -143,22 +143,105 @@ const APPLY_BUTTON_STATE_LABELS = Object.freeze({
   failed: 'Failed',
 });
 
+/** Apply-chain-park fix, spec item 3: mirrors src/dashboard/routes/applications.js's own
+ * STALE_ACTIONABLE_MS export exactly (30 minutes) -- public/ code cannot import that server module
+ * directly (it pulls in 'pg' and other Node-only packages), same reason pages/jobs.js's SORTS is a
+ * mirror rather than an import. test/dashboard-public-format.test.js drift-tests this constant against
+ * the real export, same pattern as the SORTS mirror test. */
+export const STALE_ACTIONABLE_MS = 30 * 60 * 1000;
+
+/** Apply-chain-park fix, spec item 4: mirrors src/core/normalize.js's own DETAIL_MIN_CHARS export
+ * exactly (300 characters) -- same "public/ cannot import a Node-only module" reason as
+ * STALE_ACTIONABLE_MS above (normalize.js pulls in 'node:crypto' and config.js). Drift-tested against the
+ * real export in test/dashboard-public-format.test.js. */
+export const DETAIL_MIN_CHARS = 300;
+
+/** Disabled-reason text for every application state other than 'drafting'/'submitted'/'confirmed' (those
+ * three are handled by their own dedicated branches in applyButtonState() below) -- an in-flight
+ * application in one of these states is never a candidate for a fresh Apply click; the existing
+ * apply-now route already 409s a duplicate attempt regardless, this is only the button's own disabled
+ * explanation. Total classification: applyButtonState()'s own fallback below covers any state not listed
+ * here (including an unrecognized/future CHECK-constraint value), so this map never needs to be
+ * exhaustive to keep the function total. */
+const APPLY_IN_PROGRESS_REASONS = Object.freeze({
+  docs_ready: 'Resume drafted, awaiting review.',
+  approved: 'Approved, awaiting submission.',
+  submitting: 'Submitting now.',
+  needs_human: 'Needs your input to continue.',
+  failed: 'The last attempt failed.',
+});
+
 /**
- * Total classification of a job row's Apply-button state (one-click apply PR A spec item 8). `null` means
- * the button is hidden entirely -- the two closed statuses ('skip', 'applied') where an Apply action would
- * be meaningless or redundant. Every other row gets a label; `actionable` is true only when clicking would
- * actually do something useful (no application yet, or one still mid-draft) -- every other application
- * state is a live status a click cannot meaningfully advance (the dashboard route 409s a duplicate attempt
- * regardless, this only decides whether the row renders a clickable button or a plain status label).
- * @param {{ status?: string|null, application_id?: number|string|null, application_state?: string|null }} row
- * @returns {{ label: string, actionable: boolean } | null}
+ * Total classification of a job row's Apply-button state (one-click apply PR A spec item 8, extended by
+ * the apply-chain-park fix spec item 4). Every input maps to `{ label, actionable, disabledReason }` --
+ * never `null`/`undefined` -- so a row for which clicking Apply would do nothing useful still renders a
+ * real, informative (disabled) button rather than disappearing or crashing a caller that forgot a null
+ * check. `disabledReason` is non-null exactly when `actionable` is false, and is the FIRST matching
+ * branch below (precedence matters -- e.g. an already-applied row is reported as "Already applied" even
+ * if its description also happens to be thin):
+ *   1. applied: listing status 'applied', or the application itself reached 'submitted'/'confirmed'.
+ *   2. skipped: listing status 'skip'.
+ *   3. excluded: `row.apply_excluded` truthy (a future exclusions-gate column; not written by any query
+ *      in this PR, but honored here if a caller ever sets it -- "if present in the row").
+ *   4. an in-flight application not currently in the restartable 'drafting' stage (docs_ready/approved/
+ *      submitting/needs_human/failed/any other non-null, non-drafting state).
+ *   5. a 'drafting' application younger than STALE_ACTIONABLE_MS (its own chain is presumably still
+ *      running -- mirrors the server's own re-click gate in routes/applications.js exactly). A drafting
+ *      row with no `application_created_at` at all cannot be proven stale, so it is treated the same as
+ *      "still fresh" here -- the safer default (friction, not silent escape) per this repo's own
+ *      total-classification convention.
+ *   6. `description_chars` missing/undefined: the listing's description has never been fetched, so a
+ *      resume draft attempt would fail the same precheck the server runs.
+ *   7. `description_chars` below DETAIL_MIN_CHARS: the posting is too thin to draft a resume from.
+ *   8. otherwise: actionable, `disabledReason: null`.
+ * @param {{ status?: string|null, application_id?: number|string|null, application_state?: string|null, application_created_at?: string|Date|null, description_chars?: number|null, apply_excluded?: boolean }} row
+ * @param {Date} [now]
+ * @returns {{ label: string, actionable: boolean, disabledReason: string|null }}
  */
-export function applyButtonState(row) {
-  if (row.status === 'skip' || row.status === 'applied') return null;
-  if (row.application_id === null || row.application_id === undefined) return { label: 'Apply', actionable: true };
-  const state = row.application_state ?? '';
-  const label = Object.prototype.hasOwnProperty.call(APPLY_BUTTON_STATE_LABELS, state) ? APPLY_BUTTON_STATE_LABELS[state] : state || 'Apply';
-  return { label, actionable: state === 'drafting' };
+export function applyButtonState(row, now = new Date()) {
+  const hasApplication = row.application_id !== null && row.application_id !== undefined;
+  const state = hasApplication ? (row.application_state ?? null) : null;
+  const label = !hasApplication
+    ? 'Apply'
+    : (state && Object.prototype.hasOwnProperty.call(APPLY_BUTTON_STATE_LABELS, state) ? APPLY_BUTTON_STATE_LABELS[state] : (state || 'Apply'));
+
+  // 1. applied
+  if (row.status === 'applied' || state === 'submitted' || state === 'confirmed') {
+    return { label, actionable: false, disabledReason: 'Already applied.' };
+  }
+  // 2. skipped
+  if (row.status === 'skip') {
+    return { label, actionable: false, disabledReason: 'Listing skipped.' };
+  }
+  // 3. excluded
+  if (row.apply_excluded) {
+    return { label, actionable: false, disabledReason: 'Excluded from apply.' };
+  }
+  // 4. an in-flight application not currently restartable
+  if (hasApplication && state !== 'drafting') {
+    const reason = state && Object.prototype.hasOwnProperty.call(APPLY_IN_PROGRESS_REASONS, state)
+      ? APPLY_IN_PROGRESS_REASONS[state] : (state ? `Application ${state}.` : 'Application in progress.');
+    return { label, actionable: false, disabledReason: reason };
+  }
+  // 5. drafting, still within the re-click cooldown (or unprovable freshness -- see doc comment)
+  if (hasApplication && state === 'drafting') {
+    const createdAt = row.application_created_at;
+    const createdMs = createdAt ? new Date(createdAt).getTime() : NaN;
+    const ageMs = Number.isNaN(createdMs) ? NaN : now.getTime() - createdMs;
+    if (Number.isNaN(ageMs) || ageMs < STALE_ACTIONABLE_MS) {
+      return { label, actionable: false, disabledReason: 'Drafting in progress.' };
+    }
+  }
+  // 6/7. description gates (reached only for "no application yet" or "stale drafting, eligible to retry")
+  const descChars = row.description_chars;
+  if (descChars === null || descChars === undefined) {
+    return { label, actionable: false, disabledReason: 'Unknown description, not fetched yet.' };
+  }
+  if (descChars < DETAIL_MIN_CHARS) {
+    return { label, actionable: false, disabledReason: 'Posting too thin to draft from.' };
+  }
+  // 8. otherwise actionable
+  return { label, actionable: true, disabledReason: null };
 }
 
 /**

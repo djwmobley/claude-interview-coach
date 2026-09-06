@@ -57,7 +57,7 @@ describe('every COLUMNS sortKey is a real SORTS value', () => {
 
   test('every column except the leading checkbox column is sortable, in COLUMNS order', () => {
     const sortable = COLUMNS.filter((c) => typeof c === 'object' && c.sortKey).map((c) => c.text);
-    assert.deepEqual(sortable, ['Title', 'Company', 'Source', 'Stage', 'Prescore', 'Fit', 'First seen', 'Location']);
+    assert.deepEqual(sortable, ['ID', 'Title', 'Company', 'Source', 'Stage', 'Prescore', 'Fit', 'First seen', 'Location']);
   });
 
   test('adversary finding 3: "First seen" sortKey is exactly "first_seen", never "seen" (which maps to last_seen server-side)', () => {
@@ -83,6 +83,7 @@ describe('every COLUMNS entry carries the paired header/cell className used by a
   // visible in a live browser.
   const EXPECTED_CLASS_NAMES = {
     '': 'job-row__checkbox',
+    ID: 'job-row__id',
     Title: 'job-row__title',
     Company: 'job-row__company',
     Source: 'job-row__source',
@@ -116,7 +117,7 @@ describe('nextSortState(): adversary finding 1, table-driven pure click-state tr
   });
 
   test('first click on each numeric/date column starts descending', () => {
-    for (const key of ['prescore', 'fit', 'first_seen']) {
+    for (const key of ['prescore', 'fit', 'first_seen', 'id']) {
       const result = nextSortState({ sort: 'posted', dir: 'desc' }, key);
       assert.deepEqual(result, { sort: key, dir: 'desc' }, `first click on "${key}"`);
     }

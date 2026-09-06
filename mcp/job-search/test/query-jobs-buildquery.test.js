@@ -298,6 +298,21 @@ describe('buildQuery(): hideReview (jobs-unscored-visibility PR, Change 4 -- mir
   });
 });
 
+describe('buildQuery(): description_chars / application_created_at (apply-chain-park fix, spec item 3)', () => {
+  test('the SELECT list exposes description_chars as a LENGTH, never the description text itself', () => {
+    const { sql } = buildQuery(BASE);
+    assert.match(sql, /length\(l\.description\) AS description_chars/);
+    assert.doesNotMatch(sql, /\bl\.description\b(?!\))/, 'the raw description column must never be selected directly (this tool never returns descriptions)');
+  });
+
+  test('the application LATERAL join exposes application_created_at from the application\'s own created_at, not updated_at', () => {
+    const { sql } = buildQuery(BASE);
+    assert.match(sql, /a\.created_at FROM ic_job_applications a/);
+    assert.match(sql, /app\.created_at AS application_created_at/);
+    assert.doesNotMatch(sql, /app\.updated_at/);
+  });
+});
+
 describe('buildQuery(): triagedBy=auto (slice 3 auto-triage spec section 7)', () => {
   test('triagedBy: "auto" adds the latest-status-event-actor correlated subquery clause', () => {
     const { sql } = buildQuery({ ...BASE, triagedBy: 'auto' });

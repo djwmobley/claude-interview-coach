@@ -18,6 +18,7 @@ import { withClient, closePool } from '../src/core/db.js';
 import { createDashboardServer } from '../src/dashboard/server.js';
 import { createCalendarCache } from '../src/dashboard/calendar-cache.js';
 import { createApplication, getApplication, transition, listApplicationEvents } from '../src/core/applications.js';
+import { STALE_ACTIONABLE_MS } from '../src/dashboard/routes/applications.js';
 import { applyExclusionGate as realApplyExclusionGate } from '../src/dashboard/routes/applications.js';
 
 const CO = `ZZ-TEST-APPLYNOW-${process.pid}`;
@@ -205,17 +206,96 @@ describe('POST /api/listings/:id/apply-now: happy path', () => {
   });
 });
 
-describe('POST /api/listings/:id/apply-now: resume failure leaves the application in drafting', () => {
-  test('resume runner failure stops the chain before review/approve', async () => {
+describe('POST /api/listings/:id/apply-now: apply-chain-park fix -- resume-runner failure parks to needs_human', () => {
+  test('a thin-description precheck failure stops the chain before review/approve and parks the application', async () => {
     resumeRunnerImpl = async () => ({ ok: false, reason: 'no_description' });
     const listingId = await seedListing();
     const r = await req('POST', `/api/listings/${listingId}/apply-now`);
     const appId = r.json.application_id;
-    await new Promise((resolve) => setTimeout(resolve, 150));
+    const row = await waitForState(appId, ['needs_human']);
+    assert.equal(row.state, 'needs_human');
+    assert.equal(row.error, 'no_description');
+    assert.equal(row.pending_question?.kind, 'blocked');
+    assert.ok(row.pending_question?.label, 'pending_question.label must be a human-readable string');
     assert.deepEqual(reviewRunnerCalls, []);
     assert.deepEqual(applyRunnerStartCalls, []);
+
+    const events = await listApplicationEvents(verifyClient, appId);
+    assert.ok(events.some((e) => e.kind === 'state' && e.to_state === 'needs_human'), 'a state-transition event to needs_human must be recorded');
+  });
+
+  test('a missing resumeRunner/reviewRunner also parks to needs_human, with reason "runner_unavailable"', async () => {
+    const savedResumeRunner = deps.resumeRunner;
+    deps.resumeRunner = undefined;
+    try {
+      const listingId = await seedListing();
+      const r = await req('POST', `/api/listings/${listingId}/apply-now`);
+      const appId = r.json.application_id;
+      const row = await waitForState(appId, ['needs_human']);
+      assert.equal(row.state, 'needs_human');
+      assert.equal(row.error, 'runner_unavailable');
+      assert.equal(row.pending_question?.kind, 'blocked');
+      assert.deepEqual(resumeRunnerCalls, []);
+    } finally {
+      deps.resumeRunner = savedResumeRunner;
+    }
+  });
+
+  test('parking an application already moved on to needs_human by another actor is a benign no-op, not a chain failure', async () => {
+    // Simulates the race the park's own try/catch guards against: something else already transitioned the
+    // application to needs_human (with its OWN pending_question) before this resume-runner failure's own
+    // park attempt runs. The original pending_question must survive untouched, and no
+    // "apply_now_chain_failed" error event should appear -- the VALIDATION rejection from the second,
+    // now-illegal drafting->needs_human transition must be swallowed as an expected race, not surfaced as
+    // an unexpected chain failure.
+    resumeRunnerImpl = async (applicationId) => {
+      await transition(verifyClient, applicationId, 'needs_human', {
+        actor: 'apply', pending_question: { kind: 'question', label: 'an earlier, unrelated park' },
+      });
+      return { ok: false, reason: 'no_description' };
+    };
+    const listingId = await seedListing();
+    const r = await req('POST', `/api/listings/${listingId}/apply-now`);
+    const appId = r.json.application_id;
+    await new Promise((resolve) => setTimeout(resolve, 200));
     const row = await getApplication(verifyClient, appId);
-    assert.equal(row.state, 'drafting');
+    assert.equal(row.state, 'needs_human');
+    assert.equal(row.pending_question?.kind, 'question');
+    assert.equal(row.pending_question?.label, 'an earlier, unrelated park');
+
+    const events = await listApplicationEvents(verifyClient, appId);
+    assert.ok(!events.some((e) => e.kind === 'error' && e.note === 'one-click apply chain failed unexpectedly'), 'the swallowed park race must never surface as a chain failure event');
+  });
+});
+
+describe('POST /api/listings/:id/apply-now: per-application chain lock (apply-chain-park fix, spec item 2)', () => {
+  test('a second click while the first click\'s chain is still running never starts a second chain', async () => {
+    /** @type {() => void} */
+    let releaseResumeRunner = () => {};
+    resumeRunnerImpl = async (applicationId, listingId2) => {
+      await new Promise((resolve) => { releaseResumeRunner = resolve; });
+      const relPath = `resumes/apply-now-lock-${applicationId}.docx`;
+      fs.writeFileSync(path.join(outputRoot, relPath), 'fake docx bytes');
+      const docRes = await verifyClient.query(
+        `INSERT INTO ic_job_documents (listing_id, kind, rel_path, actor) VALUES ($1, 'resume', $2, 'mcp') RETURNING id`,
+        [listingId2, relPath],
+      );
+      await verifyClient.query('UPDATE ic_job_applications SET state = $2, resume_doc_id = $3, updated_at = now() WHERE id = $1', [applicationId, 'docs_ready', docRes.rows[0].id]);
+      return { ok: true, markdownPath: 'output/markdown/lock.md' };
+    };
+    const listingId = await seedListing();
+    const first = await req('POST', `/api/listings/${listingId}/apply-now`);
+    assert.equal(first.status, 202);
+    const appId = first.json.application_id;
+
+    const second = await req('POST', `/api/listings/${listingId}/apply-now`);
+    assert.equal(second.status, 202);
+    assert.equal(second.json.application_id, appId);
+    assert.equal(second.json.outcome, 'chain_running');
+
+    releaseResumeRunner();
+    await waitForState(appId, ['approved']);
+    assert.equal(resumeRunnerCalls.length, 1, 'only one chain must have actually called the resume runner');
   });
 });
 

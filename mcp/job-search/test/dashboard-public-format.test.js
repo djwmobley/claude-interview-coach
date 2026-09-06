@@ -2,7 +2,9 @@
 /** Pure formatting function tests (pr3-spec-decisions.md section 12 item 2). No DOM required. */
 import { test, describe } from 'node:test';
 import assert from 'node:assert/strict';
-import { relativeTime, ageDays, agingBucket, scoreBucket, fitBucket, fitDisplayState, applyButtonState, shortDate, shortDateTime, salaryRange, formatMoney, pluralize, truncate, sourceLabel, formatPercent, normalizeAgendaTime, agendaTimeLabel } from '../src/dashboard/public/lib/format.js';
+import { relativeTime, ageDays, agingBucket, scoreBucket, fitBucket, fitDisplayState, applyButtonState, STALE_ACTIONABLE_MS, DETAIL_MIN_CHARS, shortDate, shortDateTime, salaryRange, formatMoney, pluralize, truncate, sourceLabel, formatPercent, normalizeAgendaTime, agendaTimeLabel } from '../src/dashboard/public/lib/format.js';
+import { STALE_ACTIONABLE_MS as SERVER_STALE_ACTIONABLE_MS } from '../src/dashboard/routes/applications.js';
+import { DETAIL_MIN_CHARS as SERVER_DETAIL_MIN_CHARS } from '../src/core/normalize.js';
 
 describe('relativeTime', () => {
   test('fixed-input cases', () => {
@@ -68,39 +70,147 @@ describe('fitBucket: same thresholds as scoreBucket, but missing maps to its own
   });
 });
 
-describe('applyButtonState: total classification of job-row.js\'s Apply button (one-click apply PR A spec item 8)', () => {
-  test('status "skip" hides the button entirely, regardless of application state', () => {
-    assert.equal(applyButtonState({ status: 'skip', application_id: null }), null);
-    assert.equal(applyButtonState({ status: 'skip', application_id: 5, application_state: 'drafting' }), null);
+describe('STALE_ACTIONABLE_MS / DETAIL_MIN_CHARS: format.js mirrors drift-tested against the real server exports', () => {
+  test('STALE_ACTIONABLE_MS matches routes/applications.js exactly (30 minutes)', () => {
+    assert.equal(STALE_ACTIONABLE_MS, SERVER_STALE_ACTIONABLE_MS);
+    assert.equal(STALE_ACTIONABLE_MS, 30 * 60 * 1000);
   });
 
-  test('status "applied" hides the button entirely', () => {
-    assert.equal(applyButtonState({ status: 'applied', application_id: 5, application_state: 'submitted' }), null);
+  test('DETAIL_MIN_CHARS matches core/normalize.js exactly (300)', () => {
+    assert.equal(DETAIL_MIN_CHARS, SERVER_DETAIL_MIN_CHARS);
+    assert.equal(DETAIL_MIN_CHARS, 300);
   });
+});
 
-  test('no application yet -> label "Apply", actionable', () => {
-    assert.deepEqual(applyButtonState({ status: 'new', application_id: null }), { label: 'Apply', actionable: true });
-    assert.deepEqual(applyButtonState({ status: 'new', application_id: undefined }), { label: 'Apply', actionable: true });
-  });
+describe('applyButtonState: TOTAL classification of job-row.js\'s Apply button (apply-chain-park fix, spec item 4)', () => {
+  const NOW = new Date('2026-09-06T12:00:00Z');
+  const FRESH = new Date(NOW.getTime() - 5 * 60 * 1000).toISOString(); // 5 minutes old
+  const STALE = new Date(NOW.getTime() - 45 * 60 * 1000).toISOString(); // 45 minutes old
+  const GOOD_DESC = DETAIL_MIN_CHARS + 50;
+  const THIN_DESC = DETAIL_MIN_CHARS - 1;
 
-  test('every application state maps to its own label; only "drafting" is actionable', () => {
-    const table = [
-      ['drafting', 'Drafting resume', true],
-      ['docs_ready', 'Reviewing', false],
-      ['approved', 'Approved', false],
-      ['submitting', 'Submitting', false],
-      ['needs_human', 'Needs you', false],
-      ['submitted', 'Submitted', false],
-      ['confirmed', 'Submitted', false],
-      ['failed', 'Failed', false],
+  test('never returns null/undefined for any input (total classification)', () => {
+    const inputs = [
+      {}, { application_id: null }, { status: 'skip' }, { status: 'applied' },
+      { application_id: 1, application_state: 'drafting' },
+      { application_id: 1, application_state: 'docs_ready' },
+      { application_id: 1, application_state: 'bogus_future_state' },
     ];
-    for (const [state, label, actionable] of table) {
-      assert.deepEqual(applyButtonState({ status: 'new', application_id: 1, application_state: state }), { label, actionable }, `state=${state}`);
+    for (const row of inputs) {
+      const result = applyButtonState(row, NOW);
+      assert.ok(result, `row ${JSON.stringify(row)} must not return null/undefined`);
+      assert.equal(typeof result.actionable, 'boolean');
+      assert.ok(result.disabledReason === null || typeof result.disabledReason === 'string');
+    }
+  });
+
+  test('disabledReason is non-null exactly when actionable is false, and null exactly when actionable is true', () => {
+    const rows = [
+      { status: 'skip', application_id: null },
+      { status: 'applied', application_id: 5, application_state: 'submitted' },
+      { application_id: null, description_chars: GOOD_DESC },
+      { application_id: null, description_chars: THIN_DESC },
+      { application_id: null },
+      { application_id: 1, application_state: 'drafting', application_created_at: FRESH, description_chars: GOOD_DESC },
+      { application_id: 1, application_state: 'drafting', application_created_at: STALE, description_chars: GOOD_DESC },
+      { application_id: 1, application_state: 'docs_ready', description_chars: GOOD_DESC },
+    ];
+    for (const row of rows) {
+      const result = applyButtonState(row, NOW);
+      if (result.actionable) assert.equal(result.disabledReason, null, `row ${JSON.stringify(row)}`);
+      else assert.equal(typeof result.disabledReason, 'string', `row ${JSON.stringify(row)}`);
+    }
+  });
+
+  test('precedence 1: applied (listing status "applied", or application state submitted/confirmed) wins over everything else', () => {
+    assert.equal(applyButtonState({ status: 'applied', application_id: null }, NOW).actionable, false);
+    assert.equal(applyButtonState({ status: 'applied', application_id: null }, NOW).disabledReason, 'Already applied.');
+    for (const state of ['submitted', 'confirmed']) {
+      const r = applyButtonState({ status: 'new', application_id: 1, application_state: state, description_chars: GOOD_DESC }, NOW);
+      assert.equal(r.actionable, false);
+      assert.equal(r.disabledReason, 'Already applied.');
+    }
+    // even a thin/missing description does not change the reason -- applied wins first
+    const r = applyButtonState({ status: 'applied', application_id: 1, application_state: 'submitted' }, NOW);
+    assert.equal(r.disabledReason, 'Already applied.');
+  });
+
+  test('precedence 2: skipped (listing status "skip")', () => {
+    const r = applyButtonState({ status: 'skip', application_id: null, description_chars: GOOD_DESC }, NOW);
+    assert.deepEqual(r, { label: 'Apply', actionable: false, disabledReason: 'Listing skipped.' });
+  });
+
+  test('precedence 3: excluded (apply_excluded truthy, if present in the row)', () => {
+    const r = applyButtonState({ status: 'new', application_id: null, apply_excluded: true, description_chars: GOOD_DESC }, NOW);
+    assert.equal(r.actionable, false);
+    assert.equal(r.disabledReason, 'Excluded from apply.');
+  });
+
+  test('precedence 4: an in-flight application not currently "drafting" is never actionable, each state carries its own reason', () => {
+    const table = [
+      ['docs_ready', 'Reviewing'],
+      ['approved', 'Approved'],
+      ['submitting', 'Submitting'],
+      ['needs_human', 'Needs you'],
+      ['failed', 'Failed'],
+    ];
+    for (const [state, label] of table) {
+      const r = applyButtonState({ status: 'new', application_id: 1, application_state: state, description_chars: GOOD_DESC }, NOW);
+      assert.equal(r.label, label, `state=${state}`);
+      assert.equal(r.actionable, false, `state=${state}`);
+      assert.ok(r.disabledReason, `state=${state} must carry a disabledReason`);
     }
   });
 
   test('an unrecognized application_state (should never happen given the CHECK constraint) falls back to the raw value, never actionable', () => {
-    assert.deepEqual(applyButtonState({ status: 'new', application_id: 1, application_state: 'withdrawn' }), { label: 'withdrawn', actionable: false });
+    const r = applyButtonState({ status: 'new', application_id: 1, application_state: 'withdrawn', description_chars: GOOD_DESC }, NOW);
+    assert.equal(r.label, 'withdrawn');
+    assert.equal(r.actionable, false);
+    assert.equal(r.disabledReason, 'Application withdrawn.');
+  });
+
+  test('precedence 5: drafting fresher than STALE_ACTIONABLE_MS is not actionable ("Drafting in progress")', () => {
+    const r = applyButtonState({ status: 'new', application_id: 1, application_state: 'drafting', application_created_at: FRESH, description_chars: GOOD_DESC }, NOW);
+    assert.deepEqual(r, { label: 'Drafting resume', actionable: false, disabledReason: 'Drafting in progress.' });
+  });
+
+  test('a drafting row with no application_created_at at all cannot be proven fresh or stale -- treated as still fresh (friction over silent escape)', () => {
+    const r = applyButtonState({ status: 'new', application_id: 1, application_state: 'drafting', description_chars: GOOD_DESC }, NOW);
+    assert.equal(r.actionable, false);
+    assert.equal(r.disabledReason, 'Drafting in progress.');
+  });
+
+  test('precedence 6: description_chars missing/undefined -> "Unknown description, not fetched yet." (no application yet, or stale drafting)', () => {
+    assert.deepEqual(applyButtonState({ status: 'new', application_id: null }, NOW), { label: 'Apply', actionable: false, disabledReason: 'Unknown description, not fetched yet.' });
+    const r = applyButtonState({ status: 'new', application_id: 1, application_state: 'drafting', application_created_at: STALE }, NOW);
+    assert.equal(r.actionable, false);
+    assert.equal(r.disabledReason, 'Unknown description, not fetched yet.');
+  });
+
+  test('precedence 7: description_chars below DETAIL_MIN_CHARS -> "Posting too thin to draft from."', () => {
+    assert.deepEqual(applyButtonState({ status: 'new', application_id: null, description_chars: THIN_DESC }, NOW), { label: 'Apply', actionable: false, disabledReason: 'Posting too thin to draft from.' });
+    const r = applyButtonState({ status: 'new', application_id: 1, application_state: 'drafting', application_created_at: STALE, description_chars: THIN_DESC }, NOW);
+    assert.equal(r.actionable, false);
+    assert.equal(r.disabledReason, 'Posting too thin to draft from.');
+  });
+
+  test('precedence 8: otherwise actionable -- no application yet, description is present and long enough', () => {
+    assert.deepEqual(applyButtonState({ status: 'new', application_id: null, description_chars: GOOD_DESC }, NOW), { label: 'Apply', actionable: true, disabledReason: null });
+    assert.deepEqual(applyButtonState({ status: 'new', application_id: undefined, description_chars: GOOD_DESC }, NOW), { label: 'Apply', actionable: true, disabledReason: null });
+  });
+
+  test('precedence 8: a stale (re-clickable) drafting row with a good description is actionable again', () => {
+    const r = applyButtonState({ status: 'new', application_id: 1, application_state: 'drafting', application_created_at: STALE, description_chars: GOOD_DESC }, NOW);
+    assert.deepEqual(r, { label: 'Drafting resume', actionable: true, disabledReason: null });
+  });
+
+  test('description_chars exactly at DETAIL_MIN_CHARS is long enough (>= not >)', () => {
+    const r = applyButtonState({ status: 'new', application_id: null, description_chars: DETAIL_MIN_CHARS }, NOW);
+    assert.equal(r.actionable, true);
+  });
+
+  test('defaults `now` to the current time when omitted (no crash without a second argument)', () => {
+    assert.doesNotThrow(() => applyButtonState({ status: 'new', application_id: null, description_chars: GOOD_DESC }));
   });
 });
 
