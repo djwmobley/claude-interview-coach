@@ -579,13 +579,13 @@ describe('pg_trgm similarity and lookups in the real Postgres', () => {
   /** @type {import('pg').Client} */
   let client;
   const table = `ic_dedup_test_${process.pid}`;
-  const cols = 'source, external_id, url_normalized, title, company, company_norm, title_norm, location_norm, dedup_hash, description_hash, posted_at, salary_min, salary_max, status, duplicate_of, repost_of, expired_at, last_seen, record_kind';
+  const cols = 'source, external_id, url_normalized, title, company, company_norm, title_norm, location_norm, dedup_hash, description_hash, posted_at, salary_min, salary_max, status, duplicate_of, repost_of, expired_at, last_seen, record_kind, detail_outcome, detail_attempts';
 
   /** @param {import('../src/core/dedup.js').ListingRow} r */
   async function insert(r) {
     const res = await client.query(
-      `INSERT INTO ${table} (${cols}) VALUES ($1,$2,$3,$4,$5,$6,$7,$8,$9,$10,$11,$12,$13,$14,$15,$16,$17,$18,$19) RETURNING id`,
-      [r.source, r.external_id, r.url_normalized, r.title, r.company, r.company_norm, r.title_norm, r.location_norm, r.dedup_hash, r.description_hash, r.posted_at, r.salary_min, r.salary_max, r.status, r.duplicate_of, r.repost_of, r.expired_at, r.last_seen, r.record_kind],
+      `INSERT INTO ${table} (${cols}) VALUES ($1,$2,$3,$4,$5,$6,$7,$8,$9,$10,$11,$12,$13,$14,$15,$16,$17,$18,$19,$20,$21) RETURNING id`,
+      [r.source, r.external_id, r.url_normalized, r.title, r.company, r.company_norm, r.title_norm, r.location_norm, r.dedup_hash, r.description_hash, r.posted_at, r.salary_min, r.salary_max, r.status, r.duplicate_of, r.repost_of, r.expired_at, r.last_seen, r.record_kind, r.detail_outcome ?? null, r.detail_attempts ?? 0],
     );
     return res.rows[0].id;
   }
@@ -596,7 +596,8 @@ describe('pg_trgm similarity and lookups in the real Postgres', () => {
     await client.query(`CREATE TABLE ${table} (
       id serial PRIMARY KEY, source text, external_id text, url_normalized text, title text, company text, company_norm text, title_norm text,
       location_norm text, dedup_hash text, description_hash text, posted_at date, salary_min int, salary_max int, status text,
-      duplicate_of int, repost_of int, expired_at timestamptz, last_seen timestamptz, record_kind text DEFAULT 'listing')`);
+      duplicate_of int, repost_of int, expired_at timestamptz, last_seen timestamptz, record_kind text DEFAULT 'listing',
+      detail_outcome text, detail_attempts integer NOT NULL DEFAULT 0)`);
     await client.query(`CREATE INDEX ON ${table} USING gin (title_norm gin_trgm_ops)`);
     await client.query(`CREATE INDEX ON ${table} USING gin (company_norm gin_trgm_ops)`);
   });

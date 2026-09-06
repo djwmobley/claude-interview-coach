@@ -12,7 +12,7 @@
  * There is no way to submit, fill, or dispatch anything through this object.
  */
 import { EXTRACTORS } from './extractors.js';
-import { guardUrl } from '../core/urlguard.js';
+import { guardUrl, classifyUrl } from '../core/urlguard.js';
 import { JobSearchError } from '../core/errors.js';
 import { PAGE_MARKER } from './session.js';
 
@@ -22,9 +22,51 @@ import { PAGE_MARKER } from './session.js';
  * @property {() => Promise<string>} readHtml
  * @property {(name: string, arg?: unknown) => Promise<unknown>} readJson
  * @property {(maxSteps?: number) => Promise<{ steps: number, atBottom: boolean }>} scrollToBottom
+ * @property {(url: string, opts?: { headers?: Record<string, string> }) => Promise<FetchAuthedJsonResult>} fetchAuthedJson
  * @property {AbortSignal} signal
  * @property {string} source
  */
+
+/**
+ * @typedef {Object} FetchAuthedJsonResult
+ * @property {'valid'|'missing'|'malformed'|'refused'} cookieState 'refused' means the URL itself never
+ *   passed the urlguard precheck (no network call and no cookie read were ever attempted)
+ * @property {string|null} [refusedReason] classifyUrl()'s own reason, only set when cookieState is 'refused'
+ * @property {number|null} status HTTP status, or null when refused/no valid cookie/network failure
+ * @property {boolean} ok
+ * @property {any} json parsed JSON body, or null when absent/unparseable/not attempted
+ */
+
+/**
+ * Reads one named cookie via the BROWSER CONTEXT's own cookie jar (Playwright's `context.cookies(urls)`,
+ * never `document.cookie` / an in-page read, and never handed to an adapter directly) and classifies it
+ * total: 'missing' (absent, or the context/cookie read itself failed), 'malformed' (present but empty
+ * once LinkedIn's own surrounding double-quotes are stripped, or containing a character outside a
+ * conservative bare-token charset), 'valid' otherwise. Filtering by `forUrl` (rather than reading every
+ * cookie in the context) is deliberate and load-bearing: a context-level cookie jar holds the session
+ * regardless of which document the PAGE currently has loaded (a fresh tab can be on about:blank and still
+ * have a valid LinkedIn session cookie), so this must never depend on the page's current origin.
+ * @param {import('playwright-core').Page} page
+ * @param {string} name
+ * @param {string} forUrl
+ * @returns {Promise<{ state: 'valid'|'missing'|'malformed', value: string|null }>}
+ */
+async function readCookieState(page, name, forUrl) {
+  /** @type {any[]} */
+  let cookies;
+  try {
+    cookies = await page.context().cookies(forUrl);
+  } catch {
+    return { state: 'missing', value: null };
+  }
+  const c = Array.isArray(cookies) ? cookies.find((k) => k && k.name === name) : null;
+  if (!c || typeof c.value !== 'string') return { state: 'missing', value: null };
+  const stripped = c.value.replace(/^"|"$/g, '');
+  // LinkedIn's own JSESSIONID value is shaped like "ajax:1234567890123456789" (a colon-separated prefix
+  // then digits), so the conservative token charset below allows ':' alongside the usual bare-token set.
+  if (!stripped || !/^[A-Za-z0-9_:-]+$/.test(stripped)) return { state: 'malformed', value: null };
+  return { state: 'valid', value: stripped };
+}
 
 /**
  * @param {import('playwright-core').Page} page attached by session.attachPage
@@ -69,6 +111,77 @@ export function makeCapability(page, opts) {
       const body = /** @type {any} */ (fn);
       const payload = arg === undefined ? null : JSON.parse(JSON.stringify(arg));
       return page.evaluate(body, payload);
+    },
+    /**
+     * Authed JSON fetch via the browser context's own cookie jar (item 6a, hardened by the item-6
+     * follow-up fix: the logged-in LinkedIn voyager API, generalized for any adapter that needs one).
+     * Precheck is the SAME sync urlguard classification every other capability method's navigation goes
+     * through (classifyUrl, not the full async guardUrl: the DNS-resolution step guardUrl adds is not
+     * meaningful for a target on a host this same capability is already connected to) -- a URL outside
+     * the registry is refused before any cookie is even read.
+     *
+     * Deliberately NOT implemented as an in-page `fetch()` via page.evaluate (the item 6 original design):
+     * that runs as same-origin-or-not from the PAGE's current document, so a fresh tab on about:blank (or
+     * any page not already on this host) has the request blocked by the browser's own cross-origin
+     * policy regardless of how valid the session cookie is. A real top-level navigation (page.goto) is
+     * not subject to that restriction -- it behaves exactly like a user following a link -- and the
+     * browser attaches whatever cookies the CONTEXT holds for the destination host automatically, so this
+     * works identically whether the page was already on linkedin.com or on about:blank. This is the
+     * "equivalent that does not depend on the current page origin" alternative to Playwright's
+     * page.request/context.request, which stay off-limits for this file (test/safety.test.js's forbidden
+     * call-surface list; that surface is reserved for src/apply/'s own reviewed, write-capable module).
+     * Custom headers ride along via page.setExtraHTTPHeaders(), scoped to just this one navigation and
+     * reset in a finally block so no later, unrelated navigation on this page ever inherits them.
+     * @param {string} url
+     * @param {{ headers?: Record<string, string> }} [opts]
+     * @returns {Promise<FetchAuthedJsonResult>}
+     */
+    async fetchAuthedJson(url, opts = {}) {
+      checkAbort();
+      const v = classifyUrl(url, registry, { source, method: 'GET' });
+      if (!v.allowed || !v.url) {
+        return { cookieState: 'refused', refusedReason: v.reason, status: null, ok: false, json: null };
+      }
+      const { state, value } = await readCookieState(page, 'JSESSIONID', v.url.origin);
+      if (state !== 'valid' || !value) {
+        return { cookieState: state, status: null, ok: false, json: null };
+      }
+      const headers = { ...(opts.headers ?? {}), 'csrf-token': value };
+      /** @type {any} */
+      let res = null;
+      try {
+        await page.setExtraHTTPHeaders(headers);
+        res = await page.goto(v.url.toString(), { waitUntil: 'domcontentloaded', timeout: 45000 });
+      } catch {
+        res = null;
+      } finally {
+        try {
+          await page.setExtraHTTPHeaders({});
+        } catch {
+          // best-effort reset; a page/context already gone by this point has nothing left to pollute
+        }
+      }
+      checkAbort();
+      if (!res) return { cookieState: 'valid', status: null, ok: false, json: null };
+      const status = res.status();
+      const ok = res.ok();
+      /** @type {string|null} */
+      let text = null;
+      try {
+        text = await res.text();
+      } catch {
+        text = null;
+      }
+      /** @type {any} */
+      let json = null;
+      if (typeof text === 'string' && text) {
+        try {
+          json = JSON.parse(text);
+        } catch {
+          json = null;
+        }
+      }
+      return { cookieState: 'valid', status, ok, json };
     },
     async scrollToBottom(maxSteps = 8) {
       let steps = 0;

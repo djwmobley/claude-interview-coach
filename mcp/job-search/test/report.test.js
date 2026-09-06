@@ -336,6 +336,45 @@ describe('renderReportText / Html / Markdown: no em-dashes, listing text present
   });
 });
 
+describe('details_by_source line in text/html/markdown (scan-detail-pass fix, spec R4 item 3)', () => {
+  /** @param {any} statsExtra */
+  function dataWithStats(statsExtra) {
+    const run = {
+      run_id: 1, profile: 'exec-default', status: 'ok', started_at: '2026-08-29T00:00:00.000Z',
+      finished_at: '2026-08-29T00:05:00.000Z', duration_seconds: 300,
+      stats: { fetched: 0, new: 0, updated: 0, repost: 0, ambiguous: 0, detail_skipped_budget: 0, ...statsExtra },
+      errors: [], pages_by_source: {},
+    };
+    return {
+      dayKey: '2026-08-29', timezone: 'America/Chicago', noScan: false, runs: [run],
+      lookAtThese: { rows: [], excludedCount: 0 }, suspectUnclassified: [],
+      homeLocations: { rows: [], excludedCount: 0 }, reviewQueue: { total: 0, topReasons: [] }, disabledSources: [],
+    };
+  }
+
+  test('all three renderers include one details line per source, skipped summed across budget/gate/cancelled', () => {
+    const data = dataWithStats({
+      details_by_source: {
+        greenhouse: { fetched: 3, empty: 1, error: 0, skipped_budget: 2, skipped_gate: 1, skipped_cancelled: 0 },
+        indeed: { fetched: 0, empty: 0, error: 1, skipped_budget: 0, skipped_gate: 0, skipped_cancelled: 1 },
+      },
+    });
+    assert.match(renderReportText(data), /details: greenhouse fetched 3 \/ empty 1 \/ error 0 \/ skipped 3/);
+    assert.match(renderReportText(data), /details: indeed fetched 0 \/ empty 0 \/ error 1 \/ skipped 1/);
+    assert.match(renderReportHtml(data), /details: greenhouse fetched 3 \/ empty 1 \/ error 0 \/ skipped 3/);
+    assert.match(renderReportHtml(data), /details: indeed fetched 0 \/ empty 0 \/ error 1 \/ skipped 1/);
+    assert.match(renderReportMarkdown(data), /details: greenhouse fetched 3 \/ empty 1 \/ error 0 \/ skipped 3/);
+    assert.match(renderReportMarkdown(data), /details: indeed fetched 0 \/ empty 0 \/ error 1 \/ skipped 1/);
+  });
+
+  test('all three renderers omit the details block entirely when stats.details_by_source is absent (a run from before this fix)', () => {
+    const data = dataWithStats({});
+    for (const rendered of [renderReportText(data), renderReportHtml(data), renderReportMarkdown(data)]) {
+      assert.ok(!rendered.includes('details:'), 'no details line when details_by_source is absent');
+    }
+  });
+});
+
 describe('collectReviewQueueSummary / bulk-separate digest line (review-bulk spec S3d)', () => {
   test('a "since" with no matching events reports an empty bulkToday, and no line renders in any format', async () => {
     const summary = await collectReviewQueueSummary(client, new Date());

@@ -198,7 +198,10 @@ export function makeFakeSession(o = {}) {
               case 'scrollStep': return { before: 100, after: 100, atBottom: true };
               case 'readJsonLd': return o.jsonld ?? [];
               case 'genericListItems': return o.listItems ?? [];
-              case 'bodyText': return 'fake body text';
+              // Default is >= scan-run.js's DETAIL_MIN_CHARS (300) so a fixture run's indeed detail
+              // fetch classifies as 'fetched' the way a real job page's body text would; a test that
+              // wants an 'empty' outcome instead passes its own short o.bodyText.
+              case 'bodyText': return o.bodyText ?? 'Fake body text extracted from the indeed detail page fixture, used only when the adapter falls back past JSON-LD to whatever visible text the page contains, long enough on its own to exceed the detail-fetch minimum-length threshold this scan pipeline enforces before counting a detail fetch as successfully fetched rather than merely attempted.';
               case 'readScriptJson': return null;
               default: throw new Error(`fake page: unknown extractor ${fn.name} (${JSON.stringify(arg)})`);
             }

@@ -870,6 +870,13 @@ export function htmlToText(html) {
 }
 
 /**
+ * Minimum cleaned-description length (chars) for a detail fetch to count as `fetched` rather than
+ * `empty` (scan-run.js's detail_outcome classification, spec R4 item 2). Single source of truth: also
+ * imported by src/dashboard/resume-runner.js's own precheck instead of a duplicated literal.
+ */
+export const DETAIL_MIN_CHARS = 300;
+
+/**
  * Pinned description pipeline: HTML strip, entity decode, NFKC, whitespace
  * collapse, trim. `text` keeps the source's original case and punctuation
  * (that's what gets stored/rendered); `hash` is computed from the lowercased

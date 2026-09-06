@@ -88,6 +88,29 @@ describe('alertSendersSchema', () => {
   });
 });
 
+describe('detailMaxAttempts (scan-detail-pass fix, spec R4 item 2 retry cap)', () => {
+  test('the real config/adapters.json (via the test fixture config dir) defaults run.detailMaxAttempts to 3 without the key present in the file', () => {
+    const cfg = loadConfig({ dir: CONFIG_DIR, fresh: true });
+    assert.equal(cfg.adapters.run.detailMaxAttempts, 3);
+  });
+
+  test('a per-source override in adapters.json wins over the run-level default', () => {
+    const tmp = fs.mkdtempSync(path.join(os.tmpdir(), 'ic-config-detailmax-'));
+    try {
+      for (const name of fs.readdirSync(CONFIG_DIR)) fs.copyFileSync(path.join(CONFIG_DIR, name), path.join(tmp, name));
+      const adaptersPath = path.join(tmp, 'adapters.json');
+      const raw = JSON.parse(fs.readFileSync(adaptersPath, 'utf8'));
+      raw.adapters.greenhouse.detailMaxAttempts = 7;
+      fs.writeFileSync(adaptersPath, JSON.stringify(raw, null, 1));
+      const cfg = loadConfig({ dir: tmp, fresh: true });
+      assert.equal(cfg.adapters.adapters.greenhouse.detailMaxAttempts, 7);
+      assert.equal(cfg.adapters.run.detailMaxAttempts, 3, 'the run-level default is unaffected by one source override');
+    } finally {
+      fs.rmSync(tmp, { recursive: true, force: true });
+    }
+  });
+});
+
 describe('atsApplySchema and config/ats-apply.json (apply pipeline slice 2, spec-adversary amendment S11)', () => {
   test('CONFIG_FILES includes ats-apply.json', () => {
     assert.ok(CONFIG_FILES.includes('ats-apply.json'));

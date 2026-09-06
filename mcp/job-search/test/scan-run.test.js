@@ -367,4 +367,285 @@ describe('runScan persisted', () => {
       await client.query(`UPDATE ic_source_state SET manual_disable = false, disabled_until = NULL, consecutive_walls = 0 WHERE source = 'indeed'`);
     }
   });
+
+  // ---------------------------------------------------------------------------------------------
+  // scan-detail-pass fix (spec R4 item 1/2): detail pass survives list-page failure, and the total
+  // detail_outcome classification (fetched/empty/error/skipped_budget/skipped_gate/skipped_cancelled/
+  // not_queued) replacing the old boolean detail_skipped.
+  // ---------------------------------------------------------------------------------------------
+
+  /** Wraps a fake indeed session so `goto` throws a plain (non-JobSearchError) error for one jobkey. */
+  function withThrowingGoto(baseOpts, throwForJk) {
+    const base = makeFakeSession(baseOpts);
+    const connectSession = async () => {
+      const session = await base.connectSession();
+      const realAttach = session.attachPage.bind(session);
+      session.attachPage = async () => {
+        const page = await realAttach();
+        const realGoto = page.goto.bind(page);
+        page.goto = async (url) => {
+          if (String(url).includes(`jk=${throwForJk}`)) throw new Error('simulated detail fetch network failure');
+          return realGoto(url);
+        };
+        return page;
+      };
+      return session;
+    };
+    return { connectSession, state: base.state };
+  }
+
+  test('(a) BUDGET_EXHAUSTED from a list generator still drains that source detail queue (detail_fetched > 0)', async () => {
+    const cfg = testConfig();
+    const capped = { ...cfg, adapters: { ...cfg.adapters, adapters: { ...cfg.adapters.adapters, indeed: { ...cfg.adapters.adapters.indeed, maxPagesPerRun: 1 } } } };
+    const CO = 'ZZ-TEST-SCAN-DETAILPASS-A';
+    const card = { jobkey: 'a1a1a1a1a1a1a1a1', title: 'Chief Technology Officer', company: CO, location: 'Houston, TX', remote: false, postedMs: Date.now(), salaryText: '$300,000 - $350,000' };
+    const fake = makeFakeSession({ indeedCards: [card] });
+    const deps = offlineDeps({ config: capped, connectSession: fake.connectSession });
+    await client.query(`INSERT INTO ic_source_state (source, manual_disable) VALUES ('indeed', false) ON CONFLICT (source) DO UPDATE SET manual_disable = false, disabled_until = NULL, consecutive_walls = 0`);
+    try {
+      const r = await runScanWaiting({ profile: PROFILE, sources: ['indeed'], dryRun: false, wait: true }, deps, { trigger: 'mcp', log: () => {} });
+      // maxPagesPerRun=1 lets term 1's page succeed (queuing the one CTO card) then refuses term 2's
+      // page -- the list pass fails mid-source, but the row already queued from term 1 must still get
+      // its detail fetch (this is the bug this fix addresses: before it, the whole detail pass was
+      // skipped whenever the list pass threw, no matter how much it had already queued).
+      assert.equal(r.status, 'partial', JSON.stringify(r.errors));
+      assert.ok(r.errors.some((e) => e.source === 'indeed' && e.code === 'BUDGET_EXHAUSTED' && /per-run page cap/.test(e.message)), JSON.stringify(r.errors));
+      assert.ok(r.stats.detail_fetched >= 1, JSON.stringify(r.stats));
+      const rows = await client.query(`SELECT detail_outcome, description FROM ic_job_listings WHERE company = $1`, [CO]);
+      assert.equal(rows.rowCount, 1);
+      assert.equal(rows.rows[0].detail_outcome, 'fetched');
+      assert.ok(rows.rows[0].description);
+    } finally {
+      await client.query(`UPDATE ic_source_state SET manual_disable = false, disabled_until = NULL, consecutive_walls = 0 WHERE source = 'indeed'`);
+      await client.query(`DELETE FROM ic_job_review_queue WHERE candidate_id IN (SELECT id FROM ic_job_listings WHERE company = $1)`, [CO]);
+      await client.query(`DELETE FROM ic_scan_run_items WHERE listing_id IN (SELECT id FROM ic_job_listings WHERE company = $1)`, [CO]);
+      await client.query(`DELETE FROM ic_job_listings WHERE company = $1`, [CO]);
+    }
+  });
+
+  test('(b) run abort mid-detail-pass finalizes remaining items skipped_cancelled and skips expiry', async () => {
+    const CO_A = 'ZZ-TEST-SCAN-DETAILPASS-B1';
+    const CO_B = 'ZZ-TEST-SCAN-DETAILPASS-B2';
+    const cardA = { jobkey: 'b1b1b1b1b1b1b1b1', title: 'Chief Technology Officer', company: CO_A, location: 'Houston, TX', remote: false, postedMs: Date.now(), salaryText: '$300,000 - $350,000' };
+    const cardB = { jobkey: 'b2b2b2b2b2b2b2b2', title: 'Chief Information Officer', company: CO_B, location: 'Houston, TX', remote: false, postedMs: Date.now(), salaryText: null };
+    const ac = new AbortController();
+    // Abort right after item A's OWN finalizeListing starts embedding (deps.fetch, used only by
+    // embedSafe in this browser-source test) -- i.e., strictly AFTER item A's detail fetch and DB write
+    // have already gone through capability.js's own checkAbort() gates (which would otherwise throw a
+    // plain INTERNAL error, not CANCELLED, for any cap.* call made once the signal is aborted), and
+    // strictly BEFORE runDetailPass's loop reaches item B. This exercises exactly what the fix is for:
+    // the loop's OWN `if (signal.aborted)` check between queued items, not an abort racing a live network
+    // call inside the capability layer (a different, pre-existing failure mode this test is not about).
+    let aborted = false;
+    const baseFetch = makeFixtureFetch();
+    const fetchWithAbort = async (input, init) => {
+      if (!aborted) {
+        aborted = true;
+        ac.abort();
+      }
+      return baseFetch(input, init);
+    };
+    const fake = makeFakeSession({ indeedCards: [cardA, cardB] });
+    const deps = offlineDeps({ connectSession: fake.connectSession, fetch: fetchWithAbort });
+    await client.query(`INSERT INTO ic_source_state (source, manual_disable) VALUES ('indeed', false) ON CONFLICT (source) DO UPDATE SET manual_disable = false, disabled_until = NULL, consecutive_walls = 0`);
+    try {
+      const { runScan } = await import('../src/core/scan-run.js');
+      const r = /** @type {any} */ (await runScan({ profile: PROFILE, sources: ['indeed'], dryRun: false, wait: true }, deps, { trigger: 'mcp', log: () => {}, signal: ac.signal }));
+      assert.equal(r.status, 'failed');
+      assert.ok(r.errors.some((e) => e.code === 'CANCELLED'), JSON.stringify(r.errors));
+      assert.equal(r.stats.expired, 0, 'expiry never ran for the cancelled source');
+      const rows = await client.query(`SELECT id, company, detail_outcome, description FROM ic_job_listings WHERE company = ANY($1::text[])`, [[CO_A, CO_B]]);
+      const a = rows.rows.find((x) => x.company === CO_A);
+      const b = rows.rows.find((x) => x.company === CO_B);
+      assert.ok(a, 'higher-prescore row (fetched before the abort) was persisted');
+      assert.equal(a.detail_outcome, 'fetched');
+      assert.ok(a.description);
+      assert.ok(b, 'lower-prescore row, still only QUEUED when the abort fired, is still persisted rather than silently dropped');
+      assert.equal(b.detail_outcome, 'skipped_cancelled');
+      assert.equal(b.description, null);
+      const items = await client.query(`SELECT listing_id FROM ic_scan_run_items WHERE listing_id = ANY($1::int[])`, [[a.id, b.id].filter(Boolean)]);
+      assert.ok(items.rowCount >= 1, 'a run_items row exists even for the cancelled/skipped listing');
+    } finally {
+      await client.query(`UPDATE ic_source_state SET manual_disable = false, disabled_until = NULL, consecutive_walls = 0 WHERE source = 'indeed'`);
+      await client.query(`DELETE FROM ic_job_review_queue WHERE candidate_id IN (SELECT id FROM ic_job_listings WHERE company = ANY($1::text[]))`, [[CO_A, CO_B]]);
+      await client.query(`DELETE FROM ic_scan_run_items WHERE listing_id IN (SELECT id FROM ic_job_listings WHERE company = ANY($1::text[]))`, [[CO_A, CO_B]]);
+      await client.query(`DELETE FROM ic_job_listings WHERE company = ANY($1::text[])`, [[CO_A, CO_B]]);
+    }
+  });
+
+  test('(c) error and skipped_gate outcomes persist', async () => {
+    const CO_ERR = 'ZZ-TEST-SCAN-DETAILPASS-C1';
+    const CO_GATE = 'ZZ-TEST-SCAN-DETAILPASS-C2';
+    const errCard = { jobkey: 'c1c1c1c1c1c1c1c1', title: 'Chief Technology Officer', company: CO_ERR, location: 'Houston, TX', remote: false, postedMs: Date.now(), salaryText: '$300,000 - $350,000' };
+    // Location deliberately NOT in the profile's own locations list (Houston, TX only) so the location
+    // signal contributes 0 rather than +12, keeping this card's prescore below indeed's 55 gate while
+    // still matching the profile's title keywords (so it is still collected as outcome 'new').
+    const gateCard = { jobkey: 'c2c2c2c2c2c2c2c2', title: 'Chief Information Officer', company: CO_GATE, location: 'Dallas, TX', remote: false, postedMs: Date.now(), salaryText: null };
+    const fake = withThrowingGoto({ indeedCards: [errCard, gateCard] }, errCard.jobkey);
+    const deps = offlineDeps({ connectSession: fake.connectSession });
+    await client.query(`INSERT INTO ic_source_state (source, manual_disable) VALUES ('indeed', false) ON CONFLICT (source) DO UPDATE SET manual_disable = false, disabled_until = NULL, consecutive_walls = 0`);
+    try {
+      const r = await runScanWaiting({ profile: PROFILE, sources: ['indeed'], dryRun: false, wait: true }, deps, { trigger: 'mcp', log: () => {} });
+      assert.ok(['ok', 'partial'].includes(r.status), JSON.stringify(r.errors));
+      const rows = await client.query(`SELECT company, prescore, detail_outcome, description FROM ic_job_listings WHERE company = ANY($1::text[])`, [[CO_ERR, CO_GATE]]);
+      const errRow = rows.rows.find((x) => x.company === CO_ERR);
+      const gateRow = rows.rows.find((x) => x.company === CO_GATE);
+      assert.ok(errRow, 'high-prescore row whose detail fetch threw is still persisted');
+      assert.equal(errRow.detail_outcome, 'error');
+      assert.equal(errRow.description, null);
+      assert.ok(gateRow, 'low-prescore row is still persisted');
+      assert.ok(gateRow.prescore < 55, `expected gate card below indeed's 55 gate, got ${gateRow.prescore}`);
+      assert.equal(gateRow.detail_outcome, 'skipped_gate');
+      assert.equal(gateRow.description, null);
+    } finally {
+      await client.query(`UPDATE ic_source_state SET manual_disable = false, disabled_until = NULL, consecutive_walls = 0 WHERE source = 'indeed'`);
+      await client.query(`DELETE FROM ic_job_review_queue WHERE candidate_id IN (SELECT id FROM ic_job_listings WHERE company = ANY($1::text[]))`, [[CO_ERR, CO_GATE]]);
+      await client.query(`DELETE FROM ic_scan_run_items WHERE listing_id IN (SELECT id FROM ic_job_listings WHERE company = ANY($1::text[]))`, [[CO_ERR, CO_GATE]]);
+      await client.query(`DELETE FROM ic_job_listings WHERE company = ANY($1::text[])`, [[CO_ERR, CO_GATE]]);
+    }
+  });
+
+  test('(f) a 299-char cleaned description classifies empty, 300 classifies fetched', async () => {
+    for (const [len, expected] of [[299, 'empty'], [300, 'fetched']]) {
+      const CO = `ZZ-TEST-SCAN-DETAILPASS-F${len}`;
+      const card = { jobkey: `f${len}f${len}f${len}f${len}f0`.slice(0, 16), title: 'Chief Technology Officer', company: CO, location: 'Houston, TX', remote: false, postedMs: Date.now(), salaryText: '$300,000 - $350,000' };
+      const fake = makeFakeSession({ indeedCards: [card], bodyText: 'x'.repeat(len) });
+      const deps = offlineDeps({ connectSession: fake.connectSession });
+      await client.query(`INSERT INTO ic_source_state (source, manual_disable) VALUES ('indeed', false) ON CONFLICT (source) DO UPDATE SET manual_disable = false, disabled_until = NULL, consecutive_walls = 0`);
+      try {
+        const r = await runScanWaiting({ profile: PROFILE, sources: ['indeed'], dryRun: false, wait: true }, deps, { trigger: 'mcp', log: () => {} });
+        assert.ok(['ok', 'partial'].includes(r.status), JSON.stringify(r.errors));
+        const row = await client.query(`SELECT detail_outcome FROM ic_job_listings WHERE company = $1`, [CO]);
+        assert.equal(row.rowCount, 1);
+        assert.equal(row.rows[0].detail_outcome, expected, `length ${len} must classify ${expected}`);
+      } finally {
+        await client.query(`UPDATE ic_source_state SET manual_disable = false, disabled_until = NULL, consecutive_walls = 0 WHERE source = 'indeed'`);
+        await client.query(`DELETE FROM ic_job_review_queue WHERE candidate_id IN (SELECT id FROM ic_job_listings WHERE company = $1)`, [CO]);
+        await client.query(`DELETE FROM ic_scan_run_items WHERE listing_id IN (SELECT id FROM ic_job_listings WHERE company = $1)`, [CO]);
+        await client.query(`DELETE FROM ic_job_listings WHERE company = $1`, [CO]);
+      }
+    }
+  });
+
+  test('(d) a row fetched on scan 1 keeps outcome fetched after scan 2 re-sees it below the gate', async () => {
+    const CO = 'ZZ-TEST-SCAN-DETAILPASS-D';
+    const jobs = JSON.parse(JSON.stringify(await import('./helpers/scan-fixtures.js').then((m) => m.readJsonFixture('adapters/greenhouse-zztest-jobs.json'))));
+    jobs.jobs = [{
+      absolute_url: 'https://boards.greenhouse.io/zztest/jobs/7000000101', internal_job_id: 101, location: { name: 'Houston, TX' },
+      id: 7000000101, updated_at: '2026-08-23T10:00:00-04:00', requisition_id: 'ZD', title: 'Chief Technology Officer',
+      company_name: CO, first_published: '2026-08-23T10:00:00-04:00',
+    }];
+    const longContent = 'ZZ-TEST-SCAN-D synthetic detail. Reports to the CEO. Base $300,000 - $350,000. '
+      + 'This synthetic posting exists purely to exercise the scan detail-fetch retry-gate logic end to '
+      + 'end across two separate scan runs of the same board and the same listing, well past the 300 '
+      + 'character detail-fetch minimum length this pipeline enforces before counting a fetch as successful.';
+    const map = [
+      { prefix: 'https://boards-api.greenhouse.io/v1/boards/zztest/jobs/7000000101', body: JSON.stringify({ id: 7000000101, title: 'Chief Technology Officer', content: longContent, location: { name: 'Houston, TX' } }) },
+      { prefix: 'https://boards-api.greenhouse.io/v1/boards/zztest/jobs', body: JSON.stringify(jobs) },
+      ...DEFAULT_MAP.filter((m) => m.prefix.includes('/gitlab/')),
+    ];
+    try {
+      const r1 = await runScanWaiting({ profile: PROFILE, sources: ['greenhouse'], dryRun: false, wait: true }, offlineDeps({ fetch: makeFixtureFetch(map) }), { trigger: 'cli', log: () => {}, now: FIXTURE_NOW });
+      assert.equal(r1.status, 'ok', JSON.stringify(r1.errors));
+      const row1 = await client.query(`SELECT detail_outcome, description FROM ic_job_listings WHERE company = $1`, [CO]);
+      assert.equal(row1.rowCount, 1);
+      assert.equal(row1.rows[0].detail_outcome, 'fetched');
+      assert.ok(row1.rows[0].description);
+      // Scan 2: a config clone whose run-level detailFetchMinPrescore is pushed to the schema's max (100)
+      // -- unreachable for any real listing -- so this same row is definitely BELOW the gate this time,
+      // exercising the 'update' outcome's not_queued path rather than a real re-fetch.
+      const cfg = testConfig();
+      const belowGate = { ...cfg, adapters: { ...cfg.adapters, run: { ...cfg.adapters.run, detailFetchMinPrescore: 100 } } };
+      const r2 = await runScanWaiting({ profile: PROFILE, sources: ['greenhouse'], dryRun: false, wait: true }, offlineDeps({ config: belowGate, fetch: makeFixtureFetch(map) }), { trigger: 'cli', log: () => {}, now: FIXTURE_NOW });
+      assert.equal(r2.status, 'ok', JSON.stringify(r2.errors));
+      assert.equal(r2.stats.updated, 1);
+      assert.equal(r2.stats.detail_fetched, 0, 'below the gate this time: no re-fetch attempted');
+      const row2 = await client.query(`SELECT detail_outcome, description FROM ic_job_listings WHERE company = $1`, [CO]);
+      assert.equal(row2.rows[0].detail_outcome, 'fetched', 'not_queued must never clobber an already-fetched outcome');
+      assert.ok(row2.rows[0].description, 'description from scan 1 is untouched');
+    } finally {
+      await client.query(`DELETE FROM ic_job_review_queue WHERE candidate_id IN (SELECT id FROM ic_job_listings WHERE company = $1)`, [CO]);
+      await client.query(`DELETE FROM ic_scan_run_items WHERE listing_id IN (SELECT id FROM ic_job_listings WHERE company = $1)`, [CO]);
+      await client.query(`DELETE FROM ic_job_listings WHERE company = $1`, [CO]);
+    }
+  });
+
+  test('(e) attempts cap: a third consecutive empty result makes the row ineligible for a further retry', async () => {
+    const CO = 'ZZ-TEST-SCAN-DETAILPASS-E';
+    const jobs = JSON.parse(JSON.stringify(await import('./helpers/scan-fixtures.js').then((m) => m.readJsonFixture('adapters/greenhouse-zztest-jobs.json'))));
+    jobs.jobs = [{
+      absolute_url: 'https://boards.greenhouse.io/zztest/jobs/7000000102', internal_job_id: 102, location: { name: 'Houston, TX' },
+      id: 7000000102, updated_at: '2026-08-23T10:00:00-04:00', requisition_id: 'ZE', title: 'Chief Technology Officer',
+      company_name: CO, first_published: '2026-08-23T10:00:00-04:00',
+    }];
+    // Short (<300 char) content: every scan's detail fetch classifies 'empty', so detail_attempts climbs
+    // by one each time this row is re-queued -- config's detailMaxAttempts defaults to 3, so the 4th scan
+    // must find it ineligible and skip the network attempt entirely.
+    const shortContent = 'ZZ-TEST-SCAN-E synthetic detail. Reports to the CEO. Base $300,000 - $350,000.';
+    const map = [
+      { prefix: 'https://boards-api.greenhouse.io/v1/boards/zztest/jobs/7000000102', body: JSON.stringify({ id: 7000000102, title: 'Chief Technology Officer', content: shortContent, location: { name: 'Houston, TX' } }) },
+      { prefix: 'https://boards-api.greenhouse.io/v1/boards/zztest/jobs', body: JSON.stringify(jobs) },
+      ...DEFAULT_MAP.filter((m) => m.prefix.includes('/gitlab/')),
+    ];
+    const deps = offlineDeps({ fetch: makeFixtureFetch(map) });
+    try {
+      for (let scanNum = 1; scanNum <= 3; scanNum++) {
+        const r = await runScanWaiting({ profile: PROFILE, sources: ['greenhouse'], dryRun: false, wait: true }, deps, { trigger: 'cli', log: () => {}, now: FIXTURE_NOW });
+        assert.equal(r.status, 'ok', JSON.stringify(r.errors));
+        assert.equal(r.stats.detail_empty, 1, `scan ${scanNum} must attempt (and get 'empty' from) the short-content detail fetch`);
+        const row = await client.query(`SELECT detail_outcome, detail_attempts FROM ic_job_listings WHERE company = $1`, [CO]);
+        assert.equal(row.rows[0].detail_outcome, 'empty');
+        assert.equal(row.rows[0].detail_attempts, scanNum, `attempts must be ${scanNum} after scan ${scanNum}`);
+      }
+      const r4 = await runScanWaiting({ profile: PROFILE, sources: ['greenhouse'], dryRun: false, wait: true }, deps, { trigger: 'cli', log: () => {}, now: FIXTURE_NOW });
+      assert.equal(r4.status, 'ok', JSON.stringify(r4.errors));
+      assert.equal(r4.stats.detail_empty, 0, 'scan 4 must NOT re-attempt: attempts is already at the cap (3)');
+      const row4 = await client.query(`SELECT detail_outcome, detail_attempts FROM ic_job_listings WHERE company = $1`, [CO]);
+      assert.equal(row4.rows[0].detail_attempts, 3, 'attempts stays capped, never incremented past the config max');
+      assert.equal(row4.rows[0].detail_outcome, 'empty', 'not_queued (scan 4) never overwrites the prior empty outcome');
+    } finally {
+      await client.query(`DELETE FROM ic_job_review_queue WHERE candidate_id IN (SELECT id FROM ic_job_listings WHERE company = $1)`, [CO]);
+      await client.query(`DELETE FROM ic_scan_run_items WHERE listing_id IN (SELECT id FROM ic_job_listings WHERE company = $1)`, [CO]);
+      await client.query(`DELETE FROM ic_job_listings WHERE company = $1`, [CO]);
+    }
+  });
+
+  test('(g) LinkedIn item-6 follow-up fix: a source-B not_found (ERR_HTTP_RESPONSE_CODE_FAILURE) persists detail_outcome error, not empty', async () => {
+    const CO = 'ZZ-TEST-SCAN-DETAILPASS-NOTFOUND';
+    const card = { id: '4461489435', title: 'Chief Technology Officer', company: CO, location: 'Houston, TX', datetime: new Date().toISOString() };
+    const base = makeFakeSession({ linkedinCards: [card] });
+    const connectSession = async () => {
+      const session = await base.connectSession();
+      const realAttach = session.attachPage.bind(session);
+      session.attachPage = async () => {
+        const page = await realAttach();
+        const realGoto = page.goto.bind(page);
+        page.goto = async (url) => {
+          // The fake page has no context()/setExtraHTTPHeaders, so cap.fetchAuthedJson's cookie read
+          // fails closed to 'missing' and source A is skipped entirely (covered separately by the
+          // capability-level tests); this test is purely about source B's own error classification.
+          if (String(url).includes('/jobs-guest/')) throw new Error('page.goto: net::ERR_HTTP_RESPONSE_CODE_FAILURE at ' + url);
+          return realGoto(url);
+        };
+        return page;
+      };
+      return session;
+    };
+    const deps = offlineDeps({ connectSession });
+    await client.query(`INSERT INTO ic_source_state (source, manual_disable) VALUES ('linkedin', false) ON CONFLICT (source) DO UPDATE SET manual_disable = false, disabled_until = NULL, consecutive_walls = 0`);
+    try {
+      const r = await runScanWaiting({ profile: PROFILE, sources: ['linkedin'], dryRun: false, wait: true }, deps, { trigger: 'mcp', log: () => {} });
+      assert.ok(['ok', 'partial'].includes(r.status), JSON.stringify(r.errors));
+      assert.ok(r.stats.detail_error >= 1, JSON.stringify(r.stats));
+      assert.equal(r.stats.detail_empty, 0, 'not_found must never land in the empty counter');
+      const row = await client.query(`SELECT detail_outcome FROM ic_job_listings WHERE company = $1`, [CO]);
+      assert.equal(row.rowCount, 1);
+      assert.equal(row.rows[0].detail_outcome, 'error');
+    } finally {
+      await client.query(`UPDATE ic_source_state SET manual_disable = false, disabled_until = NULL, consecutive_walls = 0 WHERE source = 'linkedin'`);
+      await client.query(`DELETE FROM ic_job_review_queue WHERE candidate_id IN (SELECT id FROM ic_job_listings WHERE company = $1)`, [CO]);
+      await client.query(`DELETE FROM ic_scan_run_items WHERE listing_id IN (SELECT id FROM ic_job_listings WHERE company = $1)`, [CO]);
+      await client.query(`DELETE FROM ic_job_listings WHERE company = $1`, [CO]);
+    }
+  });
 });
