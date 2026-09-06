@@ -16,6 +16,7 @@ import { register as registerListings } from './routes/listings.js';
 import { register as registerFollowups } from './routes/followups.js';
 import { register as registerReview } from './routes/review.js';
 import { register as registerScans } from './routes/scans.js';
+import { register as registerActivity } from './routes/activity.js';
 import { register as registerReport } from './routes/report.js';
 import { register as registerCalendar } from './routes/calendar.js';
 import { register as registerDocuments } from './routes/documents.js';
@@ -231,6 +232,7 @@ export function createDashboardServer(deps, opts = {}) {
   registerFollowups(router, deps, streamHub);
   registerReview(router, deps, streamHub);
   registerScans(router, deps);
+  registerActivity(router, deps);
   registerReport(router, deps);
   registerCalendar(router, deps);
   registerDocuments(router, deps);

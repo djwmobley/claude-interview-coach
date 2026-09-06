@@ -93,6 +93,7 @@ import { buildRegistry } from '../src/core/urlguard.js';
 import { defaultAutoApplySummaryFile, writeAutoApplySummary } from '../src/core/auto-apply-state.js';
 import { waitForScan, localDeadline, defaultQueryLatestScanRun } from '../src/core/scan-wait.js';
 import { launchChrome } from './scan.js';
+import { runningMarkerPath, writeRunningMarker, deleteRunningMarker } from '../src/core/running-marker.js';
 
 const USAGE = 'usage: node bin/auto-apply.js [--dry-run] [--json [out]]';
 
@@ -118,8 +119,14 @@ export class AutoApplyLockedError extends Error {
  * @param {{
  *   summary: any, summaryFile: string, logDir: string, now: Date, timezone: string, jsonArg: string|null|undefined,
  *   log: (f: any) => void,
+ *   markerFile?: string activity pill running marker (src/core/running-marker.js); deleted as the very
+ *     first action below, BEFORE exitFn/process.exit runs -- process.exit() does not unwind pending
+ *     `finally` blocks further up the call stack, so this is the only point in this file guaranteed to
+ *     run on every terminal exit (normal, locked, and error) before the process actually terminates.
+ *     Omitted (undefined) is a no-op, so existing callers/tests that never pass it are unaffected.
  *   writeSummaryFn?: typeof writeAutoApplySummary, writeDatedFn?: typeof writeRunJsonNoOverwrite,
  *   datedPathFn?: typeof datedRunJsonPath, closePoolFn?: () => Promise<void>, exitFn?: (code: number) => void,
+ *   deleteMarkerFn?: typeof deleteRunningMarker,
  * }} opts
  * @returns {(code: number) => Promise<void>}
  */
@@ -129,6 +136,7 @@ export function createFinish(opts) {
   const datedPathFn = opts.datedPathFn ?? datedRunJsonPath;
   const closePoolFn = opts.closePoolFn ?? closePool;
   const exitFn = opts.exitFn ?? ((code) => process.exit(code));
+  const deleteMarkerFn = opts.deleteMarkerFn ?? deleteRunningMarker;
   const persist = () => {
     try {
       writeSummaryFn(opts.summaryFile, opts.summary);
@@ -137,6 +145,7 @@ export function createFinish(opts) {
     }
   };
   return async (code) => {
+    if (opts.markerFile) deleteMarkerFn(opts.markerFile);
     opts.summary.phase = 'done';
     persist();
     try {
@@ -559,7 +568,18 @@ async function main() {
   };
   persist();
 
-  const finish = createFinish({ summary, summaryFile, logDir: env.JOBSEARCH_LOG_DIR, now, timezone, jsonArg: args.json, log });
+  // Activity pill running marker (spec item 2): written before any phase work starts, deleted by
+  // createFinish() above -- as its first action, before exitFn/process.exit -- on every terminal exit.
+  // Best-effort: a write failure here is logged but never fatal to the run itself (see
+  // src/core/running-marker.js's doc comment).
+  const markerFile = runningMarkerPath(env.JOBSEARCH_LOG_DIR, 'auto-apply');
+  try {
+    writeRunningMarker(markerFile, { pid: process.pid, startedAt: now, runId: null });
+  } catch (err) {
+    log({ evt: 'auto_apply_running_marker_write_failed', ...errFields(err) });
+  }
+
+  const finish = createFinish({ summary, summaryFile, logDir: env.JOBSEARCH_LOG_DIR, now, timezone, jsonArg: args.json, log, markerFile });
 
   // runLifecycle (spec-adversary finding on the original PR, fixed here; residual gap fixed here too):
   // EVERY exit path from this point on -- the apply exclusion gate config load, normal completion, the
