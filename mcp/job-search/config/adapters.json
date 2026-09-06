@@ -82,8 +82,7 @@
       ],
       "dailyPages": 40,
       "dailyDetails": 60,
-      "maxPagesPerQuery": 3,
-      "detailFetchMinPrescore": 55
+      "maxPagesPerQuery": 3
     },
     "greenhouse": {
       "transport": "fetch",
