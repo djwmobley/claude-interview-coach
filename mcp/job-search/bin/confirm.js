@@ -44,6 +44,7 @@ import { connectDedicated } from '../src/core/db.js';
 import { createLogger, dailyLogPath, pruneLogs } from '../src/core/logger.js';
 import { runMailConfirm } from '../src/apply/mail-confirm.js';
 import { errFields } from '../src/core/errors.js';
+import { runningMarkerPath, writeRunningMarker, deleteRunningMarker } from '../src/core/running-marker.js';
 
 function parseArgs(argv) {
   const out = { dryRun: false };
@@ -62,6 +63,22 @@ async function main() {
   const env = getEnv();
   pruneLogs(env.JOBSEARCH_LOG_DIR, 'confirm', 14);
   const logger = createLogger({ file: dailyLogPath(env.JOBSEARCH_LOG_DIR, 'confirm'), name: 'confirm' });
+  // Activity pill running marker (spec item 2): written before any work starts. `exit()` below is this
+  // file's ONLY path to process.exit -- both call sites route through it -- so the marker is always
+  // deleted before the process actually terminates, on every exit code this file can produce. Best-effort
+  // write: a failure here is logged but never fatal to the confirm run itself (see
+  // src/core/running-marker.js's doc comment).
+  const markerFile = runningMarkerPath(env.JOBSEARCH_LOG_DIR, 'confirm');
+  try {
+    writeRunningMarker(markerFile, { pid: process.pid, startedAt: new Date(), runId: null });
+  } catch (err) {
+    logger.error({ evt: 'confirm_running_marker_write_failed', ...errFields(err) });
+  }
+  const exit = (code) => {
+    deleteRunningMarker(markerFile);
+    process.exit(code);
+  };
+
   let client;
   try {
     client = await connectDedicated();
@@ -69,7 +86,7 @@ async function main() {
     const f = errFields(err);
     logger.error({ evt: 'confirm_db_failed', ...f });
     console.log(JSON.stringify({ ok: false, ...f }));
-    process.exit(1);
+    return exit(1);
   }
   let code = 1;
   try {
@@ -95,7 +112,7 @@ async function main() {
   } finally {
     await client.end();
   }
-  process.exit(code);
+  exit(code);
 }
 
 main();

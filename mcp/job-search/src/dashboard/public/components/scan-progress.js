@@ -1,8 +1,13 @@
 // @ts-check
 /**
- * Scan pill and progress panel (design "Scan pill states": idle green, running accent pulse, heartbeat
- * stale >30s yellow, >90s red, canceling muted). Heartbeat staleness is computed client-side from
- * `heartbeat_at` against wall-clock time on every render tick.
+ * Scan progress panel (Home page's own scan-run detail, design "Scan pill states" heartbeat staleness
+ * bucketing). Heartbeat staleness is computed client-side from `heartbeat_at` against wall-clock time on
+ * every render tick.
+ *
+ * The topbar pill this file used to also export (`scanPill`) was replaced by
+ * components/activity-pill.js's `activityPill()`, fed by GET /api/activity instead of GET
+ * /api/scans/live -- see that file's own doc comment for why this one was not simply renamed instead of
+ * split (pages/home.js still needs `scanProgressPanel`/`heartbeatBucket` from here).
  */
 import { h } from '../lib/dom.js';
 
@@ -13,17 +18,6 @@ export function heartbeatBucket(heartbeatAt, now = new Date()) {
   if (ageMs > 90000) return 'stale-red';
   if (ageMs > 30000) return 'stale-yellow';
   return 'fresh';
-}
-
-/**
- * @param {{ running: boolean, run: any|null, canceling?: boolean }} opts
- */
-export function scanPill(opts) {
-  if (opts.canceling) return h('span', { className: 'scan-pill scan-pill--canceling', text: 'Canceling' });
-  if (!opts.running || !opts.run) return h('span', { className: 'scan-pill scan-pill--idle', text: 'Idle' });
-  const bucket = heartbeatBucket(opts.run.heartbeat_at);
-  const cls = bucket === 'stale-red' ? 'scan-pill--stale-red' : bucket === 'stale-yellow' ? 'scan-pill--stale-yellow' : 'scan-pill--running';
-  return h('span', { className: `scan-pill ${cls}`, text: 'Running' });
 }
 
 /**

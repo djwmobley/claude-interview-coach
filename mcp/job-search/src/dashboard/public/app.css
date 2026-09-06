@@ -293,12 +293,22 @@ textarea.notes-textarea { min-height: 100px; }
 .activity-list__row, .agenda__row { display: flex; align-items: center; gap: 8px; padding: 6px 0; border-bottom: 1px solid var(--border); font-size: 12px; }
 .activity-list__time, .agenda__time { color: var(--muted-2); font-family: "Cascadia Mono", Consolas, "SF Mono", monospace; font-size: 10px; min-width: 90px; }
 
-.scan-pill { display: inline-flex; align-items: center; padding: 2px 10px; border-radius: 999px; font-size: 11px; }
-.scan-pill--idle { background: var(--green-dim); color: var(--green); }
-.scan-pill--running { background: var(--accent-dim); color: var(--accent); }
-.scan-pill--stale-yellow { background: var(--yellow-dim); color: var(--yellow); }
-.scan-pill--stale-red { background: var(--red-dim); color: var(--red); }
-.scan-pill--canceling { background: var(--tag-bg); color: var(--muted); }
+/* Topbar activity pill (activity pill spec item 3): what the operator is doing right now, GET
+   /api/activity's `operator` field -- "Idle" pulls the same green-dim treatment the old scan-only pill
+   used; "running" (an operator-driven action in flight) is the standard accent, same restraint as every
+   other in-progress indicator in this dashboard. */
+.activity-pill { display: inline-flex; align-items: center; padding: 2px 10px; border-radius: 999px; font-size: 11px; max-width: 260px; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
+.activity-pill--idle { background: var(--green-dim); color: var(--green); }
+.activity-pill--running { background: var(--accent-dim); color: var(--accent); }
+
+/* Background activity banner (activity pill spec item 4): same "section card + thin cyan accent, only a
+   little color" restraint as .review-bulk-bar above -- background automation is informational, not an
+   error or warning, so it never borrows the red/yellow .banner styling. */
+.background-banner { display: flex; align-items: center; background: var(--surface2); border: 1px solid var(--border); border-left: 3px solid var(--cyan); padding: 6px 18px; font-size: 12px; }
+.background-banner__items { display: flex; flex-wrap: wrap; gap: 16px; }
+.background-banner__item { display: inline-flex; align-items: center; gap: 8px; }
+.background-banner__label { color: var(--cyan); }
+.background-banner__dismiss { background: none; border: none; color: var(--muted); cursor: pointer; font-size: 11px; padding: 0; }
 
 .scan-progress { background: var(--surface); border: 1px solid var(--border); border-radius: 6px; padding: 10px 12px; margin-bottom: 12px; }
 .scan-progress__sources { display: grid; grid-template-columns: repeat(6, 1fr); gap: 8px; margin-top: 8px; }

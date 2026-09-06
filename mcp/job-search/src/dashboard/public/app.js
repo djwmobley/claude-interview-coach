@@ -16,7 +16,8 @@ import { getJson } from './lib/api.js';
 import { handleOutcome } from './lib/outcome.js';
 import { createSseClient } from './lib/sse.js';
 import { initialKbState, reduceKeyboard, CHORD_WINDOW_MS } from './lib/shortcuts.js';
-import { scanPill } from './components/scan-progress.js';
+import { activityPill } from './components/activity-pill.js';
+import { renderBackgroundBanner } from './components/background-banner.js';
 import { railIcon } from './components/rail-icons.js';
 import { emit } from './lib/bus.js';
 
@@ -65,6 +66,7 @@ const PAGE_LOADERS = Object.freeze({
 
 const railEl = document.getElementById('rail');
 const topbarEl = document.getElementById('topbar');
+const backgroundBannerEl = document.getElementById('background-banner-root');
 const bannersEl = document.getElementById('banners');
 const contentEl = document.getElementById('content');
 const toastRootEl = document.getElementById('toast-root');
@@ -75,7 +77,9 @@ initToastRoot(toastRootEl, bannersEl);
 /** @type {{ name: string, refresh?: () => void, teardown?: () => void, beforeLeave?: () => void }|null} */
 let currentPage = null;
 let currentRouteName = 'home';
-let liveScanState = { running: false, run: null };
+/** Last GET /api/activity response body, or null before the first successful fetch (activityPill()
+ * itself already renders "Idle" for null, so this is a safe initial value, never a loading flash). */
+let activityState = null;
 
 /** Section 8's chord/reducer state, driven by the module-level keydown listener below. */
 let kbState = initialKbState();
@@ -127,24 +131,30 @@ function renderTopbar() {
       location.hash = buildHash('jobs');
     }
   });
-  const pillHost = h('span', { className: 'topbar__scan-pill', attrs: { id: 'topbar-scan-pill' } }, [scanPill({ running: false, run: null })]);
+  const pillHost = h('span', { className: 'topbar__activity-pill', attrs: { id: 'topbar-activity-pill' } }, [activityPill(null)]);
   setChildren(topbarEl, [
     h('div', { className: 'topbar__left' }, [search]),
     h('div', { className: 'topbar__right' }, [pillHost, h('span', { className: 'topbar__user', text: USER_BLOCK_PLACEHOLDER })]),
   ]);
 }
 
-function updateScanPill() {
-  const host = document.getElementById('topbar-scan-pill');
+function updateActivityPill() {
+  const host = document.getElementById('topbar-activity-pill');
   if (!host) return;
-  setChildren(host, [scanPill(liveScanState)]);
+  setChildren(host, [activityPill(activityState)]);
 }
 
-async function pollLiveScan() {
-  const outcome = handleOutcome(await getJson('/api/scans/live'));
+/** GET /api/activity (activity pill spec items 3/4/5): drives both the topbar pill (operator-directed
+ * work only) and the background banner (everything else running) from one shared fetch. Replaces this
+ * app shell's own GET /api/scans/live poll entirely -- pages/home.js has its own SEPARATE fetch of that
+ * same endpoint for its scan-run detail panel, so that route itself is untouched, only this file's own
+ * now-redundant use of it is removed. */
+async function pollActivity() {
+  const outcome = handleOutcome(await getJson('/api/activity'));
   if (outcome.kind !== 'ok') return;
-  liveScanState = { running: outcome.body.running, run: outcome.body.run };
-  updateScanPill();
+  activityState = outcome.body;
+  updateActivityPill();
+  if (backgroundBannerEl) renderBackgroundBanner(backgroundBannerEl, outcome.body.background ?? []);
 }
 
 async function pollHealth() {
@@ -262,15 +272,20 @@ function hideHelpOverlay() {
 const sse = createSseClient({
   url: '/api/stream',
   onRun(data) {
-    liveScanState = { running: true, run: data };
-    updateScanPill();
+    // A scan-run SSE event is one of the things that can change what GET /api/activity reports (a new
+    // scan started, or the currently-tracked one advanced) -- re-fetch rather than trying to derive the
+    // activity shape from this event's own scan-run payload.
+    pollActivity();
     emit('dashboard:run-update', data);
   },
   onChanged(data) {
+    // 'changed' fires on application/listing state transitions -- exactly the events that flip the
+    // resume/review/apply runner statuses GET /api/activity reads, so this is refetched here too.
+    pollActivity();
     emit('dashboard:changed', data);
   },
   onPollTick() {
-    pollLiveScan();
+    pollActivity();
     emit('dashboard:changed', { kind: 'poll' });
   },
   onDegraded(degraded) {
@@ -282,9 +297,9 @@ window.addEventListener('beforeunload', () => sse.stop());
 renderTopbar();
 applyLayoutClass();
 pollHealth();
-pollLiveScan();
+pollActivity();
 setInterval(pollHealth, 30000);
-setInterval(pollLiveScan, 5000);
+setInterval(pollActivity, 5000);
 if (layoutBucket() !== 'narrow') renderRoute(location.hash || '#/');
 
 export { USER_BLOCK_PLACEHOLDER };
