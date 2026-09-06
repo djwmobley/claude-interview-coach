@@ -28,11 +28,12 @@
  * and the daily budget are still written, since the network activity is
  * real).
  */
+import assert from 'node:assert/strict';
 import { loadConfig, getEnv } from './config.js';
 import { connectDedicated as defaultConnectDedicated, withTransaction } from './db.js';
 import { JobSearchError, errFields } from './errors.js';
 import { log as defaultLog } from './logger.js';
-import { normalizeListing } from './normalize.js';
+import { normalizeListing, DETAIL_MIN_CHARS } from './normalize.js';
 import { classify, makePgLookups } from './dedup.js';
 import { applyDecision, adoptUnclassifiedRows } from './upsert.js';
 import { prescore } from './prescore.js';
@@ -116,8 +117,14 @@ export const USER_AGENT = 'job-search-mcp/0.1 (interview-coach; read-only scanne
  * @property {number} errors
  * @property {number} unembedded
  * @property {number} stale_dropped
- * @property {number} detail_fetched
- * @property {number} detail_skipped_budget rows queued for a detail fetch (outcome new/ambiguous, prescore gate met) but skipped because the source's daily/per-run budget ran out mid-source (spec R4.2, decision 22)
+ * @property {number} detail_fetched rows whose detail_outcome this run is 'fetched' (description >= DETAIL_MIN_CHARS)
+ * @property {number} detail_empty rows whose detail_outcome this run is 'empty' (fetch ran, description falsy or too short)
+ * @property {number} detail_error rows whose detail_outcome this run is 'error' (a non-budget throw from the adapter's fetchDetail)
+ * @property {number} detail_skipped_budget rows queued for a detail fetch (outcome new/ambiguous/update, prescore gate met) but skipped because the source's daily/per-run budget ran out mid-source (spec R4.2, decision 22)
+ * @property {number} detail_skipped_gate rows with a detail-capable adapter, outcome new/ambiguous, but below the prescore gate
+ * @property {number} detail_skipped_cancelled rows still queued when the run's abort signal fired mid-runDetailPass
+ * @property {number} detail_not_queued rows never eligible for the detail queue at all (cross_source_dup/repost, or update rows already fetched/attempts-capped)
+ * @property {Record<string, { fetched: number, empty: number, error: number, skipped_budget: number, skipped_gate: number, skipped_cancelled: number }>} details_by_source per-source breakdown of the six outcomes above (not_queued excluded), keyed by source name; only populated for a source that queued at least one row
  * @property {number} dedup_sticky_skip_merged rows that would otherwise have created a review-queue row
  *   but instead auto-merged into a STICKY-ELIGIBLE skip/passed/lost root (sticky-skip spec part B,
  *   src/core/upsert.js's findStickySkipRoot()); also counted under `cross_source_dup` above, since the
@@ -128,6 +135,25 @@ export const USER_AGENT = 'job-search-mcp/0.1 (interview-coach; read-only scanne
  * @property {number} expired
  * @property {Record<string, number>} pages_by_source
  */
+
+/**
+ * Total classification of a queued (or would-have-been-queued) listing's detail-fetch outcome (spec R4
+ * item 2). Every item that ever reaches finalizeListing carries exactly one of these -- there is no
+ * "unclassified" state, enforced by the assertion inside finalizeListing itself.
+ */
+export const DETAIL_OUTCOMES = Object.freeze(['fetched', 'empty', 'error', 'skipped_budget', 'skipped_gate', 'skipped_cancelled', 'not_queued']);
+const DETAIL_OUTCOME_SET = new Set(DETAIL_OUTCOMES);
+
+/** stats counter key for each DETAIL_OUTCOMES value. */
+const DETAIL_OUTCOME_STAT_KEYS = Object.freeze({
+  fetched: 'detail_fetched',
+  empty: 'detail_empty',
+  error: 'detail_error',
+  skipped_budget: 'detail_skipped_budget',
+  skipped_gate: 'detail_skipped_gate',
+  skipped_cancelled: 'detail_skipped_cancelled',
+  not_queued: 'detail_not_queued',
+});
 
 /** @param {unknown} err */
 function errRecord(err, source = null) {
@@ -288,7 +314,9 @@ async function executeRun(p) {
   /** @type {RunStats} */
   const stats = {
     fetched: 0, new: 0, updated: 0, cross_source_dup: 0, repost: 0, ambiguous: 0, errors: 0, unembedded: 0, stale_dropped: 0,
-    detail_fetched: 0, detail_skipped_budget: 0, dedup_sticky_skip_merged: 0, adopted: 0, expired: 0, pages_by_source: {},
+    detail_fetched: 0, detail_empty: 0, detail_error: 0, detail_skipped_budget: 0, detail_skipped_gate: 0, detail_skipped_cancelled: 0, detail_not_queued: 0,
+    details_by_source: {},
+    dedup_sticky_skip_merged: 0, adopted: 0, expired: 0, pages_by_source: {},
   };
   // Seeded with anything the caller already knew about before this run started (scan-never-skip fix): a
   // config-lock mismatch, an unlocked rubric, or a self-healed/failed Chrome launch. Each carries
@@ -534,11 +562,21 @@ async function executeRun(p) {
    * @param {number} ps
    * @param {number} psRaw
    * @param {string} noiseClass
-   * @param {boolean} detailSkipped
+   * @param {string} detailOutcome one of DETAIL_OUTCOMES (spec R4 item 2's total classification); asserted below
    * @param {import('./apply-target-persist.js').ApplyDetail|null} [applyDetail] auto-apply PR B: set only
    *   when this row went through a detail fetch AND the adapter returned an apply-target hint
    */
-  async function finalizeListing(s, ev, rec, decision, ps, psRaw, noiseClass, detailSkipped, applyDetail = null) {
+  async function finalizeListing(s, ev, rec, decision, ps, psRaw, noiseClass, detailOutcome, applyDetail = null) {
+    // Total classification, enforced (spec R4 item 2): every item reaching this function carries one of
+    // DETAIL_OUTCOMES, never undefined -- a caller passing anything else is a bug in THIS file, not a
+    // runtime data problem, so this throws unconditionally rather than only under NODE_ENV=test.
+    assert.ok(DETAIL_OUTCOME_SET.has(detailOutcome), `finalizeListing: detailOutcome must be one of ${DETAIL_OUTCOMES.join('|')}, got ${JSON.stringify(detailOutcome)}`);
+    stats[DETAIL_OUTCOME_STAT_KEYS[detailOutcome]]++;
+    if (detailOutcome !== 'not_queued') {
+      const bucket = (stats.details_by_source[s.name] ??= { fetched: 0, empty: 0, error: 0, skipped_budget: 0, skipped_gate: 0, skipped_cancelled: 0 });
+      bucket[detailOutcome]++;
+    }
+    const detailSkipped = detailOutcome === 'skipped_budget';
     /** @type {{ id: number|null, outcome: string, queued: number|null, branch: string, status?: string|null, stickySkipMerged?: boolean }} */
     let applied;
     if (dryRun) {
@@ -565,7 +603,7 @@ async function executeRun(p) {
         // deterministic.floor, default 40), so findStickySkipRoot/findStickySkipRootForSameRow gate an
         // auto-actor STICKY-ELIGIBLE root on this row's own already-computed prescore (`ps` above)
         // against the SAME floor auto-triage itself would use to decide skip_low.
-        prescore: ps, prescoreRaw: psRaw, noiseClass, detailSkipped, embedding, now, stickyFloor: config.triage.deterministic.floor,
+        prescore: ps, prescoreRaw: psRaw, noiseClass, detailSkipped, detailOutcome, embedding, now, stickyFloor: config.triage.deterministic.floor,
       }));
     }
     if (!dryRun && applyDetail && applied.id) await maybeSaveApplyTarget(s.name, applied.id, rec, applyDetail);
@@ -595,8 +633,10 @@ async function executeRun(p) {
 
   /**
    * Attempt one detail fetch and re-derive prescore/noise/classification from the fetched description
-   * (spec R4). Returns the (possibly unchanged) rec/decision/ps/psRaw/noiseClass plus whether the fetch
-   * was skipped for budget reasons.
+   * (spec R4 item 2). Returns a total classification of what happened -- 'fetched' (description length
+   * >= DETAIL_MIN_CHARS), 'empty' (fetch ran but the description was falsy or too short), 'error' (a
+   * non-budget throw from the adapter), or 'skipped_budget' (BUDGET_EXHAUSTED mid-source) -- alongside
+   * the (possibly unchanged) rec/decision/ps/psRaw/noiseClass.
    * @param {{ name: string, adapter: import('../adapters/base.js').Adapter, cfg: any }} s
    * @param {import('../adapters/base.js').AdapterCtx} ctx
    * @param {import('../adapters/base.js').ListingEvent} ev
@@ -612,10 +652,10 @@ async function executeRun(p) {
       if (err instanceof JobSearchError && err.code === 'BUDGET_EXHAUSTED') {
         // Budget ran out mid-source (spec R4.2, decision 22): this row (and the rest of the sorted queue
         // behind it) is still persisted, just without a description, rather than aborting the source.
-        return { skipped: true };
+        return { outcome: 'skipped_budget', applyDetail: null };
       }
       warnings.push(`detail fetch failed for ${rec.source} ${rec.external_id ?? ''}: ${errFields(err).err_code}`);
-      return { skipped: false };
+      return { outcome: 'error', applyDetail: null };
     }
     // Auto-apply PR B: capture whatever apply-target hint the adapter returned, REGARDLESS of whether the
     // description fetch itself succeeded -- an adapter whose own listing URL already IS the apply page
@@ -632,10 +672,10 @@ async function executeRun(p) {
       const noiseClass2 = classifyNoise(rec2, { rules: noiseRules, knownSources: noiseKnownSources });
       const ps2 = weightedPrescore(psRaw2, noiseClass2, { rules: noiseRules });
       const decision2 = await classify(rec2, lookups, classifyOpts);
-      stats.detail_fetched++;
-      return { rec: rec2, decision: decision2, ps: ps2, psRaw: psRaw2, noiseClass: noiseClass2, skipped: false, applyDetail };
+      const outcome = rec2.description && rec2.description.length >= DETAIL_MIN_CHARS ? 'fetched' : 'empty';
+      return { outcome, rec: rec2, decision: decision2, ps: ps2, psRaw: psRaw2, noiseClass: noiseClass2, applyDetail };
     }
-    return { skipped: false, applyDetail };
+    return { outcome: 'empty', applyDetail };
   }
 
   /**
@@ -655,19 +695,36 @@ async function executeRun(p) {
     const noiseClass = classifyNoise(rec, { rules: noiseRules, knownSources: noiseKnownSources });
     const ps = weightedPrescore(psRaw, noiseClass, { rules: noiseRules });
     const decision = await classify(rec, lookups, classifyOpts);
-    // Detail fetch eligibility (spec R4.1, decision 20): prescore gate (per-source override), and ONLY
-    // outcomes new/ambiguous ever queue -- a matched existing row (update/cross_source_dup/repost) is
-    // finalized immediately, same as before. Eligible rows are queued here (spec R4.1: "collecting list
-    // results for the source first") instead of fetched inline; the whole source's queue is sorted by
-    // prescore descending once list collection for the source finishes (runDetailPass below) so budget is
-    // spent on the highest-value rows first, not in page-arrival order.
+    // Detail fetch eligibility (spec R4.1, item 2, decision 20 extended): prescore gate (per-source
+    // override) as before, plus a retry gate for outcome 'update' (decision made for this fix: a listing
+    // re-seen on a later scan is now ALSO eligible -- as a RETRY -- when its existing stored
+    // detail_outcome is not already 'fetched' and its detail_attempts is below detailMaxAttempts;
+    // decision.target already carries both columns, since LISTING_COLUMNS was extended to select them,
+    // so no extra read is needed here). cross_source_dup and repost never queue, same as before this fix.
+    // Eligible rows are queued here (spec R4.1: "collecting list results for the source first") instead
+    // of fetched inline; the whole source's queue is sorted by prescore descending once list collection
+    // for the source finishes (runDetailPass below) so budget is spent on the highest-value rows first,
+    // not in page-arrival order.
     const detailGate = s.cfg.detailFetchMinPrescore ?? runCfg.detailFetchMinPrescore;
-    const eligible = Boolean(s.adapter.fetchDetail) && !rec.description && (decision.outcome === 'new' || decision.outcome === 'ambiguous') && ps >= detailGate;
+    const newOrAmbiguous = decision.outcome === 'new' || decision.outcome === 'ambiguous';
+    let retryEligible = true;
+    if (decision.outcome === 'update' && decision.target) {
+      const maxAttempts = s.cfg.detailMaxAttempts ?? runCfg.detailMaxAttempts;
+      const storedOutcome = decision.target.detail_outcome ?? null;
+      const storedAttempts = decision.target.detail_attempts ?? 0;
+      retryEligible = storedOutcome !== 'fetched' && storedAttempts < maxAttempts;
+    }
+    const queueableOutcome = newOrAmbiguous || decision.outcome === 'update';
+    const eligible = Boolean(s.adapter.fetchDetail) && !rec.description && queueableOutcome && ps >= detailGate && retryEligible;
     if (eligible) {
       detailQueue.push({ ev, rec, decision, ps, psRaw, noiseClass, seq: nextSeq() });
       return;
     }
-    await finalizeListing(s, ev, rec, decision, ps, psRaw, noiseClass, false);
+    // skipped_gate is deliberately scoped to new/ambiguous only (spec R4 item 2's literal wording): an
+    // 'update' row that misses the gate, or fails the retry check above, is 'not_queued' instead -- it
+    // was never a first-time candidate for this source's report-facing "skipped for budget/gate" count.
+    const detailOutcome = Boolean(s.adapter.fetchDetail) && newOrAmbiguous && ps < detailGate ? 'skipped_gate' : 'not_queued';
+    await finalizeListing(s, ev, rec, decision, ps, psRaw, noiseClass, detailOutcome);
   }
 
   /**
@@ -675,6 +732,14 @@ async function executeRun(p) {
    * desc nulls last, then arrival sequence asc -- decision 19's "id asc", read as arrival order since a
    * queued 'new' row has no id yet). Ordering is a FIXED snapshot taken once here (decision 21): a row's
    * prescore can change after its own detail fetch, but that never re-sorts the rest of the queue.
+   *
+   * Runs to completion (or throws CANCELLED) independent of whatever the list pass that fed it did (spec
+   * item 1): the caller no longer wraps this in the same try/catch as runSearch, so a source whose list
+   * pass failed partway through (BUDGET_EXHAUSTED or any other error) still gets everything it queued
+   * before the failure run through here. If the run's own abort signal fires mid-pass, every item from
+   * that point on -- including the one about to be attempted -- is finalized as 'skipped_cancelled'
+   * (still persisted, still gets an ic_scan_run_items row) rather than silently dropped, and CANCELLED is
+   * thrown afterward so the caller's recordClean/expiryPass never run for this source.
    * @param {{ name: string, adapter: import('../adapters/base.js').Adapter, cfg: any }} s
    * @param {import('../adapters/base.js').AdapterCtx} ctx
    * @param {Array<{ ev: import('../adapters/base.js').ListingEvent, rec: import('./normalize.js').NormalizedListing, decision: import('./dedup.js').Decision, ps: number, psRaw: number, noiseClass: string, seq: number }>} detailQueue
@@ -683,24 +748,29 @@ async function executeRun(p) {
     const dateNum = (/** @type {string|null} */ d) => (d ? Date.parse(d) || 0 : -Infinity);
     const sorted = [...detailQueue].sort((a, b) => (b.ps - a.ps) || (dateNum(b.rec.posted_at) - dateNum(a.rec.posted_at)) || (a.seq - b.seq));
     let queuedSkippedFromHere = false;
-    for (const item of sorted) {
-      if (signal.aborted) break;
+    for (let i = 0; i < sorted.length; i++) {
+      if (signal.aborted) {
+        for (let j = i; j < sorted.length; j++) {
+          const rem = sorted[j];
+          await finalizeListing(s, rem.ev, rem.rec, rem.decision, rem.ps, rem.psRaw, rem.noiseClass, 'skipped_cancelled');
+        }
+        throw new JobSearchError('CANCELLED', 'run aborted');
+      }
+      const item = sorted[i];
       let { ev, rec, decision, ps, psRaw, noiseClass } = item;
-      let detailSkipped = false;
+      /** @type {string} */
+      let detailOutcome;
       /** @type {import('./apply-target-persist.js').ApplyDetail|null} */
       let applyDetail = null;
       if (queuedSkippedFromHere) {
         // Budget already exhausted earlier in this SAME sorted pass: every remaining item skips the
         // network attempt outright (decision 22: queued minus fetched) rather than re-throwing per item.
-        detailSkipped = true;
-        stats.detail_skipped_budget = (stats.detail_skipped_budget ?? 0) + 1;
+        detailOutcome = 'skipped_budget';
       } else {
         const r = await tryFetchDetail(s, ctx, ev, rec);
-        if (r.skipped) {
-          detailSkipped = true;
-          queuedSkippedFromHere = true;
-          stats.detail_skipped_budget = (stats.detail_skipped_budget ?? 0) + 1;
-        } else if (r.rec) {
+        detailOutcome = r.outcome;
+        if (detailOutcome === 'skipped_budget') queuedSkippedFromHere = true;
+        if (r.rec) {
           rec = r.rec;
           decision = r.decision;
           ps = r.ps;
@@ -709,7 +779,7 @@ async function executeRun(p) {
         }
         applyDetail = r.applyDetail ?? null;
       }
-      await finalizeListing(s, ev, rec, decision, ps, psRaw, noiseClass, detailSkipped, applyDetail);
+      await finalizeListing(s, ev, rec, decision, ps, psRaw, noiseClass, detailOutcome, applyDetail);
     }
   }
 
@@ -770,6 +840,13 @@ async function executeRun(p) {
       /** @type {Array<{ ev: import('../adapters/base.js').ListingEvent, rec: import('./normalize.js').NormalizedListing, decision: import('./dedup.js').Decision, ps: number, psRaw: number, noiseClass: string, seq: number }>} */
       const detailQueue = [];
       let detailSeq = 0;
+      // Detail pass survives list-page failure (spec item 1): ONLY the list-collection call (runSearch)
+      // is wrapped here. Before this fix, runDetailPass lived inside this same try, so a source whose
+      // list pass threw partway through (BUDGET_EXHAUSTED mid-source, or any other error) never ran its
+      // detail pass at all -- every listing already queued from earlier pages silently lost its chance at
+      // a detail fetch (and, once detail_outcome existed, its stored outcome) even though those rows had
+      // nothing to do with why the list pass failed. runDetailPass now sits OUTSIDE this try/catch,
+      // unconditionally, so it always drains whatever this source did manage to queue.
       try {
         result = await runSearch(s.adapter, profile, ctx, {
           onListing: (ev) => processListing(s, ctx, ev, detailQueue, () => detailSeq++),
@@ -799,10 +876,24 @@ async function executeRun(p) {
             return { stopSource: true };
           },
         }, { maxPages: ctx.maxPages, windowStart, staleLimit: s.adapter.dateOrdered ? undefined : Number.POSITIVE_INFINITY });
-        // Phase 2 (spec R4): sorted detail-fetch pass over everything list-collection queued for this
-        // source, run BEFORE expiryPass below so every queued row is persisted (and so has an
-        // ic_scan_run_items row) before absence accounting looks for it.
-        if (detailQueue.length) await runDetailPass(s, ctx, detailQueue);
+      } catch (err) {
+        if (err instanceof JobSearchError && err.code === 'CANCELLED') throw err;
+        if (signal.aborted) throw new JobSearchError('CANCELLED', 'run aborted');
+        result = null;
+        partial = true;
+        errors.push(errRecord(err, s.name));
+        log({ evt: 'source_failed', run_id: runId, source: s.name, ...errFields(err) });
+      }
+      // Phase 2 (spec R4): sorted detail-fetch pass over everything list-collection queued for this
+      // source, run whenever anything was queued -- REGARDLESS of whether the list pass above threw --
+      // and BEFORE expiryPass below so every queued row is persisted (and so has an ic_scan_run_items
+      // row) before absence accounting looks for it. Not wrapped in its own try/catch: a CANCELLED thrown
+      // from inside runDetailPass (the run's abort signal firing mid-pass) is meant to propagate all the
+      // way to this function's own outer catch, exactly like a CANCELLED from runSearch above -- skipping
+      // the result-dependent block below (recordClean/expiryPass never run for a cancelled source) and
+      // setting `cancelled` there, same as before this fix.
+      if (detailQueue.length) await runDetailPass(s, ctx, detailQueue);
+      if (result) {
         stats.stale_dropped += result.stale;
         if (result.completed && !walled) {
           await recordClean(client, s.name);
@@ -814,12 +905,6 @@ async function executeRun(p) {
           if (!dryRun && result.listings >= 1) await expiryPass(s, boundary);
         }
         log({ evt: 'source_done', run_id: runId, source: s.name, pages: result.pages, listings: result.listings, stale: result.stale, completed: result.completed, stopped_by: result.stoppedBy });
-      } catch (err) {
-        if (err instanceof JobSearchError && err.code === 'CANCELLED') throw err;
-        if (signal.aborted) throw new JobSearchError('CANCELLED', 'run aborted');
-        errors.push(errRecord(err, s.name));
-        partial = true;
-        log({ evt: 'source_failed', run_id: runId, source: s.name, ...errFields(err) });
       }
     }
     if (signal.aborted) throw new JobSearchError('CANCELLED', 'run aborted');

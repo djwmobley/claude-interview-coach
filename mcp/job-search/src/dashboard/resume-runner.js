@@ -39,13 +39,15 @@ import { execFile } from 'node:child_process';
 import { JobSearchError, errFields } from '../core/errors.js';
 import { log as defaultLog } from '../core/logger.js';
 import { getApplication, recordApplicationEvent, transition } from '../core/applications.js';
+import { DETAIL_MIN_CHARS } from '../core/normalize.js';
 
 /** claude CLI env vars that must never leak into the headless child (this dashboard process IS a Claude
  * Code session when run interactively during development; the spawned CLI must never inherit that and
  * think it is a nested/resumed session). */
 const STRIP_ENV_VARS = Object.freeze(['CLAUDECODE', 'CLAUDE_CODE_ENTRYPOINT', 'CLAUDE_AGENT_ID']);
 
-const MIN_DESCRIPTION_CHARS = 300;
+// Shared with scan-run.js's detail_outcome classification (spec R4 item 2): one constant, one place.
+const MIN_DESCRIPTION_CHARS = DETAIL_MIN_CHARS;
 
 const HEADLESS_ABORT_RE = /HEADLESS_ABORT:\s*([a-z0-9_]+)/i;
 

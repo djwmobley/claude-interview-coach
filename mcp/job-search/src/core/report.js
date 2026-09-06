@@ -755,6 +755,24 @@ export function renderTriageLine(triage) {
 }
 
 /**
+ * One line per source (spec R4 item 3): `details: <src> fetched a / empty b / error c / skipped d`,
+ * skipped being the sum of skipped_budget + skipped_gate + skipped_cancelled (not_queued is deliberately
+ * excluded: it is not a detail-fetch attempt of any kind, so it would only dilute this line). Returns an
+ * empty array (renders nothing) when a run's stats predate this fix (no details_by_source at all), so an
+ * old run's report is unchanged rather than showing a block of zeros.
+ * @param {Record<string, any>|undefined} stats
+ * @returns {string[]}
+ */
+function detailsBySourceLines(stats) {
+  const bySource = stats && stats.details_by_source;
+  if (!bySource || typeof bySource !== 'object') return [];
+  return Object.entries(bySource).map(([src, d]) => {
+    const skipped = (d.skipped_budget ?? 0) + (d.skipped_gate ?? 0) + (d.skipped_cancelled ?? 0);
+    return `details: ${src} fetched ${d.fetched ?? 0} / empty ${d.empty ?? 0} / error ${d.error ?? 0} / skipped ${skipped}`;
+  });
+}
+
+/**
  * Plain-text rendering (spec R1.2, no em-dashes, US English).
  * @param {Awaited<ReturnType<typeof buildScanReport>>} data
  * @param {import('./urlguard.js').Registry} [registry] when given, a listing's url is printed if it passes urlguard (R1.5)
@@ -790,6 +808,7 @@ export function renderReportText(data, registry, googleAuthState, dashboardHealt
     lines.push(`${banner}run #${r.run_id} | profile ${r.profile} | status ${r.status} | started ${r.started_at} | duration ${r.duration_seconds ?? '?'}s`);
     lines.push(`  fetched ${s.fetched ?? 0} | new ${s.new ?? 0} | updated ${s.updated ?? 0} | repost ${s.repost ?? 0} | ambiguous ${s.ambiguous ?? 0} | detail_skipped_budget ${s.detail_skipped_budget ?? 0}`);
     if (Object.keys(r.pages_by_source).length) lines.push(`  pages by source: ${Object.entries(r.pages_by_source).map(([k, v]) => `${k}=${v}`).join(', ')}`);
+    for (const dline of detailsBySourceLines(s)) lines.push(`  ${dline}`);
     const triageLine = renderTriageLine(s.triage);
     if (triageLine) lines.push(`  ${triageLine}`);
     for (const e of r.errors.slice(0, 5)) lines.push(`  error: ${e.source ?? 'run'} ${e.code}: ${errorLineMessage(e).slice(0, 200)}`);
@@ -865,7 +884,8 @@ export function renderReportHtml(data, registry, googleAuthState, dashboardHealt
       const errs = r.errors.slice(0, 5).map((e) => `<br>error: ${esc(e.source ?? 'run')} ${esc(e.code)}: ${esc(errorLineMessage(e).slice(0, 200))}`).join('');
       const triageLine = renderTriageLine(s.triage);
       const triageHtml = triageLine ? `<br>${esc(triageLine)}` : '';
-      parts.push(`<li>${banner}run #${r.run_id}, profile ${esc(r.profile)}, status ${esc(r.status)}, started ${esc(r.started_at)}, duration ${r.duration_seconds ?? '?'}s<br>fetched ${s.fetched ?? 0}, new ${s.new ?? 0}, updated ${s.updated ?? 0}, repost ${s.repost ?? 0}, ambiguous ${s.ambiguous ?? 0}, detail_skipped_budget ${s.detail_skipped_budget ?? 0}${triageHtml}${errs}</li>`);
+      const detailsHtml = detailsBySourceLines(s).map((dline) => `<br>${esc(dline)}`).join('');
+      parts.push(`<li>${banner}run #${r.run_id}, profile ${esc(r.profile)}, status ${esc(r.status)}, started ${esc(r.started_at)}, duration ${r.duration_seconds ?? '?'}s<br>fetched ${s.fetched ?? 0}, new ${s.new ?? 0}, updated ${s.updated ?? 0}, repost ${s.repost ?? 0}, ambiguous ${s.ambiguous ?? 0}, detail_skipped_budget ${s.detail_skipped_budget ?? 0}${detailsHtml}${triageHtml}${errs}</li>`);
     }
     parts.push('</ul>');
   }
@@ -926,6 +946,7 @@ export function renderReportMarkdown(data, registry, googleAuthState, dashboardH
     lines.push(`- ${banner}run #${r.run_id}, profile ${r.profile}, status ${r.status}, started ${r.started_at}, duration ${r.duration_seconds ?? '?'}s`);
     lines.push(`  fetched ${s.fetched ?? 0}, new ${s.new ?? 0}, updated ${s.updated ?? 0}, repost ${s.repost ?? 0}, ambiguous ${s.ambiguous ?? 0}, detail_skipped_budget ${s.detail_skipped_budget ?? 0}`);
     if (Object.keys(r.pages_by_source).length) lines.push(`  pages by source: ${Object.entries(r.pages_by_source).map(([k, v]) => `${k}=${v}`).join(', ')}`);
+    for (const dline of detailsBySourceLines(s)) lines.push(`  ${dline}`);
     const triageLine = renderTriageLine(s.triage);
     if (triageLine) lines.push(`  ${triageLine}`);
     for (const e of r.errors.slice(0, 5)) lines.push(`  error: ${e.source ?? 'run'} ${e.code}: ${errorLineMessage(e).slice(0, 200)}`);

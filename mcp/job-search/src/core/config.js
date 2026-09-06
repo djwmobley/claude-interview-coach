@@ -252,6 +252,8 @@ const adapterSchema = z.object({
   maxPagesPerQuery: z.number().int().min(1).max(5),
   /** Per-source override of run.detailFetchMinPrescore (spec R4.1); falls back to the run-level default when absent. */
   detailFetchMinPrescore: z.number().int().min(0).max(100).optional(),
+  /** Per-source override of run.detailMaxAttempts (spec R4 item 2's detail_outcome retry cap); falls back to the run-level default when absent. */
+  detailMaxAttempts: z.number().int().positive().optional(),
   /** Hard cap on pages fetched for this source across the WHOLE run, regardless of how many queries the profile plans (spec R5.1); undefined means no extra cap beyond the daily/per-query ones. */
   maxPagesPerRun: z.number().int().positive().optional(),
 });
@@ -285,6 +287,11 @@ export const adaptersSchema = z.object({
     runTimeoutMinutes: z.number().int().positive(),
     heartbeatStaleMinutes: z.number().int().positive(),
     detailFetchMinPrescore: z.number().int().min(0).max(100),
+    /** Retry cap for a re-queued detail fetch on a listing an earlier scan already saw (spec R4 item 2:
+     * a row is eligible for a detail-fetch retry only while detail_attempts stays below this and its
+     * stored detail_outcome is not already 'fetched'). Defaulted rather than required in config/adapters.json
+     * so existing deployed configs keep validating unchanged. */
+    detailMaxAttempts: z.number().int().positive().default(3),
     backoff: z.object({ maxDelayMs: z.number().int().positive(), retries: z.number().int().nonnegative() }),
     throttleRatio: z.number().min(0).max(1),
     /** IANA zone for report day-bucketing (spec R1, decision 25). */

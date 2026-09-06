@@ -55,6 +55,10 @@ export const OUTCOMES = Object.freeze({ update: 'update', new: 'new', cross_sour
  * @property {string|Date|null} expired_at
  * @property {string|Date|null} last_seen
  * @property {string|null} record_kind
+ * @property {string|null} [detail_outcome] one of scan-run.js's DETAIL_OUTCOMES, or null for a
+ *   pre-migration-017 row (spec R4 item 2's detail-fetch retry eligibility check consults this)
+ * @property {number} [detail_attempts] count of failed/empty detail-fetch attempts (0 for a
+ *   pre-migration-017 row)
  * @property {number} [title_sim] filled by byCompany
  * @property {number} [company_sim] filled by byTitleFuzzyCompany
  */
@@ -477,7 +481,7 @@ export async function classify(rec, lookups, opts = {}) {
 export const LISTING_COLUMNS = [
   'id', 'source', 'external_id', 'url_normalized', 'title', 'company', 'company_norm', 'title_norm', 'location_norm',
   'dedup_hash', 'description_hash', 'posted_at', 'salary_min', 'salary_max', 'status', 'duplicate_of', 'repost_of',
-  'expired_at', 'last_seen', 'record_kind',
+  'expired_at', 'last_seen', 'record_kind', 'detail_outcome', 'detail_attempts',
 ];
 
 /**

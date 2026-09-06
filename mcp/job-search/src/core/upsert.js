@@ -44,7 +44,8 @@ export function computeProfileRev(p) {
  * @property {number|null} [prescore] final, noise-weighted prescore (spec R2.2)
  * @property {number|null} [prescoreRaw] the unweighted prescore before the noise_class multiplier
  * @property {string|null} [noiseClass] one of NOISE_CLASSES (spec R2.1)
- * @property {boolean} [detailSkipped] true when a detail fetch was queued for this row but skipped for budget reasons (spec R4.2, decision 22)
+ * @property {boolean} [detailSkipped] true when a detail fetch was queued for this row but skipped for budget reasons (spec R4.2, decision 22); kept for existing readers, always derived as `detailOutcome === 'skipped_budget'`
+ * @property {string} [detailOutcome] one of scan-run.js's DETAIL_OUTCOMES (spec R4 item 2's total classification): 'fetched'|'empty'|'error'|'skipped_budget'|'skipped_gate'|'skipped_cancelled'|'not_queued'
  * @property {string|null} [embedding] pgvector literal `[a,b,...]` or null
  * @property {Date} [now]
  * @property {number} [stickyFloor] current triage floor (config/triage.json's `deterministic.floor`,
@@ -146,18 +147,24 @@ export async function recordRunItem(client, runId, listingId, source, outcome, p
 export async function insertListing(client, rec, decision, ctx) {
   const status = decision.outcome === 'ambiguous' ? 'review' : decision.inherit?.status ?? null;
   const now = ctx.now ?? new Date();
+  // A brand-new row has no prior detail-fetch history, so detail_attempts starts fresh from THIS
+  // outcome alone (spec R4 item 2): 1 for a failed/empty attempt, 0 for everything else (fetched,
+  // never-attempted, or budget/gate/cancelled skips).
+  const detailAttempts = ctx.detailOutcome === 'empty' || ctx.detailOutcome === 'error' ? 1 : 0;
   /** @param {number|null} duplicateOf */
   const insertOnce = (duplicateOf) => client.query(
     `INSERT INTO ic_job_listings
        (title, company, status, ad_date, url, notes, record_kind, source, external_id, url_normalized, dedup_hash,
         company_norm, title_norm, location, location_norm, remote_mode, remote_declared, salary_min, salary_max, salary_raw,
         posted_at, first_seen, last_seen, times_seen, absent_runs, last_page_index, profile_rev, description, description_hash,
-        search_profile, prescore, prescore_raw, noise_class, detail_skipped, duplicate_of, repost_of, embedding, salary_period)
+        search_profile, prescore, prescore_raw, noise_class, detail_skipped, duplicate_of, repost_of, embedding, salary_period,
+        detail_outcome, detail_attempts)
      VALUES
        ($1,$2,$3,$4,$5,NULL,'listing',$6,$7,$8,$9,
         $10,$11,$12,$13,$14,$15,$16,$17,$18,
         $19,$20,$20,1,0,$21,$22,$23,$24,
-        $25,$26,$27,$28,$29,$30,$31,$32::vector,$33)
+        $25,$26,$27,$28,$29,$30,$31,$32::vector,$33,
+        $34,$35)
      ON CONFLICT DO NOTHING
      RETURNING id`,
     [
@@ -167,6 +174,7 @@ export async function insertListing(client, rec, decision, ctx) {
       rec.posted_at, now, ctx.pageIndex ?? null, ctx.profileRev ?? null, rec.description, rec.description_hash,
       ctx.searchProfile ?? null, ctx.prescore ?? null, ctx.prescoreRaw ?? null, ctx.noiseClass ?? null, Boolean(ctx.detailSkipped), duplicateOf, decision.repostOf, ctx.embedding ?? null,
       rec.salary_period ?? null,
+      ctx.detailOutcome ?? null, detailAttempts,
     ],
   );
 
@@ -229,6 +237,24 @@ export async function updateListing(client, rec, decision, ctx, flags) {
        noise_class = coalesce($16, noise_class),
        detail_skipped = coalesce($17, detail_skipped),
        salary_period = coalesce($18, salary_period),
+       -- detail_outcome (spec R4 item 2): fetched/empty/error/skipped_* always overwrite; not_queued and
+       -- skipped_gate are exceptions that must never clobber an already-'fetched' outcome or a row that
+       -- already has a description (both column references here are the PRE-update row, same as every
+       -- other SET clause above) -- a later revisit at a lower prescore, or one the adapter no longer
+       -- offers a detail fetch for, must not erase what an earlier, eligible scan already recorded.
+       detail_outcome = CASE
+         WHEN $19::text IS NULL THEN detail_outcome
+         WHEN $19::text IN ('not_queued', 'skipped_gate') AND (detail_outcome = 'fetched' OR description IS NOT NULL) THEN detail_outcome
+         ELSE $19
+       END,
+       -- detail_attempts: only a failed/empty attempt increments it; a successful fetch resets it to 0
+       -- (spec: "fetched resets it to 0"); every other outcome (skips, not_queued, no outcome this call)
+       -- leaves it unchanged.
+       detail_attempts = CASE
+         WHEN $19::text IN ('empty', 'error') THEN detail_attempts + 1
+         WHEN $19::text = 'fetched' THEN 0
+         ELSE detail_attempts
+       END,
        expired_at = CASE WHEN $13 THEN NULL ELSE expired_at END,
        absent_runs = CASE WHEN $13 THEN 0 ELSE absent_runs END,
        stale = CASE WHEN $13 THEN false ELSE stale END,
@@ -238,7 +264,7 @@ export async function updateListing(client, rec, decision, ctx, flags) {
       target.id, now, flags.bumpTimesSeen ? 1 : 0, rec.salary_min, rec.salary_max, rec.salary_raw, rec.description, rec.description_hash,
       rec.posted_at, ctx.pageIndex ?? null, ctx.profileRev ?? null, ctx.prescore ?? null, repost, inheritedStatus,
       ctx.prescoreRaw ?? null, ctx.noiseClass ?? null, typeof ctx.detailSkipped === 'boolean' ? ctx.detailSkipped : null,
-      rec.salary_period ?? null,
+      rec.salary_period ?? null, ctx.detailOutcome ?? null,
     ],
   );
   return target.id;
