@@ -609,4 +609,43 @@ describe('runScan persisted', () => {
       await client.query(`DELETE FROM ic_job_listings WHERE company = $1`, [CO]);
     }
   });
+
+  test('(g) LinkedIn item-6 follow-up fix: a source-B not_found (ERR_HTTP_RESPONSE_CODE_FAILURE) persists detail_outcome error, not empty', async () => {
+    const CO = 'ZZ-TEST-SCAN-DETAILPASS-NOTFOUND';
+    const card = { id: '4461489435', title: 'Chief Technology Officer', company: CO, location: 'Houston, TX', datetime: new Date().toISOString() };
+    const base = makeFakeSession({ linkedinCards: [card] });
+    const connectSession = async () => {
+      const session = await base.connectSession();
+      const realAttach = session.attachPage.bind(session);
+      session.attachPage = async () => {
+        const page = await realAttach();
+        const realGoto = page.goto.bind(page);
+        page.goto = async (url) => {
+          // The fake page has no context()/setExtraHTTPHeaders, so cap.fetchAuthedJson's cookie read
+          // fails closed to 'missing' and source A is skipped entirely (covered separately by the
+          // capability-level tests); this test is purely about source B's own error classification.
+          if (String(url).includes('/jobs-guest/')) throw new Error('page.goto: net::ERR_HTTP_RESPONSE_CODE_FAILURE at ' + url);
+          return realGoto(url);
+        };
+        return page;
+      };
+      return session;
+    };
+    const deps = offlineDeps({ connectSession });
+    await client.query(`INSERT INTO ic_source_state (source, manual_disable) VALUES ('linkedin', false) ON CONFLICT (source) DO UPDATE SET manual_disable = false, disabled_until = NULL, consecutive_walls = 0`);
+    try {
+      const r = await runScanWaiting({ profile: PROFILE, sources: ['linkedin'], dryRun: false, wait: true }, deps, { trigger: 'mcp', log: () => {} });
+      assert.ok(['ok', 'partial'].includes(r.status), JSON.stringify(r.errors));
+      assert.ok(r.stats.detail_error >= 1, JSON.stringify(r.stats));
+      assert.equal(r.stats.detail_empty, 0, 'not_found must never land in the empty counter');
+      const row = await client.query(`SELECT detail_outcome FROM ic_job_listings WHERE company = $1`, [CO]);
+      assert.equal(row.rowCount, 1);
+      assert.equal(row.rows[0].detail_outcome, 'error');
+    } finally {
+      await client.query(`UPDATE ic_source_state SET manual_disable = false, disabled_until = NULL, consecutive_walls = 0 WHERE source = 'linkedin'`);
+      await client.query(`DELETE FROM ic_job_review_queue WHERE candidate_id IN (SELECT id FROM ic_job_listings WHERE company = $1)`, [CO]);
+      await client.query(`DELETE FROM ic_scan_run_items WHERE listing_id IN (SELECT id FROM ic_job_listings WHERE company = $1)`, [CO]);
+      await client.query(`DELETE FROM ic_job_listings WHERE company = $1`, [CO]);
+    }
+  });
 });

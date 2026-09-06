@@ -675,6 +675,12 @@ async function executeRun(p) {
       const outcome = rec2.description && rec2.description.length >= DETAIL_MIN_CHARS ? 'fetched' : 'empty';
       return { outcome, rec: rec2, decision: decision2, ps: ps2, psRaw: psRaw2, noiseClass: noiseClass2, applyDetail };
     }
+    // A reason of 'not_found' (item 6 follow-up fix, linkedin.js's source B: the listing is confirmed
+    // gone -- 404/410 or the equivalent goto-throw shape) is classified 'error' rather than 'empty': the
+    // resource itself failed to resolve, not merely "fetched but nothing useful came back." Both outcomes
+    // increment detail_attempts identically (upsert.js's SQL CASE), so this only changes which report-facing
+    // counter it lands in, never the retry-cap behavior.
+    if (d && d.reason === 'not_found') return { outcome: 'error', applyDetail };
     return { outcome: 'empty', applyDetail };
   }
 

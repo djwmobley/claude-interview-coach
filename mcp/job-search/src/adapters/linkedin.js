@@ -16,6 +16,7 @@
  */
 import { defineAdapter, rawListing, searchTerms, searchLocations, isoDate } from './base.js';
 import { DETAIL_MIN_CHARS } from '../core/normalize.js';
+import { JobSearchError, errFields } from '../core/errors.js';
 
 const BASE = 'https://www.linkedin.com';
 export const PAGE_SIZE = 25;
@@ -232,10 +233,37 @@ export const linkedin = defineAdapter({
       }
     }
 
-    // Source B: logged-out jobs-guest HTML page, read via a normal navigation + DOM extractor.
+    // Source B: logged-out jobs-guest HTML page, read via a normal navigation + DOM extractor. Total
+    // classification of every way this can resolve (item 6 follow-up fix: the adapter must never throw
+    // for a fetchable URL -- cap.goto/cap.readJson are not guaranteed-safe the way cap.fetchAuthedJson is):
+    //   2xx, selectors matched                          -> description (existing happy/thin-data path)
+    //   2xx, zero selectors matched, or authwall/captcha -> reason 'guest_blocked'
+    //   404/410, or a goto error mentioning              -> reason 'not_found' (job genuinely gone; a
+    //     ERR_HTTP_RESPONSE_CODE_FAILURE                     malformed-body error status can throw instead
+    //                                                        of returning a normal Response, observed live)
+    //   any other goto/readJson error                    -> reason 'guest_error' with the message
     const guestUrl = `${BASE}/jobs-guest/jobs/api/jobPosting/${jobId}`;
-    await cap.goto(guestUrl);
-    const g = /** @type {any} */ (await cap.readJson('linkedinGuestJobDetail'));
+    /** @type {{ status: number|null }|null} */
+    let nav = null;
+    try {
+      nav = await cap.goto(guestUrl);
+    } catch (err) {
+      if (err instanceof JobSearchError && err.code === 'CANCELLED') throw err;
+      const msg = errFields(err).err_message;
+      if (/ERR_HTTP_RESPONSE_CODE_FAILURE/.test(msg)) return { description: null, reason: 'not_found' };
+      return { description: null, reason: `guest_error: ${msg}` };
+    }
+    if (nav && (nav.status === 404 || nav.status === 410)) {
+      return { description: null, reason: 'not_found' };
+    }
+    /** @type {any} */
+    let g = null;
+    try {
+      g = await cap.readJson('linkedinGuestJobDetail');
+    } catch (err) {
+      if (err instanceof JobSearchError && err.code === 'CANCELLED') throw err;
+      return { description: null, reason: `guest_error: ${errFields(err).err_message}` };
+    }
     if (!g || g.blocked || !g.matched) {
       return { description: null, reason: 'guest_blocked' };
     }

@@ -81,9 +81,14 @@ describe('linkedin.js: fetchDetail A (voyager) / B (jobs-guest) two-source strat
     return {
       async goto(url) {
         if (o.gotoCalls) o.gotoCalls.push(url);
+        if (o.gotoThrows) throw (typeof o.gotoThrows === 'function' ? o.gotoThrows(url) : o.gotoThrows);
+        return o.gotoResult ?? { status: 200, url, cfMitigated: null };
       },
       async readJson(name) {
-        if (name === 'linkedinGuestJobDetail') return o.guestDetail ?? null;
+        if (name === 'linkedinGuestJobDetail') {
+          if (o.guestDetailThrows) throw (typeof o.guestDetailThrows === 'function' ? o.guestDetailThrows() : o.guestDetailThrows);
+          return o.guestDetail ?? null;
+        }
         return null;
       },
       async fetchAuthedJson(url, opts) {
@@ -214,6 +219,40 @@ describe('linkedin.js: fetchDetail A (voyager) / B (jobs-guest) two-source strat
     assert.equal(r.reason, undefined, 'thin-but-present data is not a fetchDetail-level failure; scan-run.js\'s own DETAIL_MIN_CHARS gate classifies it empty');
   });
 
+  test('B goto throws ERR_HTTP_RESPONSE_CODE_FAILURE (live-observed shape): description null, reason not_found, never throws out of fetchDetail', async () => {
+    const cap = fakeLinkedinCap({ gotoThrows: () => new Error('page.goto: net::ERR_HTTP_RESPONSE_CODE_FAILURE at https://www.linkedin.com/jobs-guest/jobs/api/jobPosting/9999999999999') });
+    const r = await linkedin.fetchDetail({ url: 'https://www.linkedin.com/jobs/view/9999999999999', url_normalized: 'https://www.linkedin.com/jobs/view/9999999999999', source: 'linkedin' }, ctxFor({ cap }));
+    assert.deepEqual(r, { description: null, reason: 'not_found' });
+  });
+
+  test('B goto returns a normal 404/410 response (no throw): description null, reason not_found', async () => {
+    for (const status of [404, 410]) {
+      const cap = fakeLinkedinCap({ gotoResult: { status, url: 'https://www.linkedin.com/jobs-guest/jobs/api/jobPosting/1', cfMitigated: null } });
+      const r = await linkedin.fetchDetail(LISTING, ctxFor({ cap }));
+      assert.deepEqual(r, { description: null, reason: 'not_found' }, `status ${status}`);
+    }
+  });
+
+  test('B goto throws some other error: description null, reason guest_error carrying the message, never throws out of fetchDetail', async () => {
+    const cap = fakeLinkedinCap({ gotoThrows: () => new Error('page.goto: net::ERR_CONNECTION_RESET') });
+    const r = await linkedin.fetchDetail(LISTING, ctxFor({ cap }));
+    assert.equal(r.description, null);
+    assert.match(r.reason, /^guest_error: .*ERR_CONNECTION_RESET/);
+  });
+
+  test('B readJson throws (extractor not wired in some capability build): description null, reason guest_error, never throws out of fetchDetail', async () => {
+    const cap = fakeLinkedinCap({ guestDetailThrows: () => new Error('unknown extractor: linkedinGuestJobDetail') });
+    const r = await linkedin.fetchDetail(LISTING, ctxFor({ cap }));
+    assert.equal(r.description, null);
+    assert.match(r.reason, /^guest_error: /);
+  });
+
+  test('a CANCELLED error from B goto is rethrown, never swallowed into guest_error', async () => {
+    const { JobSearchError: JSE } = await import('../src/core/errors.js');
+    const cap = fakeLinkedinCap({ gotoThrows: () => new JSE('CANCELLED', 'run aborted') });
+    await assert.rejects(linkedin.fetchDetail(LISTING, ctxFor({ cap })), (e) => e instanceof JSE && e.code === 'CANCELLED');
+  });
+
   test('reservation is spent exactly once whether the call resolves via A alone or falls through to B', async () => {
     const reserveCallsA = [];
     const capA = fakeLinkedinCap({ authedJson: { cookieState: 'valid', status: 200, ok: true, json: { data: { jobPostingId: '4461489435', description: { text: LONG_DESC } } } } });
@@ -227,65 +266,85 @@ describe('linkedin.js: fetchDetail A (voyager) / B (jobs-guest) two-source strat
   });
 });
 
-describe('capability.fetchAuthedJson (real makeCapability, not bypassed -- item 6a)', () => {
+describe('capability.fetchAuthedJson (real makeCapability, not bypassed -- item 6a, hardened by the item-6 follow-up fix)', () => {
   const registry = registryFrom([
     { source: 'linkedin', domains: ['linkedin.com', 'www.linkedin.com'], pathPatterns: ['^/jobs/view/\\d+/?(\\?|$)', '^/voyager/api/jobs/jobPostings/\\d+/?$'] },
   ]);
 
-  /** @param {{ cookies?: any[], evalResult?: any }} o */
+  /**
+   * A real top-level navigation (page.goto), not an in-page fetch: this is what the follow-up fix
+   * switched to specifically so the request never depends on the page's CURRENT origin (the origin-
+   * dependence bug this fixes). `cookiesUrlsSeen` records what `context().cookies(...)` was called with,
+   * proving the read is explicitly URL-scoped rather than an implicit, origin-coupled `document.cookie`.
+   * @param {{ cookies?: any[], gotoResult?: { status: number, ok: boolean, text: string }|null, gotoThrows?: boolean, pageUrl?: string }} o
+   */
   function fakePage(o = {}) {
-    const evaluateCalls = [];
+    const gotoCalls = [];
+    const setHeadersCalls = [];
+    const cookiesUrlsSeen = [];
     const page = {
-      context: () => ({ cookies: async () => o.cookies ?? [] }),
-      async evaluate(fn, arg) {
-        evaluateCalls.push(arg);
-        return o.evalResult ?? { status: 200, ok: true, text: '{}' };
+      context: () => ({
+        cookies: async (urls) => {
+          cookiesUrlsSeen.push(urls);
+          return o.cookies ?? [];
+        },
+      }),
+      async setExtraHTTPHeaders(headers) {
+        setHeadersCalls.push(headers);
       },
-      async goto() { return { status: () => 200, headers: () => ({}) }; },
-      url: () => 'https://www.linkedin.com/jobs/view/1',
+      async goto(url) {
+        gotoCalls.push(url);
+        if (o.gotoThrows) throw new Error('page.goto: net::ERR_NAME_NOT_RESOLVED');
+        const r = o.gotoResult ?? { status: 200, ok: true, text: '{}' };
+        if (!r) return null;
+        return { status: () => r.status, ok: () => r.ok, headers: () => ({}), text: async () => r.text };
+      },
+      url: () => o.pageUrl ?? 'about:blank',
       async content() { return ''; },
     };
-    return { page, evaluateCalls };
+    return { page, gotoCalls, setHeadersCalls, cookiesUrlsSeen };
   }
 
-  test('a URL outside the registry is refused (cookieState "refused") before any cookie read or network call', async () => {
-    const { page, evaluateCalls } = fakePage();
+  test('a URL outside the registry is refused (cookieState "refused") before any cookie read or navigation', async () => {
+    const { page, gotoCalls, cookiesUrlsSeen } = fakePage();
     const cap = makeCapability(/** @type {any} */ (page), { registry, source: 'linkedin', signal: new AbortController().signal });
     const r = await cap.fetchAuthedJson('https://www.linkedin.com/not/registered');
     assert.equal(r.cookieState, 'refused');
     assert.equal(r.refusedReason, 'path_not_matching');
     assert.equal(r.status, null);
-    assert.equal(evaluateCalls.length, 0);
+    assert.equal(gotoCalls.length, 0);
+    assert.equal(cookiesUrlsSeen.length, 0);
   });
 
-  test('no JSESSIONID cookie at all -> cookieState "missing", no network call attempted', async () => {
-    const { page, evaluateCalls } = fakePage({ cookies: [] });
+  test('no JSESSIONID cookie at all -> cookieState "missing", no navigation attempted', async () => {
+    const { page, gotoCalls } = fakePage({ cookies: [] });
     const cap = makeCapability(/** @type {any} */ (page), { registry, source: 'linkedin', signal: new AbortController().signal });
     const r = await cap.fetchAuthedJson('https://www.linkedin.com/voyager/api/jobs/jobPostings/1');
     assert.equal(r.cookieState, 'missing');
-    assert.equal(evaluateCalls.length, 0);
+    assert.equal(gotoCalls.length, 0);
   });
 
   test('an empty (post-quote-strip) JSESSIONID cookie -> cookieState "malformed"', async () => {
-    const { page, evaluateCalls } = fakePage({ cookies: [{ name: 'JSESSIONID', value: '""' }] });
+    const { page, gotoCalls } = fakePage({ cookies: [{ name: 'JSESSIONID', value: '""' }] });
     const cap = makeCapability(/** @type {any} */ (page), { registry, source: 'linkedin', signal: new AbortController().signal });
     const r = await cap.fetchAuthedJson('https://www.linkedin.com/voyager/api/jobs/jobPostings/1');
     assert.equal(r.cookieState, 'malformed');
-    assert.equal(evaluateCalls.length, 0);
+    assert.equal(gotoCalls.length, 0);
   });
 
   test('a JSESSIONID cookie with a disallowed character -> cookieState "malformed"', async () => {
-    const { page, evaluateCalls } = fakePage({ cookies: [{ name: 'JSESSIONID', value: '"ajax:12345 with space"' }] });
+    const { page, gotoCalls } = fakePage({ cookies: [{ name: 'JSESSIONID', value: '"ajax:12345 with space"' }] });
     const cap = makeCapability(/** @type {any} */ (page), { registry, source: 'linkedin', signal: new AbortController().signal });
     const r = await cap.fetchAuthedJson('https://www.linkedin.com/voyager/api/jobs/jobPostings/1');
     assert.equal(r.cookieState, 'malformed');
-    assert.equal(evaluateCalls.length, 0);
+    assert.equal(gotoCalls.length, 0);
   });
 
-  test('a valid quoted JSESSIONID cookie: quotes are stripped into the csrf-token header, evaluate runs inside the page, JSON is parsed', async () => {
-    const { page, evaluateCalls } = fakePage({
+  test('cookie is read from the CONTEXT (URL-scoped), not the page: origin-independence fix -- A is attempted even when the page is on about:blank but the context holds a valid JSESSIONID', async () => {
+    const { page, gotoCalls, setHeadersCalls, cookiesUrlsSeen } = fakePage({
+      pageUrl: 'about:blank',
       cookies: [{ name: 'JSESSIONID', value: '"ajax:1234567890123456789"' }],
-      evalResult: { status: 200, ok: true, text: '{"data":{"jobPostingId":"1"}}' },
+      gotoResult: { status: 200, ok: true, text: '{"data":{"jobPostingId":"1"}}' },
     });
     const cap = makeCapability(/** @type {any} */ (page), { registry, source: 'linkedin', signal: new AbortController().signal });
     const r = await cap.fetchAuthedJson('https://www.linkedin.com/voyager/api/jobs/jobPostings/1', { headers: { accept: 'application/vnd.linkedin.normalized+json+2.1' } });
@@ -293,16 +352,29 @@ describe('capability.fetchAuthedJson (real makeCapability, not bypassed -- item 
     assert.equal(r.status, 200);
     assert.equal(r.ok, true);
     assert.deepEqual(r.json, { data: { jobPostingId: '1' } });
-    assert.equal(evaluateCalls.length, 1);
-    assert.equal(evaluateCalls[0].headers['csrf-token'], 'ajax:1234567890123456789', 'surrounding quotes stripped from the cookie value');
-    assert.equal(evaluateCalls[0].headers.accept, 'application/vnd.linkedin.normalized+json+2.1', 'caller-supplied headers pass through');
+    assert.equal(gotoCalls.length, 1, 'A was attempted (a real navigation happened) despite the page starting on about:blank');
+    assert.equal(gotoCalls[0], 'https://www.linkedin.com/voyager/api/jobs/jobPostings/1');
+    assert.ok(cookiesUrlsSeen[0], 'cookies() was called with an explicit URL filter, never a bare no-arg document.cookie-equivalent read');
+    assert.equal(setHeadersCalls[0]['csrf-token'], 'ajax:1234567890123456789', 'surrounding quotes stripped from the cookie value');
+    assert.equal(setHeadersCalls[0].accept, 'application/vnd.linkedin.normalized+json+2.1', 'caller-supplied headers pass through');
+    assert.deepEqual(setHeadersCalls[1], {}, 'headers reset after the one navigation so a later, unrelated navigation never inherits them');
   });
 
   test('a non-JSON (or empty) response body resolves json: null rather than throwing', async () => {
-    const { page } = fakePage({ cookies: [{ name: 'JSESSIONID', value: '"ajax:123"' }], evalResult: { status: 200, ok: true, text: 'not json' } });
+    const { page } = fakePage({ cookies: [{ name: 'JSESSIONID', value: '"ajax:123"' }], gotoResult: { status: 200, ok: true, text: 'not json' } });
     const cap = makeCapability(/** @type {any} */ (page), { registry, source: 'linkedin', signal: new AbortController().signal });
     const r = await cap.fetchAuthedJson('https://www.linkedin.com/voyager/api/jobs/jobPostings/1');
     assert.equal(r.cookieState, 'valid');
+    assert.equal(r.json, null);
+  });
+
+  test('a navigation error (e.g. a real network failure) resolves a graceful failure, never throws', async () => {
+    const { page } = fakePage({ cookies: [{ name: 'JSESSIONID', value: '"ajax:123"' }], gotoThrows: true });
+    const cap = makeCapability(/** @type {any} */ (page), { registry, source: 'linkedin', signal: new AbortController().signal });
+    const r = await cap.fetchAuthedJson('https://www.linkedin.com/voyager/api/jobs/jobPostings/1');
+    assert.equal(r.cookieState, 'valid');
+    assert.equal(r.status, null);
+    assert.equal(r.ok, false);
     assert.equal(r.json, null);
   });
 });
