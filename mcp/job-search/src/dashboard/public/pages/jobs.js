@@ -85,6 +85,10 @@ function saveSortState(state) {
 // while the header itself kept reading "First seen".
 export const COLUMNS = Object.freeze([
   { text: '', className: 'job-row__checkbox' },
+  // Jobs table ID column (apply-chain-park fix, spec item 5): right after the checkbox column, sorted by
+  // the real query_jobs 'id' sort key (already present in SORTS above), starting descending on first click
+  // (newest-id-first) like the other numeric/date columns below.
+  { text: 'ID', sortKey: 'id', className: 'job-row__id' },
   { text: 'Title', sortKey: 'title', className: 'job-row__title' },
   { text: 'Company', sortKey: 'company', className: 'job-row__company' },
   { text: 'Source', sortKey: 'source', className: 'job-row__source' },
@@ -120,6 +124,7 @@ export const FIRST_CLICK_DIR = Object.freeze({
   prescore: 'desc',
   fit: 'desc',
   first_seen: 'desc',
+  id: 'desc',
 });
 
 /**

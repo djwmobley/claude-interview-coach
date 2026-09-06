@@ -202,14 +202,23 @@ export function buildQuery(a) {
   // url/url_normalized/first_seen/etc. above: inert for every existing query_jobs MCP caller
   // (compactRows()/formatRow() never project these fields), only the dashboard's job-row.js Apply button
   // reads them.
+  //
+  // Apply-chain-park fix, spec item 3: application_created_at (the application's own `created_at`, NOT
+  // `updated_at` -- the resume-doc reuse reset in routes/applications.js bumps `updated_at` on a stale
+  // reuse, which would otherwise make a just-reused row read as freshly-created again) and
+  // description_chars (the LENGTH of the listing's own description, never the description text itself --
+  // this module's own doc comment says query_jobs never returns descriptions) let
+  // public/lib/format.js's applyButtonState() compute the same STALE_ACTIONABLE_MS/DETAIL_MIN_CHARS gates
+  // client-side that the apply-now route enforces server-side, without ever shipping the description text
+  // itself to the browser.
   const sql = `SELECT l.id, l.title, l.company, l.company_norm, l.location, l.remote_mode, l.posted_at, l.salary_min, l.salary_max,
       l.prescore, l.fit_score, l.status, l.source, l.noise_class, l.url, l.url_normalized, l.external_id,
-      l.first_seen, l.last_seen, l.duplicate_of, l.record_kind, l.notes,
-      app.id AS application_id, app.state AS application_state,
+      l.first_seen, l.last_seen, l.duplicate_of, l.record_kind, l.notes, length(l.description) AS description_chars,
+      app.id AS application_id, app.state AS application_state, app.created_at AS application_created_at,
       count(*) OVER() AS total
     FROM ic_job_listings l${join}
     LEFT JOIN LATERAL (
-      SELECT a.id, a.state FROM ic_job_applications a WHERE a.listing_id = l.id AND a.state <> 'withdrawn' ORDER BY a.id DESC LIMIT 1
+      SELECT a.id, a.state, a.created_at FROM ic_job_applications a WHERE a.listing_id = l.id AND a.state <> 'withdrawn' ORDER BY a.id DESC LIMIT 1
     ) app ON true
     WHERE ${where.join(' AND ')}
     ORDER BY ${order}

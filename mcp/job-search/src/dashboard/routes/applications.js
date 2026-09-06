@@ -14,7 +14,7 @@ import path from 'node:path';
 import { JobSearchError } from '../../core/errors.js';
 import {
   createApplication, approve, getApplication, getApplicationForListing, retry, markAppliedByHand, resume,
-  listApplicationEvents, recordApplicationEvent,
+  listApplicationEvents, recordApplicationEvent, transition,
 } from '../../core/applications.js';
 import { classifyApplyUrl } from '../../apply/ats-detect.js';
 import { resolveLatestApplicationScreenshot } from '../../apply/screenshot.js';
@@ -27,8 +27,89 @@ const ANSWER_BANK_PATH = path.join(packageRoot(), 'data', 'apply-answers.md');
 
 /** One-click apply (PR A spec item 7): a drafting row this old is reused only after resetting its resume
  * link -- the world (the listing's own description, or the operator's data files) may well have changed
- * since a stale drafting row was first created, so a fresh draft is safer than trusting a week-old link. */
-const STALE_DRAFTING_MS = 7 * 24 * 60 * 60 * 1000;
+ * since a stale drafting row was first created, so a fresh draft is safer than trusting a week-old link.
+ * Renamed from STALE_DRAFTING_MS (apply-chain-park fix): distinct in purpose from STALE_ACTIONABLE_MS
+ * below -- this one only ever gates the resume-doc-link reset, never re-click eligibility. */
+export const STALE_REUSE_RESET_MS = 7 * 24 * 60 * 60 * 1000;
+
+/**
+ * Apply-chain-park fix, spec item 3: how long a re-clicked "Apply" on a listing's own still-drafting
+ * application is treated as "the earlier click's chain is presumably still in flight" and refused a
+ * second chain start, independent of the in-memory per-application chain lock below (which is the
+ * precise, same-process signal -- this age-based check is the defense-in-depth backstop that also covers
+ * a process restart, or any other way the in-memory lock's state could be lost or never set). Mirrored in
+ * public/lib/format.js's applyButtonState() (drift-tested against this export) so the Apply button
+ * itself renders as non-actionable for the same window on the client.
+ */
+export const STALE_ACTIONABLE_MS = 30 * 60 * 1000;
+
+/**
+ * Apply-chain-park fix, spec item 2: in-memory set of application ids with a runApplyNowChain currently
+ * in flight in THIS process. A second POST /api/listings/:id/apply-now for an id already in this set
+ * never starts a second chain (responds 202 with outcome 'chain_running' instead) -- the chain's own
+ * resumeRunner/reviewRunner already enforce a single GLOBAL in-flight run each, but that is one shared
+ * lock across every application, not scoped per application id, so two DIFFERENT applications' chains
+ * would otherwise collide there instead of failing cleanly per-id at the route. Module-level (not part of
+ * `deps`) because it tracks in-flight work for this one process's lifetime only, exactly like
+ * resume-runner.js's own module-level `current` variable.
+ * @type {Set<number>}
+ */
+const runningChains = new Set();
+
+/**
+ * Human-readable label for a parked application's pending_question (apply-chain-park fix, spec item 1).
+ * TOTAL classification, never an allow-list: every known resume-runner failure reason gets its own
+ * specific label; anything else (including an arbitrary HEADLESS_ABORT reason string from the write-resume
+ * skill, an open/unbounded set) falls through to the generic default branch, never a thrown error or a
+ * blank label.
+ * @param {string} reason
+ */
+function humanizeParkReason(reason) {
+  const KNOWN = /** @type {Record<string, string>} */ ({
+    no_description: 'Job posting has no usable description to draft a resume from.',
+    timeout: 'Resume drafting timed out.',
+    spawn_failed: 'Resume drafting failed to start.',
+    listing_mismatch: 'The drafted resume did not match this listing; the link was reset.',
+    model_asked: 'Resume drafting stopped to ask a question instead of finishing.',
+    no_docs_ready: 'Resume drafting finished without producing a resume.',
+    markdown_not_found: 'Resume drafting finished but the draft file could not be found.',
+    runner_unavailable: 'Resume drafting is not available on this server right now.',
+  });
+  if (Object.prototype.hasOwnProperty.call(KNOWN, reason)) return KNOWN[reason];
+  return `Resume drafting stopped: ${reason}`;
+}
+
+/**
+ * Apply-chain-park fix, spec item 1: park an application that hit a resume-runner precheck failure (or a
+ * missing runner) into needs_human instead of leaving it silently stuck in drafting -- the entire point of
+ * this fix is that a resume-runner failure must always be visible and actionable to the operator, not a
+ * dead end. Wrapped in try/catch: if the row already moved on (parked by another actor between this
+ * chain's own read and this write, or advanced past drafting some other way), the transition is rejected
+ * by TRANSITIONS as a plain VALIDATION error -- that is a benign, expected race, not a chain failure, so
+ * it is logged at info and swallowed here rather than surfaced as `apply_now_chain_failed` by the caller's
+ * own outer catch.
+ * @param {import('../server.js').DashboardDeps} deps
+ * @param {ReturnType<typeof import('../stream.js').createStreamHub>|undefined} streamHub
+ * @param {number} applicationId
+ * @param {string} reason
+ */
+async function parkApplyChain(deps, streamHub, applicationId, reason) {
+  try {
+    await deps.withClient((c) => transition(c, applicationId, 'needs_human', {
+      actor: 'apply', error: reason, pending_question: { kind: 'blocked', label: humanizeParkReason(reason) },
+    }));
+    streamHub?.notifyChanged('events');
+  } catch (err) {
+    if (err instanceof JobSearchError && err.code === 'VALIDATION') {
+      deps.log?.({
+        evt: 'apply_now_chain_park_skipped', application_id: applicationId, reason,
+        err_message: err.message.slice(0, 300),
+      });
+      return;
+    }
+    throw err;
+  }
+}
 
 /**
  * Full listing columns the apply exclusion gate (src/apply/exclusions.js) needs -- one-click Apply's own
@@ -130,12 +211,19 @@ async function runApplyNowChain(deps, streamHub, applicationId, listingId) {
   try {
     if (!deps.resumeRunner || !deps.reviewRunner) {
       deps.log?.({ evt: 'apply_now_chain_missing_runner', application_id: applicationId });
+      await parkApplyChain(deps, streamHub, applicationId, 'runner_unavailable');
       return;
     }
     await progress('one-click apply: drafting resume');
     const resumeResult = await deps.resumeRunner.run(applicationId, listingId);
     notify();
-    if (!resumeResult.ok || !resumeResult.markdownPath) return;
+    if (!resumeResult.ok || !resumeResult.markdownPath) {
+      // Resume-runner failure (precheck or otherwise): park to needs_human rather than the previous
+      // silent return that left the row stuck, invisible, in 'drafting' forever (apply-chain-park fix,
+      // spec item 1). Review-phase failures below are unaffected -- they stay at docs_ready, out of scope.
+      await parkApplyChain(deps, streamHub, applicationId, resumeResult.reason ?? 'unknown');
+      return;
+    }
 
     await progress('one-click apply: reviewing draft');
     const reviewResult = await deps.reviewRunner.run(applicationId, resumeResult.markdownPath, listingId);
@@ -224,8 +312,17 @@ export function register(router, deps, streamHub) {
           message: `an active application (${app.id}, state "${app.state}") already exists for listing ${listingId}`,
         });
       }
+      // Apply-chain-park fix, spec items 2/3: never start a second chain for an id whose chain is already
+      // known in-flight this process (the in-memory lock), and never re-kick a still-fresh drafting row
+      // even if the in-memory lock's state was lost (process restart) -- both checks answer the same
+      // question ("is the earlier click's chain presumably still running") from two independent angles, so
+      // either one alone is enough to refuse a second chain start here.
       const ageMs = Date.now() - new Date(app.created_at).getTime();
-      if (ageMs > STALE_DRAFTING_MS) {
+      if (runningChains.has(app.id) || ageMs < STALE_ACTIONABLE_MS) {
+        streamHub?.notifyChanged('events');
+        return sendJson(ctx.res, 202, { ok: true, application_id: app.id, outcome: 'chain_running' });
+      }
+      if (ageMs > STALE_REUSE_RESET_MS) {
         await deps.withClient((c) => c.query('UPDATE ic_job_applications SET resume_doc_id = NULL, updated_at = now() WHERE id = $1', [app.id]));
         app = await deps.withClient((c) => getApplication(c, app.id));
       }
@@ -241,8 +338,12 @@ export function register(router, deps, streamHub) {
     streamHub?.notifyChanged('events');
     sendJson(ctx.res, 202, { ok: true, application_id: app.id });
 
-    // Fire-and-forget: the route has already responded. Never awaited here.
-    runApplyNowChain(deps, streamHub, app.id, listingId);
+    // Fire-and-forget: the route has already responded. Never awaited here. Tracked in the per-application
+    // chain lock (spec item 2) for the chain's whole lifetime, regardless of outcome (success, park, or
+    // unexpected failure) -- removed in the .finally() below, never left dangling.
+    const applicationId = app.id;
+    runningChains.add(applicationId);
+    runApplyNowChain(deps, streamHub, applicationId, listingId).finally(() => { runningChains.delete(applicationId); });
   }, { allowEmptyBody: true });
 
   router.register('GET', '/api/applications/:id', async (ctx) => {

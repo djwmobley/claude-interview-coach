@@ -58,6 +58,8 @@ export function jobRow(row, opts) {
     h('td', { className: 'job-row__checkbox' }, [
       h('input', { attrs: { type: 'checkbox' }, checked: opts.selected, on: { change: () => opts.onToggleSelect(row.id) } }),
     ]),
+    // Jobs table ID column (apply-chain-park fix, spec item 5): plain text, the listing id itself.
+    h('td', { className: 'job-row__id', text: String(row.id) }),
     h('td', { className: 'job-row__title' }, [
       // The flex layout lives on this inner div, not the <td> itself: a `display: flex` directly on a
       // table cell stops it being a real table-cell box (the browser wraps it in an anonymous cell),
@@ -77,14 +79,27 @@ export function jobRow(row, opts) {
     h('td', { className: `job-row__fit ${fitCls}`, attrs: { title: FIT_TITLE }, text: fitState.label }),
     h('td', { className: 'job-row__first-seen', text: row.first_seen ? new Date(row.first_seen).toLocaleDateString('en-US', { month: 'short', day: 'numeric' }) : 'not set' }),
     h('td', { className: 'job-row__location', text: row.location ?? 'not listed' }),
+    // Total classification (apply-chain-park fix, spec item 4): applyButtonState() never returns null, so
+    // every row now renders a real <button>, actionable or not -- a disabled one carries the `disabled`
+    // and `aria-disabled` attributes plus a `title` explaining why (disabledReason), rather than the
+    // previous plain-text span a screen reader announced with no explanation and a sighted user could not
+    // tell apart from a clickable element by look alone.
     h('td', { className: 'job-row__apply' }, [
-      applyState === null ? null
-        : applyState.actionable
-          ? h('button', {
-            className: 'btn btn--small', attrs: { type: 'button' }, text: applyState.label,
-            on: { click: (ev) => { ev.stopPropagation(); opts.onApplyNow(row.id); } },
-          })
-          : h('span', { className: 'job-row__apply-status', text: applyState.label }),
+      h('button', {
+        className: 'btn btn--small', text: applyState.label,
+        disabled: !applyState.actionable,
+        attrs: {
+          type: 'button',
+          'aria-disabled': String(!applyState.actionable),
+          ...(applyState.disabledReason ? { title: applyState.disabledReason } : {}),
+        },
+        on: {
+          click: (ev) => {
+            ev.stopPropagation();
+            if (applyState.actionable) opts.onApplyNow(row.id);
+          },
+        },
+      }),
     ]),
   ]);
   return tr;
