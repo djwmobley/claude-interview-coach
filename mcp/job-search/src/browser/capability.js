@@ -12,7 +12,7 @@
  * There is no way to submit, fill, or dispatch anything through this object.
  */
 import { EXTRACTORS } from './extractors.js';
-import { guardUrl } from '../core/urlguard.js';
+import { guardUrl, classifyUrl } from '../core/urlguard.js';
 import { JobSearchError } from '../core/errors.js';
 import { PAGE_MARKER } from './session.js';
 
@@ -22,9 +22,63 @@ import { PAGE_MARKER } from './session.js';
  * @property {() => Promise<string>} readHtml
  * @property {(name: string, arg?: unknown) => Promise<unknown>} readJson
  * @property {(maxSteps?: number) => Promise<{ steps: number, atBottom: boolean }>} scrollToBottom
+ * @property {(url: string, opts?: { headers?: Record<string, string> }) => Promise<FetchAuthedJsonResult>} fetchAuthedJson
  * @property {AbortSignal} signal
  * @property {string} source
  */
+
+/**
+ * @typedef {Object} FetchAuthedJsonResult
+ * @property {'valid'|'missing'|'malformed'|'refused'} cookieState 'refused' means the URL itself never
+ *   passed the urlguard precheck (no network call and no cookie read were ever attempted)
+ * @property {string|null} [refusedReason] classifyUrl()'s own reason, only set when cookieState is 'refused'
+ * @property {number|null} status HTTP status, or null when refused/no valid cookie/network failure
+ * @property {boolean} ok
+ * @property {any} json parsed JSON body, or null when absent/unparseable/not attempted
+ */
+
+/**
+ * Self-contained page.evaluate body for fetchAuthedJson (browser/capability.js only -- never exposed
+ * through extractors.js's readJson registry, which is documented as read-only DOM extraction; this one
+ * performs a network request). Runs the fetch INSIDE the page's own JS context so the browser's real
+ * cookie jar (JSESSIONID etc.) is attached automatically for a same-origin request, exactly like a normal
+ * page navigation would send it -- capability.js only has to add the explicit csrf-token header, never
+ * the session cookie itself. Must stay a plain, self-contained function (no closures over module state):
+ * Playwright serializes it to a string and evaluates it literally in the browser.
+ * @param {{ url: string, headers: Record<string, string> }} arg
+ */
+function fetchJsonInPage(arg) {
+  return fetch(arg.url, { method: 'GET', headers: arg.headers, credentials: 'include' }).then(
+    (res) => res.text().then((text) => ({ status: res.status, ok: res.ok, text })),
+    () => ({ status: null, ok: false, text: null }),
+  );
+}
+
+/**
+ * Reads one named cookie via the page's own browser-context cookie jar (never handed to an adapter
+ * directly) and classifies it total: 'missing' (absent, or the context/cookie read itself failed),
+ * 'malformed' (present but empty once LinkedIn's own surrounding double-quotes are stripped, or containing
+ * a character outside a conservative bare-token charset), 'valid' otherwise.
+ * @param {import('playwright-core').Page} page
+ * @param {string} name
+ * @returns {Promise<{ state: 'valid'|'missing'|'malformed', value: string|null }>}
+ */
+async function readCookieState(page, name) {
+  /** @type {any[]} */
+  let cookies;
+  try {
+    cookies = await page.context().cookies();
+  } catch {
+    return { state: 'missing', value: null };
+  }
+  const c = Array.isArray(cookies) ? cookies.find((k) => k && k.name === name) : null;
+  if (!c || typeof c.value !== 'string') return { state: 'missing', value: null };
+  const stripped = c.value.replace(/^"|"$/g, '');
+  // LinkedIn's own JSESSIONID value is shaped like "ajax:1234567890123456789" (a colon-separated prefix
+  // then digits), so the conservative token charset below allows ':' alongside the usual bare-token set.
+  if (!stripped || !/^[A-Za-z0-9_:-]+$/.test(stripped)) return { state: 'malformed', value: null };
+  return { state: 'valid', value: stripped };
+}
 
 /**
  * @param {import('playwright-core').Page} page attached by session.attachPage
@@ -69,6 +123,41 @@ export function makeCapability(page, opts) {
       const body = /** @type {any} */ (fn);
       const payload = arg === undefined ? null : JSON.parse(JSON.stringify(arg));
       return page.evaluate(body, payload);
+    },
+    /**
+     * Authed JSON fetch inside the page's own context (item 6a: the logged-in LinkedIn voyager API,
+     * generalized for any adapter that needs one). Precheck is the SAME sync urlguard classification
+     * every other capability method's navigation goes through (classifyUrl, not the full async guardUrl:
+     * this call never navigates the page or leaves the already-connected site, so the DNS-resolution
+     * step guardUrl adds for a fresh navigation target is not meaningful here) -- a URL outside the
+     * registry is refused before any cookie is even read.
+     * @param {string} url
+     * @param {{ headers?: Record<string, string> }} [opts]
+     * @returns {Promise<FetchAuthedJsonResult>}
+     */
+    async fetchAuthedJson(url, opts = {}) {
+      checkAbort();
+      const v = classifyUrl(url, registry, { source, method: 'GET' });
+      if (!v.allowed || !v.url) {
+        return { cookieState: 'refused', refusedReason: v.reason, status: null, ok: false, json: null };
+      }
+      const { state, value } = await readCookieState(page, 'JSESSIONID');
+      if (state !== 'valid' || !value) {
+        return { cookieState: state, status: null, ok: false, json: null };
+      }
+      const headers = { ...(opts.headers ?? {}), 'csrf-token': value };
+      const r = await page.evaluate(fetchJsonInPage, { url: v.url.toString(), headers });
+      checkAbort();
+      /** @type {any} */
+      let json = null;
+      if (typeof r.text === 'string' && r.text) {
+        try {
+          json = JSON.parse(r.text);
+        } catch {
+          json = null;
+        }
+      }
+      return { cookieState: 'valid', status: r.status, ok: r.ok, json };
     },
     async scrollToBottom(maxSteps = 8) {
       let steps = 0;

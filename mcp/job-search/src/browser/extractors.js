@@ -194,6 +194,33 @@ export function linkedinApplyLink() {
 }
 
 /**
+ * LinkedIn's LOGGED-OUT "jobs-guest" job posting page (LinkedIn extractor widening item 6c fallback B):
+ * a static server-rendered page (no per-build hashed classes, unlike the logged-in jobs/view/<id> page
+ * this replaces DOM extraction for), confirmed live against job 4461489435 -- .description__text or
+ * .show-more-less-html__markup for the body, h2.top-card-layout__title for the title. `matched` is false
+ * (a total, page-shape-level signal, distinct from "description too short") only when NONE of those three
+ * selectors found anything at all, which combined with an authwall/captcha marker is what
+ * src/adapters/linkedin.js's fetchDetail treats as 'guest_blocked' -- a short-but-present description is
+ * NOT blocked, it is simply thin data the shared DETAIL_MIN_CHARS gate (scan-run.js) classifies 'empty'.
+ * The apply-link selector below is prior knowledge, unverified against the live guest page in this brief
+ * (see the adapter's own blindSpots): a markup change there silently yields no applyHref, never a crash.
+ */
+export function linkedinGuestJobDetail() {
+  const blocked = /authwall|challenge|captcha/i.test(String(location.href))
+    || Boolean(document.querySelector('.authwall, .challenge-page, iframe[src*="captcha" i], [data-tracking-control-name*="authwall" i]'));
+  const descEl = document.querySelector('.description__text, .show-more-less-html__markup');
+  const titleEl = document.querySelector('h2.top-card-layout__title');
+  const matched = Boolean(descEl || titleEl);
+  const description = descEl ? String(descEl.textContent || '').replace(/\s+/g, ' ').trim() : null;
+  const title = titleEl ? String(titleEl.textContent || '').replace(/\s+/g, ' ').trim() : null;
+  const applyAnchor = /** @type {HTMLAnchorElement|null} */ (document.querySelector(
+    'a.apply-button, a[data-tracking-control-name*="apply" i], a[href*="/jobs/view/"][class*="apply" i]',
+  ));
+  const applyHref = applyAnchor && applyAnchor.href && !/^(javascript:|#)/i.test(applyAnchor.getAttribute('href') || '') ? applyAnchor.href : null;
+  return { blocked, matched, description: description || null, title, applyHref };
+}
+
+/**
  * Indeed apply affordance (auto-apply PR B): mirrors linkedinApplyLink()'s shape. Indeed's own Easy Apply
  * ("applystart") flow never navigates to an external href at all, so a same-origin/`indeed.com` href (or
  * no href) is reported as easyApplyOnly; an "Apply on company site" anchor pointing OFF indeed.com is
@@ -256,6 +283,7 @@ export const EXTRACTORS = Object.freeze({
   linkedinEmptyState,
   linkedinJobDetail,
   linkedinApplyLink,
+  linkedinGuestJobDetail,
   indeedApplyState,
   bodyText,
   genericListItems,

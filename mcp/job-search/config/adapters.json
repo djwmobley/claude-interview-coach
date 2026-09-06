@@ -72,7 +72,9 @@
       ],
       "pathPatterns": [
         "^/jobs/search/?(\\?|$)",
-        "^/jobs/view/\\d+/?(\\?|$)"
+        "^/jobs/view/\\d+/?(\\?|$)",
+        "^/voyager/api/jobs/jobPostings/\\d+/?$",
+        "^/jobs-guest/jobs/api/jobPosting/\\d+/?$"
       ],
       "delayMs": [
         6000,

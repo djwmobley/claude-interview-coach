@@ -9,7 +9,7 @@ import { loadConfig } from '../src/core/config.js';
 
 const reg = registryFrom([
   { source: 'greenhouse', domains: ['boards-api.greenhouse.io', 'boards.greenhouse.io'], pathPatterns: ['^/v1/boards/[a-z0-9-]+/jobs(/\\d+)?(\\?|$)', '^/[a-z0-9-]+/jobs/\\d+/?(\\?|$)'] },
-  { source: 'linkedin', domains: ['linkedin.com', 'www.linkedin.com'], pathPatterns: ['^/jobs/search/?(\\?|$)', '^/jobs/view/\\d+/?(\\?|$)'] },
+  { source: 'linkedin', domains: ['linkedin.com', 'www.linkedin.com'], pathPatterns: ['^/jobs/search/?(\\?|$)', '^/jobs/view/\\d+/?(\\?|$)', '^/voyager/api/jobs/jobPostings/\\d+/?$', '^/jobs-guest/jobs/api/jobPosting/\\d+/?$'] },
   { source: 'workday', domains: ['myworkdayjobs.com'], pathPatterns: ['^/wday/cxs/[a-z0-9_-]+/[a-z0-9_-]+/jobs(\\?|$)'] },
   { source: 'exec:east57th', domains: ['east57th.com', 'www.east57th.com'], pathPatterns: ['^/opportunities(/.*)?$'] },
 ], ['insecure.example']);
@@ -75,6 +75,62 @@ describe('urlguard sync classification (total)', () => {
     const names = r.entries.map((e) => e.source);
     for (const n of ['indeed', 'linkedin', 'greenhouse', 'lever', 'workday', 'dayforce', 'icims', 'smartrecruiters', 'exec:east57th', 'exec:kornferry']) assert.ok(names.includes(n), n);
     assert.ok(!names.includes('exec'), 'exec adapter has no domains and registers nothing by itself');
+  });
+});
+
+describe('linkedin voyager + jobs-guest detail-fetch registry entries (LinkedIn extractor widening, item 6b)', () => {
+  test('voyager: a bare numeric job posting id is allowed', () => {
+    const v = classifyUrl('https://www.linkedin.com/voyager/api/jobs/jobPostings/4461489435', reg);
+    assert.equal(v.allowed, true);
+    assert.equal(v.source, 'linkedin');
+  });
+
+  test('voyager: a trailing slash is allowed', () => {
+    assert.equal(classifyUrl('https://www.linkedin.com/voyager/api/jobs/jobPostings/4461489435/', reg).allowed, true);
+  });
+
+  test('voyager: an extra path segment after the id is rejected', () => {
+    const v = classifyUrl('https://www.linkedin.com/voyager/api/jobs/jobPostings/4461489435/otherResource', reg);
+    assert.equal(v.allowed, false);
+    assert.equal(v.reason, 'path_not_matching');
+  });
+
+  test('voyager: letters in the id are rejected', () => {
+    const v = classifyUrl('https://www.linkedin.com/voyager/api/jobs/jobPostings/abc123', reg);
+    assert.equal(v.allowed, false);
+    assert.equal(v.reason, 'path_not_matching');
+  });
+
+  test('voyager: a query string is rejected', () => {
+    const v = classifyUrl('https://www.linkedin.com/voyager/api/jobs/jobPostings/4461489435?foo=bar', reg);
+    assert.equal(v.allowed, false);
+    assert.equal(v.reason, 'path_not_matching');
+  });
+
+  test('jobs-guest: a bare numeric job posting id is allowed', () => {
+    const v = classifyUrl('https://www.linkedin.com/jobs-guest/jobs/api/jobPosting/4461489435', reg);
+    assert.equal(v.allowed, true);
+    assert.equal(v.source, 'linkedin');
+  });
+
+  test('jobs-guest: an extra path segment after the id is rejected', () => {
+    assert.equal(classifyUrl('https://www.linkedin.com/jobs-guest/jobs/api/jobPosting/4461489435/apply', reg).reason, 'path_not_matching');
+  });
+
+  test('jobs-guest: letters in the id are rejected', () => {
+    assert.equal(classifyUrl('https://www.linkedin.com/jobs-guest/jobs/api/jobPosting/4461489435x', reg).reason, 'path_not_matching');
+  });
+
+  test('jobs-guest: a query string is rejected', () => {
+    assert.equal(classifyUrl('https://www.linkedin.com/jobs-guest/jobs/api/jobPosting/4461489435?trk=public_jobs', reg).reason, 'path_not_matching');
+  });
+
+  test('the real config/adapters.json registers both new linkedin patterns', () => {
+    const r = buildRegistry(loadConfig());
+    const linkedinEntry = r.entries.find((e) => e.source === 'linkedin');
+    assert.ok(linkedinEntry);
+    assert.equal(classifyUrl('https://www.linkedin.com/voyager/api/jobs/jobPostings/1', { entries: [linkedinEntry], httpAllowedHosts: new Set() }).allowed, true);
+    assert.equal(classifyUrl('https://www.linkedin.com/jobs-guest/jobs/api/jobPosting/1', { entries: [linkedinEntry], httpAllowedHosts: new Set() }).allowed, true);
   });
 });
 

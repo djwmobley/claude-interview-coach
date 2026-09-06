@@ -15,9 +15,55 @@
  * and the details budget.
  */
 import { defineAdapter, rawListing, searchTerms, searchLocations, isoDate } from './base.js';
+import { DETAIL_MIN_CHARS } from '../core/normalize.js';
 
 const BASE = 'https://www.linkedin.com';
 export const PAGE_SIZE = 25;
+
+/**
+ * Total classifier over every URL form fetchDetail is expected to see (LinkedIn extractor widening item
+ * 6c): /jobs/view/<digits>, /jobs/view/<slug>-<digits>, a bare ?currentJobId=<digits> on any path,
+ * trailing slash on any of those, and www/mobile/bare linkedin.com hosts. Returns the numeric id as a
+ * string, or null for anything else -- an unparseable URL, a non-linkedin.com host, or a recognized host
+ * whose path/query carries no extractable id -- which fetchDetail maps to {description:null,
+ * reason:'unrecognized_url'} without ever spending a network call or the details budget.
+ * @param {string} rawUrl
+ * @returns {string|null}
+ */
+export function extractLinkedInJobId(rawUrl) {
+  /** @type {URL} */
+  let u;
+  try {
+    u = new URL(rawUrl);
+  } catch {
+    return null;
+  }
+  const host = u.hostname.toLowerCase();
+  if (host !== 'linkedin.com' && !host.endsWith('.linkedin.com')) return null;
+  const q = u.searchParams.get('currentJobId');
+  if (q && /^\d+$/.test(q)) return q;
+  // Greedy optional "<slug>-" prefix backtracks to the correct split: LinkedIn's own convention is that
+  // the id is always the final contiguous digit run in this path segment.
+  const m = /^\/jobs\/view\/(?:[a-z0-9-]+-)?(\d+)\/?$/i.exec(u.pathname);
+  return m ? m[1] : null;
+}
+
+/**
+ * Total match check for the voyager response's own id against the id requested (LinkedIn extractor
+ * widening item 6c): `jobPostingId` compared as an exact string, or the trailing digit run of
+ * `entityUrn` (e.g. "urn:li:fsd_jobPosting:4461489435") compared as an exact string. Neither field
+ * present, or neither matching, is a mismatch -- never assumed to match.
+ * @param {any} data
+ * @param {string} jobId
+ */
+function voyagerIdMatches(data, jobId) {
+  if (data && data.jobPostingId != null && String(data.jobPostingId) === jobId) return true;
+  if (data && typeof data.entityUrn === 'string') {
+    const m = /(\d+)$/.exec(data.entityUrn);
+    if (m && m[1] === jobId) return true;
+  }
+  return false;
+}
 
 /**
  * @param {string} term
@@ -77,12 +123,27 @@ export const linkedin = defineAdapter({
   needsBrowser: true,
   dateOrdered: true,
   domains: ['linkedin.com', 'www.linkedin.com'],
-  pathPatterns: ['^/jobs/search/?(\\?|$)', '^/jobs/view/\\d+/?(\\?|$)'],
+  pathPatterns: [
+    '^/jobs/search/?(\\?|$)', '^/jobs/view/\\d+/?(\\?|$)',
+    // Detail-fetch sources A and B (LinkedIn extractor widening item 6b): the logged-in voyager API and
+    // the logged-out jobs-guest HTML page, each path-anchored at both ends, digits-only, no query.
+    '^/voyager/api/jobs/jobPostings/\\d+/?$', '^/jobs-guest/jobs/api/jobPosting/\\d+/?$',
+  ],
   blindSpots: [
     'card selectors in the linkedinJobCards extractor are from prior knowledge; a markup change yields zero cards and the wall classifier reports UNRECOGNIZED_PAGE rather than a login wall',
     'a logged-out profile lands on the authwall; the source is then disabled for 24 h by the cross-run backoff',
     'list cards carry no description or salary; detail fetches count as job views on the account',
     'the hard cap of 3 pages x 25 cards per query bounds recall for broad terms',
+    // LinkedIn extractor widening (item 6): the logged-in jobs/view/<id> page now renders with hashed
+    // per-build classes and no h1/JSON-LD (confirmed live against job 4461489435), so fetchDetail no
+    // longer reads that page's DOM at all. Source A is the logged-in voyager API
+    // (/voyager/api/jobs/jobPostings/<id>), read via cap.fetchAuthedJson so the real browser cookie jar
+    // supplies the session; source B is the logged-OUT jobs-guest HTML page, read via cap.goto + DOM.
+    'source A (voyager) is a private API with no published contract: field names/shape (data.description.text, data.jobPostingId vs data.entityUrn, data.applyMethod) are from a single observed response and could change without notice; a shape drift silently falls through to B rather than throwing',
+    'source A requires a JSESSIONID cookie already granted by a real logged-in session; this adapter never signs in and never refreshes an expiring session -- a stale/expired cookie reads as cookieState "valid" (it is present and well-formed) but the API call itself will fail, which this code treats the same as any other non-200/malformed A result: fall back to B',
+    'source B (jobs-guest) selectors (.description__text, .show-more-less-html__markup, h2.top-card-layout__title) and the authwall/captcha markers are confirmed against one live document; LinkedIn varying that document by geography, A/B test, or a later markup change is not covered here',
+    'the guest apply-link selector was never verified live in this brief (only the description/title selectors were); a markup change there silently yields no externalApplyUrl rather than a crash',
+    'neither source is exercised end to end against live LinkedIn by the test suite; tests mock both response shapes from the verified facts, not a real network capture',
   ],
   async *search(profile, ctx) {
     const cap = await ctx.capFor('linkedin');
@@ -129,35 +190,56 @@ export const linkedin = defineAdapter({
       }
     }
   },
+  /**
+   * Total two-source strategy (LinkedIn extractor widening item 6c): the id is extracted from the URL by
+   * a closed classifier (extractLinkedInJobId, exported above); an unrecognized URL form never spends a
+   * network call or the details budget. Otherwise exactly one detail-budget slot is reserved up front,
+   * covering whichever of A/B (or both) this call ends up attempting. Source A (the logged-in voyager
+   * API) is attempted only when the session's own JSESSIONID cookie classifies 'valid'; any other cookie
+   * state, or an A response that fails ANY of (status 200, JSON parses, its own id equals the requested
+   * id, description.text is a string >= DETAIL_MIN_CHARS), falls back to source B (the logged-out
+   * jobs-guest HTML page) rather than failing outright.
+   * @param {{ url: string|null, url_normalized: string|null }} listing
+   * @param {import('./base.js').AdapterCtx} ctx
+   */
   async fetchDetail(listing, ctx) {
     const url = listing.url_normalized ?? listing.url ?? null;
-    if (!url) return { description: null };
+    const jobId = url ? extractLinkedInJobId(url) : null;
+    if (!jobId) return { description: null, reason: 'unrecognized_url' };
     const cap = await ctx.capFor('linkedin');
     if (!cap) return { description: null };
     await ctx.reserveDetail();
-    await cap.goto(url);
-    // Auto-apply PR B: observe (never click) the page's own Apply affordance. A navigable href (including
-    // a linkedin.com/safety/go/ wrapper, decoded later by src/apply/apply-target.js -- never here) is
-    // surfaced as externalApplyUrl; an Easy Apply button with no href sets easyApplyOnly instead.
-    /** @type {any} */
-    let applyState = null;
-    try {
-      applyState = await cap.readJson('linkedinApplyLink');
-    } catch {
-      applyState = null;
-    }
-    const externalApplyUrl = applyState && typeof applyState.href === 'string' ? applyState.href : null;
-    const easyApplyOnly = Boolean(applyState && applyState.buttonOnly && !externalApplyUrl);
-    const d = /** @type {any} */ (await cap.readJson('linkedinJobDetail'));
-    if (d && typeof d.description === 'string' && d.description.trim()) {
-      return { description: d.description, externalApplyUrl, easyApplyOnly };
-    }
-    const docs = /** @type {any[]} */ (await cap.readJson('readJsonLd'));
-    for (const doc of Array.isArray(docs) ? docs : []) {
-      if (doc && doc['@type'] === 'JobPosting' && typeof doc.description === 'string' && doc.description.trim()) {
-        return { description: doc.description, externalApplyUrl, easyApplyOnly };
+
+    // Source A: logged-in voyager API, fetched inside the page's own context (cap.fetchAuthedJson) so
+    // the real browser cookie jar supplies the session; capability.js classifies the JSESSIONID cookie
+    // state itself (this adapter never reads a raw cookie value).
+    const voyagerUrl = `${BASE}/voyager/api/jobs/jobPostings/${jobId}`;
+    const a = await cap.fetchAuthedJson(voyagerUrl, {
+      headers: { accept: 'application/vnd.linkedin.normalized+json+2.1', 'x-restli-protocol-version': '2.0.0' },
+    });
+    if (a.cookieState === 'valid' && a.ok && a.status === 200 && a.json) {
+      const data = /** @type {any} */ (a.json.data ?? a.json);
+      const descText = data && data.description && typeof data.description.text === 'string' ? data.description.text : null;
+      if (voyagerIdMatches(data, jobId) && typeof descText === 'string' && descText.length >= DETAIL_MIN_CHARS) {
+        const applyMethod = data.applyMethod ?? {};
+        const companyApplyUrl = typeof applyMethod.companyApplyUrl === 'string' ? applyMethod.companyApplyUrl : null;
+        const easyApplyUrl = typeof applyMethod.easyApplyUrl === 'string' ? applyMethod.easyApplyUrl : null;
+        return {
+          description: descText,
+          externalApplyUrl: companyApplyUrl,
+          easyApplyOnly: Boolean(easyApplyUrl && !companyApplyUrl),
+        };
       }
     }
-    return { description: null, externalApplyUrl, easyApplyOnly };
+
+    // Source B: logged-out jobs-guest HTML page, read via a normal navigation + DOM extractor.
+    const guestUrl = `${BASE}/jobs-guest/jobs/api/jobPosting/${jobId}`;
+    await cap.goto(guestUrl);
+    const g = /** @type {any} */ (await cap.readJson('linkedinGuestJobDetail'));
+    if (!g || g.blocked || !g.matched) {
+      return { description: null, reason: 'guest_blocked' };
+    }
+    const externalApplyUrl = typeof g.applyHref === 'string' ? g.applyHref : null;
+    return { description: g.description ?? null, externalApplyUrl, easyApplyOnly: false };
   },
 });

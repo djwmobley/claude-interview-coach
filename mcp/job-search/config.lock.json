@@ -1,5 +1,5 @@
 {
-  "sha256": "cc5e377cfff9ba2b8aba60253676b227524fea07fa85349cc2b987d36bb767b5",
+  "sha256": "0648e4214e670de8f0cab7bf22660fe3736ab7aede8d87a877ed7d52cce47aee",
   "files": [
     "adapters.json",
     "ats-boards.json",
@@ -13,5 +13,5 @@
     "triage-output-schema.json",
     "triage-mcp-empty.json"
   ],
-  "updated_at": "2026-09-04T16:11:50.605Z"
+  "updated_at": "2026-09-06T20:56:47.539Z"
 }
