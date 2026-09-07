@@ -13,7 +13,7 @@ import { test, describe, before, after } from 'node:test';
 import assert from 'node:assert/strict';
 import pg from 'pg';
 import { pgConnectionConfig } from '../src/core/config.js';
-import { testConfig, makeFixtureFetch, fakeLookup, memoryReserve, readFixture } from './helpers/scan-fixtures.js';
+import { testConfig, makeFixtureFetch, fakeLookup, memoryReserve, readFixture, makeFakeSession } from './helpers/scan-fixtures.js';
 import { runBackfill, parseArgs } from '../bin/backfill-detail.js';
 
 const TAG = `zz-test-backfill-${process.pid}`;
@@ -264,5 +264,52 @@ describe('bin/backfill-detail.js: DB-backed', () => {
     assert.equal(rowB.status, 'maybe');
     const queueRows = await client.query('SELECT id FROM ic_job_review_queue WHERE candidate_id = ANY($1::int[])', [[idA, idB]]);
     assert.equal(queueRows.rowCount, 0, 'no review-queue row: the dedup/queue path was never reached');
+  });
+
+  describe('browser-backed (linkedin) detail pacing (detail-pacing fix, spec item 2): this script only ever fetches details, so capFor must always use the limiter detail-scoped wait', () => {
+    test('linkedin detail fetches pace on detailDelayMs, never on delayMs, when both are configured', async () => {
+      const idA = await seedRow({ source: 'linkedin', external_id: 'linkedin:9991', url: 'https://www.linkedin.com/jobs/view/9991', prescore: 60 });
+      const idB = await seedRow({ source: 'linkedin', external_id: 'linkedin:9992', url: 'https://www.linkedin.com/jobs/view/9992', prescore: 60 });
+      const base = makeFakeSession({});
+      /** @type {Array<{ t: 'goto'|'sleep', url?: string, ms?: number }>} */
+      const events = [];
+      const connectSession = async () => {
+        const session = await base.connectSession();
+        const realAttach = session.attachPage.bind(session);
+        session.attachPage = async () => {
+          const page = await realAttach();
+          const realGoto = page.goto.bind(page);
+          page.goto = async (/** @type {string} */ url) => {
+            events.push({ t: 'goto', url });
+            return realGoto(url);
+          };
+          return page;
+        };
+        return session;
+      };
+      const sleep = async (/** @type {number} */ ms) => {
+        events.push({ t: 'sleep', ms });
+      };
+      // A fresh config copy (never the shared `config` from before(), which other tests in this file also
+      // read): delayMs and detailDelayMs are pinned to non-overlapping ranges so an observed gap can only
+      // fall in [3000,6000] if this script's onPage really used waitDetail(), never wait() (which would
+      // land in [6000,12000] instead).
+      const freshCfg = testConfig();
+      freshCfg.adapters.adapters.linkedin = { ...freshCfg.adapters.adapters.linkedin, delayMs: [6000, 12000], detailDelayMs: [3000, 6000] };
+      const r = await runBackfill(
+        { dryRun: false, limit: Infinity, ids: [idA, idB], source: 'linkedin' },
+        baseDeps({ config: freshCfg, connectSession, sleep, random: () => 0.5, launchChrome: async () => {} }),
+        client,
+      );
+      assert.equal(r.code, 0, JSON.stringify(r));
+      assert.equal(r.processed, 2, JSON.stringify(r));
+      const gotos = events.filter((e) => e.t === 'goto');
+      assert.equal(gotos.length, 2, `expected exactly 2 detail navigations (source B for each row, source A skipped for missing cookie), got ${JSON.stringify(events)}`);
+      const idxFirst = events.indexOf(gotos[0]);
+      const idxSecond = events.indexOf(gotos[1]);
+      const gap = events.slice(idxFirst + 1, idxSecond).filter((e) => e.t === 'sleep');
+      assert.equal(gap.length, 1, `expected exactly one sleep between the two detail navigations, got ${JSON.stringify(events)}`);
+      assert.ok(gap[0].ms >= 3000 && gap[0].ms <= 6000, `gap ${gap[0].ms}ms outside detailDelayMs [3000,6000] -- backfill-detail must pace every fetch on the detail wait, never on delayMs [6000,12000]`);
+    });
   });
 });

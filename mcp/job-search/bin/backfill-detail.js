@@ -314,7 +314,7 @@ export async function runBackfill(args, deps, client) {
     let entry = bySourceCfg.get(cfgName);
     if (entry) return entry;
     const [s] = resolveSources([cfgName], config);
-    const limiter = makeRateLimiter({ delayMs: s.cfg.delayMs, backoff: config.adapters.run.backoff, sleep: deps.sleep, random: deps.random });
+    const limiter = makeRateLimiter({ delayMs: s.cfg.delayMs, detailDelayMs: s.cfg.detailDelayMs, backoff: config.adapters.run.backoff, sleep: deps.sleep, random: deps.random });
     entry = { name: s.name, adapter: s.adapter, cfg: s.cfg, limiter, cap: null };
     bySourceCfg.set(cfgName, entry);
     return entry;
@@ -360,7 +360,11 @@ export async function runBackfill(args, deps, client) {
         const s = await getSession();
         if (!s) throw new JobSearchError('BROWSER_UNAVAILABLE', `no browser session available for ${source}`);
         const page = await s.attachPage({ signal });
-        entry.cap = makeCapability(page, { registry, source, signal, lookup: deps.lookup, onPage: () => entry.limiter.wait(source, signal) });
+        // This script never fetches a list page (reservePage() above throws unconditionally), so every
+        // navigation through this capability is a detail fetch: onPage always paces on the limiter's
+        // detail-scoped wait (detailDelayMs, falling back to delayMs when unset), unlike scan-run.js's
+        // capFor() which must switch between the two depending on which pass is currently running.
+        entry.cap = makeCapability(page, { registry, source, signal, lookup: deps.lookup, onPage: () => entry.limiter.waitDetail(source, signal) });
         return entry.cap;
       },
       config,

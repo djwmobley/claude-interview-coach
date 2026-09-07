@@ -74,7 +74,7 @@ async function readCookieState(page, name, forUrl) {
  * @returns {Capability}
  */
 export function makeCapability(page, opts) {
-  const { registry, source, signal } = opts;
+  const { registry, source, signal, onPage } = opts;
   const checkAbort = () => {
     if (signal.aborted) throw new JobSearchError('INTERNAL', 'run aborted', { details: { source } });
   };
@@ -85,7 +85,7 @@ export function makeCapability(page, opts) {
     async goto(url) {
       checkAbort();
       const g = await guardUrl(url, registry, { source, lookup: opts.lookup });
-      if (opts.onPage) await opts.onPage();
+      if (onPage) await onPage();
       // Fragment marker lets session.reconcile() recognize our pages after a crash without reading content.
       const target = new URL(g.url.toString());
       target.hash = PAGE_MARKER;
@@ -146,6 +146,13 @@ export function makeCapability(page, opts) {
       if (state !== 'valid' || !value) {
         return { cookieState: state, status: null, ok: false, json: null };
       }
+      // Same rate-limiter hook goto() honors (spec item 1 of the detail-pacing fix): called AFTER the
+      // classifyUrl refusal and cookie checks (so a refused/uncookied call never waits or spends a pacing
+      // slot) and BEFORE page.goto, deliberately outside the try/catch below so a CANCELLED thrown here
+      // (the abort signal firing mid-wait) propagates as a rejection instead of being swallowed into a
+      // graceful { ok: false } result -- this is what makes "aborted during the wait -> rejects CANCELLED,
+      // never navigates" true for this method exactly as it already was for goto().
+      if (onPage) await onPage();
       const headers = { ...(opts.headers ?? {}), 'csrf-token': value };
       /** @type {any} */
       let res = null;

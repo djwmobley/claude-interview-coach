@@ -78,7 +78,7 @@
         12000
       ],
       "dailyPages": 40,
-      "dailyDetails": 60,
+      "dailyDetails": 200,
       "maxPagesPerQuery": 3
     },
     "greenhouse": {

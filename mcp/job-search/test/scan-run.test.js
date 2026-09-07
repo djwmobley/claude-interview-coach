@@ -648,4 +648,119 @@ describe('runScan persisted', () => {
       await client.query(`DELETE FROM ic_job_listings WHERE company = $1`, [CO]);
     }
   });
+
+  test('(h) detail-pacing fix: LinkedIn detail pass paces its navigations on detailDelayMs, independent of the list-page delayMs (spec item 2)', async () => {
+    // A DEDICATED single-keyword profile (never the shared PROFILE, which an earlier test in this file
+    // permanently widens to 4 keyword terms): this test needs to know EXACTLY how many list-page
+    // navigations happen so it can tell the list-pass gaps from the detail-pass gaps by position.
+    const PACING_PROFILE = `${PROFILE}-detailpacing`;
+    const CO = 'ZZ-TEST-SCAN-DETAILPACING';
+    await upsertTestProfile(client, PACING_PROFILE, { sources: ['linkedin'], keywords: ['Chief Technology Officer'], phrases: [], locations: ['Houston, TX'] });
+    const cardA = { id: '5551110001', title: 'Chief Technology Officer', company: CO, location: 'Houston, TX', datetime: new Date().toISOString() };
+    const cardB = { id: '5551110002', title: 'Chief Information Officer', company: CO, location: 'Houston, TX', datetime: new Date().toISOString() };
+    const base = makeFakeSession({ linkedinCards: [cardA, cardB] });
+    /** @type {Array<{ t: 'goto'|'sleep', url?: string, ms?: number }>} */
+    const events = [];
+    const connectSession = async () => {
+      const session = await base.connectSession();
+      const realAttach = session.attachPage.bind(session);
+      session.attachPage = async () => {
+        const page = await realAttach();
+        const realGoto = page.goto.bind(page);
+        page.goto = async (/** @type {string} */ url) => {
+          events.push({ t: 'goto', url });
+          return realGoto(url);
+        };
+        return page;
+      };
+      return session;
+    };
+    const sleep = async (/** @type {number} */ ms) => {
+      events.push({ t: 'sleep', ms });
+    };
+    // Non-overlapping ranges (list vs detail) so an observed gap proves WHICH wait function ran it: the
+    // single list-page navigation (one keyword term, one location) must land in [6000,12000], and the 2
+    // detail-pass navigations that follow (one per queued card) must land in [3000,6000] instead.
+    const cfg = testConfig();
+    cfg.adapters.adapters.linkedin = { ...cfg.adapters.adapters.linkedin, delayMs: [6000, 12000], detailDelayMs: [3000, 6000] };
+    const deps = offlineDeps({ config: cfg, connectSession, sleep, random: () => 0.5 });
+    await client.query(`INSERT INTO ic_source_state (source, manual_disable) VALUES ('linkedin', false) ON CONFLICT (source) DO UPDATE SET manual_disable = false, disabled_until = NULL, consecutive_walls = 0`);
+    try {
+      const r = await runScanWaiting({ profile: PACING_PROFILE, sources: ['linkedin'], dryRun: false, wait: true }, deps, { trigger: 'mcp', log: () => {} });
+      assert.ok(['ok', 'partial'].includes(r.status), JSON.stringify(r.errors));
+      assert.equal(r.stats.new, 2, JSON.stringify(r.stats));
+
+      const gotos = events.filter((e) => e.t === 'goto');
+      assert.equal(gotos.length, 3, `expected 1 list-page nav (one keyword term) + 2 detail navs, got ${JSON.stringify(events)}`);
+      assert.equal(events[0].t, 'goto', 'no wait before the very first navigation ever on this key');
+      const idx = (/** @type {any} */ e) => events.indexOf(e);
+      const gapBetween = (/** @type {any} */ a, /** @type {any} */ b) => events.slice(idx(a) + 1, idx(b)).filter((e) => e.t === 'sleep');
+
+      // List-page nav -> first detail nav: paced on detailDelayMs the moment the source enters its
+      // detail pass, even though it is the SAME capability/limiter instance used for the list page.
+      const gap1 = gapBetween(gotos[0], gotos[1]);
+      assert.equal(gap1.length, 1, `expected exactly one sleep, got ${JSON.stringify(events)}`);
+      assert.ok(gap1[0].ms >= 3000 && gap1[0].ms <= 6000, `detail-pass gap ${gap1[0].ms}ms outside detailDelayMs [3000,6000]`);
+      // First detail nav -> second detail nav: also detailDelayMs.
+      const gap2 = gapBetween(gotos[1], gotos[2]);
+      assert.equal(gap2.length, 1, `expected exactly one sleep, got ${JSON.stringify(events)}`);
+      assert.ok(gap2[0].ms >= 3000 && gap2[0].ms <= 6000, `detail-pass gap ${gap2[0].ms}ms outside detailDelayMs [3000,6000]`);
+    } finally {
+      await client.query(`UPDATE ic_source_state SET manual_disable = false, disabled_until = NULL, consecutive_walls = 0 WHERE source = 'linkedin'`);
+      await client.query(`DELETE FROM ic_job_review_queue WHERE candidate_id IN (SELECT id FROM ic_job_listings WHERE company = $1)`, [CO]);
+      await client.query(`DELETE FROM ic_scan_run_items WHERE listing_id IN (SELECT id FROM ic_job_listings WHERE company = $1)`, [CO]);
+      await client.query(`DELETE FROM ic_job_listings WHERE company = $1`, [CO]);
+      await client.query(`DELETE FROM ic_scan_runs WHERE profile = $1`, [PACING_PROFILE]);
+      await client.query(`DELETE FROM ic_search_profiles WHERE name = $1`, [PACING_PROFILE]);
+    }
+  });
+
+  test('(i) detail-pacing fix: maxDetailsPerRun caps LinkedIn detail-pass attempts within a single run (spec item 3)', async () => {
+    const CAP_PROFILE = `${PROFILE}-detailcap`;
+    const CO = 'ZZ-TEST-SCAN-DETAILCAP';
+    await upsertTestProfile(client, CAP_PROFILE, { sources: ['linkedin'], keywords: ['Chief Technology Officer', 'Chief Information Officer', 'Vice President, Technology'], phrases: [], locations: ['Houston, TX'] });
+    const cards = [
+      { id: '5552220001', title: 'Chief Technology Officer', company: CO, location: 'Houston, TX', datetime: new Date().toISOString() },
+      { id: '5552220002', title: 'Chief Information Officer', company: CO, location: 'Houston, TX', datetime: new Date().toISOString() },
+      { id: '5552220003', title: 'Vice President, Technology', company: CO, location: 'Houston, TX', datetime: new Date().toISOString() },
+    ];
+    const base = makeFakeSession({ linkedinCards: cards });
+    let guestNavCount = 0;
+    const connectSession = async () => {
+      const session = await base.connectSession();
+      const realAttach = session.attachPage.bind(session);
+      session.attachPage = async () => {
+        const page = await realAttach();
+        const realGoto = page.goto.bind(page);
+        page.goto = async (/** @type {string} */ url) => {
+          if (String(url).includes('/jobs-guest/')) guestNavCount++;
+          return realGoto(url);
+        };
+        return page;
+      };
+      return session;
+    };
+    const cfg = testConfig();
+    cfg.adapters.adapters.linkedin = { ...cfg.adapters.adapters.linkedin, maxDetailsPerRun: 2 };
+    const deps = offlineDeps({ config: cfg, connectSession });
+    await client.query(`INSERT INTO ic_source_state (source, manual_disable) VALUES ('linkedin', false) ON CONFLICT (source) DO UPDATE SET manual_disable = false, disabled_until = NULL, consecutive_walls = 0`);
+    try {
+      const r = await runScanWaiting({ profile: CAP_PROFILE, sources: ['linkedin'], dryRun: false, wait: true }, deps, { trigger: 'mcp', log: () => {} });
+      assert.ok(['ok', 'partial'].includes(r.status), JSON.stringify(r.errors));
+      assert.equal(r.stats.new, 3, JSON.stringify(r.stats));
+      assert.equal(guestNavCount, 2, 'the per-run cap (2) must stop the third detail fetch before it ever navigates');
+      assert.equal(r.stats.detail_skipped_run_cap, 1, JSON.stringify(r.stats));
+      assert.ok(r.stats.detail_skipped_budget >= 1, 'the run-cap-skipped row is also counted under detail_skipped_budget (same outcome/latch)');
+      const bySource = r.stats.details_by_source.linkedin;
+      assert.ok(bySource, JSON.stringify(r.stats));
+      assert.equal(bySource.skipped_budget, 1, `report details line's "skipped" sum must include the run-cap-skipped row: ${JSON.stringify(bySource)}`);
+    } finally {
+      await client.query(`UPDATE ic_source_state SET manual_disable = false, disabled_until = NULL, consecutive_walls = 0 WHERE source = 'linkedin'`);
+      await client.query(`DELETE FROM ic_job_review_queue WHERE candidate_id IN (SELECT id FROM ic_job_listings WHERE company = $1)`, [CO]);
+      await client.query(`DELETE FROM ic_scan_run_items WHERE listing_id IN (SELECT id FROM ic_job_listings WHERE company = $1)`, [CO]);
+      await client.query(`DELETE FROM ic_job_listings WHERE company = $1`, [CO]);
+      await client.query(`DELETE FROM ic_scan_runs WHERE profile = $1`, [CAP_PROFILE]);
+      await client.query(`DELETE FROM ic_search_profiles WHERE name = $1`, [CAP_PROFILE]);
+    }
+  });
 });

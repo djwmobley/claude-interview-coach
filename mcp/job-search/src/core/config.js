@@ -247,6 +247,8 @@ const adapterSchema = z.object({
   domains: z.array(domain),
   pathPatterns: z.array(pathPattern),
   delayMs: z.tuple([z.number().int().nonnegative(), z.number().int().nonnegative()]).refine(([a, b]) => a <= b, 'delayMs min must be <= max'),
+  /** Per-source override of the jittered gap between DETAIL fetches specifically (detail-pacing fix); falls back to delayMs when absent, so an existing config with no detailDelayMs paces detail fetches exactly as before this option existed. */
+  detailDelayMs: z.tuple([z.number().int().nonnegative(), z.number().int().nonnegative()]).refine(([a, b]) => a <= b, 'detailDelayMs min must be <= max').optional(),
   dailyPages: z.number().int().positive(),
   dailyDetails: z.number().int().nonnegative(),
   maxPagesPerQuery: z.number().int().min(1).max(5),
@@ -256,6 +258,8 @@ const adapterSchema = z.object({
   detailMaxAttempts: z.number().int().positive().optional(),
   /** Hard cap on pages fetched for this source across the WHOLE run, regardless of how many queries the profile plans (spec R5.1); undefined means no extra cap beyond the daily/per-query ones. */
   maxPagesPerRun: z.number().int().positive().optional(),
+  /** Hard cap on DETAIL fetches queued+attempted for this source within a single scan run (detail-pacing fix), independent of the daily dailyDetails pool; null (the default) means no per-run cap. Ignored by bin/backfill-detail.js (bounded by --limit and the daily pool instead). */
+  maxDetailsPerRun: z.number().int().positive().nullable().default(null),
 });
 
 /**

@@ -15,6 +15,7 @@ import { dayforce } from '../src/adapters/dayforce.js';
 import { exec } from '../src/adapters/exec-generic.js';
 import { registryFrom } from '../src/core/urlguard.js';
 import { makeCapability } from '../src/browser/capability.js';
+import { JobSearchError } from '../src/core/errors.js';
 
 /** @param {Record<string, any>} readJsonResponses */
 function fakeCap(readJsonResponses = {}) {
@@ -376,6 +377,109 @@ describe('capability.fetchAuthedJson (real makeCapability, not bypassed -- item 
     assert.equal(r.status, null);
     assert.equal(r.ok, false);
     assert.equal(r.json, null);
+  });
+});
+
+describe('capability.js onPage hook wired to fetchAuthedJson (detail-pacing fix, spec item 1)', () => {
+  const registry = registryFrom([
+    { source: 'linkedin', domains: ['linkedin.com', 'www.linkedin.com'], pathPatterns: ['^/jobs/view/\\d+/?(\\?|$)', '^/voyager/api/jobs/jobPostings/\\d+/?$', '^/jobs-guest/jobs/api/jobPosting/\\d+/?$'] },
+  ]);
+  const LONG_DESC = 'x'.repeat(310);
+  const LISTING = { url: 'https://www.linkedin.com/jobs/view/4461489435', url_normalized: 'https://www.linkedin.com/jobs/view/4461489435', source: 'linkedin' };
+
+  /**
+   * A fake page backing BOTH source A (fetchAuthedJson's own internal page.goto) and source B (cap.goto +
+   * cap.readJson) so a single test can drive linkedin.fetchDetail()'s real two-source strategy through a
+   * REAL makeCapability instance, with onPage counted like a real rate-limiter hook would be.
+   * @param {{ cookies?: any[], voyagerResult?: { status: number, ok: boolean, text: string }, guestNavResult?: { status: number, ok: boolean, text: string }, guestDetail?: any, onPage?: () => Promise<void> }} o
+   */
+  function fakeLinkedinPage(o = {}) {
+    const gotoCalls = [];
+    // cap.goto() (used for source B) re-derives the landing URL from page.url() and re-runs guardUrl
+    // against it after navigating, exactly like a real Playwright page would report its post-navigation
+    // location -- so this fake must track and return the URL it was last sent to, never a fixed
+    // 'about:blank' (which would fail that re-check and make every B navigation look like a guardUrl
+    // refusal instead of a real fetch).
+    let current = 'about:blank';
+    const page = {
+      context: () => ({ cookies: async () => o.cookies ?? [{ name: 'JSESSIONID', value: '"ajax:1234567890123456789"' }] }),
+      async setExtraHTTPHeaders() {},
+      async goto(url) {
+        gotoCalls.push(url);
+        current = url;
+        const isVoyager = /\/voyager\/api\//.test(url);
+        const r = (isVoyager ? o.voyagerResult : o.guestNavResult) ?? { status: 200, ok: true, text: '{}' };
+        return { status: () => r.status, ok: () => r.ok, headers: () => ({}), text: async () => r.text };
+      },
+      url: () => current,
+      async content() { return ''; },
+      async evaluate() { return o.guestDetail ?? null; },
+    };
+    return { page, gotoCalls };
+  }
+
+  /** @param {{ page: any, onPage: () => Promise<void>, signal?: AbortSignal }} o */
+  function ctxWithRealCap(o) {
+    const cap = makeCapability(o.page, { registry, source: 'linkedin', signal: o.signal ?? new AbortController().signal, onPage: o.onPage });
+    return {
+      reserveDetail: async () => {},
+      fetchJson: async () => ({ status: 404, url: '', json: null }),
+      fetchText: async () => ({ status: 404, url: '', text: '', contentType: null }),
+      capFor: async () => cap,
+      config: { execBoards: { boards: [] } },
+      log: () => {},
+    };
+  }
+
+  test('A success (matching id, long description, B never attempted): onPage called exactly once', async () => {
+    const { page, gotoCalls } = fakeLinkedinPage({
+      voyagerResult: { status: 200, ok: true, text: JSON.stringify({ data: { jobPostingId: '4461489435', description: { text: LONG_DESC } } }) },
+    });
+    let onPageCalls = 0;
+    const ctx = ctxWithRealCap({ page, onPage: async () => { onPageCalls++; } });
+    const r = await linkedin.fetchDetail(LISTING, ctx);
+    assert.equal(r.description, LONG_DESC);
+    assert.equal(gotoCalls.length, 1, 'only A own navigation; B never attempted after an A success');
+    assert.equal(onPageCalls, 1);
+  });
+
+  test('A fails (wrong id, falls back to B which succeeds): onPage called exactly twice', async () => {
+    const { page, gotoCalls } = fakeLinkedinPage({
+      voyagerResult: { status: 200, ok: true, text: JSON.stringify({ data: { jobPostingId: '9999999999', description: { text: LONG_DESC } } }) },
+      guestNavResult: { status: 200, ok: true, text: '' },
+      guestDetail: { blocked: false, matched: true, description: LONG_DESC, applyHref: null },
+    });
+    let onPageCalls = 0;
+    const ctx = ctxWithRealCap({ page, onPage: async () => { onPageCalls++; } });
+    const r = await linkedin.fetchDetail(LISTING, ctx);
+    assert.equal(r.description, LONG_DESC);
+    assert.equal(gotoCalls.length, 2, 'A own navigation, then B cap.goto');
+    assert.equal(onPageCalls, 2, 'once for A (fetchAuthedJson), once for B (cap.goto)');
+  });
+
+  test('an unrecognized URL form never builds a capability at all: onPage called zero times', async () => {
+    let onPageCalls = 0;
+    let capForCalled = false;
+    const ctx = {
+      reserveDetail: async () => {},
+      capFor: async () => { capForCalled = true; return null; },
+      config: { execBoards: { boards: [] } },
+      log: () => {},
+    };
+    const r = await linkedin.fetchDetail({ url: 'https://www.linkedin.com/jobs/search/?keywords=cto', url_normalized: null, source: 'linkedin' }, ctx);
+    assert.deepEqual(r, { description: null, reason: 'unrecognized_url' });
+    assert.equal(capForCalled, false, 'capFor is never even called for an unrecognized URL');
+    assert.equal(onPageCalls, 0);
+  });
+
+  test('an abort signal firing during the onPage wait rejects CANCELLED and never navigates', async () => {
+    const { page, gotoCalls } = fakeLinkedinPage({});
+    const ctx = ctxWithRealCap({
+      page,
+      onPage: () => Promise.reject(new JobSearchError('CANCELLED', 'aborted during wait')),
+    });
+    await assert.rejects(linkedin.fetchDetail(LISTING, ctx), (/** @type {any} */ e) => e.code === 'CANCELLED');
+    assert.equal(gotoCalls.length, 0, 'the CANCELLED rejection from onPage happens before page.goto is ever called');
   });
 });
 
