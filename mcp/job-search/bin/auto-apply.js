@@ -631,9 +631,13 @@ async function main() {
           timezone, softDeadline, hardDeadline, pollSeconds: config.autoApply.waitPollSeconds,
           staleHeartbeatMinutes: config.autoApply.waitStaleHeartbeatMinutes,
           // scan-hang-timeouts fix (spec item C): a runaway scan run's heartbeat can keep ticking even
-          // while it is wedged, so this wait loop also treats a 'running' row whose started_at is past
-          // the scan's own wall-clock cap + 30 minutes as stalled -- never waiting into the hard deadline
-          // for a run that is never coming back.
+          // while it is wedged, so this wait loop also classifies a 'running' row whose started_at is
+          // past the scan's own wall-clock cap + 30 minutes as 'abandoned' (distinct from merely-stale
+          // 'stalled') -- waitForScan() resolves that state immediately, with no deadline wait at all, so
+          // this run is never waited on into the hard deadline. The branch below that reacts to
+          // scanState.state === 'abandoned' is what actually stops auto-apply from waiting further and
+          // proceeds with a warning (independent review Finding 3: this option alone only changed state
+          // labeling/logging without that branch).
           runCapMinutes: config.adapters.run.runTimeoutMinutes,
           log,
           queryLatestScanRun: defaultQueryLatestScanRun,
@@ -680,6 +684,12 @@ async function main() {
     if (scanState.state === 'failed') warnings.push({ code: 'SCAN_FAILED', severity: 'warning', detail: scanState.detail });
     else if (scanState.state === 'never_started') warnings.push({ code: 'SCAN_NOT_FINISHED', severity: 'warning', detail: scanState.detail });
     else if (scanState.state === 'unknown') warnings.push({ code: 'SCAN_STATE_UNKNOWN', severity: 'warning', detail: scanState.detail });
+    // scan-hang-timeouts fix (spec item C, independent review Finding 3): a run whose started_at is past
+    // its own wall-clock cap plus 30 minutes will never finish, so it is treated as NOT in progress --
+    // auto-apply stops waiting on it and proceeds through the same Chrome-launch/prepare/apply path as
+    // failed/never_started/unknown below, rather than the read-only select-only path above (which is
+    // reserved for a run that might still legitimately hold Chrome/the lock).
+    else if (scanState.state === 'abandoned') warnings.push({ code: 'SCAN_ABANDONED', severity: 'warning', detail: scanState.detail });
 
     if (scanState.state !== 'finished_today') {
       try {

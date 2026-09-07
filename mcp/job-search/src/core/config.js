@@ -293,9 +293,12 @@ export const adaptersSchema = z.object({
     /** Wall-clock cap for a whole scan run (scan-hang-timeouts fix, spec item B): supersedes the old
      * "abort and hope" timer -- when this fires, remaining sources/detail items are skipped, a
      * RUN_WALLCLOCK_EXCEEDED warning is recorded, and the run still proceeds to triage/report/run_finished
-     * rather than being marked failed. Defaulted to 50 minutes so a full-length 06:30 run finishes before
-     * the 07:40 auto-apply soft wait; config/adapters.json may still override it explicitly. */
-    runTimeoutMinutes: z.number().int().positive().default(50),
+     * rather than being marked failed. Defaulted to 40 minutes (bumped from 20; independent review
+     * Finding 2 corrected an initial 50-minute default): observed Task Scheduler jitter has pushed the
+     * 06:30 run to start as late as 07:08, and 07:08 + 50min = 07:58 is already past the 07:55 auto-apply
+     * HARD deadline; 07:08 + 40min = 07:48 still clears it with margin. config/adapters.json may still
+     * override it explicitly. */
+    runTimeoutMinutes: z.number().int().positive().default(40),
     heartbeatStaleMinutes: z.number().int().positive(),
     detailFetchMinPrescore: z.number().int().min(0).max(100),
     /** Hard per-item timeout for a single detail fetch (scan-hang-timeouts fix, spec item A): the incident

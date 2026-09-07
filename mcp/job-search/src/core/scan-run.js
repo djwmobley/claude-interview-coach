@@ -55,6 +55,11 @@ import { persistApplyTargetForListing, buildScanProbeRegistry } from './apply-ta
 export const LOCK_KEY = 730193001;
 export const HEARTBEAT_MS = 20000;
 export const USER_AGENT = 'job-search-mcp/0.1 (interview-coach; read-only scanner)';
+/** Bound on session.closeAll() at the end of a run (independent review Finding 1): page.close() takes no
+ * timeout of its own and is exactly the kind of CDP call that can hang when the underlying browser is
+ * wedged -- the same condition that caused run 2127's cookies()/goto() to hang, just at a different call
+ * site. Matches teardownCapability's own 10s bound above. */
+export const CLOSE_ALL_TIMEOUT_MS = 10000;
 
 /**
  * @typedef {Object} RunArgs
@@ -84,6 +89,14 @@ export const USER_AGENT = 'job-search-mcp/0.1 (interview-coach; read-only scanne
  *   binary NAME is separately overridable via the JOBSEARCH_TRIAGE_CLAUDE_BIN env var (mirrors
  *   JOBSEARCH_FIXTURE_MAP), for a child-process-level test that cannot pass a JS function across the
  *   process boundary.
+ * @property {(code: number) => void} [exit] independent review Finding 1, item (c): defaults to
+ *   `process.exit`. Called ONLY when browser-session teardown timed out (CLOSE_ALL_TIMEOUT_MS) AND
+ *   opts.trigger is not 'mcp' -- a wedged CDP connection is a live handle that can keep a one-shot
+ *   CLI/dashboard-triggered process (bin/scan.js) alive past the point everything this run needed to do
+ *   (finalize the row, release the advisory lock, close this run's own DB client) is already done. Never
+ *   called for an 'mcp' trigger, which runs inside the long-lived MCP/dashboard server process and must
+ *   keep serving other tool calls regardless of one scan's teardown timing out. Tests inject a fake here
+ *   to assert the call happened without actually exiting the test process.
  */
 
 /**
@@ -1139,14 +1152,17 @@ async function executeRun(p) {
     clearTimeout(timeout);
     clearInterval(heartbeat);
     if (opts.signal) opts.signal.removeEventListener('abort', onExternalAbort);
-    if (session) {
-      try {
-        await session.closeAll();
-      } catch {
-        /* ignore */
-      }
-    }
+    // Browser session teardown is deliberately NOT awaited here (independent review Finding 1). The
+    // 2026-09-07 incident's own failure mode -- a wedged Playwright/CDP call that never resolves and
+    // never rejects -- applies just as much to session.closeAll()'s own page.close() calls (no timeout
+    // option of their own) as it does to the detail-fetch cookies()/goto() calls item A above already
+    // bounds. Awaiting it unbounded HERE, before the run row is finalized and the advisory lock/DB client
+    // are released below, would let a wedged close() hold the real Postgres advisory lock open forever --
+    // reproducing the identical blocking mechanism at a different call site, even after ic_scan_runs
+    // already says 'failed' via heartbeat staleness. closeSession is started here (so teardown begins
+    // immediately) but only raced/awaited further down, AFTER the lock and DB client are already gone.
   }
+  const closeSession = session ? session.closeAll().then(() => true).catch(() => true) : Promise.resolve(true);
 
   // Warnings (severity:'warning' -- config-lock mismatch, unlocked rubric, Chrome self-heal) never count
   // toward stats.errors or the status computation: a run carrying only warnings stays 'ok'. `partial` is
@@ -1174,6 +1190,14 @@ async function executeRun(p) {
   } catch {
     /* ignore */
   }
+
+  // Browser session teardown, bounded (independent review Finding 1): the run row is finalized and the
+  // advisory lock/DB client are ALREADY released above, so a wedged page.close() can no longer hold
+  // either one hostage -- everything from here on is best-effort housekeeping. A session that has not
+  // closed within CLOSE_ALL_TIMEOUT_MS is abandoned (with a logged warning) rather than awaited forever;
+  // if it does eventually resolve on its own later, that is harmless -- nothing here is still waiting on it.
+  const browserTeardownOk = await Promise.race([closeSession, new Promise((resolve) => setTimeout(() => resolve(false), CLOSE_ALL_TIMEOUT_MS))]);
+  if (!browserTeardownOk) log({ evt: 'session_close_timeout', run_id: runId, timeout_ms: CLOSE_ALL_TIMEOUT_MS });
 
   // Slice 3 auto-triage (docs/slice3-auto-triage-spec.md section 5): runs AFTER the advisory lock
   // releases and this run's own client closes, on a fresh dedicated connection, so a model step that can
@@ -1217,6 +1241,21 @@ async function executeRun(p) {
   }
 
   log({ evt: 'run_finished', run_id: runId, status, fetched: stats.fetched, new: stats.new, updated: stats.updated, errors: errors.length });
+
+  // Independent review Finding 1, item (c): a wedged browser/CDP connection is a live handle that can
+  // keep this WHOLE PROCESS alive even after every DB write above has already completed and this function
+  // is ready to return. For a one-shot CLI/dashboard-triggered process (bin/scan.js, always run to
+  // completion and never shared with anything else -- see src/dashboard/scan-runner.js, which spawns
+  // bin/scan.js for a 'dashboard' trigger exactly like a human running it from the CLI) there is nothing
+  // left to wait for at this point, so the process exits explicitly rather than trusting Node to notice
+  // the lingering handle is no longer needed. Never done for an 'mcp' trigger: that runs inside the
+  // long-lived MCP/dashboard server process, which must keep serving other tool calls regardless of one
+  // scan's browser teardown timing out.
+  if (!browserTeardownOk && opts.trigger !== 'mcp') {
+    const exitCode = status === 'ok' ? 0 : status === 'partial' ? 2 : 1;
+    log({ evt: 'process_exit_after_browser_teardown_timeout', run_id: runId, exit_code: exitCode });
+    (deps.exit ?? process.exit)(exitCode);
+  }
 
   // Response
   const minPs = args.minPrescore ?? 0;

@@ -133,11 +133,13 @@ describe('detailDelayMs / maxDetailsPerRun (detail-pacing fix: LinkedIn detail p
   test('the REAL config/adapters.json leaves every other adapter delayMs/dailyDetails/maxPagesPerQuery untouched (this fix is LinkedIn-only, spec item 5)', () => {
     const cfg = loadConfig({ dir: REAL_CONFIG_DIR, fresh: true });
     assert.equal(cfg.adapters.adapters.linkedin.maxPagesPerQuery, 3);
-    // run.runTimeoutMinutes was bumped 20 -> 50 by the scan-hang-timeouts fix (spec item B: the wall-clock
+    // run.runTimeoutMinutes was bumped 20 -> 40 by the scan-hang-timeouts fix (spec item B: the wall-clock
     // cap now degrades gracefully -- skip remaining work, warn, still finish -- rather than aborting
-    // outright, so a longer cap is safe; 50 minutes still finishes a 06:30 run before the 07:40 auto-apply
-    // soft wait). See test/scan-run.test.js's (F2)/(F4) for the cap's own behavior.
-    assert.equal(cfg.adapters.run.runTimeoutMinutes, 50);
+    // outright, so a longer cap is safe). Independent review Finding 2 corrected an initial 50-minute
+    // default: observed Task Scheduler jitter pushed a 06:30 run to start as late as 07:08, and
+    // 07:08 + 50min = 07:58 is already past the 07:55 auto-apply HARD deadline; 40 minutes clears it with
+    // margin (07:08 + 40min = 07:48). See test/scan-run.test.js's (F2)/(F4) for the cap's own behavior.
+    assert.equal(cfg.adapters.run.runTimeoutMinutes, 40);
     for (const [name, a] of Object.entries(cfg.adapters.adapters)) {
       if (name === 'linkedin') continue;
       assert.equal(a.maxDetailsPerRun, null, `${name}: maxDetailsPerRun must stay unset (default null)`);

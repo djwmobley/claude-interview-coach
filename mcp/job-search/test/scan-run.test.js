@@ -963,4 +963,68 @@ describe('runScan persisted', () => {
       await holder.end();
     }
   });
+
+  // ---------------------------------------------------------------------------------------------
+  // Independent review Finding 1 (PR #58): session.closeAll() had no bound of its own, and the old
+  // `finally { await session.closeAll(); }` sat BEFORE the run row was finalized, the advisory lock
+  // released, and this run's own DB client closed -- reproducing the exact 2026-09-07 incident (a wedged
+  // Playwright/CDP call that never resolves) one call site over, this time keeping the real Postgres
+  // advisory lock held forever. Fixed by racing closeAll() with CLOSE_ALL_TIMEOUT_MS AFTER the
+  // lock/client are already released, plus an explicit process-exit hook (deps.exit) for a one-shot
+  // cli/dashboard-triggered process when teardown times out.
+  // ---------------------------------------------------------------------------------------------
+
+  test('(Finding 1) a session.closeAll() that never resolves does not prevent the advisory lock releasing, the run row finalizing, or the exit hook firing (cli trigger)', async () => {
+    const base = makeFakeSession({ indeedCards: [] });
+    const connectSession = async () => {
+      const session = await base.connectSession();
+      session.closeAll = () => new Promise(() => {}); // never resolves, never rejects
+      return session;
+    };
+    /** @type {number[]} */
+    const exitCalls = [];
+    const deps = offlineDeps({ connectSession, exit: (/** @type {number} */ code) => { exitCalls.push(code); } });
+    await client.query(`INSERT INTO ic_source_state (source, manual_disable) VALUES ('indeed', false) ON CONFLICT (source) DO UPDATE SET manual_disable = false, disabled_until = NULL, consecutive_walls = 0`);
+    try {
+      const r = /** @type {any} */ (await runScanWaiting({ profile: PROFILE, sources: ['indeed'], dryRun: true, wait: true }, deps, { trigger: 'cli', log: () => {} }, 30000));
+      assert.ok(['ok', 'partial'].includes(r.status), JSON.stringify(r.errors));
+      // The real Postgres advisory lock was actually released: a fresh acquisition on a separate
+      // connection must succeed immediately, never blocking on the still-pending closeAll() above.
+      const probe = await newClient();
+      try {
+        const got = await probe.query('SELECT pg_try_advisory_lock($1::bigint) AS ok', [LOCK_KEY]);
+        assert.equal(got.rows[0].ok, true, 'the advisory lock must be released even though session.closeAll() never resolved');
+        await probe.query('SELECT pg_advisory_unlock($1::bigint)', [LOCK_KEY]);
+      } finally {
+        await probe.end();
+      }
+      const row = await client.query('SELECT status, finished_at FROM ic_scan_runs WHERE id = $1', [r.run_id]);
+      assert.notEqual(row.rows[0].status, 'running', 'the run row must be finalized even though session.closeAll() never resolved');
+      assert.ok(row.rows[0].finished_at);
+      assert.equal(exitCalls.length, 1, 'the exit hook must fire exactly once for a cli trigger when browser teardown times out');
+      assert.equal(exitCalls[0], r.status === 'ok' ? 0 : r.status === 'partial' ? 2 : 1);
+    } finally {
+      await client.query(`UPDATE ic_source_state SET manual_disable = false, disabled_until = NULL, consecutive_walls = 0 WHERE source = 'indeed'`);
+    }
+  });
+
+  test('(Finding 1) a session.closeAll() that never resolves never fires the exit hook for an mcp trigger (the shared MCP/dashboard server process must never be exited over one scan)', async () => {
+    const base = makeFakeSession({ indeedCards: [] });
+    const connectSession = async () => {
+      const session = await base.connectSession();
+      session.closeAll = () => new Promise(() => {});
+      return session;
+    };
+    /** @type {number[]} */
+    const exitCalls = [];
+    const deps = offlineDeps({ connectSession, exit: (/** @type {number} */ code) => { exitCalls.push(code); } });
+    await client.query(`INSERT INTO ic_source_state (source, manual_disable) VALUES ('indeed', false) ON CONFLICT (source) DO UPDATE SET manual_disable = false, disabled_until = NULL, consecutive_walls = 0`);
+    try {
+      const r = /** @type {any} */ (await runScanWaiting({ profile: PROFILE, sources: ['indeed'], dryRun: true, wait: true }, deps, { trigger: 'mcp', log: () => {} }, 30000));
+      assert.ok(['ok', 'partial'].includes(r.status), JSON.stringify(r.errors));
+      assert.equal(exitCalls.length, 0, 'the exit hook must never fire for an mcp trigger, regardless of browser teardown timing out');
+    } finally {
+      await client.query(`UPDATE ic_source_state SET manual_disable = false, disabled_until = NULL, consecutive_walls = 0 WHERE source = 'indeed'`);
+    }
+  });
 });
