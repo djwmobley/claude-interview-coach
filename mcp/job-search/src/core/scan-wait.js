@@ -56,9 +56,14 @@ export const SCAN_STATES = Object.freeze(['finished_today', 'never_started', 'fa
  * @param {string} timezone IANA zone
  * @param {number} staleHeartbeatMinutes a 'running' row whose heartbeat_at is at least this many minutes
  *   old classifies as 'stalled' rather than 'running'.
+ * @param {number} [runCapMinutes] scan-hang-timeouts fix (spec item C): when given, a 'running' row whose
+ *   started_at is at least `runCapMinutes + 30` minutes old ALSO classifies as 'stalled', regardless of
+ *   heartbeat_at -- a heartbeat can keep ticking even while the run's own main loop is wedged (the
+ *   2026-09-07 incident), so freshness alone is not proof of real progress. Omitted (the default) keeps
+ *   this classification exactly as it was before this fix, heartbeat-only.
  * @returns {ScanStateClassification}
  */
-export function classifyScanState(row, now, timezone, staleHeartbeatMinutes) {
+export function classifyScanState(row, now, timezone, staleHeartbeatMinutes, runCapMinutes) {
   if (!row) return { state: 'never_started', detail: { runId: null, status: null } };
   const runId = row.id ?? null;
   const status = typeof row.status === 'string' ? row.status : null;
@@ -76,7 +81,12 @@ export function classifyScanState(row, now, timezone, staleHeartbeatMinutes) {
     case 'running': {
       const heartbeatMs = row.heartbeat_at ? new Date(row.heartbeat_at).getTime() : NaN;
       const staleMs = Math.max(0, staleHeartbeatMinutes) * 60000;
-      const stale = !Number.isFinite(heartbeatMs) || now.getTime() - heartbeatMs >= staleMs;
+      const heartbeatStale = !Number.isFinite(heartbeatMs) || now.getTime() - heartbeatMs >= staleMs;
+      // Runaway-run fix (spec item C): mirrors scan-run.js's own reaper rule exactly, so the reaper and
+      // this wait loop never disagree about when a run is stuck. startedAtMs is already computed above.
+      const capMs = runCapMinutes != null ? (Math.max(0, runCapMinutes) + 30) * 60000 : null;
+      const startedAtStale = capMs !== null && Number.isFinite(startedAtMs) && now.getTime() - startedAtMs >= capMs;
+      const stale = heartbeatStale || startedAtStale;
       return { state: stale ? 'stalled' : 'running', detail: { runId, status } };
     }
     default:
@@ -128,9 +138,10 @@ function isInProgressState(state) {
  * @param {import('pg').ClientBase} client
  * @param {{
  *   timezone: string, softDeadline: Date, hardDeadline: Date, pollSeconds: number,
- *   staleHeartbeatMinutes: number, log?: (f: any) => void, sleep?: (ms: number) => Promise<void>,
+ *   staleHeartbeatMinutes: number, runCapMinutes?: number, log?: (f: any) => void, sleep?: (ms: number) => Promise<void>,
  *   clock?: () => Date, queryLatestScanRun?: (client: import('pg').ClientBase) => Promise<ScanRunRow|null>,
- * }} opts clock (default `() => new Date()`) is called fresh on every poll -- a test can pass one backed
+ * }} opts runCapMinutes (spec item C) is forwarded to classifyScanState() unchanged on every poll -- see its
+ *   own doc. clock (default `() => new Date()`) is called fresh on every poll -- a test can pass one backed
  *   by a fake, independently-advanced clock (real time.Date.now() monkey-patching does not affect
  *   `new Date()`, so this seam is the only reliable way to make the deadline math deterministic in tests).
  * @returns {Promise<WaitForScanResult>}
@@ -155,7 +166,7 @@ export async function waitForScan(client, opts) {
     }
     const classified = queryFailed
       ? { state: /** @type {const} */ ('unknown'), detail: { runId: null, status: null } }
-      : classifyScanState(row, nowTick, opts.timezone, opts.staleHeartbeatMinutes);
+      : classifyScanState(row, nowTick, opts.timezone, opts.staleHeartbeatMinutes, opts.runCapMinutes);
 
     if (classified.state === 'finished_today') {
       return { ...classified, deadlineHit: null, polls };

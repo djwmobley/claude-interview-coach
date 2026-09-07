@@ -125,7 +125,8 @@ export const USER_AGENT = 'job-search-mcp/0.1 (interview-coach; read-only scanne
  * @property {number} detail_skipped_gate rows with a detail-capable adapter, outcome new/ambiguous, but below the prescore gate
  * @property {number} detail_skipped_cancelled rows still queued when the run's abort signal fired mid-runDetailPass
  * @property {number} detail_not_queued rows never eligible for the detail queue at all (cross_source_dup/repost, or update rows already fetched/attempts-capped)
- * @property {Record<string, { fetched: number, empty: number, error: number, skipped_budget: number, skipped_gate: number, skipped_cancelled: number }>} details_by_source per-source breakdown of the six outcomes above (not_queued excluded), keyed by source name; only populated for a source that queued at least one row
+ * @property {number} detail_timeout informational count (scan-hang-timeouts fix, spec item A), layered on top of `detail_error` exactly the way detail_skipped_run_cap layers on top of detail_skipped_budget: a row counted here is ALSO counted in detail_error (same finalized outcome), this is just "how many of those errors were specifically a per-item DETAIL_TIMEOUT" for reporting.
+ * @property {Record<string, { fetched: number, empty: number, error: number, skipped_budget: number, skipped_gate: number, skipped_cancelled: number, timeout: number }>} details_by_source per-source breakdown of the six outcomes above (not_queued excluded) plus `timeout` (a sub-count of `error`, see detail_timeout above), keyed by source name; only populated for a source that queued at least one row
  * @property {number} dedup_sticky_skip_merged rows that would otherwise have created a review-queue row
  *   but instead auto-merged into a STICKY-ELIGIBLE skip/passed/lost root (sticky-skip spec part B,
  *   src/core/upsert.js's findStickySkipRoot()); also counted under `cross_source_dup` above, since the
@@ -207,6 +208,38 @@ export function resolveSources(names, config) {
 }
 
 /**
+ * Reap 'running' rows nothing is coming back to finish (spec item C). Two independent staleness rules,
+ * either one sufficient on its own:
+ *   - heartbeat_at stale (the pre-existing rule): the run's own heartbeat interval has stopped ticking.
+ *   - started_at older than the run's own wall-clock cap plus 30 minutes, REGARDLESS of heartbeat_at: a
+ *     heartbeat can keep ticking even while the run's main loop is wedged on a hung detail fetch (the
+ *     2026-09-07 incident this fix exists for) -- a fresh heartbeat alone is not proof of real progress
+ *     once a run has run well past its own cap.
+ * Runs on `client` directly with no advisory lock of its own (a plain UPDATE gated only on time), so it
+ * executes even while another process still holds LOCK_KEY -- the whole point is that a run hung holding
+ * that lock must never be able to block itself from ever being reaped. Best-effort: a failure here is
+ * logged, never thrown, so a reaper hiccup can never prevent the scan that called it from proceeding.
+ * @param {import('pg').ClientBase} client
+ * @param {{ heartbeatStaleMinutes: number, runTimeoutMinutes: number }} runCfg
+ * @param {(f: any) => void} log
+ */
+async function reapStaleRuns(client, runCfg, log) {
+  try {
+    const reaped = await client.query(
+      `UPDATE ic_scan_runs SET status = 'failed', finished_at = now(), errors = errors || '[{"code":"STALE_HEARTBEAT"}]'::jsonb
+       WHERE status = 'running' AND (
+         heartbeat_at < now() - ($1::int * interval '1 minute')
+         OR started_at < now() - ($2::int * interval '1 minute')
+       ) RETURNING id`,
+      [runCfg.heartbeatStaleMinutes, runCfg.runTimeoutMinutes + 30],
+    );
+    if (reaped.rowCount) log({ evt: 'runs_reaped', count: reaped.rowCount });
+  } catch (err) {
+    log({ evt: 'reaper_failed', ...errFields(err) });
+  }
+}
+
+/**
  * Run a scan. Never throws for per-source problems; run-level failures are
  * recorded on the run row and returned as {ok:false}.
  * @param {RunArgs} args
@@ -232,6 +265,13 @@ export async function runScan(args, deps, opts) {
   let locked = false;
   let handedOff = false; // executeRun owns unlock + end once started
   try {
+    // 3. reaper (spec item C): runs unconditionally, BEFORE and independent of the advisory-lock attempt
+    // below. The old placement (after pg_try_advisory_lock succeeded) meant a run hung holding LOCK_KEY
+    // made this code unreachable for as long as that lock was held -- every later scan trigger's own
+    // pg_try_advisory_lock call is non-blocking and fails immediately, returning {status:'locked'} before
+    // ever reaching the reaper, so a hung run could never be marked failed by anything but a human.
+    await reapStaleRuns(client, config.adapters.run, log);
+
     const lockRes = await client.query('SELECT pg_try_advisory_lock($1::bigint) AS ok', [LOCK_KEY]);
     locked = Boolean(lockRes.rows[0].ok);
     if (!locked) {
@@ -240,14 +280,6 @@ export async function runScan(args, deps, opts) {
     }
     const profile = await loadProfile(client, args);
     const sources = resolveSources(args.sources && args.sources.length > 0 ? args.sources : profile.sources, config);
-
-    // 3. reaper
-    const reaped = await client.query(
-      `UPDATE ic_scan_runs SET status = 'failed', finished_at = now(), errors = errors || '[{"code":"STALE_HEARTBEAT"}]'::jsonb
-       WHERE status = 'running' AND heartbeat_at < now() - ($1::int * interval '1 minute') RETURNING id`,
-      [config.adapters.run.heartbeatStaleMinutes],
-    );
-    if (reaped.rowCount) log({ evt: 'runs_reaped', count: reaped.rowCount });
 
     // 4. run row
     const ins = await client.query(
@@ -315,7 +347,7 @@ async function executeRun(p) {
   /** @type {RunStats} */
   const stats = {
     fetched: 0, new: 0, updated: 0, cross_source_dup: 0, repost: 0, ambiguous: 0, errors: 0, unembedded: 0, stale_dropped: 0,
-    detail_fetched: 0, detail_empty: 0, detail_error: 0, detail_skipped_budget: 0, detail_skipped_run_cap: 0, detail_skipped_gate: 0, detail_skipped_cancelled: 0, detail_not_queued: 0,
+    detail_fetched: 0, detail_empty: 0, detail_error: 0, detail_skipped_budget: 0, detail_skipped_run_cap: 0, detail_skipped_gate: 0, detail_skipped_cancelled: 0, detail_not_queued: 0, detail_timeout: 0,
     details_by_source: {},
     dedup_sticky_skip_merged: 0, adopted: 0, expired: 0, pages_by_source: {},
   };
@@ -333,12 +365,20 @@ async function executeRun(p) {
   const seenKeys = new Set();
   let partial = false;
   let cancelled = false;
+  // Wall-clock cap fix (spec item B): distinct from `cancelled` above. A genuine external cancel
+  // (opts.signal, or the heartbeat loop below observing the run row flipped away from 'running') means
+  // the run is truly dead and must finish 'failed'. The wall-clock cap firing is NOT that -- per the
+  // unattended-run operating principle (warn and proceed, never exit 1), hitting the cap skips remaining
+  // sources/detail items but still lets the run finish normally (triage, report, run_finished) with only
+  // a RUN_WALLCLOCK_EXCEEDED warning, never forced to 'failed'.
+  let wallclockExceeded = false;
 
   const controller = new AbortController();
   const signal = controller.signal;
   const timeout = setTimeout(() => {
+    wallclockExceeded = true;
     controller.abort();
-    errors.push({ source: null, code: 'RUN_TIMEOUT', message: `run exceeded ${runCfg.runTimeoutMinutes} minutes` });
+    errors.push({ source: null, code: 'RUN_WALLCLOCK_EXCEEDED', message: `run exceeded ${runCfg.runTimeoutMinutes} minutes`, severity: 'warning' });
   }, runCfg.runTimeoutMinutes * 60000);
   const onExternalAbort = () => {
     cancelled = true;
@@ -405,6 +445,11 @@ async function executeRun(p) {
   let sessionFailed = false;
   /** @type {Map<string, import('../browser/capability.js').Capability>} */
   const caps = new Map();
+  /** Raw Playwright page behind each cached capability above (scan-hang-timeouts fix, spec item A): kept
+   * in a parallel map, keyed the same as `caps`, purely so a detail-fetch hard timeout can forcibly close
+   * and drop the page for one source without capability.js ever exposing the page itself to an adapter. */
+  /** @type {Map<string, import('playwright-core').Page>} */
+  const capPages = new Map();
   /** @type {Map<string, import('./ratelimit.js').RateLimiter>} */
   const capLimiters = new Map();
   /**
@@ -490,7 +535,35 @@ async function executeRun(p) {
       onPage: () => (detailPhaseSources.has(source) ? limiter.waitDetail(source, signal) : limiter.wait(source, signal)),
     });
     caps.set(source, cap);
+    capPages.set(source, page);
     return cap;
+  }
+
+  /**
+   * Forcibly close and drop the cached page/capability for one source (spec item A): the only way to
+   * actually interrupt Playwright's context.cookies()/page.goto() once they are in flight, since neither
+   * accepts nor honors an AbortSignal. Closing the page typically also makes an abandoned in-flight call
+   * on it settle (Playwright rejects pending protocol commands on a closed page), but that page or its
+   * whole browser may be just as wedged as the call that timed out -- so this close is itself capped at
+   * 10s; past that, the caller abandons the rest of this source's detail queue rather than risk hanging
+   * again on the very thing that would not close. The next call to capFor(source) builds a brand new page.
+   * @param {string} source
+   * @returns {Promise<boolean>} true when teardown completed within the 10s budget (or there was nothing to close)
+   */
+  async function teardownCapability(source) {
+    caps.delete(source);
+    const page = capPages.get(source);
+    capPages.delete(source);
+    if (!page) return true;
+    const closed = (async () => {
+      try {
+        await page.close();
+      } catch {
+        /* already gone, or the close itself failed -- either way nothing left to reuse */
+      }
+      return true;
+    })();
+    return Promise.race([closed, new Promise((resolve) => setTimeout(() => resolve(false), 10000))]);
   }
 
   /**
@@ -590,7 +663,7 @@ async function executeRun(p) {
     assert.ok(DETAIL_OUTCOME_SET.has(detailOutcome), `finalizeListing: detailOutcome must be one of ${DETAIL_OUTCOMES.join('|')}, got ${JSON.stringify(detailOutcome)}`);
     stats[DETAIL_OUTCOME_STAT_KEYS[detailOutcome]]++;
     if (detailOutcome !== 'not_queued') {
-      const bucket = (stats.details_by_source[s.name] ??= { fetched: 0, empty: 0, error: 0, skipped_budget: 0, skipped_gate: 0, skipped_cancelled: 0 });
+      const bucket = (stats.details_by_source[s.name] ??= { fetched: 0, empty: 0, error: 0, skipped_budget: 0, skipped_gate: 0, skipped_cancelled: 0, timeout: 0 });
       bucket[detailOutcome]++;
     }
     const detailSkipped = detailOutcome === 'skipped_budget';
@@ -702,6 +775,74 @@ async function executeRun(p) {
   }
 
   /**
+   * Wrap tryFetchDetail in a hard per-item timeout and make it observe the run's own abort signal
+   * immediately (spec items A and B/F4). Playwright's cookies()/goto() calls inside an adapter's
+   * fetchDetail cannot be cancelled once started -- the incident this exists for was exactly that: a hung
+   * LinkedIn detail fetch that never resolved and never rejected, leaving the run's heartbeat ticking
+   * forever with nothing downstream re-checking the abort signal mid-fetch. A bare Promise.race would
+   * just abandon that hung promise forever (never freeing the wedged page); this instead tears down and
+   * drops the source's cached page/capability on either trigger, so the NEXT queued item always gets a
+   * fresh page.
+   *
+   * Three possible shapes come back:
+   *   - the normal tryFetchDetail() result (whatever finished first)
+   *   - `{ cutByCap: true }` when the run's OWN abort signal fired mid-fetch (the wall-clock cap, or a
+   *     genuine external cancel) -- the caller finalizes this item exactly like the next loop iteration's
+   *     signal.aborted check would (outcome 'skipped_cancelled')
+   *   - `{ abandonRest: true, outcome }` when the source's page/context would not close within 10s of the
+   *     timeout/cap firing -- the caller finalizes THIS item with `outcome` and gives up on the rest of
+   *     this source's queue, since retrying on a browser that will not even close is not worth the risk of
+   *     hanging again.
+   * @param {{ name: string, adapter: import('../adapters/base.js').Adapter, cfg: any }} s
+   * @param {import('../adapters/base.js').AdapterCtx} ctx
+   * @param {import('../adapters/base.js').ListingEvent} ev
+   * @param {import('./normalize.js').NormalizedListing} rec
+   */
+  async function tryFetchDetailWithTimeout(s, ctx, ev, rec) {
+    const timeoutMs = typeof s.cfg.detailFetchTimeoutMs === 'number' ? s.cfg.detailFetchTimeoutMs : runCfg.detailFetchTimeoutMs;
+    /** @type {'timeout'|'cap'|null} */
+    let cutReason = null;
+    let settled = false;
+    const cutPromise = new Promise((resolve) => {
+      const finish = (/** @type {'timeout'|'cap'} */ reason) => {
+        if (settled) return;
+        settled = true;
+        cutReason = reason;
+        clearTimeout(timer);
+        signal.removeEventListener('abort', onAbort);
+        resolve(undefined);
+      };
+      const onAbort = () => finish('cap');
+      const timer = setTimeout(() => finish('timeout'), timeoutMs);
+      if (signal.aborted) onAbort();
+      else signal.addEventListener('abort', onAbort, { once: true });
+    });
+    const fetchPromise = tryFetchDetail(s, ctx, ev, rec);
+    const raced = await Promise.race([
+      fetchPromise.then((result) => ({ cut: false, result })),
+      cutPromise.then(() => ({ cut: true })),
+    ]);
+    if (!raced.cut) {
+      settled = true;
+      return raced.result;
+    }
+    // Timed out or cut by the run's own abort signal: tryFetchDetail's promise is now abandoned -- there
+    // is no way to cancel Playwright's underlying call, so it is never awaited again. A no-op catch keeps
+    // an eventual late rejection from the wedged call from surfacing as an unhandled rejection.
+    fetchPromise.catch(() => {});
+    const torndown = await teardownCapability(s.name);
+    if (!torndown) {
+      return { abandonRest: true, outcome: /** @type {const} */ (cutReason === 'timeout' ? 'error' : 'skipped_cancelled') };
+    }
+    if (cutReason === 'cap') return { cutByCap: true };
+    warnings.push(`detail fetch timed out for ${rec.source} ${rec.external_id ?? ''} after ${timeoutMs}ms (DETAIL_TIMEOUT)`);
+    const bucket = (stats.details_by_source[s.name] ??= { fetched: 0, empty: 0, error: 0, skipped_budget: 0, skipped_gate: 0, skipped_cancelled: 0, timeout: 0 });
+    bucket.timeout++;
+    stats.detail_timeout++;
+    return { outcome: 'error', applyDetail: null };
+  }
+
+  /**
    * @param {{ name: string, adapter: import('../adapters/base.js').Adapter, cfg: any }} s
    * @param {import('../adapters/base.js').AdapterCtx} ctx
    * @param {import('../adapters/base.js').ListingEvent} ev
@@ -810,17 +951,37 @@ async function executeRun(p) {
         stats.detail_skipped_run_cap++;
       } else {
         attempted++;
-        const r = await tryFetchDetail(s, ctx, ev, rec);
-        detailOutcome = r.outcome;
-        if (detailOutcome === 'skipped_budget') queuedSkippedFromHere = true;
-        if (r.rec) {
-          rec = r.rec;
-          decision = r.decision;
-          ps = r.ps;
-          psRaw = r.psRaw;
-          noiseClass = r.noiseClass;
+        const r = await tryFetchDetailWithTimeout(s, ctx, ev, rec);
+        if (r.abandonRest) {
+          // Item timeout/cap-cut plus a page/context that would not even close within 10s (spec item A):
+          // finalize THIS item, finalize everything still queued behind it without another network
+          // attempt, and stop draining this source entirely -- never the whole run, the caller (the
+          // per-source loop below) simply moves on to the next source.
+          await finalizeListing(s, ev, rec, decision, ps, psRaw, noiseClass, r.outcome, null);
+          for (let j = i + 1; j < sorted.length; j++) {
+            const rem = sorted[j];
+            await finalizeListing(s, rem.ev, rem.rec, rem.decision, rem.ps, rem.psRaw, rem.noiseClass, 'error');
+          }
+          warnings.push(`detail queue abandoned for ${s.name}: page teardown after a timeout did not complete within 10s`);
+          return;
         }
-        applyDetail = r.applyDetail ?? null;
+        if (r.cutByCap) {
+          // The run's own abort signal (wall-clock cap, or a genuine external cancel) fired mid-fetch
+          // (spec item B/F4): cut this item immediately, the same outcome the NEXT iteration's
+          // signal.aborted check at the top of this loop would give it.
+          detailOutcome = 'skipped_cancelled';
+        } else {
+          detailOutcome = r.outcome;
+          if (detailOutcome === 'skipped_budget') queuedSkippedFromHere = true;
+          if (r.rec) {
+            rec = r.rec;
+            decision = r.decision;
+            ps = r.ps;
+            psRaw = r.psRaw;
+            noiseClass = r.noiseClass;
+          }
+          applyDetail = r.applyDetail ?? null;
+        }
       }
       await finalizeListing(s, ev, rec, decision, ps, psRaw, noiseClass, detailOutcome, applyDetail);
     }
@@ -960,8 +1121,15 @@ async function executeRun(p) {
     if (signal.aborted) throw new JobSearchError('CANCELLED', 'run aborted');
   } catch (err) {
     if (err instanceof JobSearchError && err.code === 'CANCELLED') {
-      cancelled = true;
-      if (!errors.some((e) => e.code === 'CANCELLED' || e.code === 'RUN_TIMEOUT')) errors.push({ source: null, code: 'CANCELLED', message: 'run cancelled' });
+      if (wallclockExceeded && !cancelled) {
+        // The wall-clock cap fired, not a genuine external cancel (spec item B): every remaining
+        // source/detail item was already skipped via the `signal.aborted` checks throughout this file,
+        // and the RUN_WALLCLOCK_EXCEEDED warning above already explains why. Never force this run to
+        // 'failed' for hitting its own cap -- it proceeds normally to finalize/triage/report below.
+      } else {
+        cancelled = true;
+        if (!errors.some((e) => e.code === 'CANCELLED')) errors.push({ source: null, code: 'CANCELLED', message: 'run cancelled' });
+      }
     } else {
       errors.push(errRecord(err));
       cancelled = true;

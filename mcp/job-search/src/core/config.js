@@ -256,6 +256,8 @@ const adapterSchema = z.object({
   detailFetchMinPrescore: z.number().int().min(0).max(100).optional(),
   /** Per-source override of run.detailMaxAttempts (spec R4 item 2's detail_outcome retry cap); falls back to the run-level default when absent. */
   detailMaxAttempts: z.number().int().positive().optional(),
+  /** Per-source override of run.detailFetchTimeoutMs (scan-hang-timeouts fix, spec item A); falls back to the run-level default when absent. */
+  detailFetchTimeoutMs: z.number().int().positive().optional(),
   /** Hard cap on pages fetched for this source across the WHOLE run, regardless of how many queries the profile plans (spec R5.1); undefined means no extra cap beyond the daily/per-query ones. */
   maxPagesPerRun: z.number().int().positive().optional(),
   /** Hard cap on DETAIL fetches queued+attempted for this source within a single scan run (detail-pacing fix), independent of the daily dailyDetails pool; null (the default) means no per-run cap. Ignored by bin/backfill-detail.js (bounded by --limit and the daily pool instead). */
@@ -288,9 +290,21 @@ export const adaptersSchema = z.object({
   adapters: z.record(z.string().regex(/^[a-z][a-z0-9-]*$/), adapterSchema),
   run: z.object({
     maxPlannedPagesPerRun: z.number().int().positive(),
-    runTimeoutMinutes: z.number().int().positive(),
+    /** Wall-clock cap for a whole scan run (scan-hang-timeouts fix, spec item B): supersedes the old
+     * "abort and hope" timer -- when this fires, remaining sources/detail items are skipped, a
+     * RUN_WALLCLOCK_EXCEEDED warning is recorded, and the run still proceeds to triage/report/run_finished
+     * rather than being marked failed. Defaulted to 50 minutes so a full-length 06:30 run finishes before
+     * the 07:40 auto-apply soft wait; config/adapters.json may still override it explicitly. */
+    runTimeoutMinutes: z.number().int().positive().default(50),
     heartbeatStaleMinutes: z.number().int().positive(),
     detailFetchMinPrescore: z.number().int().min(0).max(100),
+    /** Hard per-item timeout for a single detail fetch (scan-hang-timeouts fix, spec item A): the incident
+     * this exists for was a Playwright cookies()/goto() call inside an adapter's fetchDetail that never
+     * resolved and never rejected, with nothing downstream re-checking the abort signal mid-fetch. On
+     * timeout the item is recorded as a failed detail fetch (err_code DETAIL_TIMEOUT) and the source's
+     * cached page/capability is closed and rebuilt before the next queued item runs, since neither
+     * cookies() nor goto() honor cancellation any other way. */
+    detailFetchTimeoutMs: z.number().int().positive().default(45000),
     /** Retry cap for a re-queued detail fetch on a listing an earlier scan already saw (spec R4 item 2:
      * a row is eligible for a detail-fetch retry only while detail_attempts stays below this and its
      * stored detail_outcome is not already 'fetched'). Defaulted rather than required in config/adapters.json

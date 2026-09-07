@@ -373,6 +373,51 @@ describe('details_by_source line in text/html/markdown (scan-detail-pass fix, sp
       assert.ok(!rendered.includes('details:'), 'no details line when details_by_source is absent');
     }
   });
+
+  test('a non-zero timeout count appends "/ timeout N" to the per-source details line (scan-hang-timeouts fix, spec item D); zero timeout is unchanged', () => {
+    const data = dataWithStats({
+      details_by_source: {
+        linkedin: { fetched: 1, empty: 0, error: 2, skipped_budget: 0, skipped_gate: 0, skipped_cancelled: 0, timeout: 2 },
+        greenhouse: { fetched: 1, empty: 0, error: 0, skipped_budget: 0, skipped_gate: 0, skipped_cancelled: 0, timeout: 0 },
+      },
+    });
+    for (const rendered of [renderReportText(data), renderReportHtml(data), renderReportMarkdown(data)]) {
+      assert.match(rendered, /details: linkedin fetched 1 \/ empty 0 \/ error 2 \/ skipped 0 \/ timeout 2/);
+      const ghLine = rendered.split(/<br>|\n/).find((l) => l.includes('details: greenhouse'));
+      assert.ok(ghLine && !ghLine.includes('timeout'), `zero timeout must not add a suffix: ${ghLine}`);
+    }
+  });
+});
+
+describe('[WALLCLOCK] marker (scan-hang-timeouts fix, spec item D)', () => {
+  /** @param {any} statsExtra */
+  function dataWithRunErrors(statsExtra, errors) {
+    const run = {
+      run_id: 1, profile: 'exec-default', status: 'ok', started_at: '2026-09-07T06:30:00.000Z',
+      finished_at: '2026-09-07T07:20:00.000Z', duration_seconds: 3000,
+      stats: { fetched: 0, new: 0, updated: 0, repost: 0, ambiguous: 0, detail_skipped_budget: 0, ...statsExtra },
+      errors, pages_by_source: {},
+    };
+    return {
+      dayKey: '2026-09-07', timezone: 'America/Chicago', noScan: false, runs: [run],
+      lookAtThese: { rows: [], excludedCount: 0 }, suspectUnclassified: [],
+      homeLocations: { rows: [], excludedCount: 0 }, reviewQueue: { total: 0, topReasons: [] }, disabledSources: [],
+    };
+  }
+
+  test('a run whose errors[] carries RUN_WALLCLOCK_EXCEEDED renders a [WALLCLOCK] marker in text, html, and markdown, even though status stays ok', () => {
+    const data = dataWithRunErrors({}, [{ source: null, code: 'RUN_WALLCLOCK_EXCEEDED', severity: 'warning', message: 'run exceeded 50 minutes' }]);
+    assert.match(renderReportText(data), /\[WALLCLOCK\] run #1/);
+    assert.match(renderReportHtml(data), /\[WALLCLOCK\]<\/strong> run #1/);
+    assert.match(renderReportMarkdown(data), /\[WALLCLOCK\]\*\* run #1/);
+  });
+
+  test('a run with no RUN_WALLCLOCK_EXCEEDED entry never renders the [WALLCLOCK] marker', () => {
+    const data = dataWithRunErrors({}, []);
+    for (const rendered of [renderReportText(data), renderReportHtml(data), renderReportMarkdown(data)]) {
+      assert.ok(!rendered.includes('WALLCLOCK'), rendered);
+    }
+  });
 });
 
 describe('collectReviewQueueSummary / bulk-separate digest line (review-bulk spec S3d)', () => {

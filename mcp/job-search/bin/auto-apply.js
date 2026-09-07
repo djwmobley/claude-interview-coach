@@ -629,7 +629,13 @@ async function main() {
       try {
         scanState = await waitForScan(waitClient, {
           timezone, softDeadline, hardDeadline, pollSeconds: config.autoApply.waitPollSeconds,
-          staleHeartbeatMinutes: config.autoApply.waitStaleHeartbeatMinutes, log,
+          staleHeartbeatMinutes: config.autoApply.waitStaleHeartbeatMinutes,
+          // scan-hang-timeouts fix (spec item C): a runaway scan run's heartbeat can keep ticking even
+          // while it is wedged, so this wait loop also treats a 'running' row whose started_at is past
+          // the scan's own wall-clock cap + 30 minutes as stalled -- never waiting into the hard deadline
+          // for a run that is never coming back.
+          runCapMinutes: config.adapters.run.runTimeoutMinutes,
+          log,
           queryLatestScanRun: defaultQueryLatestScanRun,
         });
       } finally {

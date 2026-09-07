@@ -165,6 +165,15 @@ function errorLineMessage(e) {
   return String(e.message ?? '');
 }
 
+/** True when this run's errors[] carries a RUN_WALLCLOCK_EXCEEDED entry (scan-hang-timeouts fix, spec
+ * item D): the run's own wall-clock cap fired and skipped remaining work, but the run still finished
+ * normally (never forced to 'failed') -- so this marker rides alongside the status banner rather than
+ * replacing it, since a run can hit the cap and ALSO be 'partial'/'ok' for unrelated reasons.
+ * @param {RunSummary} r */
+function hasWallclockMarker(r) {
+  return r.errors.some((/** @type {any} */ e) => e.code === 'RUN_WALLCLOCK_EXCEEDED');
+}
+
 /**
  * First run (in collectRuns()'s ascending finished_at order, i.e. the earliest since the marker) carrying
  * a severity:'warning' error of the given `code`, or null. Never keyed off run.status -- a run carrying
@@ -768,7 +777,10 @@ function detailsBySourceLines(stats) {
   if (!bySource || typeof bySource !== 'object') return [];
   return Object.entries(bySource).map(([src, d]) => {
     const skipped = (d.skipped_budget ?? 0) + (d.skipped_gate ?? 0) + (d.skipped_cancelled ?? 0);
-    return `details: ${src} fetched ${d.fetched ?? 0} / empty ${d.empty ?? 0} / error ${d.error ?? 0} / skipped ${skipped}`;
+    // timeout (scan-hang-timeouts fix, spec item D) is a sub-count of `error` above, not an additional
+    // total -- shown only when non-zero so an old run's report line, and every run with none, is unchanged.
+    const timeoutSuffix = d.timeout ? ` / timeout ${d.timeout}` : '';
+    return `details: ${src} fetched ${d.fetched ?? 0} / empty ${d.empty ?? 0} / error ${d.error ?? 0} / skipped ${skipped}${timeoutSuffix}`;
   });
 }
 
@@ -804,7 +816,7 @@ export function renderReportText(data, registry, googleAuthState, dashboardHealt
   if (data.runs.length === 0) lines.push('(none)');
   for (const r of data.runs) {
     const s = r.stats;
-    const banner = r.status !== 'ok' ? `[${String(r.status).toUpperCase()}] ` : '';
+    const banner = (r.status !== 'ok' ? `[${String(r.status).toUpperCase()}] ` : '') + (hasWallclockMarker(r) ? '[WALLCLOCK] ' : '');
     lines.push(`${banner}run #${r.run_id} | profile ${r.profile} | status ${r.status} | started ${r.started_at} | duration ${r.duration_seconds ?? '?'}s`);
     lines.push(`  fetched ${s.fetched ?? 0} | new ${s.new ?? 0} | updated ${s.updated ?? 0} | repost ${s.repost ?? 0} | ambiguous ${s.ambiguous ?? 0} | detail_skipped_budget ${s.detail_skipped_budget ?? 0}`);
     if (Object.keys(r.pages_by_source).length) lines.push(`  pages by source: ${Object.entries(r.pages_by_source).map(([k, v]) => `${k}=${v}`).join(', ')}`);
@@ -880,7 +892,7 @@ export function renderReportHtml(data, registry, googleAuthState, dashboardHealt
     parts.push('<ul>');
     for (const r of data.runs) {
       const s = r.stats;
-      const banner = r.status !== 'ok' ? `<strong>[${esc(String(r.status).toUpperCase())}]</strong> ` : '';
+      const banner = (r.status !== 'ok' ? `<strong>[${esc(String(r.status).toUpperCase())}]</strong> ` : '') + (hasWallclockMarker(r) ? '<strong>[WALLCLOCK]</strong> ' : '');
       const errs = r.errors.slice(0, 5).map((e) => `<br>error: ${esc(e.source ?? 'run')} ${esc(e.code)}: ${esc(errorLineMessage(e).slice(0, 200))}`).join('');
       const triageLine = renderTriageLine(s.triage);
       const triageHtml = triageLine ? `<br>${esc(triageLine)}` : '';
@@ -942,7 +954,7 @@ export function renderReportMarkdown(data, registry, googleAuthState, dashboardH
   if (data.runs.length === 0) lines.push('(none)');
   for (const r of data.runs) {
     const s = r.stats;
-    const banner = r.status !== 'ok' ? `**[${String(r.status).toUpperCase()}]** ` : '';
+    const banner = (r.status !== 'ok' ? `**[${String(r.status).toUpperCase()}]** ` : '') + (hasWallclockMarker(r) ? '**[WALLCLOCK]** ' : '');
     lines.push(`- ${banner}run #${r.run_id}, profile ${r.profile}, status ${r.status}, started ${r.started_at}, duration ${r.duration_seconds ?? '?'}s`);
     lines.push(`  fetched ${s.fetched ?? 0}, new ${s.new ?? 0}, updated ${s.updated ?? 0}, repost ${s.repost ?? 0}, ambiguous ${s.ambiguous ?? 0}, detail_skipped_budget ${s.detail_skipped_budget ?? 0}`);
     if (Object.keys(r.pages_by_source).length) lines.push(`  pages by source: ${Object.entries(r.pages_by_source).map(([k, v]) => `${k}=${v}`).join(', ')}`);

@@ -86,6 +86,31 @@ describe('classifyScanState: pure, total classification', () => {
   });
 });
 
+describe('classifyScanState: runaway-run started_at staleness (scan-hang-timeouts fix, spec item C)', () => {
+  test('status running, fresh heartbeat, started_at within cap+30min, runCapMinutes given -> still running', () => {
+    const c = classifyScanState({ id: 1, status: 'running', started_at: NOON_UTC, heartbeat_at: NOON_UTC }, NOON_UTC, TZ, 10, 20);
+    assert.equal(c.state, 'running');
+  });
+
+  test('status running, fresh heartbeat, started_at past cap+30min, runCapMinutes given -> stalled (a fresh heartbeat alone is not proof of progress past the run\'s own cap)', () => {
+    const startedAt = new Date(NOON_UTC.getTime() - 51 * 60000); // cap 20 + 30 = 50min threshold; 51min old
+    const c = classifyScanState({ id: 1, status: 'running', started_at: startedAt, heartbeat_at: NOON_UTC }, NOON_UTC, TZ, 10, 20);
+    assert.equal(c.state, 'stalled');
+  });
+
+  test('status running, started_at exactly at cap+30min -> stalled ("at least" reads >=, matching the heartbeat rule\'s own wording)', () => {
+    const startedAt = new Date(NOON_UTC.getTime() - 50 * 60000);
+    const c = classifyScanState({ id: 1, status: 'running', started_at: startedAt, heartbeat_at: NOON_UTC }, NOON_UTC, TZ, 10, 20);
+    assert.equal(c.state, 'stalled');
+  });
+
+  test('status running, fresh heartbeat, started_at past cap+30min, but runCapMinutes OMITTED -> still running (backward compatible: pre-fix callers see no behavior change)', () => {
+    const startedAt = new Date(NOON_UTC.getTime() - 51 * 60000);
+    const c = classifyScanState({ id: 1, status: 'running', started_at: startedAt, heartbeat_at: NOON_UTC }, NOON_UTC, TZ, 10);
+    assert.equal(c.state, 'running');
+  });
+});
+
 describe('localDeadline: HH:MM -> local wall-clock Date', () => {
   test('07:40 America/Chicago on 2026-09-04 CDT is 12:40:00Z', () => {
     const d = localDeadline(NOON_UTC, TZ, '07:40');
@@ -210,5 +235,17 @@ describe('waitForScan: two-deadline poll loop', () => {
     assert.equal(result.state, 'running');
     assert.equal(result.deadlineHit, 'hard');
     assert.equal(sleepCalls, 0);
+  });
+
+  test('runCapMinutes threading (scan-hang-timeouts fix, spec item C): a running row with a fresh heartbeat but started_at past cap+30min is treated as stalled, so the wait resolves at the HARD deadline rather than waiting forever on a runaway run', async () => {
+    const startedAt = new Date(NOON_UTC.getTime() - 51 * 60000);
+    const client = { async query() { return { rows: [{ id: 7, status: 'running', started_at: startedAt, heartbeat_at: NOON_UTC }] }; } };
+    const { clock, sleep } = fakeClockAndSleep(NOON_UTC.getTime());
+    const result = await waitForScan(client, {
+      timezone: TZ, softDeadline: localDeadline(NOON_UTC, TZ, '07:40'), hardDeadline: localDeadline(NOON_UTC, TZ, '07:55'),
+      pollSeconds: 60, staleHeartbeatMinutes: 10, runCapMinutes: 20, clock, sleep,
+    });
+    assert.equal(result.state, 'stalled');
+    assert.equal(result.deadlineHit, 'hard');
   });
 });

@@ -229,9 +229,10 @@
   },
   "run": {
     "maxPlannedPagesPerRun": 200,
-    "runTimeoutMinutes": 20,
+    "runTimeoutMinutes": 50,
     "heartbeatStaleMinutes": 10,
     "detailFetchMinPrescore": 40,
+    "detailFetchTimeoutMs": 45000,
     "backoff": {
       "maxDelayMs": 300000,
       "retries": 3

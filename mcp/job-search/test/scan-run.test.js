@@ -394,6 +394,40 @@ describe('runScan persisted', () => {
     return { connectSession, state: base.state };
   }
 
+  /**
+   * Wraps a fake indeed session so `goto` for one jobkey never resolves and never rejects (scan-hang-
+   * timeouts fix, spec item A/F1) -- exactly the Playwright cookies()/goto() hang the incident this fix
+   * exists for was about. `page.close()` is also intercepted so the test can prove teardown actually
+   * happened, and in what order relative to the next queued item's own navigation.
+   * @param {any} baseOpts
+   * @param {string} hangForJk
+   * @param {Array<{ t: 'goto'|'close', url?: string }>} events
+   */
+  function withHangingGoto(baseOpts, hangForJk, events) {
+    const base = makeFakeSession(baseOpts);
+    const connectSession = async () => {
+      const session = await base.connectSession();
+      const realAttach = session.attachPage.bind(session);
+      session.attachPage = async () => {
+        const page = await realAttach();
+        const realGoto = page.goto.bind(page);
+        const realClose = page.close.bind(page);
+        page.goto = async (/** @type {string} */ url) => {
+          events.push({ t: 'goto', url });
+          if (String(url).includes(`jk=${hangForJk}`)) return new Promise(() => {}); // never settles
+          return realGoto(url);
+        };
+        page.close = async () => {
+          events.push({ t: 'close' });
+          return realClose();
+        };
+        return page;
+      };
+      return session;
+    };
+    return { connectSession, state: base.state };
+  }
+
   test('(a) BUDGET_EXHAUSTED from a list generator still drains that source detail queue (detail_fetched > 0)', async () => {
     const cfg = testConfig();
     const capped = { ...cfg, adapters: { ...cfg.adapters, adapters: { ...cfg.adapters.adapters, indeed: { ...cfg.adapters.adapters.indeed, maxPagesPerRun: 1 } } } };
@@ -761,6 +795,172 @@ describe('runScan persisted', () => {
       await client.query(`DELETE FROM ic_job_listings WHERE company = $1`, [CO]);
       await client.query(`DELETE FROM ic_scan_runs WHERE profile = $1`, [CAP_PROFILE]);
       await client.query(`DELETE FROM ic_search_profiles WHERE name = $1`, [CAP_PROFILE]);
+    }
+  });
+
+  // ---------------------------------------------------------------------------------------------
+  // scan-hang-timeouts fix (2026-09-07 incident: scan run 2127 hung forever in runDetailPass after a
+  // Playwright cookies()/goto() call inside LinkedIn's detail fetch never resolved and never rejected).
+  // Spec items A (per-item hard timeout + forced page/context rebuild), B (wall-clock cap supersedes the
+  // old RUN_TIMEOUT abort, never forces the run to 'failed'), C (lock-independent reaper), F (required
+  // tests 1-4).
+  // ---------------------------------------------------------------------------------------------
+
+  test('(F1) a detail fetch that never resolves is cut at its per-item timeout, and page teardown happens before the next queued item runs', async () => {
+    const CO = 'ZZ-TEST-SCAN-TIMEOUT-F1';
+    const hangJk = 'aaaa1111bbbb2222';
+    const okJk = 'cccc3333dddd4444';
+    const hangCard = { jobkey: hangJk, title: 'Chief Technology Officer', company: CO, location: 'Houston, TX', remote: false, postedMs: Date.now(), salaryText: '$300,000 - $350,000' };
+    const okCard = { jobkey: okJk, title: 'Chief Information Officer', company: CO, location: 'Houston, TX', remote: false, postedMs: Date.now(), salaryText: null };
+    /** @type {Array<{ t: 'goto'|'close', url?: string }>} */
+    const events = [];
+    const fake = withHangingGoto({ indeedCards: [hangCard, okCard] }, hangJk, events);
+    const cfg = testConfig();
+    // Higher prescore (hangCard, has a salary) is drained FIRST by runDetailPass's own descending sort, so
+    // the hang is guaranteed to be the first item attempted, with okCard queued right behind it.
+    const withTimeout = { ...cfg, adapters: { ...cfg.adapters, adapters: { ...cfg.adapters.adapters, indeed: { ...cfg.adapters.adapters.indeed, detailFetchTimeoutMs: 150 } } } };
+    // Plenty of budget for BOTH cards' detail fetches (unlike the R4 test above, which deliberately
+    // leaves exactly 1 remaining to exercise budget-skip behavior): this test is about the timeout/
+    // teardown path, not the budget gate, so neither card may be skipped for budget reasons.
+    const deps = offlineDeps({ config: withTimeout, connectSession: fake.connectSession, reserveBudget: memoryReserve() });
+    await client.query(`INSERT INTO ic_source_state (source, manual_disable) VALUES ('indeed', false) ON CONFLICT (source) DO UPDATE SET manual_disable = false, disabled_until = NULL, consecutive_walls = 0`);
+    try {
+      const r = await runScanWaiting({ profile: PROFILE, sources: ['indeed'], dryRun: false, wait: true }, deps, { trigger: 'mcp', log: () => {} }, 30000);
+      assert.ok(['ok', 'partial'].includes(r.status), JSON.stringify(r.errors));
+      assert.ok(r.stats.detail_timeout >= 1, JSON.stringify(r.stats));
+      assert.ok(r.warnings.some((w) => /DETAIL_TIMEOUT/.test(w)), JSON.stringify(r.warnings));
+      const bySource = r.stats.details_by_source.indeed;
+      assert.ok(bySource && bySource.timeout >= 1, JSON.stringify(bySource));
+      const closeIdx = events.findIndex((e) => e.t === 'close');
+      const okGotoIdx = events.findIndex((e) => e.t === 'goto' && e.url && e.url.includes(`jk=${okJk}`));
+      assert.ok(closeIdx >= 0, `expected a page close (teardown) event, got ${JSON.stringify(events)}`);
+      assert.ok(okGotoIdx >= 0, `expected the OK card's own detail navigation, got ${JSON.stringify(events)}`);
+      assert.ok(closeIdx < okGotoIdx, `teardown must happen BEFORE the next queued item's own detail fetch: ${JSON.stringify(events)}`);
+      const rows = await client.query(`SELECT title, detail_outcome, description FROM ic_job_listings WHERE company = $1`, [CO]);
+      const hangRow = rows.rows.find((x) => x.title === 'Chief Technology Officer');
+      const okRow = rows.rows.find((x) => x.title === 'Chief Information Officer');
+      assert.ok(hangRow, 'the hung card is still persisted, never silently dropped');
+      assert.equal(hangRow.detail_outcome, 'error');
+      assert.equal(hangRow.description, null);
+      assert.ok(okRow, 'the card behind the hang is still persisted, fetched on a fresh page');
+      assert.equal(okRow.detail_outcome, 'fetched');
+    } finally {
+      await client.query(`UPDATE ic_source_state SET manual_disable = false, disabled_until = NULL, consecutive_walls = 0 WHERE source = 'indeed'`);
+      await client.query(`DELETE FROM ic_job_review_queue WHERE candidate_id IN (SELECT id FROM ic_job_listings WHERE company = $1)`, [CO]);
+      await client.query(`DELETE FROM ic_scan_run_items WHERE listing_id IN (SELECT id FROM ic_job_listings WHERE company = $1)`, [CO]);
+      await client.query(`DELETE FROM ic_job_listings WHERE company = $1`, [CO]);
+    }
+  });
+
+  test('(F2) a run past its wall-clock cap skips remaining work, never fails, and still runs triage and writes run_finished', async () => {
+    const slowFetch = async (/** @type {any} */ input, /** @type {any} */ init) => {
+      await new Promise((res) => setTimeout(res, 250));
+      return makeFixtureFetch(ZZ_MAP)(input, init);
+    };
+    const cfg = testConfig();
+    // Not schema-validated (this is a post-load plain-object clone, same trick other tests in this file
+    // use for maxPagesPerRun:0): a fractional minute count gives a real ~90ms wall-clock cap without
+    // waiting out a real integer-minute timer.
+    const fastCap = { ...cfg, adapters: { ...cfg.adapters, run: { ...cfg.adapters.run, runTimeoutMinutes: 0.0015 } } };
+    const deps = offlineDeps({ config: fastCap, fetch: slowFetch });
+    const r = /** @type {any} */ (await runScanWaiting({ profile: PROFILE, sources: ['greenhouse'], dryRun: false, wait: true }, deps, { trigger: 'cli', log: () => {}, now: FIXTURE_NOW }, 30000));
+    assert.notEqual(r.status, 'failed', JSON.stringify(r.errors));
+    assert.ok(r.errors.some((/** @type {any} */ e) => e.code === 'RUN_WALLCLOCK_EXCEEDED' && e.severity === 'warning'), JSON.stringify(r.errors));
+    assert.ok(!r.errors.some((/** @type {any} */ e) => e.code === 'CANCELLED'), 'a wall-clock-only abort must never also record a CANCELLED entry');
+    assert.ok(r.stats.triage && typeof r.stats.triage.configured === 'boolean', 'runTriage must still run after a wall-clock cap, not just after a clean finish');
+    const row = await client.query('SELECT status, finished_at FROM ic_scan_runs WHERE id = $1', [r.run_id]);
+    assert.notEqual(row.rows[0].status, 'running', 'run_finished must be written even when the cap cut the run short');
+    assert.ok(row.rows[0].finished_at);
+  });
+
+  test('(F4) the wall-clock cap firing mid-item cuts that item immediately, well before its own slow network call would otherwise finish', async () => {
+    const CO = 'ZZ-TEST-SCAN-WALLCLOCK-F4';
+    const jk = 'eeee7777ffff8888';
+    const card = { jobkey: jk, title: 'Chief Technology Officer', company: CO, location: 'Houston, TX', remote: false, postedMs: Date.now(), salaryText: '$300,000 - $350,000' };
+    const base = makeFakeSession({ indeedCards: [card] });
+    const connectSession = async () => {
+      const session = await base.connectSession();
+      const realAttach = session.attachPage.bind(session);
+      session.attachPage = async () => {
+        const page = await realAttach();
+        const realGoto = page.goto.bind(page);
+        page.goto = async (/** @type {string} */ url) => {
+          if (String(url).includes(`jk=${jk}`)) await new Promise((res) => setTimeout(res, 800));
+          return realGoto(url);
+        };
+        return page;
+      };
+      return session;
+    };
+    const cfg = testConfig();
+    // The cap fires at ~60ms; detailFetchTimeoutMs is deliberately generous (30s) so a cut here can only
+    // be the wall-clock cap, never the per-item DETAIL_TIMEOUT from (F1).
+    const fastCap = {
+      ...cfg,
+      adapters: {
+        ...cfg.adapters,
+        run: { ...cfg.adapters.run, runTimeoutMinutes: 0.001 },
+        adapters: { ...cfg.adapters.adapters, indeed: { ...cfg.adapters.adapters.indeed, detailFetchTimeoutMs: 30000 } },
+      },
+    };
+    const deps = offlineDeps({ config: fastCap, connectSession, reserveBudget: memoryReserve({ details: 99 }) });
+    await client.query(`INSERT INTO ic_source_state (source, manual_disable) VALUES ('indeed', false) ON CONFLICT (source) DO UPDATE SET manual_disable = false, disabled_until = NULL, consecutive_walls = 0`);
+    try {
+      const started = Date.now();
+      const r = /** @type {any} */ (await runScanWaiting({ profile: PROFILE, sources: ['indeed'], dryRun: false, wait: true }, deps, { trigger: 'mcp', log: () => {} }, 30000));
+      const elapsed = Date.now() - started;
+      assert.ok(elapsed < 700, `expected the cap to cut the in-flight item well before its own 800ms network delay finished, took ${elapsed}ms`);
+      assert.notEqual(r.status, 'failed', JSON.stringify(r.errors));
+      assert.ok(r.errors.some((/** @type {any} */ e) => e.code === 'RUN_WALLCLOCK_EXCEEDED'), JSON.stringify(r.errors));
+      assert.ok(r.stats.detail_skipped_cancelled >= 1, JSON.stringify(r.stats));
+      const row = await client.query(`SELECT detail_outcome, description FROM ic_job_listings WHERE company = $1`, [CO]);
+      assert.equal(row.rowCount, 1);
+      assert.equal(row.rows[0].detail_outcome, 'skipped_cancelled', 'cut by the cap, not treated as a DETAIL_TIMEOUT error');
+      assert.equal(row.rows[0].description, null);
+    } finally {
+      await client.query(`UPDATE ic_source_state SET manual_disable = false, disabled_until = NULL, consecutive_walls = 0 WHERE source = 'indeed'`);
+      await client.query(`DELETE FROM ic_job_review_queue WHERE candidate_id IN (SELECT id FROM ic_job_listings WHERE company = $1)`, [CO]);
+      await client.query(`DELETE FROM ic_scan_run_items WHERE listing_id IN (SELECT id FROM ic_job_listings WHERE company = $1)`, [CO]);
+      await client.query(`DELETE FROM ic_job_listings WHERE company = $1`, [CO]);
+    }
+  });
+
+  test('(F3) reaper: a stale run with a FRESH heartbeat but started_at past cap+30min is reaped even while the advisory lock is held by another connection', async () => {
+    const { runScan } = await import('../src/core/scan-run.js');
+    const holder = await newClient();
+    try {
+      const got = await holder.query('SELECT pg_try_advisory_lock($1::bigint) AS ok', [LOCK_KEY]);
+      if (!got.rows[0].ok) {
+        for (let i = 0; i < 400; i++) {
+          await new Promise((res) => setTimeout(res, 250));
+          const again = await holder.query('SELECT pg_try_advisory_lock($1::bigint) AS ok', [LOCK_KEY]);
+          if (again.rows[0].ok) break;
+        }
+      }
+      const cfg = testConfig();
+      const capMinutes = cfg.adapters.run.runTimeoutMinutes;
+      const staleStartedAt = new Date(Date.now() - (capMinutes + 31) * 60000);
+      const ins = await client.query(
+        `INSERT INTO ic_scan_runs (profile, profile_rev, trigger, dry_run, config_hash, status, started_at, heartbeat_at)
+         VALUES ($1, 'zz-fake-rev', 'cli', false, 'zz-fake-hash', 'running', $2, now()) RETURNING id`,
+        [PROFILE, staleStartedAt],
+      );
+      const fakeRunId = ins.rows[0].id;
+      try {
+        // A normal run attempt here still fails to acquire the lock (holder has it) and returns
+        // {status:'locked'} -- but the reaper (spec item C) runs BEFORE that lock attempt, unconditionally,
+        // on the same connection, so it must have already reaped the row above regardless.
+        const r = /** @type {any} */ (await runScan({ profile: PROFILE, sources: ['greenhouse'], dryRun: true, wait: true }, offlineDeps({ config: cfg }), { trigger: 'cli', log: () => {} }));
+        assert.equal(r.status, 'locked', 'sanity: the lock really is held by another connection for this assertion to mean anything');
+        const row = await client.query('SELECT status, errors FROM ic_scan_runs WHERE id = $1', [fakeRunId]);
+        assert.equal(row.rows[0].status, 'failed', 'reaped despite a fresh heartbeat, because started_at is past cap+30min, and despite the advisory lock being held');
+        assert.ok(row.rows[0].errors.some((/** @type {any} */ e) => e.code === 'STALE_HEARTBEAT'));
+      } finally {
+        await client.query('DELETE FROM ic_scan_runs WHERE id = $1', [fakeRunId]);
+      }
+    } finally {
+      await holder.query('SELECT pg_advisory_unlock($1::bigint)', [LOCK_KEY]).catch(() => {});
+      await holder.end();
     }
   });
 });
