@@ -14,19 +14,21 @@
  *     advisory lock belong to that scan, auto-apply never touches prepare/apply in this case; it runs
  *     select read-only for the report and stops.
  *
- * classifyScanState() is pure and total: every `{ row, now, timezone, staleMinutes }` input maps to
- * exactly one of finished_today / never_started / failed / running / stalled / unknown, never a silent
- * fifth case. waitForScan() is the only place that touches the database or the clock; it re-classifies on
- * every poll (so a state can migrate from the soft bucket to the hard bucket mid-wait, e.g. never_started
- * -> running, and the loop naturally starts honoring the later deadline) and returns as soon as a
- * classification resolves (finished_today) or its applicable deadline is reached -- including immediately,
- * with no polling at all, when that deadline has already passed on entry.
+ * classifyScanState() is pure and total: every `{ row, now, timezone, staleMinutes, runCapMinutes }` input
+ * maps to exactly one of finished_today / never_started / failed / running / stalled / abandoned /
+ * unknown, never a silent eighth case. waitForScan() is the only place that touches the database or the
+ * clock; it re-classifies on every poll (so a state can migrate from the soft bucket to the hard bucket
+ * mid-wait, e.g. never_started -> running, and the loop naturally starts honoring the later deadline) and
+ * returns as soon as a classification resolves (finished_today), is abandoned (scan-hang-timeouts fix,
+ * independent review Finding 3: a run whose started_at is past its own wall-clock cap plus 30 minutes will
+ * never finish, so waiting is pointless regardless of deadline), or its applicable deadline is reached --
+ * including immediately, with no polling at all, when that deadline has already passed on entry.
  */
 
 import { startOfDayInTz } from './auto-apply-select.js';
 
 /** States a scan-state classification can resolve to -- exhaustive, see classifyScanState's own doc. */
-export const SCAN_STATES = Object.freeze(['finished_today', 'never_started', 'failed', 'running', 'stalled', 'unknown']);
+export const SCAN_STATES = Object.freeze(['finished_today', 'never_started', 'failed', 'running', 'stalled', 'abandoned', 'unknown']);
 
 /**
  * @typedef {Object} ScanRunRow
@@ -56,9 +58,19 @@ export const SCAN_STATES = Object.freeze(['finished_today', 'never_started', 'fa
  * @param {string} timezone IANA zone
  * @param {number} staleHeartbeatMinutes a 'running' row whose heartbeat_at is at least this many minutes
  *   old classifies as 'stalled' rather than 'running'.
+ * @param {number} [runCapMinutes] scan-hang-timeouts fix (spec item C): when given, a 'running' row whose
+ *   started_at is at least `runCapMinutes + 30` minutes old classifies as 'abandoned' (total, checked
+ *   before heartbeat staleness) rather than 'running'/'stalled', regardless of heartbeat_at -- a heartbeat
+ *   can keep ticking even while the run's own main loop is wedged (the 2026-09-07 incident), so freshness
+ *   alone is not proof of real progress once a run is this far past its own cap. 'abandoned' is
+ *   deliberately distinct from 'stalled' (independent review Finding 3): 'stalled' (heartbeat merely gone
+ *   quiet) might still recover or still legitimately hold Chrome/the lock, so it keeps waiting out the
+ *   HARD deadline like 'running' does; 'abandoned' means this run mathematically cannot still be the one
+ *   working, so waitForScan() resolves immediately rather than waiting out any deadline at all. Omitted
+ *   (the default) keeps this classification exactly as it was before this fix, heartbeat-only.
  * @returns {ScanStateClassification}
  */
-export function classifyScanState(row, now, timezone, staleHeartbeatMinutes) {
+export function classifyScanState(row, now, timezone, staleHeartbeatMinutes, runCapMinutes) {
   if (!row) return { state: 'never_started', detail: { runId: null, status: null } };
   const runId = row.id ?? null;
   const status = typeof row.status === 'string' ? row.status : null;
@@ -74,10 +86,18 @@ export function classifyScanState(row, now, timezone, staleHeartbeatMinutes) {
     case 'locked':
       return { state: startedToday ? 'failed' : 'never_started', detail: { runId, status } };
     case 'running': {
+      // Runaway-run fix (spec item C, independent review Finding 3): a row this far past its own
+      // wall-clock cap will never finish, regardless of heartbeat_at -- mirrors scan-run.js's own reaper
+      // rule exactly, so the reaper and this wait loop never disagree about when a run is truly stuck.
+      // Checked FIRST and wins outright over heartbeat staleness: 'abandoned' and 'stalled' are mutually
+      // exclusive branches of the same total classification, never both true for one row.
+      const capMs = runCapMinutes != null ? (Math.max(0, runCapMinutes) + 30) * 60000 : null;
+      const startedAtAbandoned = capMs !== null && Number.isFinite(startedAtMs) && now.getTime() - startedAtMs >= capMs;
+      if (startedAtAbandoned) return { state: 'abandoned', detail: { runId, status } };
       const heartbeatMs = row.heartbeat_at ? new Date(row.heartbeat_at).getTime() : NaN;
       const staleMs = Math.max(0, staleHeartbeatMinutes) * 60000;
-      const stale = !Number.isFinite(heartbeatMs) || now.getTime() - heartbeatMs >= staleMs;
-      return { state: stale ? 'stalled' : 'running', detail: { runId, status } };
+      const heartbeatStale = !Number.isFinite(heartbeatMs) || now.getTime() - heartbeatMs >= staleMs;
+      return { state: heartbeatStale ? 'stalled' : 'running', detail: { runId, status } };
     }
     default:
       // A status this classification has never seen a shape for (including null/non-string) is never
@@ -105,7 +125,9 @@ export function localDeadline(now, timezone, hhmm) {
 }
 
 /** Whether a classified state belongs to the "scan is actively in progress" bucket, which waits on the
- * HARD deadline (Chrome/lock belong to the scan) rather than the soft one. */
+ * HARD deadline (Chrome/lock belong to the scan) rather than the soft one. Never called with 'abandoned':
+ * waitForScan() resolves that state immediately, before this function is ever consulted (independent
+ * review Finding 3) -- an abandoned run cannot still be "actively in progress" by definition. */
 function isInProgressState(state) {
   return state === 'running' || state === 'stalled';
 }
@@ -114,8 +136,10 @@ function isInProgressState(state) {
  * @typedef {Object} WaitForScanResult
  * @property {typeof SCAN_STATES[number]} state the final classification observed
  * @property {{ runId: number|string|null, status: string|null }} detail
- * @property {'soft'|'hard'|null} deadlineHit which deadline stopped the wait, or null when the wait
- *   resolved because the scan finished (no deadline needed)
+ * @property {'soft'|'hard'|'abandoned'|null} deadlineHit which deadline stopped the wait; 'abandoned' when
+ *   the run was classified 'abandoned' and the wait resolved immediately with no deadline consulted at
+ *   all (independent review Finding 3); null when the wait resolved because the scan finished (no
+ *   deadline needed)
  * @property {number} polls how many times the scan-state query actually ran (>= 1)
  */
 
@@ -128,9 +152,10 @@ function isInProgressState(state) {
  * @param {import('pg').ClientBase} client
  * @param {{
  *   timezone: string, softDeadline: Date, hardDeadline: Date, pollSeconds: number,
- *   staleHeartbeatMinutes: number, log?: (f: any) => void, sleep?: (ms: number) => Promise<void>,
+ *   staleHeartbeatMinutes: number, runCapMinutes?: number, log?: (f: any) => void, sleep?: (ms: number) => Promise<void>,
  *   clock?: () => Date, queryLatestScanRun?: (client: import('pg').ClientBase) => Promise<ScanRunRow|null>,
- * }} opts clock (default `() => new Date()`) is called fresh on every poll -- a test can pass one backed
+ * }} opts runCapMinutes (spec item C) is forwarded to classifyScanState() unchanged on every poll -- see its
+ *   own doc. clock (default `() => new Date()`) is called fresh on every poll -- a test can pass one backed
  *   by a fake, independently-advanced clock (real time.Date.now() monkey-patching does not affect
  *   `new Date()`, so this seam is the only reliable way to make the deadline math deterministic in tests).
  * @returns {Promise<WaitForScanResult>}
@@ -155,10 +180,16 @@ export async function waitForScan(client, opts) {
     }
     const classified = queryFailed
       ? { state: /** @type {const} */ ('unknown'), detail: { runId: null, status: null } }
-      : classifyScanState(row, nowTick, opts.timezone, opts.staleHeartbeatMinutes);
+      : classifyScanState(row, nowTick, opts.timezone, opts.staleHeartbeatMinutes, opts.runCapMinutes);
 
     if (classified.state === 'finished_today') {
       return { ...classified, deadlineHit: null, polls };
+    }
+    if (classified.state === 'abandoned') {
+      // Independent review Finding 3: a run this far past its own wall-clock cap will never finish, so
+      // there is no deadline worth waiting out, soft or hard -- resolve immediately so the caller stops
+      // waiting on it and proceeds (with a warning), same as it would for a scan that never started.
+      return { ...classified, deadlineHit: 'abandoned', polls };
     }
     const deadlineKind = isInProgressState(classified.state) ? 'hard' : 'soft';
     const deadline = deadlineKind === 'hard' ? opts.hardDeadline : opts.softDeadline;

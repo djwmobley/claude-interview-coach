@@ -86,6 +86,45 @@ describe('classifyScanState: pure, total classification', () => {
   });
 });
 
+describe('classifyScanState: runaway-run started_at staleness (scan-hang-timeouts fix, spec item C)', () => {
+  test('status running, fresh heartbeat, started_at within cap+30min, runCapMinutes given -> still running', () => {
+    const c = classifyScanState({ id: 1, status: 'running', started_at: NOON_UTC, heartbeat_at: NOON_UTC }, NOON_UTC, TZ, 10, 20);
+    assert.equal(c.state, 'running');
+  });
+
+  test('status running, fresh heartbeat, started_at past cap+30min, runCapMinutes given -> abandoned, not stalled (independent review Finding 3: a fresh heartbeat alone is not proof of progress past the run\'s own cap, and this run will never finish, unlike a merely-stale-heartbeat "stalled" run)', () => {
+    const startedAt = new Date(NOON_UTC.getTime() - 51 * 60000); // cap 20 + 30 = 50min threshold; 51min old
+    const c = classifyScanState({ id: 1, status: 'running', started_at: startedAt, heartbeat_at: NOON_UTC }, NOON_UTC, TZ, 10, 20);
+    assert.equal(c.state, 'abandoned');
+  });
+
+  test('status running, started_at exactly at cap+30min -> abandoned ("at least" reads >=, matching the heartbeat rule\'s own wording)', () => {
+    const startedAt = new Date(NOON_UTC.getTime() - 50 * 60000);
+    const c = classifyScanState({ id: 1, status: 'running', started_at: startedAt, heartbeat_at: NOON_UTC }, NOON_UTC, TZ, 10, 20);
+    assert.equal(c.state, 'abandoned');
+  });
+
+  test('status running, fresh heartbeat, started_at past cap+30min, but runCapMinutes OMITTED -> still running (backward compatible: pre-fix callers see no behavior change)', () => {
+    const startedAt = new Date(NOON_UTC.getTime() - 51 * 60000);
+    const c = classifyScanState({ id: 1, status: 'running', started_at: startedAt, heartbeat_at: NOON_UTC }, NOON_UTC, TZ, 10);
+    assert.equal(c.state, 'running');
+  });
+
+  test('status running, STALE heartbeat but started_at NOT past cap+30min -> stalled, never abandoned (the two branches are mutually exclusive; abandoned requires the started_at rule specifically)', () => {
+    const staleHeartbeat = new Date(NOON_UTC.getTime() - 20 * 60000);
+    const startedAt = new Date(NOON_UTC.getTime() - 20 * 60000); // well within cap(20)+30=50min
+    const c = classifyScanState({ id: 1, status: 'running', started_at: startedAt, heartbeat_at: staleHeartbeat }, NOON_UTC, TZ, 10, 20);
+    assert.equal(c.state, 'stalled');
+  });
+
+  test('status running, BOTH heartbeat stale AND started_at past cap+30min -> abandoned wins (checked first, per the total classification)', () => {
+    const startedAt = new Date(NOON_UTC.getTime() - 51 * 60000);
+    const staleHeartbeat = new Date(NOON_UTC.getTime() - 51 * 60000);
+    const c = classifyScanState({ id: 1, status: 'running', started_at: startedAt, heartbeat_at: staleHeartbeat }, NOON_UTC, TZ, 10, 20);
+    assert.equal(c.state, 'abandoned');
+  });
+});
+
 describe('localDeadline: HH:MM -> local wall-clock Date', () => {
   test('07:40 America/Chicago on 2026-09-04 CDT is 12:40:00Z', () => {
     const d = localDeadline(NOON_UTC, TZ, '07:40');
@@ -210,5 +249,23 @@ describe('waitForScan: two-deadline poll loop', () => {
     assert.equal(result.state, 'running');
     assert.equal(result.deadlineHit, 'hard');
     assert.equal(sleepCalls, 0);
+  });
+
+  test('runCapMinutes threading (scan-hang-timeouts fix, spec item C, independent review Finding 3): a running row with a fresh heartbeat but started_at past cap+30min classifies abandoned and resolves IMMEDIATELY, never waiting on any deadline for a run that will never finish', async () => {
+    const startedAt = new Date(NOON_UTC.getTime() - 51 * 60000);
+    let queryCalls = 0;
+    const client = { async query() { queryCalls++; return { rows: [{ id: 7, status: 'running', started_at: startedAt, heartbeat_at: NOON_UTC }] }; } };
+    let sleepCalls = 0;
+    const { clock, sleep: realSleep } = fakeClockAndSleep(NOON_UTC.getTime());
+    const sleep = async (ms) => { sleepCalls++; return realSleep(ms); };
+    const result = await waitForScan(client, {
+      timezone: TZ, softDeadline: localDeadline(NOON_UTC, TZ, '07:40'), hardDeadline: localDeadline(NOON_UTC, TZ, '07:55'),
+      pollSeconds: 60, staleHeartbeatMinutes: 10, runCapMinutes: 20, clock, sleep,
+    });
+    assert.equal(result.state, 'abandoned');
+    assert.equal(result.deadlineHit, 'abandoned');
+    assert.equal(result.polls, 1, 'resolved on the first poll, no deadline math, no waiting');
+    assert.equal(queryCalls, 1);
+    assert.equal(sleepCalls, 0, 'never slept waiting on a deadline for a run that will never finish');
   });
 });
