@@ -121,6 +121,7 @@ export const USER_AGENT = 'job-search-mcp/0.1 (interview-coach; read-only scanne
  * @property {number} detail_empty rows whose detail_outcome this run is 'empty' (fetch ran, description falsy or too short)
  * @property {number} detail_error rows whose detail_outcome this run is 'error' (a non-budget throw from the adapter's fetchDetail)
  * @property {number} detail_skipped_budget rows queued for a detail fetch (outcome new/ambiguous/update, prescore gate met) but skipped because the source's daily/per-run budget ran out mid-source (spec R4.2, decision 22)
+ * @property {number} detail_skipped_run_cap subset of detail_skipped_budget above whose specific cause was the per-source maxDetailsPerRun cap (detail-pacing fix) rather than the daily dailyDetails pool running out; every row counted here is ALSO counted in detail_skipped_budget (same latch, same outcome), so this is informational granularity, not an additional total.
  * @property {number} detail_skipped_gate rows with a detail-capable adapter, outcome new/ambiguous, but below the prescore gate
  * @property {number} detail_skipped_cancelled rows still queued when the run's abort signal fired mid-runDetailPass
  * @property {number} detail_not_queued rows never eligible for the detail queue at all (cross_source_dup/repost, or update rows already fetched/attempts-capped)
@@ -314,7 +315,7 @@ async function executeRun(p) {
   /** @type {RunStats} */
   const stats = {
     fetched: 0, new: 0, updated: 0, cross_source_dup: 0, repost: 0, ambiguous: 0, errors: 0, unembedded: 0, stale_dropped: 0,
-    detail_fetched: 0, detail_empty: 0, detail_error: 0, detail_skipped_budget: 0, detail_skipped_gate: 0, detail_skipped_cancelled: 0, detail_not_queued: 0,
+    detail_fetched: 0, detail_empty: 0, detail_error: 0, detail_skipped_budget: 0, detail_skipped_run_cap: 0, detail_skipped_gate: 0, detail_skipped_cancelled: 0, detail_not_queued: 0,
     details_by_source: {},
     dedup_sticky_skip_merged: 0, adopted: 0, expired: 0, pages_by_source: {},
   };
@@ -406,6 +407,16 @@ async function executeRun(p) {
   const caps = new Map();
   /** @type {Map<string, import('./ratelimit.js').RateLimiter>} */
   const capLimiters = new Map();
+  /**
+   * Sources currently draining their detail queue (detail-pacing fix, spec item 2): capFor()'s shared
+   * capability object is built once per source and reused across BOTH the list pass and the detail pass
+   * (the adapter calls ctx.capFor(source) from inside both search() and fetchDetail()), so the onPage hook
+   * cannot be fixed at construction time -- it has to check, on every navigation, whether THIS call is
+   * happening during the source's detail pass and pick limiter.wait() vs limiter.waitDetail()
+   * accordingly. Toggled around the runDetailPass() call below, never read from anywhere else.
+   * @type {Set<string>}
+   */
+  const detailPhaseSources = new Set();
 
   async function getSession() {
     if (session) return session;
@@ -458,7 +469,7 @@ async function executeRun(p) {
     const cfgName = source.startsWith('exec:') ? 'exec' : source;
     const s = sources.find((x) => x.name === cfgName);
     if (!s) throw new JobSearchError('INTERNAL', `capFor: no resolved config for source ${source}`, { details: { source } });
-    const limiter = makeRateLimiter({ delayMs: s.cfg.delayMs, backoff: runCfg.backoff, sleep: deps.sleep, random: deps.random });
+    const limiter = makeRateLimiter({ delayMs: s.cfg.delayMs, detailDelayMs: s.cfg.detailDelayMs, backoff: runCfg.backoff, sleep: deps.sleep, random: deps.random });
     capLimiters.set(source, limiter);
     return limiter;
   }
@@ -471,7 +482,13 @@ async function executeRun(p) {
     if (!s) return null;
     const page = await s.attachPage({ signal });
     const limiter = limiterFor(source);
-    const cap = makeCapability(page, { registry, source, signal, lookup: deps.lookup, onPage: () => limiter.wait(source, signal) });
+    // detail-pacing fix (spec item 2): list-page navigations pace on limiter.wait() (delayMs); anything
+    // that happens while this source is draining its detail queue (detailPhaseSources, toggled around
+    // runDetailPass below) paces on limiter.waitDetail() (detailDelayMs, falling back to delayMs) instead.
+    const cap = makeCapability(page, {
+      registry, source, signal, lookup: deps.lookup,
+      onPage: () => (detailPhaseSources.has(source) ? limiter.waitDetail(source, signal) : limiter.wait(source, signal)),
+    });
     caps.set(source, cap);
     return cap;
   }
@@ -746,6 +763,15 @@ async function executeRun(p) {
    * that point on -- including the one about to be attempted -- is finalized as 'skipped_cancelled'
    * (still persisted, still gets an ic_scan_run_items row) rather than silently dropped, and CANCELLED is
    * thrown afterward so the caller's recordClean/expiryPass never run for this source.
+   *
+   * Per-run detail cap (detail-pacing fix, spec item 3): maxDetailsPerRun (null = unlimited) bounds how
+   * many of THIS source's queued rows this pass will actually attempt a network fetch for, independent of
+   * and in addition to the daily dailyDetails pool. Once the cap is reached, every remaining row is
+   * finalized the same way a real daily-budget exhaustion already was -- outcome 'skipped_budget', via the
+   * SAME queuedSkippedFromHere latch below -- so it shares that latch's persistence/reporting path exactly;
+   * the only difference is the extra detail_skipped_run_cap counter, which exists purely so a report/dashboard
+   * reader can tell "hit the per-run cap" apart from "ran out of the daily pool" without changing what
+   * either one does to the row.
    * @param {{ name: string, adapter: import('../adapters/base.js').Adapter, cfg: any }} s
    * @param {import('../adapters/base.js').AdapterCtx} ctx
    * @param {Array<{ ev: import('../adapters/base.js').ListingEvent, rec: import('./normalize.js').NormalizedListing, decision: import('./dedup.js').Decision, ps: number, psRaw: number, noiseClass: string, seq: number }>} detailQueue
@@ -753,7 +779,10 @@ async function executeRun(p) {
   async function runDetailPass(s, ctx, detailQueue) {
     const dateNum = (/** @type {string|null} */ d) => (d ? Date.parse(d) || 0 : -Infinity);
     const sorted = [...detailQueue].sort((a, b) => (b.ps - a.ps) || (dateNum(b.rec.posted_at) - dateNum(a.rec.posted_at)) || (a.seq - b.seq));
+    const maxDetailsPerRun = typeof s.cfg.maxDetailsPerRun === 'number' ? s.cfg.maxDetailsPerRun : null;
     let queuedSkippedFromHere = false;
+    let runCapHit = false;
+    let attempted = 0;
     for (let i = 0; i < sorted.length; i++) {
       if (signal.aborted) {
         for (let j = i; j < sorted.length; j++) {
@@ -769,10 +798,18 @@ async function executeRun(p) {
       /** @type {import('./apply-target-persist.js').ApplyDetail|null} */
       let applyDetail = null;
       if (queuedSkippedFromHere) {
-        // Budget already exhausted earlier in this SAME sorted pass: every remaining item skips the
-        // network attempt outright (decision 22: queued minus fetched) rather than re-throwing per item.
+        // Budget already exhausted earlier in this SAME sorted pass (either the daily pool, via
+        // BUDGET_EXHAUSTED below, or the per-run cap above): every remaining item skips the network
+        // attempt outright (decision 22: queued minus fetched) rather than re-throwing per item.
         detailOutcome = 'skipped_budget';
+        if (runCapHit) stats.detail_skipped_run_cap++;
+      } else if (maxDetailsPerRun !== null && attempted >= maxDetailsPerRun) {
+        detailOutcome = 'skipped_budget';
+        queuedSkippedFromHere = true;
+        runCapHit = true;
+        stats.detail_skipped_run_cap++;
       } else {
+        attempted++;
         const r = await tryFetchDetail(s, ctx, ev, rec);
         detailOutcome = r.outcome;
         if (detailOutcome === 'skipped_budget') queuedSkippedFromHere = true;
@@ -898,7 +935,14 @@ async function executeRun(p) {
       // way to this function's own outer catch, exactly like a CANCELLED from runSearch above -- skipping
       // the result-dependent block below (recordClean/expiryPass never run for a cancelled source) and
       // setting `cancelled` there, same as before this fix.
-      if (detailQueue.length) await runDetailPass(s, ctx, detailQueue);
+      if (detailQueue.length) {
+        detailPhaseSources.add(s.name);
+        try {
+          await runDetailPass(s, ctx, detailQueue);
+        } finally {
+          detailPhaseSources.delete(s.name);
+        }
+      }
       if (result) {
         stats.stale_dropped += result.stale;
         if (result.completed && !walled) {

@@ -15,7 +15,7 @@ import { fileURLToPath } from 'node:url';
 import fs from 'node:fs';
 import os from 'node:os';
 import {
-  alertSendersSchema, GMAIL_PARSER_NAMES, loadConfig, triageSchema, atsApplySchema, CONFIG_FILES, computeConfigHash,
+  alertSendersSchema, GMAIL_PARSER_NAMES, loadConfig, triageSchema, atsApplySchema, adaptersSchema, CONFIG_FILES, computeConfigHash,
   loadTriageCandidateSummary, checkConfigLock, writeConfigLock, missingConfigFiles,
   triageCandidatePresent, computeTriageCandidateHash, triageCandidateLockPath, checkTriageCandidateLock, writeTriageCandidateLock,
 } from '../src/core/config.js';
@@ -109,6 +109,77 @@ describe('detailMaxAttempts (scan-detail-pass fix, spec R4 item 2 retry cap)', (
       fs.rmSync(tmp, { recursive: true, force: true });
     }
   });
+});
+
+describe('detailDelayMs / maxDetailsPerRun (detail-pacing fix: LinkedIn detail pool 200/day, 3-6s detail pacing, 60/run cap)', () => {
+  const REAL_CONFIG_DIR = path.join(HERE, '..', 'config');
+
+  test('a per-source config with no detailDelayMs/maxDetailsPerRun at all still validates (both optional, maxDetailsPerRun defaults null)', () => {
+    const cfg = loadConfig({ dir: CONFIG_DIR, fresh: true });
+    const linkedin = cfg.adapters.adapters.linkedin;
+    assert.equal(linkedin.detailDelayMs, undefined, 'the test fixture config deliberately does not set detailDelayMs');
+    assert.equal(linkedin.maxDetailsPerRun, null, 'default null = unlimited when the key is absent');
+  });
+
+  test('the REAL config/adapters.json sets linkedin detailDelayMs [3000,6000], dailyDetails 200, maxDetailsPerRun 60, and leaves list-page delayMs at [6000,12000]', () => {
+    const cfg = loadConfig({ dir: REAL_CONFIG_DIR, fresh: true });
+    const linkedin = cfg.adapters.adapters.linkedin;
+    assert.deepEqual(linkedin.detailDelayMs, [3000, 6000]);
+    assert.deepEqual(linkedin.delayMs, [6000, 12000], 'list-page pacing must be untouched by this fix');
+    assert.equal(linkedin.dailyDetails, 200);
+    assert.equal(linkedin.maxDetailsPerRun, 60);
+  });
+
+  test('the REAL config/adapters.json leaves every other adapter delayMs/dailyDetails/maxPagesPerQuery and run.runTimeoutMinutes untouched (this fix is LinkedIn-only, spec item 5)', () => {
+    const cfg = loadConfig({ dir: REAL_CONFIG_DIR, fresh: true });
+    assert.equal(cfg.adapters.adapters.linkedin.maxPagesPerQuery, 3);
+    assert.equal(cfg.adapters.run.runTimeoutMinutes, 20);
+    for (const [name, a] of Object.entries(cfg.adapters.adapters)) {
+      if (name === 'linkedin') continue;
+      assert.equal(a.maxDetailsPerRun, null, `${name}: maxDetailsPerRun must stay unset (default null)`);
+      assert.equal(a.detailDelayMs, undefined, `${name}: detailDelayMs must stay unset`);
+    }
+  });
+
+  test('adaptersSchema rejects detailDelayMs with min > max, same rule as delayMs', () => {
+    const base = { transport: 'browser', domains: ['x.com'], pathPatterns: ['^/$'], delayMs: [100, 200], dailyPages: 1, dailyDetails: 1, maxPagesPerQuery: 1 };
+    const r = adaptersSchemaEntry({ ...base, detailDelayMs: [500, 100] });
+    assert.equal(r.success, false);
+  });
+
+  test('adaptersSchema accepts a valid detailDelayMs and a positive maxDetailsPerRun', () => {
+    const base = { transport: 'browser', domains: ['x.com'], pathPatterns: ['^/$'], delayMs: [100, 200], dailyPages: 1, dailyDetails: 1, maxPagesPerQuery: 1 };
+    const r = adaptersSchemaEntry({ ...base, detailDelayMs: [50, 100], maxDetailsPerRun: 10 });
+    assert.equal(r.success, true);
+    assert.deepEqual(r.data.detailDelayMs, [50, 100]);
+    assert.equal(r.data.maxDetailsPerRun, 10);
+  });
+
+  test('adaptersSchema rejects a zero or negative maxDetailsPerRun (must be a positive integer when set at all)', () => {
+    const base = { transport: 'browser', domains: ['x.com'], pathPatterns: ['^/$'], delayMs: [100, 200], dailyPages: 1, dailyDetails: 1, maxPagesPerQuery: 1 };
+    assert.equal(adaptersSchemaEntry({ ...base, maxDetailsPerRun: 0 }).success, false);
+    assert.equal(adaptersSchemaEntry({ ...base, maxDetailsPerRun: -1 }).success, false);
+  });
+
+  /**
+   * adaptersSchema (exported) validates the whole config/adapters.json file (dedup/adapters/run/etc), not
+   * one adapter entry in isolation. This drives the single per-adapter `adapterSchema` (not itself
+   * exported) through adaptersSchema's own `adapters` record with exactly one entry, `x`, so these tests
+   * exercise the real per-adapter validation rules without duplicating them.
+   * @param {any} entry
+   */
+  function adaptersSchemaEntry(entry) {
+    const whole = {
+      dedup: { repostGapDays: 1, reviewAutoSeparateDays: 1, titleSimilarity: 0.5, companySimilarity: 0.5, postedAtCorroborationDays: 1, expireAfterAbsentRuns: 1 },
+      trackingParams: [],
+      httpAllowedHosts: ['x.com'],
+      adapters: { x: entry },
+      run: { maxPlannedPagesPerRun: 1, runTimeoutMinutes: 1, heartbeatStaleMinutes: 1, detailFetchMinPrescore: 40, backoff: { maxDelayMs: 1000, retries: 1 }, throttleRatio: 0.5 },
+    };
+    const r = adaptersSchema.safeParse(whole);
+    if (!r.success) return { success: false };
+    return { success: true, data: r.data.adapters.x };
+  }
 });
 
 describe('atsApplySchema and config/ats-apply.json (apply pipeline slice 2, spec-adversary amendment S11)', () => {

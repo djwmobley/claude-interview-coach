@@ -75,7 +75,10 @@ export function isRetryableStatus(status) {
 
 /**
  * @typedef {Object} RateLimiterOptions
- * @property {[number, number]} delayMs jittered delay between requests on the same key
+ * @property {[number, number]} delayMs jittered delay between requests on the same key (list/page traffic)
+ * @property {[number, number]} [detailDelayMs] jittered delay for waitDetail(); falls back to delayMs when
+ *   absent (detail-pacing fix: a source with no configured detailDelayMs paces its detail fetches
+ *   identically to before this option existed)
  * @property {{ maxDelayMs: number, retries: number, baseMs?: number }} backoff
  * @property {(ms: number, signal?: AbortSignal) => Promise<void>} [sleep]
  * @property {() => number} [random]
@@ -84,7 +87,8 @@ export function isRetryableStatus(status) {
 
 /**
  * @typedef {Object} RateLimiter
- * @property {(key: string, signal?: AbortSignal) => Promise<void>} wait serialize per key and enforce the jittered gap
+ * @property {(key: string, signal?: AbortSignal) => Promise<void>} wait serialize per key and enforce the jittered gap from delayMs
+ * @property {(key: string, signal?: AbortSignal) => Promise<void>} waitDetail same serialization and key-space as wait() (they share one chain/lastAt per key, so a phase switch on the same key never bursts), but draws its jittered gap from detailDelayMs (falling back to delayMs when unset) -- for detail-fetch traffic on a browser/fetch capability that should pace independently of list-page traffic
  * @property {<T extends { status: number|null, retryAfter?: string|null }>(key: string, fn: () => Promise<T>, opts?: { signal?: AbortSignal, onRetry?: (f: { attempt: number, delay_ms: number, status: number|null }) => void }) => Promise<T>} withRetry run fn under wait(); back off on 429/503; abort after retries
  * @property {() => { waits: number, retries: number, aborted: number }} stats
  */
@@ -104,10 +108,14 @@ export function makeRateLimiter(opts) {
   const stats = { waits: 0, retries: 0, aborted: 0 };
 
   /**
+   * Shared wait mechanics for both wait() and waitDetail(): serialize per key (one in-flight wait per key
+   * at a time, same chain regardless of which range it was called with) and enforce a jittered gap since
+   * the key's own last wait, drawn from whichever [min, max] range the caller passes.
    * @param {string} key
+   * @param {[number, number]} range
    * @param {AbortSignal} [signal]
    */
-  async function wait(key, signal) {
+  async function waitWithRange(key, range, signal) {
     const prev = chains.get(key) ?? Promise.resolve();
     /** @type {() => void} */
     let release = () => {};
@@ -118,7 +126,7 @@ export function makeRateLimiter(opts) {
     await prev;
     try {
       const last = lastAt.get(key);
-      const gap = jitter(opts.delayMs, random);
+      const gap = jitter(range, random);
       if (last !== undefined) {
         const due = last + gap;
         const remaining = due - now();
@@ -129,6 +137,22 @@ export function makeRateLimiter(opts) {
     } finally {
       release();
     }
+  }
+
+  /**
+   * @param {string} key
+   * @param {AbortSignal} [signal]
+   */
+  async function wait(key, signal) {
+    return waitWithRange(key, opts.delayMs, signal);
+  }
+
+  /**
+   * @param {string} key
+   * @param {AbortSignal} [signal]
+   */
+  async function waitDetail(key, signal) {
+    return waitWithRange(key, opts.detailDelayMs ?? opts.delayMs, signal);
   }
 
   /**
@@ -158,5 +182,5 @@ export function makeRateLimiter(opts) {
     }
   }
 
-  return { wait, withRetry, stats: () => ({ ...stats }) };
+  return { wait, waitDetail, withRetry, stats: () => ({ ...stats }) };
 }

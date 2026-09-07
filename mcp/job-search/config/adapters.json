@@ -80,9 +80,14 @@
         6000,
         12000
       ],
+      "detailDelayMs": [
+        3000,
+        6000
+      ],
       "dailyPages": 40,
-      "dailyDetails": 60,
-      "maxPagesPerQuery": 3
+      "dailyDetails": 200,
+      "maxPagesPerQuery": 3,
+      "maxDetailsPerRun": 60
     },
     "greenhouse": {
       "transport": "fetch",
