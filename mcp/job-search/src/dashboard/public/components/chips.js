@@ -216,6 +216,19 @@ export function applicationStateChip(state) {
   return table[state ?? ''] ?? { label: 'Unknown', fg: '--muted-2', bg: '--tag-bg', style: O };
 }
 
+/**
+ * Headless review verdict chip (review-approvals-list PR spec A3, Review page's "Applications awaiting
+ * approval" card): TOTAL over the two real review_verdict values a row can carry ('PASS'/'FAIL') plus the
+ * unreviewed case (null, or any other value -- e.g. an unparseable verdict the review runner could not
+ * classify) as "not reviewed", never an "Unknown" fallback distinct from that case.
+ * @param {string|null|undefined} verdict
+ */
+export function reviewVerdictChip(verdict) {
+  if (verdict === 'PASS') return { label: 'PASS', fg: '--green', bg: '--green-dim', style: O };
+  if (verdict === 'FAIL') return { label: 'FAIL', fg: '--red', bg: '--red-dim', style: O };
+  return { label: 'not reviewed', fg: '--muted', bg: '--tag-bg', style: O };
+}
+
 /** Turn a token slug like "--purple-dim" into the CSS class suffix "purple-dim". @param {string} token */
 function slug(token) {
   return String(token).replace(/^--/, '');

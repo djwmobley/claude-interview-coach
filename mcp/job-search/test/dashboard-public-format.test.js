@@ -2,7 +2,7 @@
 /** Pure formatting function tests (pr3-spec-decisions.md section 12 item 2). No DOM required. */
 import { test, describe } from 'node:test';
 import assert from 'node:assert/strict';
-import { relativeTime, ageDays, agingBucket, scoreBucket, fitBucket, fitDisplayState, applyButtonState, STALE_ACTIONABLE_MS, DETAIL_MIN_CHARS, shortDate, shortDateTime, salaryRange, formatMoney, pluralize, truncate, sourceLabel, formatPercent, normalizeAgendaTime, agendaTimeLabel } from '../src/dashboard/public/lib/format.js';
+import { relativeTime, ageDays, agingBucket, scoreBucket, fitBucket, fitDisplayState, applyButtonState, STALE_ACTIONABLE_MS, DETAIL_MIN_CHARS, shortDate, shortDateTime, salaryRange, formatMoney, pluralize, truncate, sourceLabel, formatPercent, normalizeAgendaTime, agendaTimeLabel, approvalRowFindingsState, approvalRowApproveState } from '../src/dashboard/public/lib/format.js';
 import { STALE_ACTIONABLE_MS as SERVER_STALE_ACTIONABLE_MS } from '../src/dashboard/routes/applications.js';
 import { DETAIL_MIN_CHARS as SERVER_DETAIL_MIN_CHARS } from '../src/core/normalize.js';
 
@@ -430,5 +430,85 @@ describe('agendaTimeLabel', () => {
   test('at: null falls back to the fixed placeholder for both branches', () => {
     assert.equal(agendaTimeLabel({ at: null, allDay: false }), 'not set');
     assert.equal(agendaTimeLabel({ at: null, allDay: true }), 'not set');
+  });
+});
+
+describe('approvalRowFindingsState (review-approvals-list PR spec A3): findings-panel default expand state', () => {
+  test('FAIL verdict with findings present: expanded, no empty-message', () => {
+    const r = approvalRowFindingsState({ review_verdict: 'FAIL', review_findings: [{ severity: 'high', text: 'x' }] });
+    assert.deepEqual(r, { expanded: true, emptyMessage: null });
+  });
+
+  test('FAIL verdict with empty findings: expanded, "No findings recorded" (never "No findings.")', () => {
+    const r = approvalRowFindingsState({ review_verdict: 'FAIL', review_findings: [] });
+    assert.equal(r.expanded, true);
+    assert.equal(r.emptyMessage, 'No findings recorded');
+  });
+
+  test('unreviewed (null verdict) with empty findings: expanded, "No findings recorded"', () => {
+    const r = approvalRowFindingsState({ review_verdict: null, review_findings: [] });
+    assert.equal(r.expanded, true);
+    assert.equal(r.emptyMessage, 'No findings recorded');
+  });
+
+  test('unreviewed (null verdict) with findings present: NOT expanded by default', () => {
+    const r = approvalRowFindingsState({ review_verdict: null, review_findings: [{ text: 'x' }] });
+    assert.equal(r.expanded, false);
+    assert.equal(r.emptyMessage, null);
+  });
+
+  test('PASS verdict with empty findings: not expanded, no "No findings recorded" (that wording is reserved for the non-PASS case)', () => {
+    const r = approvalRowFindingsState({ review_verdict: 'PASS', review_findings: [] });
+    assert.equal(r.expanded, false);
+    assert.equal(r.emptyMessage, null);
+  });
+
+  test('PASS verdict with findings present: not expanded', () => {
+    const r = approvalRowFindingsState({ review_verdict: 'PASS', review_findings: [{ text: 'x' }] });
+    assert.equal(r.expanded, false);
+    assert.equal(r.emptyMessage, null);
+  });
+
+  test('review_findings missing/not an array is treated as empty, never throws', () => {
+    assert.doesNotThrow(() => approvalRowFindingsState({ review_verdict: 'FAIL' }));
+    assert.equal(approvalRowFindingsState({ review_verdict: 'FAIL' }).expanded, true);
+  });
+});
+
+describe('approvalRowApproveState (review-approvals-list PR spec A3): Approve button visibility/disabled state', () => {
+  test('no resume_doc_id: hidden entirely, regardless of any other field', () => {
+    assert.deepEqual(approvalRowApproveState({ resume_doc_id: null, blocked: false, sibling_active: false }), { visible: false, disabled: true, reason: null });
+    assert.deepEqual(approvalRowApproveState({ resume_doc_id: undefined }), { visible: false, disabled: true, reason: null });
+  });
+
+  test('blocked: true: visible, disabled, reason shown (blocked_reason preferred over a generic fallback)', () => {
+    const r = approvalRowApproveState({ resume_doc_id: 1, blocked: true, blocked_reason: 'company matches blocked employer "Immunotec"' });
+    assert.equal(r.visible, true);
+    assert.equal(r.disabled, true);
+    assert.equal(r.reason, 'company matches blocked employer "Immunotec"');
+  });
+
+  test('blocked: true with no blocked_reason string: still disabled, with a non-null fallback reason', () => {
+    const r = approvalRowApproveState({ resume_doc_id: 1, blocked: true, blocked_reason: null });
+    assert.equal(r.disabled, true);
+    assert.notEqual(r.reason, null);
+  });
+
+  test('sibling_active: true (and not blocked): visible, disabled, with a reason', () => {
+    const r = approvalRowApproveState({ resume_doc_id: 1, blocked: false, sibling_active: true });
+    assert.equal(r.visible, true);
+    assert.equal(r.disabled, true);
+    assert.notEqual(r.reason, null);
+  });
+
+  test('inFlight: true always disables, even an otherwise-eligible row', () => {
+    const r = approvalRowApproveState({ resume_doc_id: 1, blocked: false, sibling_active: false }, { inFlight: true });
+    assert.equal(r.visible, true);
+    assert.equal(r.disabled, true);
+  });
+
+  test('eligible row (resume linked, not blocked, no active sibling, not in flight): visible and enabled', () => {
+    const r = approvalRowApproveState({ resume_doc_id: 1, blocked: false, blocked_reason: null, sibling_active: false });
+    assert.deepEqual(r, { visible: true, disabled: false, reason: null });
   });
 });

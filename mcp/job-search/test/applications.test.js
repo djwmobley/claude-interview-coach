@@ -28,13 +28,26 @@ let client;
 /** @type {number[]} */
 const listingIds = [];
 
+// review-approvals-list PR fix: company_norm/title_norm are now unique PER LISTING (a random suffix on
+// each), never the fixed 'applications test co'/'applications test' literal every call used to share.
+// approve() (below) now runs the FULL apply exclusion classifier via checkApplicationBlockers, whose
+// already_applied_history/applied_company_other_role branches match company+title GLOBALLY across every
+// non-withdrawn application in the test DB -- not scoped to any one describe block's own listingIds. With
+// a shared literal, any two of this file's ~40 subtests that both reach a non-withdrawn state would
+// collide and make approve() spuriously reject an otherwise-eligible application. Nothing else in this
+// file asserts on the literal company_norm/title_norm text (confirmed by search), so this is a safe,
+// no-op-elsewhere fix scoped entirely to this shared fixture.
 /** @param {Partial<{ status: string|null, locationNorm: string, remoteMode: string|null }>} o */
 async function insertListing(o = {}) {
   const n = Math.floor(Math.random() * 1e9);
   const r = await client.query(
     `INSERT INTO ic_job_listings (title, company, source, external_id, record_kind, company_norm, title_norm, location_norm, remote_mode, dedup_hash, last_seen, status)
-     VALUES ('Applications Test', $1, $2, $3, 'listing', 'applications test co', 'applications test', $4, $5, $6, now(), $7) RETURNING id`,
-    [CO, `zz-test-applications-${process.pid}`, `zz-test-applications-${process.pid}:${n}`, o.locationNorm ?? 'legacy-unknown', o.remoteMode ?? null, `zz-applications-hash-${n}`, o.status ?? null],
+     VALUES ('Applications Test', $1, $2, $3, 'listing', $4, $5, $6, $7, $8, now(), $9) RETURNING id`,
+    [
+      CO, `zz-test-applications-${process.pid}`, `zz-test-applications-${process.pid}:${n}`,
+      `zzapplicationstestco${n}`, `zzapplicationstestrole${n}`,
+      o.locationNorm ?? 'legacy-unknown', o.remoteMode ?? null, `zz-applications-hash-${n}`, o.status ?? null,
+    ],
   );
   const id = Number(r.rows[0].id);
   listingIds.push(id);
@@ -758,5 +771,101 @@ describe('approve() (apply pipeline slice 3): docs_ready -> approved, hashes sto
       assert.equal(/** @type {any} */ (err).code, 'NOT_FOUND');
       return true;
     });
+  });
+});
+
+describe('approve() blockers (review-approvals-list PR spec A2): blocked employer, closed listing status, sibling active', () => {
+  /** @type {string} */
+  let outputRoot;
+  const RESUME_REL = 'resumes/ZZ-Approve-Blockers-Test.docx';
+
+  before(() => {
+    outputRoot = fs.mkdtempSync(path.join(os.tmpdir(), 'jobsearch-approve-blockers-'));
+    fs.mkdirSync(path.join(outputRoot, 'resumes'), { recursive: true });
+    fs.writeFileSync(path.join(outputRoot, RESUME_REL), 'resume-fixture-bytes');
+  });
+  after(() => {
+    fs.rmSync(outputRoot, { recursive: true, force: true });
+  });
+
+  /** Unique-per-call company_norm/title_norm (never the shared 'applications test co'/'applications test'
+   * literal this file's other describe blocks use): classifyExclusion's (c)/(d) branches search for a
+   * company+title match GLOBALLY across every non-withdrawn application in the real test DB, not scoped
+   * to this file's own listingIds -- a shared company_norm would risk an incidental match against another
+   * test's own leftover 'approved'/'submitted' rows, exactly the collision seedUniqueListing() in
+   * test/dashboard-apply-now-route.test.js already documents and avoids the same way.
+   * @param {Partial<{ company: string, companyNorm: string, status: string|null, duplicateOf: number|null }>} o */
+  async function insertCustomListing(o = {}) {
+    const n = Math.floor(Math.random() * 1e9);
+    const r = await client.query(
+      `INSERT INTO ic_job_listings (title, company, source, external_id, record_kind, company_norm, title_norm, location_norm, dedup_hash, last_seen, status, duplicate_of)
+       VALUES ('Approve Blockers Test', $1, $2, $3, 'listing', $4, $5, 'legacy-unknown', $6, now(), $7, $8) RETURNING id`,
+      [
+        o.company ?? CO, `zz-test-applications-blockers-${process.pid}`, `zz-test-applications-blockers-${process.pid}:${n}`,
+        o.companyNorm ?? `zzapproveblockersco${n}`, `zzapproveblockersrole${n}`, `zz-applications-blockers-hash-${n}`,
+        o.status ?? null, o.duplicateOf ?? null,
+      ],
+    );
+    const id = Number(r.rows[0].id);
+    listingIds.push(id);
+    return id;
+  }
+
+  /** A docs_ready application with a linked resume, inserted directly (bypassing applications.js's own
+   * validation, same house pattern as this file's own seedApplication()) so its state and resume link are
+   * both set in one INSERT. @param {number} listingId @param {string} relPath */
+  async function seedDocsReadyWithResume(listingId, relPath = RESUME_REL) {
+    const resumeDocId = await insertDocument(listingId, 'resume', relPath);
+    const r = await client.query(
+      `INSERT INTO ic_job_applications (listing_id, state, resume_doc_id) VALUES ($1, 'docs_ready', $2) RETURNING id`,
+      [listingId, resumeDocId],
+    );
+    return Number(r.rows[0].id);
+  }
+
+  test('blocked employer (built-in blocked company, subset match): rejected, application left in docs_ready', async () => {
+    const listingId = await insertCustomListing({ company: 'Immunotec Research Ltd', companyNorm: 'immunotec research' });
+    const appId = await seedDocsReadyWithResume(listingId);
+    await assert.rejects(approve(client, appId, { outputRoot }), /approve\(\) blocked: company matches blocked employer/);
+    const row = await getApplication(client, appId);
+    assert.equal(row.state, 'docs_ready');
+    assert.equal(row.resume_hash, null, 'a rejected approve() must never write the hash columns');
+  });
+
+  test('closed listing status (STATUS_GROUPS.closed): rejected even though the exclusion classifier itself is eligible', async () => {
+    const listingId = await insertCustomListing({ status: 'lost' });
+    const appId = await seedDocsReadyWithResume(listingId, 'resumes/ZZ-Approve-Blockers-Closed.docx');
+    await assert.rejects(approve(client, appId, { outputRoot }), /approve\(\) blocked: listing status is "lost" \(closed\)/);
+    const row = await getApplication(client, appId);
+    assert.equal(row.state, 'docs_ready');
+  });
+
+  // Note (documented, not a silent gap): a sibling in SIBLING_ACTIVE_STATES is by construction also a
+  // non-withdrawn application, so the exclusion classifier's own already_applied_listing HARD branch
+  // (checked first, via checkApplicationBlockers' `blocked` field) always fires for this exact case too --
+  // the siblingActive-specific message in approve() is therefore never the one actually thrown today. The
+  // functional requirement (reject when a sibling is already approved/submitting/submitted/confirmed) is
+  // still met; this test asserts the rejection and the reason's provenance (already_applied_listing),
+  // not the dead siblingActive wording. sibling_active remains independently useful on GET
+  // /api/applications (A1), where it is reported alongside `blocked` rather than superseded by it.
+  test('a sibling application on a duplicate listing already approved: rejected via already_applied_listing', async () => {
+    const rootId = await insertCustomListing();
+    const dupId = await insertCustomListing({ duplicateOf: rootId });
+    const siblingResumeDocId = await insertDocument(rootId, 'resume', 'resumes/ZZ-Approve-Blockers-Sibling.docx');
+    await client.query(`INSERT INTO ic_job_applications (listing_id, state, resume_doc_id) VALUES ($1, 'approved', $2)`, [rootId, siblingResumeDocId]);
+    const appId = await seedDocsReadyWithResume(dupId, 'resumes/ZZ-Approve-Blockers-Dup.docx');
+    await assert.rejects(approve(client, appId, { outputRoot }), /approve\(\) blocked: an active \(non-withdrawn\) application already exists for this listing or a listing it duplicates/);
+    const row = await getApplication(client, appId);
+    assert.equal(row.state, 'docs_ready');
+  });
+
+  test('still-allowed happy path: eligible company, open listing status, no sibling -> approve succeeds', async () => {
+    const listingId = await insertCustomListing();
+    const relPath = 'resumes/ZZ-Approve-Blockers-Happy.docx';
+    fs.writeFileSync(path.join(outputRoot, relPath), 'happy-path-resume-bytes');
+    const appId = await seedDocsReadyWithResume(listingId, relPath);
+    const row = await approve(client, appId, { outputRoot });
+    assert.equal(row.state, 'approved');
+    assert.ok(row.approved_at);
   });
 });

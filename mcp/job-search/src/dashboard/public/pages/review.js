@@ -15,6 +15,7 @@ import { handleOutcome } from '../lib/outcome.js';
 import { showToast } from '../lib/toast.js';
 import { confirmButton } from '../components/confirm-button.js';
 import { skeleton, emptyState } from '../components/empty-state.js';
+import { renderApprovalSection } from '../components/approval-section.js';
 import { on, off } from '../lib/bus.js';
 import { createListCursor } from '../lib/list-cursor.js';
 
@@ -61,12 +62,26 @@ export async function render(container, params, app) {
   }
 
   async function load() {
-    const [reviewOutcome, reasonsOutcome] = await Promise.all([getJson('/api/review'), getJson('/api/review/reasons')]);
+    const [reviewOutcome, reasonsOutcome, docsReadyOutcome, parkedOutcome] = await Promise.all([
+      getJson('/api/review'), getJson('/api/review/reasons'),
+      // Applications awaiting approval / parked (needs human), review-approvals-list PR spec A3. Fetched
+      // as two separate state calls (each with its own accurate 200-cap and total), not one combined
+      // call, alongside the existing dedup-review queue -- a failure here degrades to an empty approval
+      // section (via handleOutcome's own generic toast) rather than blocking the rest of the page.
+      getJson('/api/applications', { state: 'docs_ready' }), getJson('/api/applications', { state: 'needs_human' }),
+    ]);
     const outcome = handleOutcome(reviewOutcome);
     if (outcome.kind !== 'ok') {
       setChildren(container, [emptyState({ message: 'The review queue could not be loaded right now.' })]);
       return;
     }
+    const docsReadyResult = handleOutcome(docsReadyOutcome);
+    const parkedResult = handleOutcome(parkedOutcome);
+    const docsReadyRows = docsReadyResult.kind === 'ok' ? docsReadyResult.body.rows : [];
+    const docsReadyTotal = docsReadyResult.kind === 'ok' ? docsReadyResult.body.total : 0;
+    const parkedRows = parkedResult.kind === 'ok' ? parkedResult.body.rows : [];
+    const approvalHost = h('div', { className: 'review-approvals-host' });
+    renderApprovalSection(approvalHost, { docsReadyRows, parkedRows, total: docsReadyTotal, onChanged: load });
     const reasonsResult = handleOutcome(reasonsOutcome);
     const reasonOptions = reasonsResult.kind === 'ok' ? reasonsResult.body.reasons : [];
     // If the previously selected reason no longer has any open items, fall back to "all" rather than
@@ -124,6 +139,7 @@ export async function render(container, params, app) {
 
     setChildren(container, [
       h('h1', { className: 'page-title', text: 'Review' }),
+      approvalHost,
       autoNote,
       h('div', { className: 'review-toolbar' }, [reasonSelect]),
       bulkBarEl,

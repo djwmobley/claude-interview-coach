@@ -370,3 +370,48 @@ export function agendaTimeLabel(normalized) {
   }
   return shortDateTime(normalized.at);
 }
+
+/**
+ * Total classification of one docs_ready row's findings-panel default expand state on the Review page's
+ * "Applications awaiting approval" card (review-approvals-list PR spec A3): findings are EXPANDED by
+ * default when the verdict is FAIL, or when the verdict is anything but PASS and findings are empty (an
+ * unparseable/missing verdict with nothing recorded is exactly the case an operator most needs surfaced,
+ * never collapsed by default). `emptyMessage` is set ONLY in that second, empty-non-PASS case, to the
+ * required amber-styled "No findings recorded" text -- never the plain "No findings." wording, which
+ * this function reserves for a PASS verdict with an empty findings list (rendered by the caller, not
+ * returned here, since that combination is not "needs attention").
+ * @param {{ review_verdict?: string|null, review_findings?: unknown }} application
+ * @returns {{ expanded: boolean, emptyMessage: string|null }}
+ */
+export function approvalRowFindingsState(application) {
+  const verdict = application.review_verdict ?? null;
+  const findings = Array.isArray(application.review_findings) ? application.review_findings : [];
+  const isEmpty = findings.length === 0;
+  const expanded = verdict === 'FAIL' || (verdict !== 'PASS' && isEmpty);
+  const emptyMessage = isEmpty && verdict !== 'PASS' ? 'No findings recorded' : null;
+  return { expanded, emptyMessage };
+}
+
+/**
+ * Total classification of the Review page's "Applications awaiting approval" row Approve button
+ * (review-approvals-list PR spec A3): hidden entirely when the row has no linked resume yet (nothing to
+ * approve against -- server-side approve() would reject this the same way); otherwise visible, and
+ * disabled (with the reason shown) when a request for this row is already in flight, when the row is
+ * `blocked` (apply exclusion HARD branch or a closed listing status -- src/core/applications.js's
+ * checkApplicationBlockers), or when `sibling_active` (another application for the same job already
+ * reached approved/submitting/submitted/confirmed). `blocked` takes precedence over `sibling_active` when
+ * both are true (a `blocked_reason` string is always present in that case; `sibling_active` alone is not).
+ * @param {{ resume_doc_id?: number|string|null, blocked?: boolean, blocked_reason?: string|null, sibling_active?: boolean }} row
+ * @param {{ inFlight?: boolean }} [state]
+ * @returns {{ visible: boolean, disabled: boolean, reason: string|null }}
+ */
+export function approvalRowApproveState(row, state = {}) {
+  const hasResume = row.resume_doc_id !== null && row.resume_doc_id !== undefined;
+  if (!hasResume) return { visible: false, disabled: true, reason: null };
+  if (state.inFlight) return { visible: true, disabled: true, reason: null };
+  if (row.blocked) return { visible: true, disabled: true, reason: row.blocked_reason ?? 'Blocked.' };
+  if (row.sibling_active) {
+    return { visible: true, disabled: true, reason: 'Another application for this job is already approved, submitting, submitted, or confirmed.' };
+  }
+  return { visible: true, disabled: false, reason: null };
+}
