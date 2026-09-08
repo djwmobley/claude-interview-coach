@@ -85,13 +85,29 @@ describe('sql/011_triage_actor.sql', () => {
     await client.query(SQL);
   });
 
-  test('the constraint is named ic_job_events_actor_auto_check and there is exactly one CHECK constraint on actor', async () => {
-    await client.query(SQL);
-    const constraints = await client.query(`
+  test('exactly one CHECK constraint covers actor, and re-applying this file never changes which one', async () => {
+    // Definition-comparison guard (ic_ensure_widened_check, sql/009): bin/bootstrap-test-db.js's
+    // MIGRATIONS list applies sql/012_applications.sql right after this file, so by the time any test
+    // file runs, the column is normally already widened past this file's own target set under
+    // sql/012's own constraint name (ic_job_events_actor_apply_check), not this file's
+    // ic_job_events_actor_auto_check. Re-running this file's SQL must be a true no-op in that case --
+    // it must NOT drop the wider constraint and reinstall its own narrower one (that name-keyed
+    // regression is exactly the 2026-09-06 incident this guard replaced). So this test asserts the
+    // re-run is idempotent on WHATEVER constraint currently covers the column, not on a specific name.
+    const before_ = await client.query(`
       SELECT c.conname FROM pg_constraint c JOIN pg_class t ON t.oid = c.conrelid
       WHERE t.relname = 'ic_job_events' AND c.contype = 'c' AND pg_get_constraintdef(c.oid) ILIKE '%actor%'
     `);
-    assert.equal(constraints.rowCount, 1);
-    assert.equal(constraints.rows[0].conname, 'ic_job_events_actor_auto_check');
+    assert.equal(before_.rowCount, 1);
+    const nameBefore = before_.rows[0].conname;
+
+    await client.query(SQL);
+
+    const after_ = await client.query(`
+      SELECT c.conname FROM pg_constraint c JOIN pg_class t ON t.oid = c.conrelid
+      WHERE t.relname = 'ic_job_events' AND c.contype = 'c' AND pg_get_constraintdef(c.oid) ILIKE '%actor%'
+    `);
+    assert.equal(after_.rowCount, 1, 'exactly one CHECK constraint must still cover actor');
+    assert.equal(after_.rows[0].conname, nameBefore, 're-applying sql/011 must never change which constraint covers actor');
   });
 });
