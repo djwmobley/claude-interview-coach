@@ -835,7 +835,20 @@ describe('approve() blockers (review-approvals-list PR spec A2): blocked employe
   test('closed listing status (STATUS_GROUPS.closed): rejected even though the exclusion classifier itself is eligible', async () => {
     const listingId = await insertCustomListing({ status: 'lost' });
     const appId = await seedDocsReadyWithResume(listingId, 'resumes/ZZ-Approve-Blockers-Closed.docx');
-    await assert.rejects(approve(client, appId, { outputRoot }), /approve\(\) blocked: listing status is "lost" \(closed\)/);
+    await assert.rejects(approve(client, appId, { outputRoot }), new RegExp(`approve\\(\\) blocked: listing ${listingId} status is "lost" \\(closed\\)`));
+    const row = await getApplication(client, appId);
+    assert.equal(row.state, 'docs_ready');
+  });
+
+  // Follow-up fix: the closed-status blocker is dedup-tree-aware, matching blocked_company/
+  // already_applied_listing/sibling_active above -- a docs_ready application sitting on a DUPLICATE
+  // listing whose own status column is still open must still be blocked once the ROOT listing (the same
+  // real job) has been marked closed. blocked_reason names the ROOT's own listing id, not the duplicate's.
+  test('closed status on a dedup-tree ROOT (not the application\'s own listing): rejected, reason names the root', async () => {
+    const rootId = await insertCustomListing({ status: 'dead' });
+    const dupId = await insertCustomListing({ duplicateOf: rootId });
+    const appId = await seedDocsReadyWithResume(dupId, 'resumes/ZZ-Approve-Blockers-Closed-Root.docx');
+    await assert.rejects(approve(client, appId, { outputRoot }), new RegExp(`approve\\(\\) blocked: listing ${rootId} status is "dead" \\(closed\\)`));
     const row = await getApplication(client, appId);
     assert.equal(row.state, 'docs_ready');
   });

@@ -706,12 +706,20 @@ export const SIBLING_ACTIVE_STATES = Object.freeze(['approved', 'submitting', 's
  * Shared blocker check for approve() (below) and the Review page's "Applications awaiting approval" list
  * (dashboard route GET /api/applications, review-approvals-list PR spec A1/A2): whether an application's
  * listing is blocked by the apply exclusion classifier's HARD branches or a closed listing status
- * (src/core/statuses.js STATUS_GROUPS.closed), and whether a sibling application anywhere in the listing's
- * dedup tree (src/apply/exclusions.js's own duplicate_of walk) has already reached one of
- * SIBLING_ACTIVE_STATES. `blocked`/`blockedReason` and `siblingActive` are reported separately rather than
- * collapsed into one boolean: a sibling in SIBLING_ACTIVE_STATES is also always `blocked` (it is a
- * non-withdrawn sibling, so already_applied_listing fires), but the reverse is not true -- `blocked` alone
- * does not tell a caller WHICH specific, more actionable condition applies.
+ * (src/core/statuses.js STATUS_GROUPS.closed) anywhere in the listing's dedup tree, and whether a sibling
+ * application anywhere in that same tree (src/apply/exclusions.js's own duplicate_of walk) has already
+ * reached one of SIBLING_ACTIVE_STATES. `blocked`/`blockedReason` and `siblingActive` are reported
+ * separately rather than collapsed into one boolean: a sibling in SIBLING_ACTIVE_STATES is also always
+ * `blocked` (it is a non-withdrawn sibling, so already_applied_listing fires), but the reverse is not true
+ * -- `blocked` alone does not tell a caller WHICH specific, more actionable condition applies.
+ *
+ * The closed-status check is dedup-tree-aware (follow-up fix, matching blocked_company/
+ * already_applied_listing/sibling_active, which were already tree-aware from the start): it is not enough
+ * to check only `application.listing_id`'s own status column, because the same real-world job can exist
+ * as more than one listing row (root + duplicate_of descendants) with independently-set status columns.
+ * An operator who marks the ROOT listing dead/lost/passed/etc. must also block Approve on an application
+ * sitting on a DUPLICATE row whose own status was never separately updated -- otherwise the closed status
+ * signal on one row is silently invisible to an application living on another row of the very same job.
  *
  * `excludeApplicationId` is always set to `application.id` when calling classifyExclusion: the
  * application's OWN row must never count as "already applied" against itself (see classifyExclusion's own
@@ -743,18 +751,25 @@ export async function checkApplicationBlockers(client, application, opts = {}) {
   };
   const verdict = await classifyExclusion(exclusionListing, { client, config, excludeApplicationId: application.id });
 
+  const rootId = await walkDuplicateRoot(client, application.listing_id);
+  const treeIds = await collectDuplicateTreeIds(client, rootId);
+
   let blocked = false;
   let blockedReason = null;
   if (HARD_BRANCHES.includes(verdict.branch)) {
     blocked = true;
     blockedReason = verdict.reason;
-  } else if (STATUS_GROUPS.closed.includes(listing.status)) {
-    blocked = true;
-    blockedReason = `listing status is "${listing.status}" (closed)`;
+  } else {
+    const closedRes = await client.query(
+      `SELECT id, status FROM ic_job_listings WHERE id = ANY($1::int[]) AND status = ANY($2::text[]) ORDER BY id ASC LIMIT 1`,
+      [treeIds, STATUS_GROUPS.closed],
+    );
+    if (closedRes.rowCount > 0) {
+      blocked = true;
+      blockedReason = `listing ${closedRes.rows[0].id} status is "${closedRes.rows[0].status}" (closed)`;
+    }
   }
 
-  const rootId = await walkDuplicateRoot(client, application.listing_id);
-  const treeIds = await collectDuplicateTreeIds(client, rootId);
   const siblingRes = await client.query(
     `SELECT 1 FROM ic_job_applications WHERE listing_id = ANY($1::int[]) AND id <> $2 AND state = ANY($3::text[]) LIMIT 1`,
     [treeIds, application.id, SIBLING_ACTIVE_STATES],

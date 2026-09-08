@@ -242,6 +242,17 @@ describe('GET /api/applications: row shape, blocked/sibling_active flags, cap an
     assert.match(row.blocked_reason, /"lost"/);
   });
 
+  test('closed status on a dedup-tree ROOT (not the row\'s own listing): blocked true, reason names the root listing id', async () => {
+    const rootId = await seedListing({ status: 'dead' });
+    const dupId = await seedListing({ duplicateOf: rootId });
+    const appId = await seedApplication(dupId, { state: 'docs_ready' });
+    const r = await get('/api/applications?state=docs_ready');
+    const row = r.json.rows.find((x) => x.application_id === appId);
+    assert.equal(row.listing_id, dupId, 'sanity: the row itself is the duplicate, not the root');
+    assert.equal(row.blocked, true);
+    assert.match(row.blocked_reason, new RegExp(`listing ${rootId} status is "dead"`));
+  });
+
   test('sibling_active: a duplicate listing whose own application already reached approved', async () => {
     const rootId = await seedListing();
     const dupId = await seedListing({ duplicateOf: rootId });
