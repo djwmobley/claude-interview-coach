@@ -14,14 +14,24 @@
  *
  * Selection (src/core/dedup.js/src/core/scan-run.js's own liveness/eligibility guards, restated here since
  * this script reads rows the scan pipeline already wrote rather than a fresh list page):
- *   - status IN ('maybe','review','apply')                      -- skipped with --ids (see below)
+ *   - status IN ('maybe','review','apply') OR the fit-sweep predicate (fix/detail-fit-sweep spec S4:
+ *     src/core/detail-fit-sweep.js's fitSweepPredicateSql -- fit_score >= config/auto-apply.json's
+ *     fitFloor, an empty description, not a terminal status, not expired/stale/absent, no active
+ *     application) -- skipped with --ids (see below), UNIONed rather than replacing the original status
+ *     set so a status='new' row that already looks like a good fit is no longer permanently invisible to
+ *     this script just because it never crossed detailFetchMinPrescore on a live scan
  *   - expired_at IS NULL AND duplicate_of IS NULL                -- never a stale or merged-away row
  *   - detail_outcome IS DISTINCT FROM 'fetched'                  -- never re-fetch an already-successful row
  *   - detail_attempts < the row's OWN source's effective detailMaxAttempts (per-source override, falling
  *     back to config/adapters.json's run-level default) -- same retry cap src/core/scan-run.js's own
- *     processListing() enforces for a re-queued 'update' row
+ *     processListing() enforces for a re-queued 'update' row; applied AFTER this query, in JS (see
+ *     `candidates` below), uniformly over every returned row regardless of which half of the union it
+ *     matched, so a fit-sweep-matched row gets the identical attempts-cap treatment a status-matched row
+ *     already did
  *   - the row's source resolves to an adapter that exports fetchDetail at all (lever and gmail do not)
- * Ordered prescore DESC NULLS LAST, id (highest-value rows first, ties broken by insertion order).
+ * Ordered prescore DESC NULLS LAST, id (highest-value rows first, ties broken by insertion order) --
+ * UNCHANGED by the fit-sweep union: a fit-sweep-only match is simply interleaved into this same ordering
+ * by its own prescore, never given separate priority.
  *
  * --ids=<comma list> targets specific listing ids directly: this bypasses the `status IN (...)` filter
  * (a human can point this script at a specific row regardless of its current status) but NEVER the
@@ -93,6 +103,7 @@ import { makeRateLimiter } from '../src/core/ratelimit.js';
 import { connectSession as defaultConnectSession } from '../src/browser/session.js';
 import { makeCapability } from '../src/browser/capability.js';
 import { resolveSources, USER_AGENT } from '../src/core/scan-run.js';
+import { fitSweepPredicateSql } from '../src/core/detail-fit-sweep.js';
 import { launchChrome as defaultLaunchChrome } from './scan.js';
 
 const USAGE = 'usage: node bin/backfill-detail.js [--dry-run] [--limit N] [--ids=1,2,3] [--source=name] [--json [out]]';
@@ -142,9 +153,11 @@ function effectiveMaxAttempts(source, config) {
 }
 
 /**
- * Build the candidate query. `ids` bypasses the status filter (never the fetched/attempts/capability
- * guards); `source` adds an extra restriction on top of whichever selection mode is active.
- * @param {{ ids: number[]|null, source: string|null, detailSources: string[] }} o
+ * Build the candidate query. `ids` bypasses the status/fit-sweep filter entirely (never the
+ * fetched/attempts/capability guards); `source` adds an extra restriction on top of whichever selection
+ * mode is active. `fitFloor` (config/auto-apply.json's autoApply.fitFloor) is required whenever `ids` is
+ * not given -- it feeds the fit-sweep half of the union (fix/detail-fit-sweep spec S4).
+ * @param {{ ids: number[]|null, source: string|null, detailSources: string[], fitFloor: number }} o
  */
 function buildCandidateQuery(o) {
   const clauses = [
@@ -161,7 +174,13 @@ function buildCandidateQuery(o) {
     params.push(o.ids);
     clauses.push(`id = ANY($${params.length}::int[])`);
   } else {
-    clauses.push(`status IN ('maybe','review','apply')`);
+    // fix/detail-fit-sweep spec S4: UNION the original status set with the shared fit-sweep predicate,
+    // never replace it -- a row matching either half is a candidate, and the fit-sweep half's own status
+    // clause (status IS NULL OR status IN ('new','maybe','shortlisted')) already excludes every terminal
+    // status on its own, so no terminal status is ever reopened by this union.
+    const pred = fitSweepPredicateSql({ paramOffset: params.length, fitFloor: o.fitFloor });
+    params.push(...pred.params);
+    clauses.push(`(status IN ('maybe','review','apply') OR ${pred.sql})`);
   }
   if (o.source) {
     params.push(o.source);
@@ -264,7 +283,7 @@ export async function runBackfill(args, deps, client) {
       }
     });
 
-  const { sql, params } = buildCandidateQuery({ ids: args.ids, source: args.source, detailSources });
+  const { sql, params } = buildCandidateQuery({ ids: args.ids, source: args.source, detailSources, fitFloor: config.autoApply.fitFloor });
   const rows = (await client.query(sql, params)).rows;
 
   const maxAttemptsByRow = new Map();

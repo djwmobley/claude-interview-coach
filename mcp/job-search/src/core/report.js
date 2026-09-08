@@ -769,6 +769,16 @@ export function renderTriageLine(triage) {
  * excluded: it is not a detail-fetch attempt of any kind, so it would only dilute this line). Returns an
  * empty array (renders nothing) when a run's stats predate this fix (no details_by_source at all), so an
  * old run's report is unchanged rather than showing a block of zeros.
+ *
+ * fix/detail-fit-sweep spec S3: every line also carries a `fit sweep queued N / fetched M` suffix,
+ * ALWAYS -- even 0/0 -- for every source present in details_by_source at all (scan-run.js's
+ * ensureDetailsBucket seeds fit_sweep_queued/fit_sweep_fetched at 0 the moment a source's bucket is first
+ * created, whether by the ordinary detail-queue path or the fit-sweep path itself, so both fields are
+ * always real numbers here, never undefined, for any run produced after this fix). A run whose stats
+ * predate this fix entirely has no details_by_source at all and still renders nothing (the early return
+ * above); a run produced by this fix's own scan-run.js but before some OTHER future change might in
+ * principle lack these two fields on an old bucket -- the `?? 0` below covers that gracefully by showing
+ * "fit sweep queued 0 / fetched 0" rather than "undefined".
  * @param {Record<string, any>|undefined} stats
  * @returns {string[]}
  */
@@ -780,7 +790,8 @@ function detailsBySourceLines(stats) {
     // timeout (scan-hang-timeouts fix, spec item D) is a sub-count of `error` above, not an additional
     // total -- shown only when non-zero so an old run's report line, and every run with none, is unchanged.
     const timeoutSuffix = d.timeout ? ` / timeout ${d.timeout}` : '';
-    return `details: ${src} fetched ${d.fetched ?? 0} / empty ${d.empty ?? 0} / error ${d.error ?? 0} / skipped ${skipped}${timeoutSuffix}`;
+    const fitSweepSuffix = ` / fit sweep queued ${d.fit_sweep_queued ?? 0} / fetched ${d.fit_sweep_fetched ?? 0}`;
+    return `details: ${src} fetched ${d.fetched ?? 0} / empty ${d.empty ?? 0} / error ${d.error ?? 0} / skipped ${skipped}${timeoutSuffix}${fitSweepSuffix}`;
   });
 }
 

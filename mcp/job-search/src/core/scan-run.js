@@ -35,7 +35,8 @@ import { JobSearchError, errFields } from './errors.js';
 import { log as defaultLog } from './logger.js';
 import { normalizeListing, DETAIL_MIN_CHARS } from './normalize.js';
 import { classify, makePgLookups } from './dedup.js';
-import { applyDecision, adoptUnclassifiedRows } from './upsert.js';
+import { applyDecision, adoptUnclassifiedRows, updateListing } from './upsert.js';
+import { buildScanFitSweepQuery } from './detail-fit-sweep.js';
 import { prescore } from './prescore.js';
 import { classifyNoise, weightedPrescore, getDefaultNoiseRules } from './noise.js';
 import { embedSafe, embeddingText } from './embed.js';
@@ -139,7 +140,9 @@ export const CLOSE_ALL_TIMEOUT_MS = 10000;
  * @property {number} detail_skipped_cancelled rows still queued when the run's abort signal fired mid-runDetailPass
  * @property {number} detail_not_queued rows never eligible for the detail queue at all (cross_source_dup/repost, or update rows already fetched/attempts-capped)
  * @property {number} detail_timeout informational count (scan-hang-timeouts fix, spec item A), layered on top of `detail_error` exactly the way detail_skipped_run_cap layers on top of detail_skipped_budget: a row counted here is ALSO counted in detail_error (same finalized outcome), this is just "how many of those errors were specifically a per-item DETAIL_TIMEOUT" for reporting.
- * @property {Record<string, { fetched: number, empty: number, error: number, skipped_budget: number, skipped_gate: number, skipped_cancelled: number, timeout: number }>} details_by_source per-source breakdown of the six outcomes above (not_queued excluded) plus `timeout` (a sub-count of `error`, see detail_timeout above), keyed by source name; only populated for a source that queued at least one row
+ * @property {number} detail_fit_sweep_queued (fix/detail-fit-sweep spec S3) rows selected by the fit-sweep predicate (src/core/detail-fit-sweep.js) across every source this run, regardless of outcome. Deliberately a SEPARATE counter from detail_fetched/detail_not_queued/etc. above -- a fit-sweep row was never seen on this run's own list pages, so folding it into those list-page-derived counters would conflate two different discovery mechanisms. Always present, even 0.
+ * @property {number} detail_fit_sweep_fetched (fix/detail-fit-sweep spec S3) subset of detail_fit_sweep_queued above whose detail fetch outcome was 'fetched' (description >= DETAIL_MIN_CHARS). Always present, even 0.
+ * @property {Record<string, { fetched: number, empty: number, error: number, skipped_budget: number, skipped_gate: number, skipped_cancelled: number, timeout: number, fit_sweep_queued: number, fit_sweep_fetched: number }>} details_by_source per-source breakdown of the six outcomes above (not_queued excluded) plus `timeout` (a sub-count of `error`, see detail_timeout above) and the fit_sweep_queued/fit_sweep_fetched pair (spec S3, always present for any source whose adapter exports fetchDetail -- not gated on "queued at least one row" the way the rest of this bucket historically was)
  * @property {number} dedup_sticky_skip_merged rows that would otherwise have created a review-queue row
  *   but instead auto-merged into a STICKY-ELIGIBLE skip/passed/lost root (sticky-skip spec part B,
  *   src/core/upsert.js's findStickySkipRoot()); also counted under `cross_source_dup` above, since the
@@ -361,9 +364,20 @@ async function executeRun(p) {
   const stats = {
     fetched: 0, new: 0, updated: 0, cross_source_dup: 0, repost: 0, ambiguous: 0, errors: 0, unembedded: 0, stale_dropped: 0,
     detail_fetched: 0, detail_empty: 0, detail_error: 0, detail_skipped_budget: 0, detail_skipped_run_cap: 0, detail_skipped_gate: 0, detail_skipped_cancelled: 0, detail_not_queued: 0, detail_timeout: 0,
+    detail_fit_sweep_queued: 0, detail_fit_sweep_fetched: 0,
     details_by_source: {},
     dedup_sticky_skip_merged: 0, adopted: 0, expired: 0, pages_by_source: {},
   };
+  /**
+   * Shared per-source details_by_source bucket, always carrying the fit-sweep counters (spec S3) alongside
+   * the six pre-existing ones -- a single creation point so every caller (the ordinary detail-queue path
+   * and the fit-sweep path below) gets the identical shape rather than two independently-typed literals
+   * drifting apart.
+   * @param {string} name
+   */
+  function ensureDetailsBucket(name) {
+    return (stats.details_by_source[name] ??= { fetched: 0, empty: 0, error: 0, skipped_budget: 0, skipped_gate: 0, skipped_cancelled: 0, timeout: 0, fit_sweep_queued: 0, fit_sweep_fetched: 0 });
+  }
   // Seeded with anything the caller already knew about before this run started (scan-never-skip fix): a
   // config-lock mismatch, an unlocked rubric, or a self-healed/failed Chrome launch. Each carries
   // severity:'warning' so the status computation at finalize below ignores it; a run-level failure this
@@ -676,7 +690,7 @@ async function executeRun(p) {
     assert.ok(DETAIL_OUTCOME_SET.has(detailOutcome), `finalizeListing: detailOutcome must be one of ${DETAIL_OUTCOMES.join('|')}, got ${JSON.stringify(detailOutcome)}`);
     stats[DETAIL_OUTCOME_STAT_KEYS[detailOutcome]]++;
     if (detailOutcome !== 'not_queued') {
-      const bucket = (stats.details_by_source[s.name] ??= { fetched: 0, empty: 0, error: 0, skipped_budget: 0, skipped_gate: 0, skipped_cancelled: 0, timeout: 0 });
+      const bucket = ensureDetailsBucket(s.name);
       bucket[detailOutcome]++;
     }
     const detailSkipped = detailOutcome === 'skipped_budget';
@@ -849,7 +863,7 @@ async function executeRun(p) {
     }
     if (cutReason === 'cap') return { cutByCap: true };
     warnings.push(`detail fetch timed out for ${rec.source} ${rec.external_id ?? ''} after ${timeoutMs}ms (DETAIL_TIMEOUT)`);
-    const bucket = (stats.details_by_source[s.name] ??= { fetched: 0, empty: 0, error: 0, skipped_budget: 0, skipped_gate: 0, skipped_cancelled: 0, timeout: 0 });
+    const bucket = ensureDetailsBucket(s.name);
     bucket.timeout++;
     stats.detail_timeout++;
     return { outcome: 'error', applyDetail: null };
@@ -930,10 +944,20 @@ async function executeRun(p) {
    * @param {import('../adapters/base.js').AdapterCtx} ctx
    * @param {Array<{ ev: import('../adapters/base.js').ListingEvent, rec: import('./normalize.js').NormalizedListing, decision: import('./dedup.js').Decision, ps: number, psRaw: number, noiseClass: string, seq: number }>} detailQueue
    */
-  async function runDetailPass(s, ctx, detailQueue) {
+  /**
+   * @param {{ name: string, adapter: import('../adapters/base.js').Adapter, cfg: any }} s
+   * @param {import('../adapters/base.js').AdapterCtx} ctx
+   * @param {Array<{ ev: import('../adapters/base.js').ListingEvent, rec: import('./normalize.js').NormalizedListing, decision: import('./dedup.js').Decision, ps: number, psRaw: number, noiseClass: string, seq: number }>} detailQueue
+   * @param {number|null} [capOverride] fit-sweep share cap (spec S2): when given, REPLACES `s.cfg.maxDetailsPerRun`
+   *   as this pass's own per-run cap (the run-queue's share after the sweep's own share -- and any leftover
+   *   reallocated back from an under-subscribed sweep -- has already been subtracted by the caller). When
+   *   omitted, falls back to `s.cfg.maxDetailsPerRun` exactly as before this fix (every non-scan-run.js
+   *   caller, and every test that calls into this path without a fit-sweep source, is unaffected).
+   */
+  async function runDetailPass(s, ctx, detailQueue, capOverride) {
     const dateNum = (/** @type {string|null} */ d) => (d ? Date.parse(d) || 0 : -Infinity);
     const sorted = [...detailQueue].sort((a, b) => (b.ps - a.ps) || (dateNum(b.rec.posted_at) - dateNum(a.rec.posted_at)) || (a.seq - b.seq));
-    const maxDetailsPerRun = typeof s.cfg.maxDetailsPerRun === 'number' ? s.cfg.maxDetailsPerRun : null;
+    const maxDetailsPerRun = capOverride !== undefined ? capOverride : (typeof s.cfg.maxDetailsPerRun === 'number' ? s.cfg.maxDetailsPerRun : null);
     let queuedSkippedFromHere = false;
     let runCapHit = false;
     let attempted = 0;
@@ -997,6 +1021,182 @@ async function executeRun(p) {
         }
       }
       await finalizeListing(s, ev, rec, decision, ps, psRaw, noiseClass, detailOutcome, applyDetail);
+    }
+  }
+
+  /**
+   * Fit-sweep analog of tryFetchDetail above (fix/detail-fit-sweep, spec S1), operating on an EXISTING
+   * ic_job_listings row (src/core/detail-fit-sweep.js's buildScanFitSweepQuery) instead of a freshly-seen
+   * ListingEvent. Deliberately mirrors bin/backfill-detail.js's own fetchDetailNoDedup rather than
+   * tryFetchDetail's classify()-calling path: a description that did not exist at list-collection time can
+   * retroactively look, via dedup.js's description_hash matching, like a repost/cross-source-dup of some
+   * OTHER row already in the database -- a real risk for a row this run never even saw on a list page. So
+   * this path recomputes only prescore/noise from the fetched description and is written directly via
+   * updateListing() in writeSweepOutcome below, never through applyDecision()'s merge/repost machinery (same
+   * DEDUP BYPASS rationale backfill-detail.js's own header comment already documents for the identical
+   * situation).
+   * @param {{ name: string, adapter: import('../adapters/base.js').Adapter, cfg: any }} s
+   * @param {import('../adapters/base.js').AdapterCtx} ctx
+   * @param {any} row a fit-sweep candidate row (src/core/detail-fit-sweep.js's FIT_SWEEP_SELECT_COLUMNS)
+   */
+  async function tryFetchSweepDetail(s, ctx, row) {
+    /** @type {any} */
+    let d = null;
+    try {
+      d = await s.adapter.fetchDetail({ url: row.url, url_normalized: row.url_normalized, external_id: row.external_id, source: row.source }, ctx);
+    } catch (err) {
+      if (err instanceof JobSearchError && err.code === 'CANCELLED') throw err;
+      if (err instanceof JobSearchError && err.code === 'BUDGET_EXHAUSTED') return { outcome: 'skipped_budget', applyDetail: null };
+      warnings.push(`fit sweep detail fetch failed for ${row.source} #${row.id}: ${errFields(err).err_code}`);
+      return { outcome: 'error', applyDetail: null };
+    }
+    const applyDetail = d && (d.externalApplyUrl !== undefined || d.easyApplyOnly !== undefined || d.applyProbe !== undefined)
+      ? { externalApplyUrl: d.externalApplyUrl ?? null, easyApplyOnly: Boolean(d.easyApplyOnly), applyProbe: d.applyProbe ?? null }
+      : null;
+    if (d && d.description) {
+      const rec2 = normalizeListing({
+        title: row.title, company: row.company, url: row.url, location: row.location,
+        remoteMode: row.remote_mode, remoteDeclared: row.remote_declared,
+        salaryMin: row.salary_min, salaryMax: row.salary_max, salaryRaw: row.salary_raw,
+        postedAt: row.posted_at, source: row.source, description: d.description,
+      });
+      const psRaw2 = prescore(rec2, profile);
+      const noiseClass2 = classifyNoise(rec2, { rules: noiseRules, knownSources: noiseKnownSources });
+      const ps2 = weightedPrescore(psRaw2, noiseClass2, { rules: noiseRules });
+      const outcome = rec2.description && rec2.description.length >= DETAIL_MIN_CHARS ? 'fetched' : 'empty';
+      return { outcome, rec: rec2, ps: ps2, psRaw: psRaw2, noiseClass: noiseClass2, applyDetail };
+    }
+    if (d && d.reason === 'not_found') return { outcome: 'error', applyDetail };
+    return { outcome: 'empty', applyDetail };
+  }
+
+  /**
+   * Timeout/abort wrapper for tryFetchSweepDetail, deliberately DUPLICATING tryFetchDetailWithTimeout's own
+   * cutoff/teardown logic (scan-hang-timeouts fix, PR #58) rather than sharing it: that logic is exactly
+   * the mechanism the 2026-09-07 incident exists to fix, merged into main the day before this fix, so this
+   * module accepts the small duplication rather than risk an unintended behavior change to already-tested,
+   * hang-prevention-critical code. Same three-shape return contract as tryFetchDetailWithTimeout.
+   * @param {{ name: string, adapter: import('../adapters/base.js').Adapter, cfg: any }} s
+   * @param {import('../adapters/base.js').AdapterCtx} ctx
+   * @param {any} row
+   */
+  async function tryFetchSweepDetailWithTimeout(s, ctx, row) {
+    const timeoutMs = typeof s.cfg.detailFetchTimeoutMs === 'number' ? s.cfg.detailFetchTimeoutMs : runCfg.detailFetchTimeoutMs;
+    /** @type {'timeout'|'cap'|null} */
+    let cutReason = null;
+    let settled = false;
+    const cutPromise = new Promise((resolve) => {
+      const finish = (/** @type {'timeout'|'cap'} */ reason) => {
+        if (settled) return;
+        settled = true;
+        cutReason = reason;
+        clearTimeout(timer);
+        signal.removeEventListener('abort', onAbort);
+        resolve(undefined);
+      };
+      const onAbort = () => finish('cap');
+      const timer = setTimeout(() => finish('timeout'), timeoutMs);
+      if (signal.aborted) onAbort();
+      else signal.addEventListener('abort', onAbort, { once: true });
+    });
+    const fetchPromise = tryFetchSweepDetail(s, ctx, row);
+    const raced = await Promise.race([
+      fetchPromise.then((result) => ({ cut: false, result })),
+      cutPromise.then(() => ({ cut: true })),
+    ]);
+    if (!raced.cut) {
+      settled = true;
+      return raced.result;
+    }
+    fetchPromise.catch(() => {});
+    const torndown = await teardownCapability(s.name);
+    if (!torndown) {
+      return { abandonRest: true, outcome: /** @type {const} */ (cutReason === 'timeout' ? 'error' : 'skipped_cancelled') };
+    }
+    if (cutReason === 'cap') return { cutByCap: true };
+    warnings.push(`fit sweep detail fetch timed out for ${row.source} #${row.id} after ${timeoutMs}ms (DETAIL_TIMEOUT)`);
+    const bucket = ensureDetailsBucket(s.name);
+    bucket.timeout++;
+    stats.detail_timeout++;
+    return { outcome: 'error', applyDetail: null };
+  }
+
+  /**
+   * Persist one fit-sweep row's detail-fetch outcome directly (DEDUP BYPASS, see tryFetchSweepDetail's own
+   * comment above): a synthetic 'update' decision whose branch is never '1a-repost-same-id'/
+   * '1b-repost-same-url', so updateListing() never touches status/expired_at/absent_runs/stale as a side
+   * effect (mirrors bin/backfill-detail.js's noDedupDecision()). Deliberately never writes an
+   * ic_scan_run_items row (unlike finalizeListing's applyDecision() path) -- a fit-sweep row was NOT seen
+   * on this run's own list pages, so recording it as "seen this run" would corrupt expiryPass's own
+   * absence/expiry accounting for a row this run never actually crawled.
+   * @param {{ name: string }} s
+   * @param {any} row
+   * @param {string} outcome one of DETAIL_OUTCOMES (fetched/empty/error/skipped_budget/skipped_cancelled)
+   * @param {{ rec?: import('./normalize.js').NormalizedListing, ps?: number, psRaw?: number, noiseClass?: string, applyDetail?: any }|null} r
+   */
+  async function writeSweepOutcome(s, row, outcome, r) {
+    if (dryRun) return;
+    const rec = r && r.rec;
+    const detailRec = rec ?? { salary_min: null, salary_max: null, salary_raw: null, description: null, description_hash: null, posted_at: null, salary_period: null };
+    const decision = { outcome: 'update', branch: 'fit-sweep', target: { id: row.id }, inherit: null };
+    const writeCtx = {
+      now, pageIndex: null, profileRev: null,
+      prescore: r?.ps ?? null, prescoreRaw: r?.psRaw ?? null, noiseClass: r?.noiseClass ?? null,
+      detailSkipped: outcome === 'skipped_budget', detailOutcome: outcome,
+    };
+    await updateListing(client, /** @type {any} */ (detailRec), decision, writeCtx, { bumpTimesSeen: false });
+    if (r && r.applyDetail) await maybeSaveApplyTarget(s.name, row.id, { url_normalized: row.url_normalized }, r.applyDetail);
+  }
+
+  /**
+   * Drain one source's fit-sweep candidates (fix/detail-fit-sweep spec S1-S3), sharing the SAME daily
+   * details pool and per-item timeout/abort machinery the ordinary detail-queue pass uses, but writing
+   * directly via writeSweepOutcome (never through applyDecision/finalizeListing) since every row here is
+   * already-persisted rather than freshly discovered. `rows` already arrives capped to this source's share
+   * of maxDetailsPerRun (S2) and ordered fit_score DESC / posted_at DESC NULLS LAST / id ASC (S1), so no
+   * further sorting or per-item cap bookkeeping is needed here -- only the daily-pool BUDGET_EXHAUSTED latch
+   * (same "queuedSkippedFromHere" pattern runDetailPass above uses) and the run's own abort signal.
+   * @param {{ name: string, adapter: import('../adapters/base.js').Adapter, cfg: any }} s
+   * @param {import('../adapters/base.js').AdapterCtx} ctx
+   * @param {any[]} rows
+   */
+  async function runFitSweep(s, ctx, rows) {
+    const bucket = ensureDetailsBucket(s.name);
+    bucket.fit_sweep_queued += rows.length;
+    stats.detail_fit_sweep_queued += rows.length;
+    let queuedSkippedFromHere = false;
+    for (let i = 0; i < rows.length; i++) {
+      const row = rows[i];
+      if (signal.aborted) {
+        for (let j = i; j < rows.length; j++) await writeSweepOutcome(s, rows[j], 'skipped_cancelled', null);
+        return;
+      }
+      if (queuedSkippedFromHere) {
+        await writeSweepOutcome(s, row, 'skipped_budget', null);
+        continue;
+      }
+      const r = await tryFetchSweepDetailWithTimeout(s, ctx, row);
+      if (r.abandonRest) {
+        await writeSweepOutcome(s, row, r.outcome, null);
+        if (r.outcome === 'fetched') {
+          bucket.fit_sweep_fetched++;
+          stats.detail_fit_sweep_fetched++;
+        }
+        for (let j = i + 1; j < rows.length; j++) await writeSweepOutcome(s, rows[j], 'error', null);
+        warnings.push(`fit sweep abandoned for ${s.name}: page teardown after a timeout did not complete within 10s`);
+        return;
+      }
+      if (r.cutByCap) {
+        await writeSweepOutcome(s, row, 'skipped_cancelled', null);
+        continue;
+      }
+      const outcome = r.outcome;
+      if (outcome === 'skipped_budget') queuedSkippedFromHere = true;
+      await writeSweepOutcome(s, row, outcome, r);
+      if (outcome === 'fetched') {
+        bucket.fit_sweep_fetched++;
+        stats.detail_fit_sweep_fetched++;
+      }
     }
   }
 
@@ -1101,6 +1301,46 @@ async function executeRun(p) {
         errors.push(errRecord(err, s.name));
         log({ evt: 'source_failed', run_id: runId, source: s.name, ...errFields(err) });
       }
+      // Fit sweep (fix/detail-fit-sweep, spec S1-S3): computed BEFORE the ordinary detail-queue pass so
+      // the share-cap split (S2) and its reciprocal "leftover reuse" can be resolved from a single query
+      // against the real candidate counts on both sides, rather than a second round trip after the queue
+      // pass finishes. Only for a source whose adapter exports fetchDetail (spec S1); `queueCap` stays the
+      // plain per-source maxDetailsPerRun, unmodified, for every other source -- byte-for-byte the same
+      // value runDetailPass computed internally before this fix, so a source with no fetchDetail (or no
+      // maxDetailsPerRun override) sees NO behavior change at all.
+      let sweepRows = /** @type {any[]} */ ([]);
+      let queueCap = typeof s.cfg.maxDetailsPerRun === 'number' ? s.cfg.maxDetailsPerRun : null;
+      if (Boolean(s.adapter.fetchDetail)) {
+        const maxDetailsPerRun = queueCap;
+        // Base split (S2): sweep gets floor(cap/2), minimum 1 once cap >= 2; 0 at cap 0 or 1 (judgment
+        // call: "minimum 1 when the cap is >= 2" is read literally -- a cap of exactly 1 gives that single
+        // slot to the run's own fresher list-page queue rather than guaranteeing the sweep a slot it was
+        // never promised at that cap). A null (unlimited) maxDetailsPerRun leaves the sweep uncapped at
+        // the run level too, same as the ordinary queue -- both still gated by the shared daily details
+        // pool via ctx.reserveDetail() regardless of this split.
+        const sweepBaseShare = maxDetailsPerRun === null ? null : (maxDetailsPerRun >= 2 ? Math.floor(maxDetailsPerRun / 2) : 0);
+        const queueBaseShare = maxDetailsPerRun === null ? null : maxDetailsPerRun - sweepBaseShare;
+        // Never re-select a row THIS run's own list-page queue already resolved to an existing id (an
+        // 'update' decision) -- a row cannot be detail-fetched twice in the same run through two different
+        // paths.
+        const excludeIds = detailQueue.map((item) => item.decision?.target?.id).filter((id) => typeof id === 'number');
+        const maxAttemptsForSource = s.cfg.detailMaxAttempts ?? runCfg.detailMaxAttempts;
+        const { sql, params } = buildScanFitSweepQuery({
+          source: s.name, fitFloor: config.autoApply.fitFloor, detailMaxAttempts: maxAttemptsForSource,
+          excludeIds, limit: maxDetailsPerRun,
+        });
+        const sweepCandidates = (await client.query(sql, params)).rows;
+        const sweepNeed = sweepBaseShare === null ? sweepCandidates.length : Math.min(sweepCandidates.length, sweepBaseShare);
+        const queueNeed = queueBaseShare === null ? detailQueue.length : Math.min(detailQueue.length, queueBaseShare);
+        // Reciprocal leftover reuse (S2): whichever side needs fewer than its own base share gives the
+        // difference to the other side, so an under-subscribed sweep never starves the ordinary queue (or
+        // vice versa) of budget the other side has no use for this run.
+        const leftoverFromQueue = queueBaseShare === null ? 0 : Math.max(0, queueBaseShare - queueNeed);
+        const leftoverFromSweep = sweepBaseShare === null ? 0 : Math.max(0, sweepBaseShare - sweepNeed);
+        queueCap = queueBaseShare === null ? null : queueNeed + leftoverFromSweep;
+        const sweepCap = sweepBaseShare === null ? null : sweepNeed + leftoverFromQueue;
+        sweepRows = sweepCap === null ? sweepCandidates : sweepCandidates.slice(0, sweepCap);
+      }
       // Phase 2 (spec R4): sorted detail-fetch pass over everything list-collection queued for this
       // source, run whenever anything was queued -- REGARDLESS of whether the list pass above threw --
       // and BEFORE expiryPass below so every queued row is persisted (and so has an ic_scan_run_items
@@ -1112,7 +1352,21 @@ async function executeRun(p) {
       if (detailQueue.length) {
         detailPhaseSources.add(s.name);
         try {
-          await runDetailPass(s, ctx, detailQueue);
+          await runDetailPass(s, ctx, detailQueue, queueCap);
+        } finally {
+          detailPhaseSources.delete(s.name);
+        }
+      }
+      // Fit sweep drain (spec S1-S3): runs whenever this source's adapter exports fetchDetail at all --
+      // even with zero candidates -- so its details_by_source bucket (and the two new stats counters)
+      // are ALWAYS present, per spec S3, never gated on "something was queued" the way the six pre-existing
+      // counters historically were. Not wrapped in the CANCELLED-propagating try/catch runDetailPass above
+      // uses: runFitSweep never throws CANCELLED itself (it returns early on an aborted signal instead, see
+      // its own comment), so there is nothing here that needs to interrupt this function's normal flow.
+      if (Boolean(s.adapter.fetchDetail)) {
+        detailPhaseSources.add(s.name);
+        try {
+          await runFitSweep(s, ctx, sweepRows);
         } finally {
           detailPhaseSources.delete(s.name);
         }
