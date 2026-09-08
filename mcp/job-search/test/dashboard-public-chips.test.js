@@ -14,7 +14,7 @@ import { ATS_TYPES, APPLICATION_STATES } from '../src/core/applications.js';
 import { CONFIDENCE_LEVELS } from '../src/apply/ats-detect.js';
 import {
   stageChip, actorBadge, documentChip, sourceChip, runStatusChip, runItemOutcomeChip, atsChip, atsConfidenceChip,
-  applicationStateChip, chipClassName,
+  applicationStateChip, reviewVerdictChip, chipClassName,
 } from '../src/dashboard/public/components/chips.js';
 
 function assertChipShape(chip, ctx) {
@@ -161,6 +161,22 @@ describe('applicationStateChip(): totality over the real APPLICATION_STATES (src
     assertChipShape(applicationStateChip(undefined), 'undefined state');
     assertChipShape(applicationStateChip('some-future-state'), 'unrecognized state');
     assert.equal(applicationStateChip('some-future-state').label, 'Unknown');
+  });
+});
+
+describe('reviewVerdictChip(): total over PASS/FAIL plus the "not reviewed" fallback (review-approvals-list PR spec A3)', () => {
+  test('PASS and FAIL each return their own defined chip', () => {
+    assertChipShape(reviewVerdictChip('PASS'), 'PASS');
+    assert.equal(reviewVerdictChip('PASS').label, 'PASS');
+    assertChipShape(reviewVerdictChip('FAIL'), 'FAIL');
+    assert.equal(reviewVerdictChip('FAIL').label, 'FAIL');
+  });
+
+  test('null/undefined/an unrecognized (unparseable) verdict all fall to "not reviewed", never "Unknown"', () => {
+    for (const v of [null, undefined, 'unparseable', '']) {
+      assertChipShape(reviewVerdictChip(v), `verdict=${String(v)}`);
+      assert.equal(reviewVerdictChip(v).label, 'not reviewed');
+    }
   });
 });
 

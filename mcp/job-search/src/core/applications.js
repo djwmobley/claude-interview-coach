@@ -38,6 +38,7 @@ import { createFollowup } from './followups.js';
 import { loadConfig } from './config.js';
 import { resolveFloor } from './salary-floor.js';
 import { log as defaultLog } from './logger.js';
+import { classifyExclusion, loadExclusionConfig, HARD_BRANCHES, walkDuplicateRoot, collectDuplicateTreeIds } from '../apply/exclusions.js';
 
 /**
  * `created_from` prefix for the unconditional 5-day-nudge follow-up markSubmittedUnwrapped creates below
@@ -690,12 +691,104 @@ function hashOutputFile(outputRoot, relPath) {
 }
 
 /**
+ * States that count as "already actively progressing" for the sibling-active check below (review-
+ * approvals-list PR, A1/A2): once a sibling application anywhere in the listing's dedup tree has reached
+ * one of these, a second application for the same real-world job must never also be approved. A strict
+ * subset of "non-withdrawn" -- deliberately narrower than the exclusion classifier's own
+ * already_applied_listing branch (which fires on ANY non-withdrawn sibling, including one still in
+ * drafting/docs_ready/needs_human/failed) so callers get a more specific, friendlier-to-display signal for
+ * the case an operator most needs a clear reason for: another application for this same job has already
+ * gone out or is going out right now.
+ */
+export const SIBLING_ACTIVE_STATES = Object.freeze(['approved', 'submitting', 'submitted', 'confirmed']);
+
+/**
+ * Shared blocker check for approve() (below) and the Review page's "Applications awaiting approval" list
+ * (dashboard route GET /api/applications, review-approvals-list PR spec A1/A2): whether an application's
+ * listing is blocked by the apply exclusion classifier's HARD branches or a closed listing status
+ * (src/core/statuses.js STATUS_GROUPS.closed) anywhere in the listing's dedup tree, and whether a sibling
+ * application anywhere in that same tree (src/apply/exclusions.js's own duplicate_of walk) has already
+ * reached one of SIBLING_ACTIVE_STATES. `blocked`/`blockedReason` and `siblingActive` are reported
+ * separately rather than collapsed into one boolean: a sibling in SIBLING_ACTIVE_STATES is also always
+ * `blocked` (it is a non-withdrawn sibling, so already_applied_listing fires), but the reverse is not true
+ * -- `blocked` alone does not tell a caller WHICH specific, more actionable condition applies.
+ *
+ * The closed-status check is dedup-tree-aware (follow-up fix, matching blocked_company/
+ * already_applied_listing/sibling_active, which were already tree-aware from the start): it is not enough
+ * to check only `application.listing_id`'s own status column, because the same real-world job can exist
+ * as more than one listing row (root + duplicate_of descendants) with independently-set status columns.
+ * An operator who marks the ROOT listing dead/lost/passed/etc. must also block Approve on an application
+ * sitting on a DUPLICATE row whose own status was never separately updated -- otherwise the closed status
+ * signal on one row is silently invisible to an application living on another row of the very same job.
+ *
+ * `excludeApplicationId` is always set to `application.id` when calling classifyExclusion: the
+ * application's OWN row must never count as "already applied" against itself (see classifyExclusion's own
+ * doc comment on that field -- this is exactly the "re-checking a listing that already has its own
+ * application" case that field exists for).
+ * @param {import('pg').ClientBase} client
+ * @param {{ id: number, listing_id: number }} application
+ * @param {{ config?: import('../apply/exclusions.js').ExclusionConfig, configDir?: string, listing?: any }} [opts]
+ *   `listing` lets a caller that already joined the listing row (the GET /api/applications route) skip a
+ *   redundant SELECT; when absent this fetches the row itself.
+ * @returns {Promise<{ blocked: boolean, blockedReason: string|null, siblingActive: boolean }>}
+ */
+export async function checkApplicationBlockers(client, application, opts = {}) {
+  const config = opts.config ?? loadExclusionConfig(opts.configDir ?? loadConfig().configDir);
+  let listing = opts.listing;
+  if (!listing) {
+    const listingRes = await client.query(
+      `SELECT id, company, company_norm, title, title_norm, apply_url, url, url_normalized, description, status
+       FROM ic_job_listings WHERE id = $1`,
+      [application.listing_id],
+    );
+    if (listingRes.rowCount === 0) throw new JobSearchError('NOT_FOUND', `listing ${application.listing_id} not found`);
+    listing = listingRes.rows[0];
+  }
+  const exclusionListing = {
+    id: Number(application.listing_id), company: listing.company ?? null, companyNorm: listing.company_norm ?? null,
+    title: listing.title ?? null, titleNorm: listing.title_norm ?? null, applyUrl: listing.apply_url ?? null,
+    sourceUrl: listing.url_normalized ?? listing.url ?? null, description: listing.description ?? null,
+  };
+  const verdict = await classifyExclusion(exclusionListing, { client, config, excludeApplicationId: application.id });
+
+  const rootId = await walkDuplicateRoot(client, application.listing_id);
+  const treeIds = await collectDuplicateTreeIds(client, rootId);
+
+  let blocked = false;
+  let blockedReason = null;
+  if (HARD_BRANCHES.includes(verdict.branch)) {
+    blocked = true;
+    blockedReason = verdict.reason;
+  } else {
+    const closedRes = await client.query(
+      `SELECT id, status FROM ic_job_listings WHERE id = ANY($1::int[]) AND status = ANY($2::text[]) ORDER BY id ASC LIMIT 1`,
+      [treeIds, STATUS_GROUPS.closed],
+    );
+    if (closedRes.rowCount > 0) {
+      blocked = true;
+      blockedReason = `listing ${closedRes.rows[0].id} status is "${closedRes.rows[0].status}" (closed)`;
+    }
+  }
+
+  const siblingRes = await client.query(
+    `SELECT 1 FROM ic_job_applications WHERE listing_id = ANY($1::int[]) AND id <> $2 AND state = ANY($3::text[]) LIMIT 1`,
+    [treeIds, application.id, SIBLING_ACTIVE_STATES],
+  );
+  const siblingActive = siblingRes.rowCount > 0;
+
+  return { blocked, blockedReason, siblingActive };
+}
+
+/**
  * docs_ready -> approved ("Approve" in the dashboard, plan section 7 / section 1's "Store the DOCX hash
  * at Approve"). Everything happens inside ONE transaction (the plan's explicit requirement): validate
- * the application is in docs_ready with a linked resume, hash the linked resume DOCX (and cover letter,
- * if linked) via documents.resolveOutputPath's safe path resolution, transition to 'approved', and store
- * resume_hash/coverletter_hash/approved_at on the SAME row UPDATE the transition itself performs (via
- * transitionUnwrapped's extraSet -- never a second, separately-committed UPDATE after the transition).
+ * the application is in docs_ready with a linked resume, reject if the listing/sibling blocker checks
+ * above find a reason to (review-approvals-list PR spec A2 -- protects the detail-page Approve button as
+ * well as the Review page's own Approve, since both call this same function), hash the linked resume DOCX
+ * (and cover letter, if linked) via documents.resolveOutputPath's safe path resolution, transition to
+ * 'approved', and store resume_hash/coverletter_hash/approved_at on the SAME row UPDATE the transition
+ * itself performs (via transitionUnwrapped's extraSet -- never a second, separately-committed UPDATE
+ * after the transition).
  *
  * This slice ships the only writer of approved_at in the whole apply pipeline: transitionUnwrapped's own
  * doc comment on submitted_at/confirmed_at notes "approved_at is deliberately NOT touched by this slice
@@ -706,7 +799,10 @@ function hashOutputFile(outputRoot, relPath) {
  * own and break the "same transaction" requirement for the hash writes.
  * @param {import('pg').ClientBase} client
  * @param {number} id
- * @param {{ outputRoot: string, actor?: string, note?: string|null }} opts
+ * @param {{ outputRoot: string, actor?: string, note?: string|null, exclusionConfig?: import('../apply/exclusions.js').ExclusionConfig, configDir?: string }} opts
+ *   `exclusionConfig`/`configDir` are a test seam only (mirrors createApplication's own `floors` param) --
+ *   production callers never set them, letting checkApplicationBlockers load config/apply-exclusions.json
+ *   fresh from disk as usual.
  */
 export async function approve(client, id, opts) {
   const actor = opts.actor ?? 'dashboard';
@@ -722,6 +818,20 @@ export async function approve(client, id, opts) {
     if (!row.resume_doc_id) {
       throw new JobSearchError('VALIDATION', `approve() requires application ${id} to have a linked resume document`);
     }
+
+    const blockers = await checkApplicationBlockers(c, { id: row.id, listing_id: row.listing_id }, {
+      config: opts.exclusionConfig, configDir: opts.configDir,
+    });
+    if (blockers.blocked) {
+      throw new JobSearchError('VALIDATION', `approve() blocked: ${blockers.blockedReason}`, {
+        details: { application_id: id, reason: blockers.blockedReason },
+      });
+    }
+    if (blockers.siblingActive) {
+      const reason = `another application for this listing (or a duplicate of it) is already ${SIBLING_ACTIVE_STATES.join('/')}`;
+      throw new JobSearchError('VALIDATION', `approve() blocked: ${reason}`, { details: { application_id: id, reason } });
+    }
+
     const resumeDoc = await c.query('SELECT rel_path FROM ic_job_documents WHERE id = $1', [row.resume_doc_id]);
     if (resumeDoc.rowCount === 0) throw new JobSearchError('NOT_FOUND', `document ${row.resume_doc_id} not found`);
     const resumeHash = hashOutputFile(opts.outputRoot, resumeDoc.rows[0].rel_path);

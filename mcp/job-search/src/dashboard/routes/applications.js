@@ -14,7 +14,7 @@ import path from 'node:path';
 import { JobSearchError } from '../../core/errors.js';
 import {
   createApplication, approve, getApplication, getApplicationForListing, retry, markAppliedByHand, resume,
-  listApplicationEvents, recordApplicationEvent, transition,
+  listApplicationEvents, recordApplicationEvent, transition, APPLICATION_STATES, checkApplicationBlockers,
 } from '../../core/applications.js';
 import { classifyApplyUrl } from '../../apply/ats-detect.js';
 import { resolveLatestApplicationScreenshot } from '../../apply/screenshot.js';
@@ -345,6 +345,77 @@ export function register(router, deps, streamHub) {
     runningChains.add(applicationId);
     runApplyNowChain(deps, streamHub, applicationId, listingId).finally(() => { runningChains.delete(applicationId); });
   }, { allowEmptyBody: true });
+
+  // Review page "Applications awaiting approval" list (review-approvals-list PR spec A1). `state` is a
+  // comma-separated list of ic_job_applications.state values, validated against the state machine's own
+  // APPLICATION_STATES (never an allow-list maintained separately from it); default 'docs_ready' when the
+  // query param is absent, empty, or blank (the same "falsy string reads as absent" convention
+  // parseListingsQuery's listParam() uses elsewhere in this dashboard). A present-but-malformed value (an
+  // empty entry from e.g. "docs_ready,") or any entry outside APPLICATION_STATES is a 400 naming the
+  // offending value, never silently dropped. Capped at 200 rows (ordered created_at DESC, id DESC for a
+  // stable tiebreak); `total` is the FULL matching count so the UI can render "showing 200 of N".
+  router.register('GET', '/api/applications', async (ctx) => {
+    const raw = typeof ctx.query.state === 'string' && ctx.query.state.trim() ? ctx.query.state : 'docs_ready';
+    const parts = raw.split(',').map((s) => s.trim());
+    const badEntry = parts.find((s) => !s);
+    if (badEntry !== undefined) {
+      throw new JobSearchError('VALIDATION', `state must not contain an empty value: "${raw}"`, { details: { state: raw } });
+    }
+    const states = [...new Set(parts)];
+    for (const s of states) {
+      if (!APPLICATION_STATES.includes(s)) {
+        throw new JobSearchError('VALIDATION', `unknown application state: "${s}"`, { details: { state: s } });
+      }
+    }
+
+    const configDir = deps.config?.configDir ?? loadConfig().configDir;
+    const exclusionConfig = loadExclusionConfig(configDir);
+
+    const { rows, total } = await deps.withClient(async (c) => {
+      const totalRes = await c.query('SELECT count(*)::int AS n FROM ic_job_applications WHERE state = ANY($1::text[])', [states]);
+      const mainRes = await c.query(
+        // rel_path is joined in (never returned by any other field in this row) so the Review page's Open
+        // resume/Open cover letter buttons can call POST /api/documents/open with the same {path} body
+        // application-card.js's own docRow() already uses -- that route takes a rel_path, not a doc id.
+        `SELECT a.id AS application_id, a.listing_id, a.state, a.review_verdict, a.review_findings,
+                a.resume_doc_id, a.coverletter_doc_id, a.pending_question, a.created_at, a.updated_at,
+                l.title, l.company, l.company_norm, l.title_norm, l.location_norm, l.apply_ats, l.apply_url,
+                l.url, l.url_normalized, l.description, l.status AS listing_status,
+                rd.rel_path AS resume_rel_path, cd.rel_path AS coverletter_rel_path
+         FROM ic_job_applications a
+         JOIN ic_job_listings l ON l.id = a.listing_id
+         LEFT JOIN ic_job_documents rd ON rd.id = a.resume_doc_id
+         LEFT JOIN ic_job_documents cd ON cd.id = a.coverletter_doc_id
+         WHERE a.state = ANY($1::text[])
+         ORDER BY a.created_at DESC, a.id DESC
+         LIMIT 200`,
+        [states],
+      );
+      const out = [];
+      for (const row of mainRes.rows) {
+        const listing = {
+          company: row.company, company_norm: row.company_norm, title: row.title, title_norm: row.title_norm,
+          apply_url: row.apply_url, url: row.url, url_normalized: row.url_normalized, description: row.description,
+          status: row.listing_status,
+        };
+        const blockers = await checkApplicationBlockers(
+          c, { id: Number(row.application_id), listing_id: Number(row.listing_id) }, { config: exclusionConfig, listing },
+        );
+        out.push({
+          listing_id: Number(row.listing_id), title: row.title, company: row.company, location_norm: row.location_norm,
+          apply_ats: row.apply_ats, listing_status: row.listing_status,
+          application_id: Number(row.application_id), state: row.state, review_verdict: row.review_verdict,
+          review_findings: row.review_findings, resume_doc_id: row.resume_doc_id, coverletter_doc_id: row.coverletter_doc_id,
+          resume_rel_path: row.resume_rel_path ?? null, coverletter_rel_path: row.coverletter_rel_path ?? null,
+          parked_reason: row.pending_question && typeof row.pending_question.label === 'string' ? row.pending_question.label : null,
+          created_at: row.created_at, updated_at: row.updated_at,
+          blocked: blockers.blocked, blocked_reason: blockers.blockedReason, sibling_active: blockers.siblingActive,
+        });
+      }
+      return { rows: out, total: Number(totalRes.rows[0].n) };
+    });
+    sendJson(ctx.res, 200, { ok: true, total, rows });
+  });
 
   router.register('GET', '/api/applications/:id', async (ctx) => {
     const id = Number(ctx.params.id);

@@ -81,6 +81,11 @@ let currentRouteName = 'home';
  * itself already renders "Idle" for null, so this is a safe initial value, never a loading flash). */
 let activityState = null;
 
+/** Review nav tab count badge (review-approvals-list PR spec A3): the docs_ready application count from
+ * GET /api/applications' own `total` field (never derived from a page of already-loaded rows -- dashboard
+ * UI restraint rule). 0 renders no badge at all. */
+let reviewBadgeCount = 0;
+
 /** Section 8's chord/reducer state, driven by the module-level keydown listener below. */
 let kbState = initialKbState();
 
@@ -115,10 +120,13 @@ function renderRail() {
       // The `title` attribute is the tooltip shown once app.css's 1180px breakpoint hides
       // `.rail__link-label` and the link goes icon-only, per defect 5: illegible truncated 9px labels are
       // replaced by a single legible icon, never by a shrunken/truncated copy of the same text.
+      const badge = item.route === 'review' && reviewBadgeCount > 0
+        ? h('span', { className: 'rail__badge', text: String(reviewBadgeCount) })
+        : null;
       return h('a', {
         className: `rail__link ${active ? 'rail__link--active' : ''}`.trim(),
         hashHref: buildHash(item.route), attrs: { 'aria-current': active ? 'page' : undefined, title: item.label },
-      }, [railIcon(item.route), h('span', { className: 'rail__link-label', text: item.label })]);
+      }, [railIcon(item.route), h('span', { className: 'rail__link-label', text: item.label }), badge]);
     }),
   ]));
   setChildren(railEl, sections);
@@ -155,6 +163,19 @@ async function pollActivity() {
   activityState = outcome.body;
   updateActivityPill();
   if (backgroundBannerEl) renderBackgroundBanner(backgroundBannerEl, outcome.body.background ?? []);
+}
+
+/** GET /api/applications?state=docs_ready (review-approvals-list PR spec A3): drives the Review nav
+ * tab's count badge. Re-renders the rail only when the count actually changed, matching pollActivity's
+ * own "fetch, then update only the affected DOM" pattern. */
+async function pollReviewBadge() {
+  const outcome = handleOutcome(await getJson('/api/applications', { state: 'docs_ready' }));
+  if (outcome.kind !== 'ok') return;
+  const next = Number(outcome.body.total) || 0;
+  if (next !== reviewBadgeCount) {
+    reviewBadgeCount = next;
+    renderRail();
+  }
 }
 
 async function pollHealth() {
@@ -280,12 +301,15 @@ const sse = createSseClient({
   },
   onChanged(data) {
     // 'changed' fires on application/listing state transitions -- exactly the events that flip the
-    // resume/review/apply runner statuses GET /api/activity reads, so this is refetched here too.
+    // resume/review/apply runner statuses GET /api/activity reads (and the docs_ready count the Review
+    // nav badge shows), so both are refetched here too.
     pollActivity();
+    pollReviewBadge();
     emit('dashboard:changed', data);
   },
   onPollTick() {
     pollActivity();
+    pollReviewBadge();
     emit('dashboard:changed', { kind: 'poll' });
   },
   onDegraded(degraded) {
@@ -298,8 +322,10 @@ renderTopbar();
 applyLayoutClass();
 pollHealth();
 pollActivity();
+pollReviewBadge();
 setInterval(pollHealth, 30000);
 setInterval(pollActivity, 5000);
+setInterval(pollReviewBadge, 30000);
 if (layoutBucket() !== 'narrow') renderRoute(location.hash || '#/');
 
 export { USER_BLOCK_PLACEHOLDER };

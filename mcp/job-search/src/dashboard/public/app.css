@@ -79,6 +79,9 @@ table { border-collapse: collapse; width: 100%; }
 .rail__link--active { background: var(--accent-dim); color: var(--accent); }
 .rail__icon { flex: none; fill: currentColor; }
 .rail__link-label { overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
+/* Review nav tab count badge (review-approvals-list PR spec A3): docs_ready application count, hidden
+   entirely at 0 (see app.js pollReviewBadge -- no badge node is rendered in that case). */
+.rail__badge { margin-left: auto; background: var(--cyan-dim); color: var(--cyan); border-radius: 10px; padding: 1px 7px; font-size: 11px; font-weight: 600; flex: none; }
 
 .topbar__left, .topbar__right { display: flex; align-items: center; gap: 12px; }
 .topbar__search { background: var(--surface2); border: 1px solid var(--border); border-radius: 6px; color: var(--text); padding: 6px 10px; width: 240px; }
@@ -373,6 +376,28 @@ textarea.notes-textarea { min-height: 100px; }
    .filter-modal__section above -- one accent stripe, no other color. */
 .review-bulk-bar { display: flex; align-items: center; justify-content: space-between; gap: 12px; background: var(--surface2); border: 1px solid var(--border); border-left: 3px solid var(--cyan); border-radius: 6px; padding: 8px 12px; margin-bottom: 12px; }
 .review-bulk-bar__count { color: var(--cyan); font-weight: 600; }
+
+/* "Applications awaiting approval" / "Parked (needs human)" section cards (review-approvals-list PR spec
+   A3): same section-card + thin cyan accent restraint as .review-bulk-bar/.filter-modal__section above --
+   one accent stripe, minimal color beyond it. */
+.approval-section { background: var(--surface2); border: 1px solid var(--border); border-left: 3px solid var(--cyan); border-radius: 6px; padding: 10px 14px; margin-bottom: 14px; }
+.approval-section__title { font-size: 13px; color: var(--cyan); text-transform: uppercase; letter-spacing: 0.04em; margin: 0 0 8px; }
+.approval-section__note { color: var(--muted); font-size: 12px; margin: 0 0 8px; }
+.approval-list { display: flex; flex-direction: column; gap: 10px; }
+.approval-row { background: var(--surface); border: 1px solid var(--border); border-radius: 6px; padding: 8px 10px; }
+.approval-row--parked { opacity: 0.85; }
+.approval-row__main { display: flex; flex-wrap: wrap; align-items: center; gap: 8px; }
+.approval-row__title { color: var(--text-strong); font-weight: 600; }
+.approval-row__company, .approval-row__location, .approval-row__age { color: var(--muted); font-size: 12px; }
+.approval-row__findings { margin-top: 6px; }
+.approval-row__findings-toggle { background: none; border: none; color: var(--muted); font-size: 12px; padding: 0; cursor: pointer; }
+.approval-row__findings-toggle:hover { color: var(--text); }
+.approval-row__findings-list { margin: 4px 0 0; padding-left: 16px; font-size: 12px; }
+.approval-row__empty-findings { color: var(--muted); font-size: 12px; margin: 4px 0 0; }
+.approval-row__empty-findings--amber { color: var(--yellow); }
+.approval-row__inline-message { color: var(--red); font-size: 12px; margin: 6px 0 0; }
+.approval-row__actions { display: flex; gap: 6px; margin-top: 8px; }
+.approval-row__parked-reason { color: var(--muted); font-size: 12px; margin: 4px 0 0; }
 
 .run-detail-meta { display: flex; align-items: center; gap: 10px; margin-bottom: 12px; }
 .run-detail-grid { display: grid; grid-template-columns: 1fr 420px; gap: 16px; }
