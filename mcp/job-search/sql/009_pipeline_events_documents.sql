@@ -83,13 +83,16 @@ CREATE INDEX IF NOT EXISTS ic_job_documents_listing_idx ON ic_job_documents (lis
 -- an unrecognized shape is never assumed to cover, and there is no shape under which the widen is
 -- silently skipped without either a matched-and-covering canonical constraint or a NOTICE.
 --
--- Among matched canonical constraints, if any one's value set is already a superset of the set this call
--- asks for, the column is already wide enough for this migration's needs and it does nothing at all --
--- so sql/011 running after sql/012 has already widened the column is a true no-op, not a narrowing
--- regression. Total classification of what it finds on the column: no CHECK constraint at all -> install
--- this one; a canonical-shape CHECK whose value set already covers the target -> no-op; anything else
--- (non-canonical shape, or a canonical shape whose value set is narrower than the target) -> drop every
--- CHECK currently on the column and install this one.
+-- Multiple CHECK constraints on one column are combined by Postgres via implicit AND (every one must
+-- pass), so "already covers" requires EVERY existing CHECK on the column to be canonical AND a superset
+-- of the target set -- not just the widest one found. Stopping at the first covering constraint (an
+-- earlier revision of this helper) can miss a coexisting narrower constraint that would still reject
+-- rows the caller believes are now accepted. Total classification of what it finds on the column: no
+-- CHECK constraint at all -> install this one; every existing CHECK is canonical and covers the target ->
+-- true no-op (so sql/011 running after sql/012 has already widened the column is a no-op, not a
+-- narrowing regression); anything else (any one non-canonical, or any one canonical but narrower than the
+-- target) -> drop EVERY CHECK currently on the column and install this one, with a RAISE NOTICE listing
+-- every dropped constraint's name and the specific reason it did not cover.
 --
 -- Defined with CREATE OR REPLACE (Postgres has no CREATE FUNCTION IF NOT EXISTS) so re-running this file
 -- just redefines the same body -- safe on every server/dashboard startup like the rest of this file.
@@ -124,6 +127,10 @@ DECLARE
   found_values text[];
   covers boolean;
   drop_list text;
+  seen_any boolean := false;
+  all_cover boolean := true;
+  bad_names text[] := '{}';
+  bad_reasons text[] := '{}';
   qualified_table text := format('%I.%I', p_schema, p_table);
   col_ident text := quote_ident(p_column);
   -- A safe SQL identifier never itself contains a regex metacharacter, but this still neutralizes any
@@ -147,6 +154,13 @@ BEGIN
   pat_eq := format('^CHECK \(\(%s = %s\)\)$', col_pat, lit);
   pat_in := format('^CHECK \(%s IN \((?:''(?:[^'']|'''''')*''(?:, )?)+\)\)$', col_pat);
 
+  -- Multiple simultaneous CHECK constraints on one column are combined by Postgres via implicit AND
+  -- (every one must pass for a row to be valid), so "does the column already accept the target set"
+  -- requires EVERY existing CHECK on it to be a canonical single-column enumeration that is itself a
+  -- superset of the target -- checking only the widest one and stopping there (the prior version's
+  -- behavior) can miss a coexisting narrower constraint that would still reject rows the caller believes
+  -- are now accepted. So this loop never returns early on a single covering constraint; it examines all
+  -- of them, and only decides "no-op" once every one has been checked.
   FOR con IN
     SELECT c.conname, pg_get_constraintdef(c.oid) AS def
     FROM pg_constraint c
@@ -155,8 +169,12 @@ BEGIN
     JOIN pg_attribute a ON a.attrelid = t.oid AND a.attnum = ANY (c.conkey)
     WHERE t.relname = p_table AND n.nspname = p_schema AND c.contype = 'c' AND a.attname = p_column
   LOOP
+    seen_any := true;
+
     IF con.def !~ pat_any AND con.def !~ pat_any_cast AND con.def !~ pat_eq AND con.def !~ pat_in THEN
-      RAISE NOTICE 'ic_ensure_widened_check: constraint % on %.% is not one of the recognized single-column enumeration shapes (def: %); treating as not covering', con.conname, p_table, p_column, con.def;
+      all_cover := false;
+      bad_names := array_append(bad_names, con.conname);
+      bad_reasons := array_append(bad_reasons, format('%s: not a recognized single-column enumeration shape (def: %s)', con.conname, con.def));
       CONTINUE;
     END IF;
 
@@ -169,17 +187,28 @@ BEGIN
     END;
 
     IF found_values IS NULL OR array_length(found_values, 1) IS NULL THEN
-      RAISE NOTICE 'ic_ensure_widened_check: constraint % on %.% matched a canonical shape but no literal values could be extracted (def: %); treating as not covering', con.conname, p_table, p_column, con.def;
+      all_cover := false;
+      bad_names := array_append(bad_names, con.conname);
+      bad_reasons := array_append(bad_reasons, format('%s: matched a canonical shape but no literal values could be extracted (def: %s)', con.conname, con.def));
       CONTINUE;
     END IF;
 
     SELECT bool_and(v = ANY (found_values)) INTO covers FROM unnest(p_allowed_values) AS v;
     covers := coalesce(covers, true);
-    IF covers THEN
-      RETURN;
+    IF NOT covers THEN
+      all_cover := false;
+      bad_names := array_append(bad_names, con.conname);
+      bad_reasons := array_append(bad_reasons, format('%s: a recognized canonical shape, but its value set does not cover the target', con.conname));
     END IF;
-    RAISE NOTICE 'ic_ensure_widened_check: constraint % on %.% is a recognized shape but its value set does not cover the target; dropping and reinstalling', con.conname, p_table, p_column;
   END LOOP;
+
+  IF seen_any AND all_cover THEN
+    RETURN; -- every existing CHECK on the column is canonical and covers the target: true no-op
+  END IF;
+
+  IF seen_any THEN
+    RAISE NOTICE 'ic_ensure_widened_check: dropping ALL CHECK constraint(s) on %.% (%) and installing %: %', p_table, p_column, array_to_string(bad_names, ', '), p_constraint_name, array_to_string(bad_reasons, '; ');
+  END IF;
 
   SELECT string_agg(format('ALTER TABLE %s DROP CONSTRAINT %I', qualified_table, c.conname), '; ')
     INTO drop_list

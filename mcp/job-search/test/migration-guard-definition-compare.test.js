@@ -275,3 +275,52 @@ describe('ic_ensure_widened_check is schema-qualified: a same-named table in ano
     assert.equal(other.rows[0].conname, 'zz_migguard_schema_other_wide', 'the other schema\'s table must be completely untouched -- neither dropped nor renamed');
   });
 });
+
+describe('coexisting CHECK constraints on the same column are combined via implicit AND: "covers" requires ALL of them', () => {
+  // Two separate CHECK constraints on one column are both enforced simultaneously (implicit AND): a row
+  // must satisfy every one, not just the widest. An earlier revision of this helper returned as soon as
+  // it found ANY single covering constraint, so a coexisting narrower constraint -- one that still
+  // actually rejects rows under the real, combined enforcement -- could be missed entirely.
+  const WIDE = ['dashboard', 'mcp', 'cli', 'migration', 'seed', 'auto', 'apply'];
+
+  test('C1 (wide, matches the target) + C2 (narrow, coexisting): both are dropped and the target is installed', async () => {
+    const t = `zz_test_migguard_coexist_narrow_${process.pid}`;
+    await client.query(`DROP TABLE IF EXISTS ${t}`);
+    await client.query(`CREATE TABLE ${t} (id serial PRIMARY KEY, actor text NOT NULL)`);
+    await client.query(`ALTER TABLE ${t} ADD CONSTRAINT zz_migguard_coexist_c1_wide CHECK (actor IN ('dashboard','mcp','cli','migration','seed','auto','apply'))`);
+    await client.query(`ALTER TABLE ${t} ADD CONSTRAINT zz_migguard_coexist_c2_narrow CHECK (actor IN ('dashboard','mcp'))`);
+
+    // Ground truth: even though C1 alone would accept 'apply', the combined (AND) enforcement of C1+C2
+    // rejects it today, because C2 does not.
+    await assert.rejects(
+      client.query(`INSERT INTO ${t} (actor) VALUES ('apply')`),
+      /violates check constraint/i,
+      'sanity check: C1+C2 together do not actually accept apply yet',
+    );
+
+    await client.query(`SELECT ic_ensure_widened_check($1, 'actor', 'zz_migguard_coexist_target', $2::text[])`, [t, WIDE]);
+
+    const after_ = await client.query(`SELECT conname FROM pg_constraint WHERE conrelid = $1::regclass AND contype = 'c'`, [t]);
+    assert.equal(after_.rowCount, 1, 'both C1 and C2 must have been dropped, leaving exactly the newly installed constraint');
+    assert.equal(after_.rows[0].conname, 'zz_migguard_coexist_target');
+    await assert.doesNotReject(client.query(`INSERT INTO ${t} (actor) VALUES ('apply')`), 'apply must now genuinely be accepted');
+
+    await client.query(`DROP TABLE ${t}`);
+  });
+
+  test('two coexisting canonical constraints that BOTH already cover the target: true no-op', async () => {
+    const t = `zz_test_migguard_coexist_wide_${process.pid}`;
+    await client.query(`DROP TABLE IF EXISTS ${t}`);
+    await client.query(`CREATE TABLE ${t} (id serial PRIMARY KEY, actor text NOT NULL)`);
+    await client.query(`ALTER TABLE ${t} ADD CONSTRAINT zz_migguard_coexist_wide_a CHECK (actor IN ('dashboard','mcp','cli','migration','seed','auto','apply'))`);
+    await client.query(`ALTER TABLE ${t} ADD CONSTRAINT zz_migguard_coexist_wide_b CHECK (actor IN ('dashboard','mcp','cli','migration','seed','auto','apply','extra'))`);
+
+    await client.query(`SELECT ic_ensure_widened_check($1, 'actor', 'zz_migguard_coexist_should_not_appear', $2::text[])`, [t, WIDE]);
+
+    const after_ = await client.query(`SELECT conname FROM pg_constraint WHERE conrelid = $1::regclass AND contype = 'c' ORDER BY conname`, [t]);
+    assert.equal(after_.rowCount, 2, 'both pre-existing constraints must survive untouched -- a true no-op');
+    assert.deepEqual(after_.rows.map((r) => r.conname), ['zz_migguard_coexist_wide_a', 'zz_migguard_coexist_wide_b']);
+
+    await client.query(`DROP TABLE ${t}`);
+  });
+});
