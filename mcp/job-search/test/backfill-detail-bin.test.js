@@ -167,6 +167,57 @@ describe('bin/backfill-detail.js: DB-backed', () => {
     });
   });
 
+  describe('fit-sweep union (fix/detail-fit-sweep spec S4)', () => {
+    const FLOOR = 70; // testConfig()'s config/auto-apply.json fitFloor, mirrored here (see src/core/config.js's default).
+
+    test('a status=new row at/over the fit floor with an empty description is now selected (previously invisible to this script)', async () => {
+      const included = await seedRow({ status: 'new', fit_score: FLOOR });
+      const r = await runBackfill({ dryRun: true, limit: Infinity, ids: null, source: null }, baseDeps(), client);
+      assert.ok(r.rows.map((row) => row.id).includes(included));
+    });
+
+    test('a status=new row BELOW the fit floor is still excluded (the union does not relax the floor)', async () => {
+      const excluded = await seedRow({ status: 'new', fit_score: FLOOR - 1 });
+      const r = await runBackfill({ dryRun: true, limit: Infinity, ids: null, source: null }, baseDeps(), client);
+      assert.ok(!r.rows.map((row) => row.id).includes(excluded));
+    });
+
+    test('a terminal status (applied) is never reopened by the union even at/over the fit floor', async () => {
+      const excluded = await seedRow({ status: 'applied', fit_score: FLOOR + 10 });
+      const r = await runBackfill({ dryRun: true, limit: Infinity, ids: null, source: null }, baseDeps(), client);
+      assert.ok(!r.rows.map((row) => row.id).includes(excluded), 'a terminal status must never be reopened by the fit-sweep half of the union');
+    });
+
+    test('the union half never bypasses the common exclusions (expired_at, duplicate_of, detail_outcome=fetched, no fetchDetail adapter)', async () => {
+      const expired = await seedRow({ status: 'new', fit_score: FLOOR, expired_at: new Date().toISOString() });
+      const root = await seedRow({ status: 'new', fit_score: FLOOR });
+      const duplicate = await seedRow({ status: 'new', fit_score: FLOOR, duplicate_of: root });
+      const alreadyFetched = await seedRow({ status: 'new', fit_score: FLOOR, detail_outcome: 'fetched' });
+      const noAdapter = await seedRow({ status: 'new', fit_score: FLOOR, source: 'lever', external_id: `zz-lever-fit-${Math.random()}`, url: 'https://jobs.lever.co/example/fit-sweep' });
+      const r = await runBackfill({ dryRun: true, limit: Infinity, ids: null, source: null }, baseDeps(), client);
+      const ids = r.rows.map((row) => row.id);
+      assert.ok(!ids.includes(expired));
+      assert.ok(!ids.includes(duplicate));
+      assert.ok(!ids.includes(alreadyFetched));
+      assert.ok(!ids.includes(noAdapter));
+    });
+
+    test('a fit-sweep-matched row at/over detailMaxAttempts is still excluded (JS-side filter applies uniformly regardless of match reason)', async () => {
+      const excluded = await seedRow({ status: 'new', fit_score: FLOOR, detail_outcome: 'error', detail_attempts: 3 });
+      const included = await seedRow({ status: 'new', fit_score: FLOOR, detail_outcome: 'error', detail_attempts: 2 });
+      const r = await runBackfill({ dryRun: true, limit: Infinity, ids: null, source: null }, baseDeps(), client);
+      const ids = r.rows.map((row) => row.id);
+      assert.ok(!ids.includes(excluded));
+      assert.ok(ids.includes(included));
+    });
+
+    test('--ids bypasses the union exactly like it always bypassed the status filter (unchanged)', async () => {
+      const belowFloor = await seedRow({ status: 'applied', fit_score: FLOOR - 1 });
+      const r = await runBackfill({ dryRun: true, limit: Infinity, ids: [belowFloor], source: null }, baseDeps(), client);
+      assert.deepEqual(r.rows.map((row) => row.id), [belowFloor], '--ids still bypasses BOTH halves of the union, unchanged');
+    });
+  });
+
   test('--ids overrides the status filter but never the fetched/attempts guards', async () => {
     const skippedStatus = await seedRow({ status: 'skip' });
     const alreadyFetched = await seedRow({ detail_outcome: 'fetched' });

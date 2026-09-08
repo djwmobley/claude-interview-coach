@@ -387,6 +387,40 @@ describe('details_by_source line in text/html/markdown (scan-detail-pass fix, sp
       assert.ok(ghLine && !ghLine.includes('timeout'), `zero timeout must not add a suffix: ${ghLine}`);
     }
   });
+
+  test('fix/detail-fit-sweep spec S3: every details line carries "fit sweep queued N / fetched M", non-zero values rendered correctly', () => {
+    const data = dataWithStats({
+      details_by_source: {
+        greenhouse: { fetched: 3, empty: 1, error: 0, skipped_budget: 2, skipped_gate: 1, skipped_cancelled: 0, fit_sweep_queued: 5, fit_sweep_fetched: 2 },
+      },
+    });
+    for (const rendered of [renderReportText(data), renderReportHtml(data), renderReportMarkdown(data)]) {
+      assert.match(rendered, /details: greenhouse fetched 3 \/ empty 1 \/ error 0 \/ skipped 3 \/ fit sweep queued 5 \/ fetched 2/);
+    }
+  });
+
+  test('fix/detail-fit-sweep spec S3: the fit-sweep suffix is ALWAYS present, even 0/0, for a source with zero fit-sweep activity', () => {
+    const data = dataWithStats({
+      details_by_source: {
+        greenhouse: { fetched: 0, empty: 0, error: 0, skipped_budget: 0, skipped_gate: 0, skipped_cancelled: 0, fit_sweep_queued: 0, fit_sweep_fetched: 0 },
+      },
+    });
+    for (const rendered of [renderReportText(data), renderReportHtml(data), renderReportMarkdown(data)]) {
+      assert.match(rendered, /details: greenhouse fetched 0 \/ empty 0 \/ error 0 \/ skipped 0 \/ fit sweep queued 0 \/ fetched 0/);
+    }
+  });
+
+  test('fix/detail-fit-sweep spec S3: a bucket predating the fit-sweep fields (undefined) still renders "fit sweep queued 0 / fetched 0" rather than "undefined"', () => {
+    const data = dataWithStats({
+      details_by_source: {
+        greenhouse: { fetched: 1, empty: 0, error: 0, skipped_budget: 0, skipped_gate: 0, skipped_cancelled: 0 },
+      },
+    });
+    for (const rendered of [renderReportText(data), renderReportHtml(data), renderReportMarkdown(data)]) {
+      assert.match(rendered, /fit sweep queued 0 \/ fetched 0/);
+      assert.ok(!rendered.includes('undefined'));
+    }
+  });
 });
 
 describe('[WALLCLOCK] marker (scan-hang-timeouts fix, spec item D)', () => {
