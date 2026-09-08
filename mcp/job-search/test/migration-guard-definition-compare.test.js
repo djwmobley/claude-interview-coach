@@ -226,3 +226,52 @@ describe('a compound multi-column CHECK is recognized as non-canonical and repla
     );
   });
 });
+
+describe('ic_ensure_widened_check is schema-qualified: a same-named table in another schema cannot fool it', () => {
+  // Before schema-qualification, the constraint lookup joined pg_class on an unqualified t.relname, so a
+  // second table sharing p_table's name in a different schema on the search path could be picked up by
+  // that join -- a wide canonical constraint on the OTHER schema's same-named table's same-named column
+  // would be misread as covering the actually-targeted table, leaving the real target's own (narrower)
+  // constraint untouched. p_schema now defaults to current_schema() and is used in both the pg_namespace
+  // filter and the schema-qualified ALTER TABLE target.
+  const SCRATCH_NAME = `zz_test_migguard_schema_${process.pid}`;
+  const OTHER_SCHEMA = `zz_test_migguard_otherschema_${process.pid}`;
+
+  before(async () => {
+    await client.query(`DROP TABLE IF EXISTS public.${SCRATCH_NAME}`);
+    await client.query(`DROP SCHEMA IF EXISTS ${OTHER_SCHEMA} CASCADE`);
+    await client.query(`CREATE SCHEMA ${OTHER_SCHEMA}`);
+
+    // public.<name>: narrow constraint (the actual target).
+    await client.query(`CREATE TABLE public.${SCRATCH_NAME} (id serial PRIMARY KEY, actor text NOT NULL)`);
+    await client.query(`ALTER TABLE public.${SCRATCH_NAME} ADD CONSTRAINT zz_migguard_schema_public_narrow CHECK (actor IN ('dashboard','mcp'))`);
+
+    // <other schema>.<same name>: already has the exact wide canonical constraint this test asks for.
+    await client.query(`CREATE TABLE ${OTHER_SCHEMA}.${SCRATCH_NAME} (id serial PRIMARY KEY, actor text NOT NULL)`);
+    await client.query(`ALTER TABLE ${OTHER_SCHEMA}.${SCRATCH_NAME} ADD CONSTRAINT zz_migguard_schema_other_wide CHECK (actor IN ('dashboard','mcp','cli','migration','seed','auto','apply'))`);
+  });
+
+  after(async () => {
+    await client.query(`DROP TABLE IF EXISTS public.${SCRATCH_NAME}`);
+    await client.query(`DROP SCHEMA IF EXISTS ${OTHER_SCHEMA} CASCADE`);
+  });
+
+  test('the public table is still widened for real, and the other schema\'s table is left untouched', async () => {
+    // p_schema defaults to current_schema() (this test connection's search_path is the ordinary default,
+    // 'public'), so this call targets public.<name>, not <other schema>.<name>, even though both tables
+    // share the same bare name.
+    await client.query(
+      `SELECT ic_ensure_widened_check($1, 'actor', 'zz_migguard_schema_public_wide', ARRAY['dashboard','mcp','cli','migration','seed','auto','apply'])`,
+      [SCRATCH_NAME],
+    );
+
+    const pub = await client.query(`SELECT conname FROM pg_constraint WHERE conrelid = $1::regclass AND contype = 'c'`, [`public.${SCRATCH_NAME}`]);
+    assert.equal(pub.rowCount, 1);
+    assert.equal(pub.rows[0].conname, 'zz_migguard_schema_public_wide', 'the public table\'s narrow constraint must have been replaced by the real widen, not skipped because the other schema already looked wide');
+    await assert.doesNotReject(client.query(`INSERT INTO public.${SCRATCH_NAME} (actor) VALUES ('apply')`), 'the public table must genuinely accept apply now');
+
+    const other = await client.query(`SELECT conname FROM pg_constraint WHERE conrelid = $1::regclass AND contype = 'c'`, [`${OTHER_SCHEMA}.${SCRATCH_NAME}`]);
+    assert.equal(other.rowCount, 1);
+    assert.equal(other.rows[0].conname, 'zz_migguard_schema_other_wide', 'the other schema\'s table must be completely untouched -- neither dropped nor renamed');
+  });
+});

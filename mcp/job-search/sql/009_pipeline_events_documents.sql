@@ -93,13 +93,30 @@ CREATE INDEX IF NOT EXISTS ic_job_documents_listing_idx ON ic_job_documents (lis
 --
 -- Defined with CREATE OR REPLACE (Postgres has no CREATE FUNCTION IF NOT EXISTS) so re-running this file
 -- just redefines the same body -- safe on every server/dashboard startup like the rest of this file.
+--
+-- Schema-qualified throughout (p_schema, default current_schema()): the constraint lookup joins
+-- pg_namespace and filters n.nspname = p_schema, and the DROP/ADD CONSTRAINT statements target
+-- format('%I.%I', p_schema, p_table), never a bare, schema-unqualified table name. Without this, a
+-- second table sharing p_table's name in a different schema on the search path could be picked up by an
+-- unqualified pg_class join, misreporting the actually-targeted table's own (possibly narrower)
+-- constraint as covered by the other schema's wider one, or dropping/altering the wrong table entirely.
 -- ---------------------------------------------------------------------------------------------------
+
+-- CREATE OR REPLACE only replaces a function whose argument list matches exactly; adding p_schema below
+-- changed the signature from 4 to 5 arguments, so a database that already ran an earlier revision of this
+-- file (the 4-argument version, before schema-qualification was added) would otherwise end up with BOTH
+-- overloads defined -- the 5-argument one's DEFAULT makes it callable with 4 arguments too, which is
+-- ambiguous against the genuine 4-argument overload and breaks every call site with "not unique". Drop
+-- that specific prior signature unconditionally (IF EXISTS: a no-op on a database that never had it) so
+-- this file converges to exactly one overload regardless of which earlier revision last ran here.
+DROP FUNCTION IF EXISTS ic_ensure_widened_check(text, text, text, text[]);
 
 CREATE OR REPLACE FUNCTION ic_ensure_widened_check(
   p_table text,
   p_column text,
   p_constraint_name text,
-  p_allowed_values text[]
+  p_allowed_values text[],
+  p_schema text DEFAULT current_schema()
 ) RETURNS void
 LANGUAGE plpgsql AS $ic_ensure_widened_check$
 DECLARE
@@ -107,6 +124,7 @@ DECLARE
   found_values text[];
   covers boolean;
   drop_list text;
+  qualified_table text := format('%I.%I', p_schema, p_table);
   col_ident text := quote_ident(p_column);
   -- A safe SQL identifier never itself contains a regex metacharacter, but this still neutralizes any
   -- that quote_ident's quoting could introduce (e.g. a column requiring double-quoting) before it is
@@ -133,8 +151,9 @@ BEGIN
     SELECT c.conname, pg_get_constraintdef(c.oid) AS def
     FROM pg_constraint c
     JOIN pg_class t ON t.oid = c.conrelid
+    JOIN pg_namespace n ON n.oid = t.relnamespace
     JOIN pg_attribute a ON a.attrelid = t.oid AND a.attnum = ANY (c.conkey)
-    WHERE t.relname = p_table AND c.contype = 'c' AND a.attname = p_column
+    WHERE t.relname = p_table AND n.nspname = p_schema AND c.contype = 'c' AND a.attname = p_column
   LOOP
     IF con.def !~ pat_any AND con.def !~ pat_any_cast AND con.def !~ pat_eq AND con.def !~ pat_in THEN
       RAISE NOTICE 'ic_ensure_widened_check: constraint % on %.% is not one of the recognized single-column enumeration shapes (def: %); treating as not covering', con.conname, p_table, p_column, con.def;
@@ -162,19 +181,20 @@ BEGIN
     RAISE NOTICE 'ic_ensure_widened_check: constraint % on %.% is a recognized shape but its value set does not cover the target; dropping and reinstalling', con.conname, p_table, p_column;
   END LOOP;
 
-  SELECT string_agg(format('ALTER TABLE %I DROP CONSTRAINT %I', p_table, c.conname), '; ')
+  SELECT string_agg(format('ALTER TABLE %s DROP CONSTRAINT %I', qualified_table, c.conname), '; ')
     INTO drop_list
     FROM pg_constraint c
     JOIN pg_class t ON t.oid = c.conrelid
+    JOIN pg_namespace n ON n.oid = t.relnamespace
     JOIN pg_attribute a ON a.attrelid = t.oid AND a.attnum = ANY (c.conkey)
-    WHERE t.relname = p_table AND c.contype = 'c' AND a.attname = p_column;
+    WHERE t.relname = p_table AND n.nspname = p_schema AND c.contype = 'c' AND a.attname = p_column;
   IF drop_list IS NOT NULL THEN
     EXECUTE drop_list;
   END IF;
 
   EXECUTE format(
-    'ALTER TABLE %I ADD CONSTRAINT %I CHECK (%I IN (%s))',
-    p_table, p_constraint_name, p_column,
+    'ALTER TABLE %s ADD CONSTRAINT %I CHECK (%I IN (%s))',
+    qualified_table, p_constraint_name, p_column,
     (SELECT string_agg(quote_literal(v), ', ') FROM unnest(p_allowed_values) AS v)
   );
 END;
