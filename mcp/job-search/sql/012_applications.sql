@@ -96,52 +96,30 @@ CREATE INDEX IF NOT EXISTS ic_job_application_events_application_id_idx ON ic_jo
 -- Widen ic_job_events.actor further: sql/011_triage_actor.sql's ic_job_events_actor_auto_check accepts
 -- ('dashboard', 'mcp', 'cli', 'migration', 'seed', 'auto'); this adds 'apply' for the apply-pipeline
 -- worker (src/core/applications.js's markSubmitted/reconcileStale, and any future caller that records an
--- ic_job_events row -- e.g. a document link -- as a side effect of an application state change). Same
--- find-whatever-CHECK-currently-covers-the-column, drop, replace-with-fixed-name pattern as sql/009 and
--- sql/011, guarded so a second run of this file is a no-op.
+-- ic_job_events row -- e.g. a document link -- as a side effect of an application state change). Via
+-- ic_ensure_widened_check(), the shared helper defined in sql/009_pipeline_events_documents.sql -- see
+-- the comment there for why this is a DEFINITION comparison, not a name-keyed guard. This file never
+-- references a later migration's constraint name either; it only asserts the target set this migration
+-- itself needs, and the helper finds and drops whatever CHECK currently covers the column if (and only
+-- if) it does not already cover that set.
 -- ---------------------------------------------------------------------------------------------------
 
 DO $$
-DECLARE
-  dropsql text;
 BEGIN
-  IF NOT EXISTS (
-    SELECT 1 FROM pg_constraint c JOIN pg_class t ON t.oid = c.conrelid
-    WHERE t.relname = 'ic_job_events' AND c.conname = 'ic_job_events_actor_apply_check'
-  ) THEN
-    SELECT string_agg(format('ALTER TABLE ic_job_events DROP CONSTRAINT %I', c.conname), '; ')
-      INTO dropsql
-      FROM pg_constraint c JOIN pg_class t ON t.oid = c.conrelid
-      WHERE t.relname = 'ic_job_events' AND c.contype = 'c' AND pg_get_constraintdef(c.oid) ILIKE '%actor%';
-    IF dropsql IS NOT NULL THEN EXECUTE dropsql; END IF;
-    ALTER TABLE ic_job_events ADD CONSTRAINT ic_job_events_actor_apply_check
-      CHECK (actor IN ('dashboard', 'mcp', 'cli', 'migration', 'seed', 'auto', 'apply'));
-  END IF;
+  PERFORM ic_ensure_widened_check('ic_job_events', 'actor', 'ic_job_events_actor_apply_check', ARRAY['dashboard', 'mcp', 'cli', 'migration', 'seed', 'auto', 'apply']);
 END $$;
 
 -- ---------------------------------------------------------------------------------------------------
 -- Widen ic_job_events.kind: sql/009_pipeline_events_documents.sql's original CHECK accepts ('status',
 -- 'note', 'fit', 'created', 'document', 'followup', 'reply', 'migrated'); this adds 'application' for a
 -- listing-level event that a future slice writes as a side effect of an application-level change (e.g.
--- surfacing "application submitted" on the listing's own timeline). Same drop/replace pattern.
+-- surfacing "application submitted" on the listing's own timeline). Via ic_ensure_widened_check(), same
+-- as the actor widen above.
 -- ---------------------------------------------------------------------------------------------------
 
 DO $$
-DECLARE
-  dropsql text;
 BEGIN
-  IF NOT EXISTS (
-    SELECT 1 FROM pg_constraint c JOIN pg_class t ON t.oid = c.conrelid
-    WHERE t.relname = 'ic_job_events' AND c.conname = 'ic_job_events_kind_application_check'
-  ) THEN
-    SELECT string_agg(format('ALTER TABLE ic_job_events DROP CONSTRAINT %I', c.conname), '; ')
-      INTO dropsql
-      FROM pg_constraint c JOIN pg_class t ON t.oid = c.conrelid
-      WHERE t.relname = 'ic_job_events' AND c.contype = 'c' AND pg_get_constraintdef(c.oid) ILIKE '%kind%';
-    IF dropsql IS NOT NULL THEN EXECUTE dropsql; END IF;
-    ALTER TABLE ic_job_events ADD CONSTRAINT ic_job_events_kind_application_check
-      CHECK (kind IN ('status', 'note', 'fit', 'created', 'document', 'followup', 'reply', 'migrated', 'application'));
-  END IF;
+  PERFORM ic_ensure_widened_check('ic_job_events', 'kind', 'ic_job_events_kind_application_check', ARRAY['status', 'note', 'fit', 'created', 'document', 'followup', 'reply', 'migrated', 'application']);
 END $$;
 
 COMMIT;

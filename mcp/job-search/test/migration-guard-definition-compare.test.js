@@ -1,0 +1,236 @@
+// @ts-check
+/**
+ * ic_ensure_widened_check() (defined in sql/009_pipeline_events_documents.sql, used by sql/009, 011, and
+ * both widen sites in sql/012_applications.sql): the shared helper that replaced the name-keyed CHECK
+ * guard responsible for the 2026-09-06 incident. See sql/009's own doc comment on the function for the
+ * failure mode: a name-keyed guard in sql/011 only checked "does a constraint named
+ * ic_job_events_actor_auto_check already exist" -- when sql/012 had already widened the same column under
+ * a DIFFERENT name (ic_job_events_actor_apply_check), a later run of sql/011 alone (a plain server
+ * startup, via ensureAuxSchema) decided nothing covered it yet, dropped the wider constraint, and
+ * reinstalled its own narrower one -- which then failed outright because a live row already carried
+ * actor='apply', a value the narrower constraint rejects.
+ *
+ * Two scenarios, matching the fix's own test requirements:
+ *   (a) against the real, shared ic_job_events table (already fully migrated by bin/bootstrap-test-db.js's
+ *       MIGRATIONS list, which applies 011 before 012): insert an actor='apply' row, then re-run 011,
+ *       009, and 012's SQL text directly -- each must be a no-op, the wide constraint must survive intact,
+ *       and no error may be raised.
+ *   (b) against a private scratch table this file creates and drops itself (never the shared
+ *       ic_job_events table -- narrowing that mid-suite would break every other test file's actor/kind
+ *       inserts, per test/migration-011.test.js's and test/migration-012.test.js's own established rule):
+ *       starting with NO check constraint on the column at all, calling ic_ensure_widened_check() with
+ *       011's target set installs it, and a second call with 012's wider target set widens it further.
+ */
+import { test, describe, before, after } from 'node:test';
+import assert from 'node:assert/strict';
+import fs from 'node:fs';
+import path from 'node:path';
+import { fileURLToPath } from 'node:url';
+import pg from 'pg';
+import { pgConnectionConfig } from '../src/core/config.js';
+
+const HERE = path.dirname(fileURLToPath(import.meta.url));
+const SQL_DIR = path.join(HERE, '..', 'sql');
+const SQL_009 = fs.readFileSync(path.join(SQL_DIR, '009_pipeline_events_documents.sql'), 'utf8');
+const SQL_011 = fs.readFileSync(path.join(SQL_DIR, '011_triage_actor.sql'), 'utf8');
+const SQL_012 = fs.readFileSync(path.join(SQL_DIR, '012_applications.sql'), 'utf8');
+
+const CO = `ZZ-TEST-MIGGUARD-${process.pid}`;
+const SCRATCH_TABLE = `zz_test_migguard_scratch_${process.pid}`;
+/** @type {pg.Client} */
+let client;
+
+/** @param {string} actor */
+async function insertEventRow(actor) {
+  const n = Math.floor(Math.random() * 1e9);
+  const listing = await client.query(
+    `INSERT INTO ic_job_listings (title, company, source, external_id, record_kind, company_norm, title_norm, location_norm, dedup_hash, last_seen)
+     VALUES ('Migration Guard Test', $1, $2, $3, 'listing', 'migguard test co', 'migguard test', 'legacy-unknown', $4, now()) RETURNING id`,
+    [CO, `zz-test-migguard-${process.pid}`, `zz-test-migguard-${process.pid}:${n}`, `zz-migguard-hash-${n}`],
+  );
+  const listingId = Number(listing.rows[0].id);
+  await client.query(`INSERT INTO ic_job_events (listing_id, kind, to_status, actor) VALUES ($1, 'status', 'new', $2)`, [listingId, actor]);
+  return listingId;
+}
+
+async function cleanup() {
+  const ids = (await client.query('SELECT id FROM ic_job_listings WHERE company = $1', [CO])).rows.map((r) => r.id);
+  if (ids.length === 0) return;
+  await client.query('DELETE FROM ic_job_events WHERE listing_id = ANY($1::int[])', [ids]);
+  await client.query('DELETE FROM ic_followups WHERE listing_id = ANY($1::int[])', [ids]);
+  await client.query('DELETE FROM ic_job_listings WHERE id = ANY($1::int[])', [ids]);
+}
+
+before(async () => {
+  client = new pg.Client(pgConnectionConfig());
+  await client.connect();
+  await cleanup();
+  // Belt and braces, matching migration-011.test.js's and migration-012.test.js's own pattern: make sure
+  // the shared column is at least as wide as 012 leaves it before this file's own assertions run. Always
+  // a no-op or a widen, never a narrow.
+  await client.query(SQL_009);
+  await client.query(SQL_011);
+  await client.query(SQL_012);
+});
+
+after(async () => {
+  await cleanup();
+  await client.query(`DROP TABLE IF EXISTS ${SCRATCH_TABLE}`);
+  await client.query(`DROP TABLE IF EXISTS zz_test_migguard_blindspot_${process.pid}`);
+  await client.end();
+});
+
+describe('ic_ensure_widened_check against the real ic_job_events.actor column (scenario a)', () => {
+  test('an actor="apply" row exists, then re-running 011, 009, and 012 is a no-op with no error', async () => {
+    const id = await insertEventRow('apply');
+
+    await assert.doesNotReject(client.query(SQL_011), 're-running sql/011 after sql/012 has already widened the column must not error');
+    await assert.doesNotReject(client.query(SQL_009), 're-running sql/009 must not error');
+    await assert.doesNotReject(client.query(SQL_012), 're-running sql/012 must not error');
+
+    // The row inserted before the re-runs must still be there and still readable -- if the old
+    // name-keyed guard had narrowed the constraint back and the ADD CONSTRAINT failed mid-DO-block, the
+    // enclosing BEGIN/COMMIT in each file would still leave prior statements in that same file committed,
+    // but subsequent files (and any query on the same connection afterward) would fail with 25P02 until
+    // the client's transaction was cleared -- proven here by simply continuing to use `client`.
+    const row = await client.query('SELECT actor FROM ic_job_events WHERE listing_id = $1', [id]);
+    assert.equal(row.rows[0].actor, 'apply');
+
+    const actorConstraints = await client.query(`
+      SELECT c.conname FROM pg_constraint c JOIN pg_class t ON t.oid = c.conrelid
+      WHERE t.relname = 'ic_job_events' AND c.contype = 'c' AND pg_get_constraintdef(c.oid) ILIKE '%actor%'
+    `);
+    assert.equal(actorConstraints.rowCount, 1, 'exactly one CHECK constraint must remain on actor');
+    assert.equal(actorConstraints.rows[0].conname, 'ic_job_events_actor_apply_check', 'the wider (012) constraint must survive intact, not be replaced by 011\'s narrower one');
+
+    // Every value 012 ever allowed, including 'apply', must still be accepted.
+    for (const actor of ['dashboard', 'mcp', 'cli', 'migration', 'seed', 'auto', 'apply']) {
+      await assert.doesNotReject(insertEventRow(actor), `actor="${actor}" must still be accepted after the re-runs`);
+    }
+  });
+});
+
+describe('ic_ensure_widened_check against a private scratch column (scenario b)', () => {
+  before(async () => {
+    await client.query(`DROP TABLE IF EXISTS ${SCRATCH_TABLE}`);
+    await client.query(`CREATE TABLE ${SCRATCH_TABLE} (id serial PRIMARY KEY, actor text NOT NULL)`);
+  });
+
+  test('starting from no CHECK constraint at all: 011\'s target set installs one', async () => {
+    const before_ = await client.query(`
+      SELECT c.conname FROM pg_constraint c JOIN pg_class t ON t.oid = c.conrelid
+      WHERE t.relname = $1 AND c.contype = 'c'
+    `, [SCRATCH_TABLE]);
+    assert.equal(before_.rowCount, 0, 'the scratch table must start with no CHECK constraint on actor');
+
+    await client.query(
+      `SELECT ic_ensure_widened_check($1, 'actor', 'zz_migguard_scratch_actor_auto_check', ARRAY['dashboard','mcp','cli','migration','seed','auto'])`,
+      [SCRATCH_TABLE],
+    );
+
+    const after_ = await client.query(`
+      SELECT c.conname, pg_get_constraintdef(c.oid) AS def FROM pg_constraint c JOIN pg_class t ON t.oid = c.conrelid
+      WHERE t.relname = $1 AND c.contype = 'c'
+    `, [SCRATCH_TABLE]);
+    assert.equal(after_.rowCount, 1);
+    assert.equal(after_.rows[0].conname, 'zz_migguard_scratch_actor_auto_check');
+
+    await assert.doesNotReject(client.query(`INSERT INTO ${SCRATCH_TABLE} (actor) VALUES ('auto')`));
+    await assert.rejects(client.query(`INSERT INTO ${SCRATCH_TABLE} (actor) VALUES ('apply')`), /violates check constraint/i);
+  });
+
+  test('then 012\'s wider target set widens it further, under a different constraint name', async () => {
+    await client.query(
+      `SELECT ic_ensure_widened_check($1, 'actor', 'zz_migguard_scratch_actor_apply_check', ARRAY['dashboard','mcp','cli','migration','seed','auto','apply'])`,
+      [SCRATCH_TABLE],
+    );
+
+    const after_ = await client.query(`
+      SELECT c.conname FROM pg_constraint c JOIN pg_class t ON t.oid = c.conrelid
+      WHERE t.relname = $1 AND c.contype = 'c'
+    `, [SCRATCH_TABLE]);
+    assert.equal(after_.rowCount, 1, 'the narrower constraint must have been dropped, not left alongside the wider one');
+    assert.equal(after_.rows[0].conname, 'zz_migguard_scratch_actor_apply_check');
+
+    await assert.doesNotReject(client.query(`INSERT INTO ${SCRATCH_TABLE} (actor) VALUES ('apply')`));
+
+    // And critically: re-applying 011's OWN (narrower) call again now must be a no-op, never a regression
+    // back to the narrower constraint -- this is the exact bug this whole change fixes.
+    await client.query(
+      `SELECT ic_ensure_widened_check($1, 'actor', 'zz_migguard_scratch_actor_auto_check', ARRAY['dashboard','mcp','cli','migration','seed','auto'])`,
+      [SCRATCH_TABLE],
+    );
+    const final = await client.query(`
+      SELECT c.conname FROM pg_constraint c JOIN pg_class t ON t.oid = c.conrelid
+      WHERE t.relname = $1 AND c.contype = 'c'
+    `, [SCRATCH_TABLE]);
+    assert.equal(final.rowCount, 1);
+    assert.equal(final.rows[0].conname, 'zz_migguard_scratch_actor_apply_check', 're-running the narrower widen after the wider one must not regress the constraint');
+    await assert.doesNotReject(client.query(`INSERT INTO ${SCRATCH_TABLE} (actor) VALUES ('apply')`), 'the wide constraint must still accept apply after the narrower re-run');
+  });
+});
+
+describe('KNOWN BLIND SPOT: a compound multi-column CHECK can be misclassified as covering', () => {
+  // ic_ensure_widened_check() parses an existing constraint's allowed value set by regex-extracting
+  // every quoted string literal out of pg_get_constraintdef()'s text -- it does not parse the expression's
+  // actual boolean structure. A constraint that ORs an unrelated column's equality test alongside the
+  // real actor list contributes ITS literal into the same found_values set, even though that literal has
+  // nothing to do with what actor is actually allowed to be. This is a genuine false positive: the helper
+  // reports "already covers", stays a no-op, and leaves the real (too-narrow, semantically different)
+  // constraint in place -- exactly the kind of gap the total-classification rule (unparsable -> not
+  // covering) does NOT catch, because this constraint parses just fine; it is just not what it looks like.
+  const SCRATCH2 = `zz_test_migguard_blindspot_${process.pid}`;
+
+  before(async () => {
+    await client.query(`DROP TABLE IF EXISTS ${SCRATCH2}`);
+    await client.query(`CREATE TABLE ${SCRATCH2} (id serial PRIMARY KEY, actor text NOT NULL, note text)`);
+    // A row is valid if actor is one of the 6 narrow values, OR note is literally 'apply'. 'apply' here
+    // constrains note, not actor -- an actor='apply' row is rejected unless note also happens to be
+    // 'apply', which is not what "actor accepts apply" means. Both actor and note are in this
+    // constraint's conkey, so the lookup-by-column in ic_ensure_widened_check finds it under p_column =
+    // 'actor'.
+    await client.query(`
+      ALTER TABLE ${SCRATCH2} ADD CONSTRAINT zz_migguard_blindspot_compound_check CHECK (
+        (actor = ANY (ARRAY['dashboard','mcp','cli','migration','seed','auto']::text[]))
+        OR (note = 'apply'::text)
+      )
+    `);
+  });
+
+  test('a genuinely narrower compound constraint is wrongly classified as covering the wider target set', async () => {
+    // Ground truth first: actor='apply' with an unrelated note is in fact rejected today.
+    await assert.rejects(
+      client.query(`INSERT INTO ${SCRATCH2} (actor, note) VALUES ('apply', 'unrelated')`),
+      /violates check constraint/i,
+      'sanity check: the compound constraint does not actually accept actor=apply in general',
+    );
+
+    // Ask the helper to ensure the same widen 012 applies for real (adds 'apply' to actor's target set).
+    // A CORRECT implementation, told to install ARRAY[...,'apply'], would have to conclude the existing
+    // compound constraint does not cover that and replace it. This helper instead sees 'apply' already
+    // present among the literals it extracted (from note's branch) and treats the column as already wide
+    // enough, so it makes no change at all.
+    await client.query(
+      `SELECT ic_ensure_widened_check($1, 'actor', 'zz_migguard_blindspot_apply_check', ARRAY['dashboard','mcp','cli','migration','seed','auto','apply'])`,
+      [SCRATCH2],
+    );
+
+    const after_ = await client.query(`
+      SELECT c.conname FROM pg_constraint c JOIN pg_class t ON t.oid = c.conrelid
+      WHERE t.relname = $1 AND c.contype = 'c'
+    `, [SCRATCH2]);
+    // Documents the actual (wrong) behavior: the original compound constraint is still the only one
+    // present -- the helper believed it already covered the target set and did nothing.
+    assert.equal(after_.rowCount, 1);
+    assert.equal(after_.rows[0].conname, 'zz_migguard_blindspot_compound_check', 'BLIND SPOT: the helper left the narrower compound constraint in place instead of installing the real widen');
+
+    // And the practical consequence: actor=apply with an unrelated note is STILL rejected after the
+    // "widen" call returned successfully -- silently. No error, no RAISE NOTICE (the definition parsed
+    // fine), just a widen that did not actually happen.
+    await assert.rejects(
+      client.query(`INSERT INTO ${SCRATCH2} (actor, note) VALUES ('apply', 'still-unrelated')`),
+      /violates check constraint/i,
+      'BLIND SPOT: actor=apply is still rejected even though ic_ensure_widened_check reported the target set as already covered',
+    );
+  });
+});

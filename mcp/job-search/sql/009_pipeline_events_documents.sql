@@ -55,33 +55,102 @@ CREATE TABLE IF NOT EXISTS ic_job_documents (
 CREATE INDEX IF NOT EXISTS ic_job_documents_listing_idx ON ic_job_documents (listing_id);
 
 -- ---------------------------------------------------------------------------------------------------
--- Widen ic_scan_runs.trigger to accept 'dashboard' alongside the existing 'mcp'/'cli'. The original
--- CHECK from sql/003 was an unnamed column constraint (Postgres auto-names it); rather than assume that
--- generated name, find and drop whatever CHECK constraint currently covers the trigger column and
--- replace it with a fixed, known name -- so a second run of this file (which finds the fixed name
--- already present) does nothing.
+-- ic_ensure_widened_check(table, column, constraint_name, allowed_values): shared helper. This table/
+-- column-widen site plus sql/011_triage_actor.sql and both widen sites in sql/012_applications.sql used
+-- to each carry their own copy of a name-keyed guard ("does a constraint named X already exist? if not,
+-- drop whatever CHECK currently covers the column and install X"). That pattern broke on 2026-09-06: a
+-- server start runs sql/009, then sql/011, then sql/012 in that fixed order every time (schema.js's
+-- AUX_MIGRATIONS), so once sql/012 had ever widened ic_job_events.actor to include 'apply', a LATER
+-- server start still ran sql/011's guard, which only checks for its OWN constraint name
+-- (ic_job_events_actor_auto_check) -- found the wider ic_job_events_actor_apply_check installed under a
+-- different name, decided nothing covered it yet, dropped that wider constraint, and reinstalled its own
+-- narrower one that does not include 'apply'. Live data with actor = 'apply' already existed, so the
+-- ADD CONSTRAINT itself failed on the check violation, and the resulting aborted-transaction connection
+-- was returned to the pool unrolled-back (see src/core/db.js's withClient fix in this same change).
+--
+-- This helper replaces every one of those name-keyed guards with a DEFINITION comparison: it finds
+-- whatever CHECK constraint(s) currently sit on the target column (found by conkey/pg_attribute, never
+-- by name -- so no migration here has to know a later migration's constraint name) and parses each
+-- one's allowed value set out of pg_get_constraintdef(). If any existing constraint's set is already a
+-- superset of the set this call asks for, the column is already wide enough for this migration's needs
+-- and it does nothing at all -- so sql/011 running after sql/012 has already widened the column is a
+-- true no-op, not a narrowing regression. Total classification of what it finds on the column: no CHECK
+-- constraint at all -> install this one; an existing CHECK whose value set already covers the target ->
+-- no-op; anything else, including a CHECK whose definition this helper cannot parse into a value list
+-- (treated as NOT covering, never silently trusted, RAISE NOTICE so it is visible) -> drop every CHECK
+-- currently on the column and install this one.
+--
+-- Defined with CREATE OR REPLACE (Postgres has no CREATE FUNCTION IF NOT EXISTS) so re-running this file
+-- just redefines the same body -- safe on every server/dashboard startup like the rest of this file.
+-- ---------------------------------------------------------------------------------------------------
+
+CREATE OR REPLACE FUNCTION ic_ensure_widened_check(
+  p_table text,
+  p_column text,
+  p_constraint_name text,
+  p_allowed_values text[]
+) RETURNS void
+LANGUAGE plpgsql AS $ic_ensure_widened_check$
+DECLARE
+  con record;
+  found_values text[];
+  covers boolean;
+  drop_list text;
+BEGIN
+  FOR con IN
+    SELECT c.conname, pg_get_constraintdef(c.oid) AS def
+    FROM pg_constraint c
+    JOIN pg_class t ON t.oid = c.conrelid
+    JOIN pg_attribute a ON a.attrelid = t.oid AND a.attnum = ANY (c.conkey)
+    WHERE t.relname = p_table AND c.contype = 'c' AND a.attname = p_column
+  LOOP
+    found_values := NULL;
+    BEGIN
+      SELECT array_agg(m[1]) INTO found_values
+      FROM regexp_matches(con.def, $rx$'([^']*)'::text$rx$, 'g') AS m;
+    EXCEPTION WHEN OTHERS THEN
+      found_values := NULL;
+    END;
+
+    IF found_values IS NULL OR array_length(found_values, 1) IS NULL THEN
+      RAISE NOTICE 'ic_ensure_widened_check: constraint % on %.% has an unparsable definition (%); treating as not covering', con.conname, p_table, p_column, con.def;
+      covers := false;
+    ELSE
+      SELECT bool_and(v = ANY (found_values)) INTO covers FROM unnest(p_allowed_values) AS v;
+      covers := coalesce(covers, true);
+    END IF;
+
+    IF covers THEN
+      RETURN;
+    END IF;
+  END LOOP;
+
+  SELECT string_agg(format('ALTER TABLE %I DROP CONSTRAINT %I', p_table, c.conname), '; ')
+    INTO drop_list
+    FROM pg_constraint c
+    JOIN pg_class t ON t.oid = c.conrelid
+    JOIN pg_attribute a ON a.attrelid = t.oid AND a.attnum = ANY (c.conkey)
+    WHERE t.relname = p_table AND c.contype = 'c' AND a.attname = p_column;
+  IF drop_list IS NOT NULL THEN
+    EXECUTE drop_list;
+  END IF;
+
+  EXECUTE format(
+    'ALTER TABLE %I ADD CONSTRAINT %I CHECK (%I IN (%s))',
+    p_table, p_constraint_name, p_column,
+    (SELECT string_agg(quote_literal(v), ', ') FROM unnest(p_allowed_values) AS v)
+  );
+END;
+$ic_ensure_widened_check$;
+
+-- ---------------------------------------------------------------------------------------------------
+-- Widen ic_scan_runs.trigger to accept 'dashboard' alongside the existing 'mcp'/'cli', via the shared
+-- helper above -- a second run of this file (which finds the target set already covered) does nothing.
 -- ---------------------------------------------------------------------------------------------------
 
 DO $$
-DECLARE
-  dropsql text;
 BEGIN
-  IF NOT EXISTS (
-    SELECT 1 FROM pg_constraint c
-    JOIN pg_class t ON t.oid = c.conrelid
-    WHERE t.relname = 'ic_scan_runs' AND c.conname = 'ic_scan_runs_trigger_dashboard_check'
-  ) THEN
-    SELECT string_agg(format('ALTER TABLE ic_scan_runs DROP CONSTRAINT %I', c.conname), '; ')
-      INTO dropsql
-      FROM pg_constraint c
-      JOIN pg_class t ON t.oid = c.conrelid
-      WHERE t.relname = 'ic_scan_runs' AND c.contype = 'c'
-        AND pg_get_constraintdef(c.oid) ILIKE '%trigger%';
-    IF dropsql IS NOT NULL THEN
-      EXECUTE dropsql;
-    END IF;
-    ALTER TABLE ic_scan_runs ADD CONSTRAINT ic_scan_runs_trigger_dashboard_check CHECK (trigger IN ('mcp', 'cli', 'dashboard'));
-  END IF;
+  PERFORM ic_ensure_widened_check('ic_scan_runs', 'trigger', 'ic_scan_runs_trigger_dashboard_check', ARRAY['mcp', 'cli', 'dashboard']);
 END $$;
 
 -- ---------------------------------------------------------------------------------------------------

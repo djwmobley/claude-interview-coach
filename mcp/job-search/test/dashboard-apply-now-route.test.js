@@ -389,6 +389,28 @@ describe('POST /api/listings/:id/apply-now: apply exclusion gate (real gate rest
 
   test('re-clicking Apply on a listing\'s own still-drafting application is never blocked as already_applied_listing', async () => {
     const listingId = await seedUniqueListing();
+    // The route's own async chain (runApplyNowChain) is fire-and-forget after the 202 -- this test wants
+    // to catch the application while it is STILL 'drafting', which is what "re-clicking Apply on a
+    // listing's own still-drafting application" actually means. The default beforeEach's fake
+    // resumeRunnerImpl performs its DB side effect essentially instantly (a single local INSERT/UPDATE,
+    // no real headless work), so on a fast local Postgres the whole chain (resume -> review -> approve)
+    // can race ahead of this test's own second HTTP round trip and land on 'approved' before the second
+    // click is even sent -- a real race with no synchronization on either side, not something specific to
+    // any one implementation detail. A short artificial delay here, scoped to only this test, keeps the
+    // chain reliably mid-flight (still 'drafting') for the immediate re-click, matching what the test
+    // name actually describes, independent of how fast the surrounding I/O happens to be.
+    resumeRunnerImpl = async (applicationId, listingId2) => {
+      await new Promise((resolve) => setTimeout(resolve, 300));
+      const relPath = `resumes/apply-now-reclick-${applicationId}.docx`;
+      fs.writeFileSync(path.join(outputRoot, relPath), 'fake docx bytes');
+      const docRes = await verifyClient.query(
+        `INSERT INTO ic_job_documents (listing_id, kind, rel_path, actor) VALUES ($1, 'resume', $2, 'mcp') RETURNING id`,
+        [listingId2, relPath],
+      );
+      await verifyClient.query('UPDATE ic_job_applications SET state = $2, resume_doc_id = $3, updated_at = now() WHERE id = $1', [applicationId, 'docs_ready', docRes.rows[0].id]);
+      return { ok: true, markdownPath: 'output/markdown/x.md' };
+    };
+
     const first = await req('POST', `/api/listings/${listingId}/apply-now`);
     assert.equal(first.status, 202);
     const second = await req('POST', `/api/listings/${listingId}/apply-now`);

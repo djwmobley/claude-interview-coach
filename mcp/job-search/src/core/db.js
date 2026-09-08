@@ -59,6 +59,18 @@ export async function connectDedicated(opts = {}) {
 
 /**
  * Run `fn` with a pooled client, releasing it afterwards.
+ *
+ * This is the only site in this module (indeed, the only obtain-and-release site against the shared
+ * pool anywhere in this codebase -- query() below uses pg's own Pool#query convenience wrapper for a
+ * single statement, and connectDedicated() opens a non-pooled Client, never the pool) that hands a
+ * caller a pooled client to run arbitrary statements against, including multi-statement scripts (see
+ * src/core/schema.js's ensureAuxSchema). If `fn` throws after starting a transaction (BEGIN, or a
+ * statement inside a script that opens one implicitly) and never issues its own ROLLBACK, the pooled
+ * client normally goes back to the pool still inside an aborted transaction -- every later query any
+ * other caller runs on that same connection then fails with 25P02 until the process restarts. Always
+ * issuing ROLLBACK here before release closes that gap unconditionally, whether or not a transaction was
+ * actually open: PG accepts ROLLBACK with no transaction in progress as a harmless no-op (a WARNING, not
+ * an error), so this is safe on the ordinary non-transactional path too.
  * @template T
  * @param {(client: import('pg').PoolClient) => Promise<T>} fn
  * @returns {Promise<T>}
@@ -73,6 +85,11 @@ export async function withClient(fn) {
   try {
     return await fn(client);
   } finally {
+    try {
+      await client.query('ROLLBACK');
+    } catch {
+      /* connection is already gone or otherwise unusable; release() below still runs */
+    }
     client.release();
   }
 }
