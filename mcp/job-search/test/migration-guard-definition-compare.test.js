@@ -76,7 +76,7 @@ before(async () => {
 after(async () => {
   await cleanup();
   await client.query(`DROP TABLE IF EXISTS ${SCRATCH_TABLE}`);
-  await client.query(`DROP TABLE IF EXISTS zz_test_migguard_blindspot_${process.pid}`);
+  await client.query(`DROP TABLE IF EXISTS zz_test_migguard_compound_${process.pid}`);
   await client.end();
 });
 
@@ -170,16 +170,15 @@ describe('ic_ensure_widened_check against a private scratch column (scenario b)'
   });
 });
 
-describe('KNOWN BLIND SPOT: a compound multi-column CHECK can be misclassified as covering', () => {
-  // ic_ensure_widened_check() parses an existing constraint's allowed value set by regex-extracting
-  // every quoted string literal out of pg_get_constraintdef()'s text -- it does not parse the expression's
-  // actual boolean structure. A constraint that ORs an unrelated column's equality test alongside the
-  // real actor list contributes ITS literal into the same found_values set, even though that literal has
-  // nothing to do with what actor is actually allowed to be. This is a genuine false positive: the helper
-  // reports "already covers", stays a no-op, and leaves the real (too-narrow, semantically different)
-  // constraint in place -- exactly the kind of gap the total-classification rule (unparsable -> not
-  // covering) does NOT catch, because this constraint parses just fine; it is just not what it looks like.
-  const SCRATCH2 = `zz_test_migguard_blindspot_${process.pid}`;
+describe('a compound multi-column CHECK is recognized as non-canonical and replaced, never treated as covering', () => {
+  // ic_ensure_widened_check() first requires an existing CHECK's pg_get_constraintdef() text to match one
+  // of a small set of canonical single-column enumeration shapes (col = ANY (ARRAY[...]), its cast
+  // variant, col = 'v'::type, or col IN (...)), each anchored to the WHOLE definition -- only THEN does it
+  // extract and compare literal values. A compound constraint that ORs an unrelated column's equality test
+  // alongside the real actor list does not match any of those shapes (it contains OR and a second column),
+  // so it is never treated as covering regardless of which literals happen to appear inside it -- it is
+  // classified as not covering (with a RAISE NOTICE naming the constraint and why) and replaced.
+  const SCRATCH2 = `zz_test_migguard_compound_${process.pid}`;
 
   before(async () => {
     await client.query(`DROP TABLE IF EXISTS ${SCRATCH2}`);
@@ -190,14 +189,14 @@ describe('KNOWN BLIND SPOT: a compound multi-column CHECK can be misclassified a
     // constraint's conkey, so the lookup-by-column in ic_ensure_widened_check finds it under p_column =
     // 'actor'.
     await client.query(`
-      ALTER TABLE ${SCRATCH2} ADD CONSTRAINT zz_migguard_blindspot_compound_check CHECK (
+      ALTER TABLE ${SCRATCH2} ADD CONSTRAINT zz_migguard_compound_check CHECK (
         (actor = ANY (ARRAY['dashboard','mcp','cli','migration','seed','auto']::text[]))
         OR (note = 'apply'::text)
       )
     `);
   });
 
-  test('a genuinely narrower compound constraint is wrongly classified as covering the wider target set', async () => {
+  test('the compound constraint is dropped and replaced with the real widen, not left in place', async () => {
     // Ground truth first: actor='apply' with an unrelated note is in fact rejected today.
     await assert.rejects(
       client.query(`INSERT INTO ${SCRATCH2} (actor, note) VALUES ('apply', 'unrelated')`),
@@ -206,12 +205,10 @@ describe('KNOWN BLIND SPOT: a compound multi-column CHECK can be misclassified a
     );
 
     // Ask the helper to ensure the same widen 012 applies for real (adds 'apply' to actor's target set).
-    // A CORRECT implementation, told to install ARRAY[...,'apply'], would have to conclude the existing
-    // compound constraint does not cover that and replace it. This helper instead sees 'apply' already
-    // present among the literals it extracted (from note's branch) and treats the column as already wide
-    // enough, so it makes no change at all.
+    // Because the existing constraint's shape is not one of the recognized canonical forms, the helper
+    // must classify it as not covering and replace it, regardless of which literals it happens to contain.
     await client.query(
-      `SELECT ic_ensure_widened_check($1, 'actor', 'zz_migguard_blindspot_apply_check', ARRAY['dashboard','mcp','cli','migration','seed','auto','apply'])`,
+      `SELECT ic_ensure_widened_check($1, 'actor', 'zz_migguard_compound_apply_check', ARRAY['dashboard','mcp','cli','migration','seed','auto','apply'])`,
       [SCRATCH2],
     );
 
@@ -219,18 +216,13 @@ describe('KNOWN BLIND SPOT: a compound multi-column CHECK can be misclassified a
       SELECT c.conname FROM pg_constraint c JOIN pg_class t ON t.oid = c.conrelid
       WHERE t.relname = $1 AND c.contype = 'c'
     `, [SCRATCH2]);
-    // Documents the actual (wrong) behavior: the original compound constraint is still the only one
-    // present -- the helper believed it already covered the target set and did nothing.
-    assert.equal(after_.rowCount, 1);
-    assert.equal(after_.rows[0].conname, 'zz_migguard_blindspot_compound_check', 'BLIND SPOT: the helper left the narrower compound constraint in place instead of installing the real widen');
+    assert.equal(after_.rowCount, 1, 'the compound constraint must have been dropped, and exactly one canonical constraint installed in its place');
+    assert.equal(after_.rows[0].conname, 'zz_migguard_compound_apply_check', 'the non-canonical compound constraint must be replaced by the real widen, never left in place');
 
-    // And the practical consequence: actor=apply with an unrelated note is STILL rejected after the
-    // "widen" call returned successfully -- silently. No error, no RAISE NOTICE (the definition parsed
-    // fine), just a widen that did not actually happen.
-    await assert.rejects(
+    // And the practical consequence: actor='apply' now genuinely succeeds regardless of note.
+    await assert.doesNotReject(
       client.query(`INSERT INTO ${SCRATCH2} (actor, note) VALUES ('apply', 'still-unrelated')`),
-      /violates check constraint/i,
-      'BLIND SPOT: actor=apply is still rejected even though ic_ensure_widened_check reported the target set as already covered',
+      'actor=apply must now be accepted unconditionally -- the widen actually took effect',
     );
   });
 });
