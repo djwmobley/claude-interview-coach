@@ -90,6 +90,14 @@ export function ensureDotenv() {
  * @property {string} JOBSEARCH_LOG_DIR
  * @property {string} JOBSEARCH_CONFIG_DIR
  * @property {string} GOOGLE_TOKEN_FILE
+ * @property {string} GOOGLE_OAUTH_REDIRECT_URIS raw comma-separated string from .env/process.env, or ''
+ *   to use src/core/google-reauth.js's five registered http://localhost:8000-8004/oauth2callback
+ *   defaults (resolveRedirectUris() does the actual parsing/fallback; getEnv() passes the raw value
+ *   through unchanged since '' is itself a meaningful "use the defaults" signal, not an error).
+ * @property {number} GOOGLE_REAUTH_TIMEOUT_MS how long an interactive in-run Google re-auth consent
+ *   window (src/core/google-reauth.js) stays open before giving up with outcome 'timeout'; default 10
+ *   minutes. The unattended (non-interactive) policy in scan-run.js uses its own fixed 2-hour wait for
+ *   the detached bin/google-reauth.js CLI, independent of this value.
  * @property {string} REMINDER_TO
  * @property {string} LOG_LEVEL
  * @property {string|undefined} DASHBOARD_PORT raw string from .env/process.env; bin/dashboard.js
@@ -127,6 +135,8 @@ export function getEnv() {
     JOBSEARCH_LOG_DIR: resolveFromRoot(e.JOBSEARCH_LOG_DIR || path.join('mcp', 'job-search', 'logs')),
     JOBSEARCH_CONFIG_DIR: resolveFromRoot(e.JOBSEARCH_CONFIG_DIR || path.join('mcp', 'job-search', 'config')),
     GOOGLE_TOKEN_FILE: e.GOOGLE_TOKEN_FILE || '',
+    GOOGLE_OAUTH_REDIRECT_URIS: e.GOOGLE_OAUTH_REDIRECT_URIS || '',
+    GOOGLE_REAUTH_TIMEOUT_MS: Number(e.GOOGLE_REAUTH_TIMEOUT_MS) > 0 ? Number(e.GOOGLE_REAUTH_TIMEOUT_MS) : 600000,
     REMINDER_TO: e.REMINDER_TO || '',
     LOG_LEVEL: e.LOG_LEVEL || 'info',
     DASHBOARD_PORT: e.DASHBOARD_PORT || undefined,

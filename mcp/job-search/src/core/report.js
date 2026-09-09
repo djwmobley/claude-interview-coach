@@ -148,6 +148,12 @@ function describeWarning(entry) {
   if (entry.code === 'CHROME_RELAUNCHED') {
     return `scan Chrome had to be killed and relaunched (${entry.attempts ?? '?'} attempt(s)) before this run could proceed.`;
   }
+  // In-run Google re-auth (spec A6/A10): these two carry their own `message` (never a `remedy`), unlike
+  // every other warning code above -- fall through to it rather than the bare code below, or the
+  // operator-facing text (e.g. "approve it and Gmail resumes next run") would be silently dropped.
+  if (entry.code === 'AUTH_REAUTH_PENDING' || entry.code === 'AUTH_REAUTH_FAILED') {
+    return entry.message ?? entry.code;
+  }
   return `${entry.code}${entry.remedy ? `. ${entry.remedy}` : ''}`;
 }
 

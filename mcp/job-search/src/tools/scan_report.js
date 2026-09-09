@@ -41,7 +41,7 @@ export const tool = {
     // scheduled digest's own send-capability check (bin/remind.js). deps.env.GOOGLE_TOKEN_FILE is '' in
     // any environment with no token file configured, which classifies deterministically to
     // broken_missing_file rather than throwing.
-    const googleAuthState = await classifyGoogleTokenState(deps.env?.GOOGLE_TOKEN_FILE ?? '', { gmail: true });
+    const googleAuthState = await classifyGoogleTokenState(deps.env?.GOOGLE_TOKEN_FILE ?? '', { gmail: true, gmailRead: true });
     const subject = buildReportSubject(report, {});
     const text = renderReportText(report, registry, googleAuthState);
     return {

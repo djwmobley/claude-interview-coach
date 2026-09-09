@@ -29,7 +29,12 @@
  * real).
  */
 import assert from 'node:assert/strict';
-import { loadConfig, getEnv } from './config.js';
+import path from 'node:path';
+import { spawn as defaultSpawn } from 'node:child_process';
+import { loadConfig, getEnv, packageRoot } from './config.js';
+import { classifyGoogleTokenState } from './google.js';
+import { reauthorizeGoogle, resolveRedirectUris } from './google-reauth.js';
+import { launchOsBrowser } from './open-dashboard.js';
 import { connectDedicated as defaultConnectDedicated, withTransaction } from './db.js';
 import { JobSearchError, errFields } from './errors.js';
 import { log as defaultLog } from './logger.js';
@@ -85,6 +90,13 @@ export const CLOSE_ALL_TIMEOUT_MS = 10000;
  * @property {(ms: number, signal?: AbortSignal) => Promise<void>} [sleep]
  * @property {() => number} [random]
  * @property {typeof reserveBudget} [reserveBudget] tests inject an in-memory reservation so fixture runs never consume the real daily budget
+ * @property {typeof defaultSpawn} [spawn] unattended Google re-auth (spec A6): the child_process.spawn
+ *   used to fire-and-forget bin/google-reauth.js. Tests inject a fake to assert the spawn args (command,
+ *   detached/windowsHide/stdio) without actually launching a process.
+ * @property {(url: string) => (void|Promise<void>)} [openUrl] interactive Google re-auth (spec A5): passed
+ *   through to reauthorizeGoogle() as its own openUrl. Tests inject a no-op so no real browser opens.
+ * @property {typeof reauthorizeGoogle} [reauthorizeGoogle] test seam over the real function.
+ * @property {typeof classifyGoogleTokenState} [classifyGoogleTokenState] test seam over the real function.
  * @property {Function} [execFile] slice 3 auto-triage's model step (src/core/triage.js's runModelTriage)
  *   seam for a fake `claude` CLI script in tests, mirroring render.js's `opts.execFile` pattern. The
  *   binary NAME is separately overridable via the JOBSEARCH_TRIAGE_CLAUDE_BIN env var (mirrors
@@ -118,6 +130,12 @@ export const CLOSE_ALL_TIMEOUT_MS = 10000;
  *   executeRun() so they land in the same finalize UPDATE as everything else and are visible on the run row
  *   -- but status computation ignores every entry whose `severity` is 'warning', so a run carrying ONLY
  *   these stays 'ok'.
+ * @property {boolean} [interactive] Google re-auth policy (spec A5/A6): true pops a real consent window
+ *   in-run when Gmail's auth is broken and waits on it (ctx.reauthGoogle, bound in makeCtx below); false
+ *   (or omitted) fires the unattended policy instead -- a detached bin/google-reauth.js CLI spawned once
+ *   the run row exists, Gmail reordered last so it gets the longest chance to resolve before its own
+ *   source turn. Defaults to `trigger === 'dashboard' || trigger === 'mcp'` when not explicitly set
+ *   (bin/scan.js only ever passes 'cli' or 'dashboard' as a trigger; 'mcp' comes from search_jobs.js).
  */
 
 /**
@@ -346,6 +364,16 @@ async function executeRun(p) {
   const dryRun = Boolean(args.dryRun);
   const runCfg = config.adapters.run;
   const dedupCfg = config.adapters.dedup;
+  // Google re-auth policy (spec A5/A6): interactive iff explicitly set, else trigger dashboard/mcp.
+  const interactive = typeof opts.interactive === 'boolean' ? opts.interactive : (opts.trigger === 'dashboard' || opts.trigger === 'mcp');
+  const runStartMs = Date.now();
+  const runTimeoutMs = runCfg.runTimeoutMinutes * 60000;
+  /** Remaining wall clock minus a 5-minute safety margin, clamped to [1000, GOOGLE_REAUTH_TIMEOUT_MS default 600000] (spec A5). */
+  function reauthTimeoutMs() {
+    const remaining = runTimeoutMs - (Date.now() - runStartMs) - 5 * 60000;
+    const configured = Number(env.GOOGLE_REAUTH_TIMEOUT_MS) > 0 ? Number(env.GOOGLE_REAUTH_TIMEOUT_MS) : 600000;
+    return Math.max(1000, Math.min(configured, remaining));
+  }
   const classifyOpts = {
     now,
     repostGapDays: dedupCfg.repostGapDays,
@@ -663,6 +691,27 @@ async function executeRun(p) {
       capFor,
       config,
       env: { GOOGLE_TOKEN_FILE: env.GOOGLE_TOKEN_FILE },
+      interactive,
+      // Spec A5/A8: bound so an adapter never sees tokenFile/timeoutMs/signal wiring. Only meaningful
+      // when `interactive` is true -- the unattended policy (spec A6) is handled entirely around the
+      // source loop below, never through this ctx method.
+      async reauthGoogle() {
+        const doReauth = deps.reauthorizeGoogle ?? reauthorizeGoogle;
+        // Production default: actually pop the OS browser (dashboard-triggered runs are interactive by
+        // default -- someone needs to SEE the consent tab). Tests always inject deps.openUrl instead.
+        const doOpenUrl = deps.openUrl ?? (async (/** @type {string} */ url) => {
+          await launchOsBrowser({ dashboardUrl: url, spawnImpl: deps.spawn ?? defaultSpawn, platform: process.platform });
+        });
+        return doReauth({
+          tokenFile: env.GOOGLE_TOKEN_FILE,
+          redirectUris: resolveRedirectUris(env.GOOGLE_OAUTH_REDIRECT_URIS),
+          timeoutMs: reauthTimeoutMs(),
+          signal,
+          openUrl: doOpenUrl,
+          log: (f) => log({ source: s.name, evt: 'google_reauth', ...f }),
+          now,
+        });
+      },
       log: (f) => log({ source: s.name, ...f }),
     };
   }
@@ -1241,9 +1290,67 @@ async function executeRun(p) {
     assertPlanWithinCap(plan, runCfg.maxPlannedPagesPerRun);
     log({ evt: 'plan', run_id: runId, planned: plan.planned, sources: sources.length });
 
+    // Unattended Google re-auth policy (spec A6): only when this run is NOT interactive, gmail is
+    // actually among the resolved sources, AND a token file is configured at all (an unconfigured
+    // GOOGLE_TOKEN_FILE is gmail's own pre-existing "no GOOGLE_TOKEN_FILE configured" warning -- nothing
+    // for this policy to do). gmail is moved to the very end of this run's source order (every other
+    // source's relative order is preserved) so it gets the longest possible window for a human to notice
+    // and click through the popped consent tab before its own turn comes up.
+    const gmailIndex = sources.findIndex((s) => s.name === 'gmail');
+    const unattendedGmailPolicyActive = !interactive && gmailIndex !== -1 && Boolean(env.GOOGLE_TOKEN_FILE);
+    // Only the unattended policy reorders (spec A6); an interactive run keeps gmail at its configured
+    // position -- its own adapter pops the consent tab synchronously at its normal turn, so there is no
+    // "give it more time" reason to move it.
+    const orderedSources = unattendedGmailPolicyActive ? [...sources.slice(0, gmailIndex), ...sources.slice(gmailIndex + 1), sources[gmailIndex]] : sources;
+    let unattendedGmailReauthTriggered = false;
+    let unattendedGmailReauthSpawnFailedReason = /** @type {string|null} */ (null);
+    if (unattendedGmailPolicyActive) {
+      try {
+        const doClassify = deps.classifyGoogleTokenState ?? classifyGoogleTokenState;
+        const state = await doClassify(env.GOOGLE_TOKEN_FILE, { gmail: true, gmailRead: true });
+        if (state.state !== 'ok') {
+          unattendedGmailReauthTriggered = true;
+          const spawnImpl = deps.spawn ?? defaultSpawn;
+          try {
+            const child = spawnImpl(
+              process.execPath,
+              [path.join(packageRoot(), 'bin', 'google-reauth.js'), '--wait-ms', '7200000', '--token-file', env.GOOGLE_TOKEN_FILE],
+              { detached: true, windowsHide: true, stdio: 'ignore' },
+            );
+            child.unref?.();
+            log({ evt: 'unattended_google_reauth_spawned', run_id: runId, state: state.state });
+          } catch (err) {
+            unattendedGmailReauthSpawnFailedReason = String(err instanceof Error ? err.message : err).slice(0, 200);
+            log({ evt: 'unattended_google_reauth_spawn_failed', run_id: runId, err_message: unattendedGmailReauthSpawnFailedReason });
+          }
+        }
+      } catch (err) {
+        log({ evt: 'unattended_google_reauth_classify_failed', run_id: runId, ...errFields(err) });
+      }
+    }
+
     // 7. sources
-    for (const s of sources) {
+    for (const s of orderedSources) {
       if (signal.aborted) break;
+      if (s.name === 'gmail' && unattendedGmailReauthTriggered) {
+        // Re-classify NOW, at gmail's turn (not the earlier pre-loop snapshot): a consent completed
+        // moments ago is picked up in this same run rather than waiting for the next scheduled scan.
+        let stillBroken = true;
+        try {
+          const doClassify = deps.classifyGoogleTokenState ?? classifyGoogleTokenState;
+          const state = await doClassify(env.GOOGLE_TOKEN_FILE, { gmail: true, gmailRead: true });
+          stillBroken = state.state !== 'ok';
+        } catch (err) {
+          log({ evt: 'gmail_reclassify_failed', run_id: runId, ...errFields(err) });
+        }
+        if (stillBroken) {
+          errors.push(unattendedGmailReauthSpawnFailedReason
+            ? { source: 'gmail', code: 'AUTH_REAUTH_FAILED', severity: 'warning', message: `could not start the background Google re-authorization: ${unattendedGmailReauthSpawnFailedReason}` }
+            : { source: 'gmail', code: 'AUTH_REAUTH_PENDING', severity: 'warning', message: 'Google consent tab is open; approve it and Gmail resumes next run' });
+          log({ evt: 'adapter_warning', source: 'gmail', code: 'AUTH_UNAVAILABLE', message: 'gmail: reauth pending, skipped for this run' });
+          continue;
+        }
+      }
       const enabled = await sourceEnabled(client, s.name, now);
       if (!enabled.enabled) {
         errors.push({ source: s.name, code: 'SOURCE_DISABLED', message: `${s.name} disabled (${enabled.reason})${enabled.disabledUntil ? ' until ' + enabled.disabledUntil.toISOString() : ''}` });

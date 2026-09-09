@@ -13,7 +13,7 @@ import path from 'node:path';
 import { spawn } from 'node:child_process';
 import { fileURLToPath } from 'node:url';
 import { newClient, upsertTestProfile, cleanupScan, CONFIG_DIR, FIXTURE_NOW } from './helpers/scan-fixtures.js';
-import { parseArgs, launchChrome, cdpReachable } from '../bin/scan.js';
+import { parseArgs, launchChrome, cdpReachable, resolveInteractive } from '../bin/scan.js';
 import { computeConfigHash, CONFIG_FILES, writeTriageCandidateLock } from '../src/core/config.js';
 
 const HERE = path.dirname(fileURLToPath(import.meta.url));
@@ -79,6 +79,17 @@ describe('scan.js CLI', () => {
     assert.equal(parseArgs(['--json', 'out.json']).json, 'out.json');
     assert.equal(parseArgs([]).trigger, 'cli', 'default trigger is cli (dashboard PR 1)');
     assert.equal(parseArgs(['--trigger', 'dashboard']).trigger, 'dashboard');
+    assert.equal(parseArgs([]).interactive, undefined, 'no --interactive/--no-interactive flag: unset, defer to resolveInteractive');
+    assert.equal(parseArgs(['--interactive']).interactive, true);
+    assert.equal(parseArgs(['--no-interactive']).interactive, false);
+    assert.equal(parseArgs(['--interactive', '--no-interactive']).interactive, false, 'last flag wins');
+  });
+
+  test('resolveInteractive (spec A8): default interactive iff trigger is dashboard; an explicit flag always wins', () => {
+    assert.equal(resolveInteractive('cli', undefined), false);
+    assert.equal(resolveInteractive('dashboard', undefined), true);
+    assert.equal(resolveInteractive('cli', true), true, 'explicit --interactive overrides the cli default');
+    assert.equal(resolveInteractive('dashboard', false), false, 'explicit --no-interactive overrides the dashboard default');
   });
 
   test('--accept-config-change no longer exists: parseArgs never sets an acceptConfigChange field (scan-never-skip fix: nothing left for it to override)', () => {

@@ -454,6 +454,45 @@ describe('[WALLCLOCK] marker (scan-hang-timeouts fix, spec item D)', () => {
   });
 });
 
+describe('AUTH_REAUTH_PENDING / AUTH_REAUTH_FAILED per-run error lines (in-run Google re-auth, spec A6/A10)', () => {
+  /** @param {any} statsExtra */
+  function dataWithRunErrors(statsExtra, errors) {
+    const run = {
+      run_id: 7, profile: 'exec-default', status: 'ok', started_at: '2026-09-09T06:30:00.000Z',
+      finished_at: '2026-09-09T06:40:00.000Z', duration_seconds: 600,
+      stats: { fetched: 0, new: 0, updated: 0, repost: 0, ambiguous: 0, detail_skipped_budget: 0, ...statsExtra },
+      errors, pages_by_source: {},
+    };
+    return {
+      dayKey: '2026-09-09', timezone: 'America/Chicago', noScan: false, runs: [run],
+      lookAtThese: { rows: [], excludedCount: 0 }, suspectUnclassified: [],
+      homeLocations: { rows: [], excludedCount: 0 }, reviewQueue: { total: 0, topReasons: [] }, disabledSources: [],
+    };
+  }
+
+  test('AUTH_REAUTH_PENDING renders its own message text (never the bare code) in text, html, and markdown', () => {
+    const data = dataWithRunErrors({}, [{ source: 'gmail', code: 'AUTH_REAUTH_PENDING', severity: 'warning', message: 'Google consent tab is open; approve it and Gmail resumes next run' }]);
+    for (const rendered of [renderReportText(data), renderReportHtml(data), renderReportMarkdown(data)]) {
+      assert.match(rendered, /Google consent tab is open; approve it and Gmail resumes next run/, rendered);
+      assert.ok(!/error: gmail AUTH_REAUTH_PENDING: AUTH_REAUTH_PENDING\b/.test(rendered), 'never falls through to the bare-code fallback');
+    }
+  });
+
+  test('AUTH_REAUTH_FAILED renders its own message text (never the bare code) in text, html, and markdown', () => {
+    const data = dataWithRunErrors({}, [{ source: 'gmail', code: 'AUTH_REAUTH_FAILED', severity: 'warning', message: 'could not start the background Google re-authorization: spawn ENOENT' }]);
+    for (const rendered of [renderReportText(data), renderReportHtml(data), renderReportMarkdown(data)]) {
+      assert.match(rendered, /could not start the background Google re-authorization: spawn ENOENT/, rendered);
+    }
+  });
+
+  test('a warning-only run (AUTH_REAUTH_PENDING only) never counts toward a non-ok status render', () => {
+    const data = dataWithRunErrors({}, [{ source: 'gmail', code: 'AUTH_REAUTH_PENDING', severity: 'warning', message: 'Google consent tab is open; approve it and Gmail resumes next run' }]);
+    // status on the synthetic run object above is already 'ok' (matches scan-run.js's own finalize logic
+    // for a warning-severity-only errors[]); this test only guards the report renderer never overrides it.
+    assert.match(renderReportText(data), /run #7 \| profile exec-default \| status ok/);
+  });
+});
+
 describe('collectReviewQueueSummary / bulk-separate digest line (review-bulk spec S3d)', () => {
   test('a "since" with no matching events reports an empty bulkToday, and no line renders in any format', async () => {
     const summary = await collectReviewQueueSummary(client, new Date());

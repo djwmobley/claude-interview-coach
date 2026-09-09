@@ -21,6 +21,22 @@ export async function openRunScanDrawer(opts = {}) {
   const outcome = handleOutcome(await getJson('/api/profiles'));
   const allSources = outcome.kind === 'ok' && Array.isArray(outcome.body.sources) ? outcome.body.sources : [];
 
+  // Google auth badge (spec A9): a dashboard-triggered scan is interactive by default (src/core/
+  // scan-run.js) -- a broken Gmail token pops a real consent tab the moment the scan reaches gmail, so
+  // the operator should know that BEFORE clicking Start, not be surprised by a tab appearing mid-scan.
+  // Best-effort: a failed lookup just means no badge, never blocks starting the drawer.
+  let googleAuthBadge = null;
+  try {
+    const authOutcome = handleOutcome(await getJson('/api/google/auth'));
+    if (authOutcome.kind === 'ok' && typeof authOutcome.body.state === 'string' && authOutcome.body.state.startsWith('broken_')) {
+      googleAuthBadge = h('p', { className: 'drawer__hint' }, [
+        h('span', { className: 'badge badge--error', text: 'Google auth needs consent; a Google tab will open when you start' }),
+      ]);
+    }
+  } catch {
+    /* best-effort only */
+  }
+
   /** @type {Record<string, HTMLInputElement>} */
   const checkboxes = {};
   const sourceRows = allSources.length === 0
@@ -49,6 +65,7 @@ export async function openRunScanDrawer(opts = {}) {
   const { el, close } = drawer({
     title: 'Run scan',
     body: [
+      ...(googleAuthBadge ? [googleAuthBadge] : []),
       h('div', { className: 'drawer__field' }, [h('span', { text: 'Sources' }), ...sourceRows]),
       h('label', { className: 'drawer__checkbox-row' }, [dryRunCheckbox, h('span', { text: 'Dry run (no writes)' })]),
       h('div', { className: 'drawer__actions' }, [

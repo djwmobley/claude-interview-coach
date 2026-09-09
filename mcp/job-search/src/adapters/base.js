@@ -62,6 +62,14 @@ export const KEYWORD_RE = /^[\p{L}\p{N} .,+'/&-]{1,80}$/u;
  * @property {(source: string) => Promise<import('../browser/capability.js').Capability|null>} capFor frozen capability scoped to a registry source; null when the scan Chrome is unreachable (connects lazily on first call)
  * @property {import('../core/config.js').LoadedConfig} config
  * @property {{ GOOGLE_TOKEN_FILE?: string }} [env] scalar env values an adapter may need directly (gmail: the workspace-mcp OAuth token file path)
+ * @property {boolean} [interactive] true for a dashboard/mcp-triggered run (or --interactive on the CLI):
+ *   an adapter whose auth is broken may pop a real consent window and wait via reauthGoogle() below. False
+ *   (the unattended default) means an adapter must never block on human interaction -- scan-run.js itself
+ *   handles the unattended Google re-auth policy (spec A6) around the source loop, never inside the adapter.
+ * @property {() => Promise<{ outcome: string, reason: string|null }>} [reauthGoogle] bound
+ *   src/core/google-reauth.js reauthorizeGoogle() (tokenFile/timeoutMs/signal already filled in by
+ *   scan-run.js's makeCtx). Only meaningful when `interactive` is true; the gmail adapter is today's only
+ *   caller, on broken_invalid_grant/broken_no_refresh_token/broken_missing_scopes, exactly once per run.
  * @property {(fields: Record<string, string|number|boolean|null>) => void} log enumerated scalars only
  */
 
