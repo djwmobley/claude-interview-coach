@@ -127,6 +127,50 @@ describe('createScanRunner.start', () => {
   });
 });
 
+describe('createScanRunner.start source validation (S2/S2b)', () => {
+  test('an unknown source name is refused VALIDATION 400-equivalent without spawning', async () => {
+    let spawnCalled = false;
+    const runner = createScanRunner({
+      env: {}, logDir, scanScript: path.join(logDir, 'fake-scan.js'),
+      spawn: () => { spawnCalled = true; throw new Error('should never spawn'); },
+      checkConfigLock: okConfigLock,
+    });
+    await assert.rejects(
+      runner.start({ sources: ['greenhouse', 'bogus-source'] }),
+      (err) => err instanceof JobSearchError && err.code === 'VALIDATION' && /bogus-source/.test(err.message),
+    );
+    assert.equal(spawnCalled, false);
+  });
+
+  test('an explicit empty sources array is refused "no sources selected" without spawning, never falls back to profile defaults', async () => {
+    let spawnCalled = false;
+    const runner = createScanRunner({
+      env: {}, logDir, scanScript: path.join(logDir, 'fake-scan.js'),
+      spawn: () => { spawnCalled = true; throw new Error('should never spawn'); },
+      checkConfigLock: okConfigLock,
+    });
+    await assert.rejects(
+      runner.start({ sources: [] }),
+      (err) => err instanceof JobSearchError && err.code === 'VALIDATION' && /no sources selected/.test(err.message),
+    );
+    assert.equal(spawnCalled, false);
+  });
+
+  test('omitted sources (undefined) is not validated -- keeps falling back to the profile defaults', async () => {
+    const { spawnFn } = makeFakeSpawn({ mode: 'resolve', runId: 6006 });
+    const runner = createScanRunner({ env: {}, logDir, scanScript: path.join(logDir, 'fake-scan.js'), spawn: spawnFn, checkConfigLock: okConfigLock });
+    const result = await runner.start({ profile: 'exec-default' });
+    assert.equal(result.runId, 6006);
+  });
+
+  test('mixed-case source names normalize the same way resolveSources() does and are accepted', async () => {
+    const { spawnFn } = makeFakeSpawn({ mode: 'resolve', runId: 7007 });
+    const runner = createScanRunner({ env: {}, logDir, scanScript: path.join(logDir, 'fake-scan.js'), spawn: spawnFn, checkConfigLock: okConfigLock });
+    const result = await runner.start({ sources: ['Greenhouse', ' lever '] });
+    assert.equal(result.runId, 7007);
+  });
+});
+
 describe('armCancelBackstop', () => {
   test('forced_kill_available is true only when this runner spawned that exact run id and pid', async () => {
     const { spawnFn } = makeFakeSpawn({ mode: 'resolve', runId: 2002, delayMs: 10 });

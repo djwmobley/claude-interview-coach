@@ -22,6 +22,7 @@ import { checkConfigLock } from '../core/config.js';
 import { JobSearchError, errFields } from '../core/errors.js';
 import { log as defaultLog } from '../core/logger.js';
 import { DashboardError } from './http.js';
+import { adapterNames } from '../adapters/index.js';
 
 export const MARKER_TIMEOUT_MS = 30000;
 export const CANCEL_BACKSTOP_MS = 45000;
@@ -87,6 +88,23 @@ export function createScanRunner(deps) {
       throw new JobSearchError('CONFIG_LOCK_MISMATCH', 'config/*.json differs from config.lock.json', { details: { expected: lock.expected, actual: lock.actual } });
     }
     if (current) throw new JobSearchError('LOCKED', 'a scan started from this dashboard is already running');
+
+    // S2/S2b: validate requested sources against the adapter registry before ever spawning the child.
+    // Same trim()+toLowerCase() normalization as resolveSources() (src/core/scan-run.js), but checked here
+    // so a bad request never spawns a scan process only to have it exit immediately.
+    // An explicit empty array means "nothing selected" and is refused; `sources` left undefined keeps
+    // today's behavior of falling back to the profile's own defaults inside bin/scan.js.
+    if (args.sources !== undefined) {
+      if (args.sources.length === 0) {
+        throw new JobSearchError('VALIDATION', 'no sources selected');
+      }
+      const known = new Set(adapterNames());
+      const normalized = args.sources.map((s) => String(s).trim().toLowerCase());
+      const unknown = normalized.filter((s) => !known.has(s));
+      if (unknown.length > 0) {
+        throw new JobSearchError('VALIDATION', `unknown source(s): ${unknown.join(', ')}`, { hint: `known sources: ${[...known].join(', ')}` });
+      }
+    }
 
     fs.mkdirSync(deps.logDir, { recursive: true });
     const markerId = `${process.pid}-${process.hrtime.bigint()}-${crypto.randomBytes(4).toString('hex')}`;
