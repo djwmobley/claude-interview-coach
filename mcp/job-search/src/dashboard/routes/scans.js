@@ -7,6 +7,7 @@
 import { JobSearchError } from '../../core/errors.js';
 import { cdpReachable, launchChrome } from '../../../bin/scan.js';
 import { sendJson } from '../http.js';
+import { adapterNames } from '../../adapters/index.js';
 
 /** @param {any} r */
 function formatRunFull(r) {
@@ -135,8 +136,11 @@ export function register(router, deps) {
     // The full universe of scannable source names (adapters.json's own keys, the same set resolveSources()
     // in src/core/scan-run.js validates against), not any one profile's own `sources` column -- a profile's
     // `sources` is usually `{}` (meaning "no restriction, use every configured adapter"), so it cannot
-    // double as the checkbox list the Run scan options drawer needs.
-    const sources = deps.config ? Object.keys(deps.config.adapters.adapters).sort() : [];
+    // double as the checkbox list the Run scan options drawer needs. Intersected with adapterNames() so a
+    // config key with no registered adapter (e.g. icims, smartrecruiters) never appears as a checkbox for
+    // a source that cannot actually run.
+    const configuredSources = deps.config ? new Set(Object.keys(deps.config.adapters.adapters)) : null;
+    const sources = configuredSources ? adapterNames().filter((n) => configuredSources.has(n)).sort() : [];
     sendJson(ctx.res, 200, {
       ok: true,
       profiles: r.rows.map((p) => ({ ...p, rev: String(p.rev).slice(0, 12), updated_at: new Date(p.updated_at).toISOString() })),

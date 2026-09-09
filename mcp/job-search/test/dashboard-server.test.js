@@ -1104,6 +1104,14 @@ describe('profiles: sources list for the Run scan options drawer (defect 4)', ()
     assert.ok(r.json.sources.includes('lever'));
     assert.ok(Array.isArray(r.json.profiles));
   });
+
+  test('S1: a config adapter key with no registered adapter (icims, smartrecruiters) is dropped from the list', async () => {
+    const r = await req('GET', '/api/profiles');
+    assert.equal(r.status, 200);
+    assert.ok(!r.json.sources.includes('icims'), 'icims has a config entry but no registered adapter');
+    assert.ok(!r.json.sources.includes('smartrecruiters'), 'smartrecruiters has a config entry but no registered adapter');
+    assert.deepEqual(r.json.sources, [...r.json.sources].sort(), 'sources is sorted');
+  });
 });
 
 describe('analytics', () => {

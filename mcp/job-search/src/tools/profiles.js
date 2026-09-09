@@ -6,6 +6,7 @@
 import { z } from 'zod';
 import { computeProfileRev } from '../core/upsert.js';
 import { JobSearchError } from '../core/errors.js';
+import { adapterNames } from '../adapters/index.js';
 
 const KEYWORD = /^[\p{L}\p{N} .,+'/&-]{1,80}$/u;
 
@@ -63,8 +64,10 @@ export const tool = {
       max_pages: p.max_pages ?? base.max_pages,
       sources: cleanTerms(p.sources ?? base.sources, 'sources').map((s) => s.toLowerCase()),
     };
-    if (deps.config) {
-      const known = new Set([...Object.keys(deps.config.adapters.adapters), 'exec']);
+    {
+      // Validated against the adapter registry, not adapters.json's config keys: a config key with no
+      // registered adapter (e.g. icims, smartrecruiters) is not a source a scan can actually run.
+      const known = new Set(adapterNames());
       for (const s of merged.sources) if (!known.has(s)) throw new JobSearchError('VALIDATION', `unknown source: ${s}`, { hint: `known: ${[...known].join(', ')}` });
     }
     if (merged.keywords.length + merged.phrases.length === 0) throw new JobSearchError('VALIDATION', 'a profile needs at least one keyword or phrase');

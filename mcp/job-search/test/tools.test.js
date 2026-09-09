@@ -366,6 +366,14 @@ describe('profiles and scans', () => {
     assert.ok(l.profiles.some((p) => p.name === 'exec-default'), 'exec-default seeded');
   });
 
+  test('S1b: profiles upsert rejects a source with no registered adapter, validated against adapterNames() not config keys', async () => {
+    const name = `zz-test-badsource-${process.pid}`;
+    await assert.rejects(
+      profiles.handler({ action: 'upsert', profile: { name, keywords: ['CTO'], sources: ['icims'] } }, deps),
+      /unknown source: icims/,
+    );
+  });
+
   test('scans status lists runs and source state; cancel on a non-running id is a soft failure', async () => {
     const s = /** @type {any} */ (await scans.handler({ action: 'status', last: 3 }, deps));
     assert.equal(s.ok, true);
