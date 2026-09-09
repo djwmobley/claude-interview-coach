@@ -33,6 +33,10 @@ import { PARSERS, PARSER_INPUT } from './gmail-parsers.js';
 
 export const GMAIL_MESSAGES_URL = 'https://gmail.googleapis.com/gmail/v1/users/me/messages';
 export const LIST_PAGE_SIZE = 50;
+/** Token states an interactive run (spec A5) may pop a consent window for; anything else (missing file,
+ * malformed, a live refresh_error) is never worth interrupting a human for -- it needs the workspace-mcp
+ * auth flow re-run, not a quick re-consent. */
+const REAUTH_ELIGIBLE_STATES = new Set(['broken_invalid_grant', 'broken_no_refresh_token', 'broken_missing_scopes']);
 /** The mailbox window is decoupled from job freshness (R1): withinWindow on each listing does the real freshness filtering downstream. */
 export const MIN_MAILBOX_WINDOW_DAYS = 14;
 
@@ -131,7 +135,23 @@ export const gmail = defineAdapter({
       // classification slug (e.g. broken_missing_scopes, broken_invalid_grant) instead of a generic
       // message -- a MID-run 401 on messages.list/messages.get further below is explicitly out of scope
       // and keeps its existing AUTH_UNAVAILABLE/generic treatment, never re-classified here.
-      const { state, accessToken: token } = await classifyAndConnect(tokenFile, { gmailRead: true }, deps);
+      let { state, accessToken: token } = await classifyAndConnect(tokenFile, { gmailRead: true }, deps);
+      // Interactive in-run re-auth (spec A5): only when this run is interactive (dashboard/mcp trigger,
+      // or --interactive), only for the three states a fresh consent can actually fix, and at most once
+      // per run -- ctx.reauthGoogle() itself is a single bound call, never retried here even if the
+      // reauth outcome is something other than 'reauthorized'.
+      if ((state.state !== 'ok' || !token) && ctx.interactive && typeof ctx.reauthGoogle === 'function' && REAUTH_ELIGIBLE_STATES.has(state.state)) {
+        const reauth = await ctx.reauthGoogle();
+        if (reauth.outcome === 'reauthorized') {
+          const retry = await classifyAndConnect(tokenFile, { gmailRead: true }, deps);
+          state = retry.state;
+          token = retry.accessToken;
+        }
+        if (state.state !== 'ok' || !token) {
+          yield { kind: 'warning', code: 'AUTH_UNAVAILABLE', message: `gmail: reauth ${reauth.outcome}${reauth.reason ? ` (${reauth.reason})` : ''}` };
+          return;
+        }
+      }
       if (state.state !== 'ok' || !token) {
         const detail = state.state === 'broken_refresh_error' ? ` (${state.code})`
           : state.state === 'broken_missing_scopes' ? ` (missing ${state.missing.join(', ')})`

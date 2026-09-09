@@ -157,7 +157,7 @@ async function tryCdp({ dashboardUrl, cdpUrl, fetchImpl, WebSocketImpl }) {
  * @param {{ dashboardUrl: string, spawnImpl: typeof import('node:child_process').spawn, platform: NodeJS.Platform }} o
  * @returns {Promise<void>}
  */
-function launchOsBrowser({ dashboardUrl, spawnImpl, platform }) {
+export function launchOsBrowser({ dashboardUrl, spawnImpl, platform }) {
   return new Promise((resolve, reject) => {
     const [cmd, cmdArgs] = platform === 'win32'
       ? ['cmd.exe', ['/c', 'start', '', dashboardUrl]]

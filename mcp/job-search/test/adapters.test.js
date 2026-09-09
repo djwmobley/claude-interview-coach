@@ -43,7 +43,7 @@ const profile = /** @type {any} */ ({
 /**
  * Minimal ctx over the fixture transport. Records fetches so pagination
  * can be asserted as URL construction only.
- * @param {{ maxPages?: number, map?: any[], cap?: any, env?: any }} [o]
+ * @param {{ maxPages?: number, map?: any[], cap?: any, env?: any, interactive?: boolean, reauthGoogle?: () => Promise<{ outcome: string, reason: string|null }> }} [o]
  */
 function makeCtx(o = {}) {
   const requests = [];
@@ -79,6 +79,8 @@ function makeCtx(o = {}) {
     capFor: async () => o.cap ?? null,
     config: testConfig(),
     env: o.env ?? { GOOGLE_TOKEN_FILE: 'zz-test-token-file.json' },
+    interactive: o.interactive ?? false,
+    ...(o.reauthGoogle ? { reauthGoogle: o.reauthGoogle } : {}),
     log() {},
   };
   return { ctx, requests, budget };
@@ -825,5 +827,116 @@ describe('gmail', () => {
       if (name === 'gmail') continue;
       assert.notEqual(ADAPTERS[name].ignoresQuery, true, `${name} must not set ignoresQuery`);
     }
+  });
+
+  describe('interactive in-run re-auth (spec A5)', () => {
+    test(
+      'interactive + broken_invalid_grant: ctx.reauthGoogle() called exactly once, reauthorized -> scan proceeds normally',
+      withFakeAuth(async () => {
+        gmailAuthDeps.getAccessToken = async () => {
+          throw new Error('invalid_grant');
+        };
+        let calls = 0;
+        const reauthGoogle = async () => {
+          calls++;
+          // A real reauth would have rewritten the token file; simulate that by making the NEXT
+          // classifyAndConnect (the adapter's own retry) succeed.
+          gmailAuthDeps.getAccessToken = async () => ({ token: 'zz-fresh-access-token', expiry: '2099-01-01T00:00:00.000Z' });
+          return { outcome: 'reauthorized', reason: null };
+        };
+        const { ctx, requests } = makeCtx({ maxPages: 1, interactive: true, reauthGoogle });
+        const listings = [];
+        const warnings = [];
+        const gen = gmail.search(profile, ctx);
+        let directive;
+        for (;;) {
+          const s = await gen.next(directive);
+          if (s.done) break;
+          directive = undefined;
+          if (s.value.kind === 'listing') listings.push(s.value.listing);
+          else if (s.value.kind === 'warning') warnings.push(s.value);
+        }
+        assert.equal(calls, 1, 'ctx.reauthGoogle() called exactly once');
+        assert.equal(warnings.length, 0);
+        assert.ok(listings.length > 0, 'the scan proceeded and found listings in the SAME run after reauth');
+        assert.ok(requests.length > 0);
+      }),
+    );
+
+    test(
+      'interactive + broken_missing_scopes but reauth still fails (timeout): one AUTH_UNAVAILABLE warning naming the outcome, no retry',
+      withFakeAuth(async () => {
+        gmailAuthDeps.readTokenFile = () => ({ client_id: 'zz-cid', client_secret: 'zz-secret', refresh_token: 'zz-refresh', access_token: null, scopes: ['https://www.googleapis.com/auth/gmail.send'], expiry: null, token_uri: 'https://oauth2.googleapis.com/token' });
+        let calls = 0;
+        const reauthGoogle = async () => {
+          calls++;
+          return { outcome: 'timeout', reason: 'no consent received within 1ms' };
+        };
+        const { ctx, requests } = makeCtx({ interactive: true, reauthGoogle });
+        const events = [];
+        const gen = gmail.search(profile, ctx);
+        for (;;) {
+          const s = await gen.next();
+          if (s.done) break;
+          events.push(s.value);
+        }
+        assert.equal(calls, 1, 'reauth attempted exactly once, never retried after a non-reauthorized outcome');
+        assert.equal(events.length, 1);
+        assert.equal(events[0].kind, 'warning');
+        assert.equal(events[0].code, 'AUTH_UNAVAILABLE');
+        assert.match(events[0].message, /reauth timeout/);
+        assert.equal(requests.length, 0, 'no Gmail API request when reauth itself did not succeed');
+      }),
+    );
+
+    test(
+      'non-interactive (ctx.interactive false, the unattended default): reauth is never attempted even for a reauth-eligible state',
+      withFakeAuth(async () => {
+        gmailAuthDeps.getAccessToken = async () => {
+          throw new Error('invalid_grant');
+        };
+        let calls = 0;
+        const reauthGoogle = async () => {
+          calls++;
+          return { outcome: 'reauthorized', reason: null };
+        };
+        const { ctx } = makeCtx({ interactive: false, reauthGoogle });
+        const events = [];
+        const gen = gmail.search(profile, ctx);
+        for (;;) {
+          const s = await gen.next();
+          if (s.done) break;
+          events.push(s.value);
+        }
+        assert.equal(calls, 0, 'the unattended policy handles Google re-auth in scan-run.js, never inside the adapter');
+        assert.deepEqual(events.map((e) => e.code), ['AUTH_UNAVAILABLE']);
+        assert.match(events[0].message, /broken_invalid_grant/);
+      }),
+    );
+
+    test(
+      'interactive but a NON-reauth-eligible broken state (broken_refresh_error) never calls ctx.reauthGoogle',
+      withFakeAuth(async () => {
+        gmailAuthDeps.getAccessToken = async () => {
+          const err = new Error('some other transient failure');
+          throw err;
+        };
+        let calls = 0;
+        const reauthGoogle = async () => {
+          calls++;
+          return { outcome: 'reauthorized', reason: null };
+        };
+        const { ctx } = makeCtx({ interactive: true, reauthGoogle });
+        const events = [];
+        const gen = gmail.search(profile, ctx);
+        for (;;) {
+          const s = await gen.next();
+          if (s.done) break;
+          events.push(s.value);
+        }
+        assert.equal(calls, 0, 'broken_refresh_error is not in REAUTH_ELIGIBLE_STATES: a quick re-consent cannot fix it');
+        assert.deepEqual(events.map((e) => e.code), ['AUTH_UNAVAILABLE']);
+      }),
+    );
   });
 });

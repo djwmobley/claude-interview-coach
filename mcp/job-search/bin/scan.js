@@ -65,6 +65,7 @@ export function parseArgs(argv) {
     launchChrome: false,
     /** @type {string} */ trigger: 'cli',
     /** @type {string|undefined} */ runMarker: undefined,
+    /** @type {boolean|undefined} */ interactive: undefined,
     help: false,
   };
   for (let i = 0; i < argv.length; i++) {
@@ -85,12 +86,26 @@ export function parseArgs(argv) {
     } else if (a === '--launch-chrome') out.launchChrome = true;
     else if (a === '--trigger') out.trigger = String(next() ?? 'cli');
     else if (a === '--run-marker') out.runMarker = String(next() ?? '');
+    else if (a === '--interactive') out.interactive = true;
+    else if (a === '--no-interactive') out.interactive = false;
     else if (a === '--help' || a === '-h') out.help = true;
   }
   return out;
 }
 
-const USAGE = 'usage: node bin/scan.js --profile exec-default [--sources a,b] [--days N] [--max-pages N] [--min-prescore N] [--dry-run] [--trigger cli|dashboard] [--run-marker path] [--json [out]] [--launch-chrome]';
+const USAGE = 'usage: node bin/scan.js --profile exec-default [--sources a,b] [--days N] [--max-pages N] [--min-prescore N] [--dry-run] [--trigger cli|dashboard] [--interactive|--no-interactive] [--run-marker path] [--json [out]] [--launch-chrome]';
+
+/**
+ * Google re-auth policy (spec A8): default interactive iff the trigger is dashboard (bin/scan.js never
+ * itself runs with trigger 'mcp' -- that comes from search_jobs.js directly, whose own default lives in
+ * scan-run.js's runOpts resolution). An explicit --interactive/--no-interactive always wins.
+ * @param {string} trigger
+ * @param {boolean|undefined} explicit
+ * @returns {boolean}
+ */
+export function resolveInteractive(trigger, explicit) {
+  return explicit !== undefined ? explicit : trigger === 'dashboard';
+}
 
 /**
  * Write `{"run_id": N}` to `markerFile` (dashboard PR 2, pr2-spec-decisions.md "Scan runner"): the
@@ -299,6 +314,7 @@ async function main() {
       deps,
       {
         trigger: /** @type {'cli'|'dashboard'} */ (args.trigger),
+        interactive: resolveInteractive(args.trigger, args.interactive),
         signal: controller.signal,
         log,
         progress: (f) => log({ evt: 'progress', ...f }),
