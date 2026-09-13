@@ -29,17 +29,28 @@ let root;
 /** @type {number[]} */
 const listingIds = [];
 
-/** @param {Partial<{ status: string|null }>} o */
+/** @param {Partial<{ status: string|null, company: string }>} o */
 async function insertListing(o = {}) {
   const n = Math.floor(Math.random() * 1e9);
   const r = await client.query(
     `INSERT INTO ic_job_listings (title, company, source, external_id, record_kind, company_norm, title_norm, location_norm, dedup_hash, last_seen, status)
      VALUES ('Render Doc Link Test', $1, $2, $3, 'listing', 'render doc link test co', 'render doc link test', 'legacy-unknown', $4, now(), $5) RETURNING id`,
-    [CO, `zz-test-render-doc-link-${process.pid}`, `zz-test-render-doc-link-${process.pid}:${n}`, `zz-render-doc-link-hash-${n}`, o.status ?? null],
+    [o.company ?? CO, `zz-test-render-doc-link-${process.pid}`, `zz-test-render-doc-link-${process.pid}:${n}`, `zz-render-doc-link-hash-${n}`, o.status ?? null],
   );
   const id = Number(r.rows[0].id);
   listingIds.push(id);
   return id;
+}
+
+/** A renderFn stub matching core/render.js's renderToPath signature, writing arbitrary bytes without
+ * invoking Python. `calls` (when supplied) records every (targetAbs) it was asked to render, so a test can
+ * assert a sibling that should be REUSED never reaches this function. */
+function stubRenderFn(calls) {
+  return async (_req, targetAbs) => {
+    if (calls) calls.push(targetAbs);
+    fs.writeFileSync(targetAbs, 'stub-rendered-bytes');
+    return { ok: true, output_path: path.relative(root, targetAbs), bytes: 20, checks: [] };
+  };
 }
 
 async function cleanup() {
@@ -202,6 +213,7 @@ describe('reuseExistingDocument (submit-on-resume spec section 2, amendment A4)'
     assert.equal(result.ok, true);
     assert.equal(/** @type {any} */ (result).document.rel_path, 'resumes/Reuse Happy Path.docx');
     assert.equal(/** @type {any} */ (result).application_link.ignored, false);
+    assert.equal(/** @type {any} */ (result).reused, true);
     const row = await getApplication(client, app.id);
     assert.equal(row.state, 'docs_ready');
     assert.ok(row.resume_doc_id);
@@ -218,7 +230,7 @@ describe('reuseExistingDocument (submit-on-resume spec section 2, amendment A4)'
     assert.equal(/** @type {any} */ (result).application_link.application.id, app.id);
   });
 
-  test('EMPTY_DOCX: a 0-byte on-disk file refuses to link, no ic_job_documents row is created', async () => {
+  test('EMPTY_DOCX without a source: refuses exactly as before (documented blind spot -- no markdown to render a sibling from)', async () => {
     const listingId = await insertListing();
     fs.writeFileSync(path.join(root, 'output', 'resumes', 'Empty Resume.docx'), '');
     const result = await reuseExistingDocument(client, {
@@ -229,7 +241,7 @@ describe('reuseExistingDocument (submit-on-resume spec section 2, amendment A4)'
     assert.equal(docs.rowCount, 0);
   });
 
-  test('EXISTS_OTHER_LISTING: the same rel_path already linked to a different listing refuses without re-linking', async () => {
+  test('EXISTS_OTHER_LISTING without a source: refuses exactly as before, no re-link', async () => {
     const listingA = await insertListing();
     const listingB = await insertListing();
     fs.writeFileSync(path.join(root, 'output', 'resumes', 'Shared Name.docx'), 'shared-bytes');
@@ -254,5 +266,106 @@ describe('reuseExistingDocument (submit-on-resume spec section 2, amendment A4)'
       listingId, kind: 'resume', outputPath: 'output/resumes/Same Listing Reuse.docx', root,
     });
     assert.equal(result.ok, true);
+  });
+});
+
+describe('reuseExistingDocument: cross-listing collision resolved via a listing-unique sibling (render_doc PR "resolve cross-listing DOCX filename collisions")', () => {
+  test('EXISTS_OTHER_LISTING: renders and links a company-suffixed sibling instead of refusing, leaving the other listing\'s document untouched', async () => {
+    const listingA = await insertListing();
+    const listingB = await insertListing({ company: 'Acme Robotics, Inc.' });
+    fs.writeFileSync(path.join(root, 'output', 'resumes', 'Cross Listing.docx'), 'listingA-bytes');
+    await linkRenderedDocument(client, { listingId: listingA, kind: 'resume', outputPath: 'output/resumes/Cross Listing.docx', root });
+
+    const calls = [];
+    const result = await reuseExistingDocument(client, {
+      listingId: listingB, kind: 'resume', outputPath: 'output/resumes/Cross Listing.docx', root,
+      source: 'fx/clean.md', outName: 'Cross Listing', renderFn: stubRenderFn(calls),
+    });
+    assert.equal(result.ok, true, JSON.stringify(result));
+    assert.equal(calls.length, 1);
+    assert.equal(/** @type {any} */ (result).reused, false);
+    assert.equal(/** @type {any} */ (result).conflict_code, 'EXISTS_OTHER_LISTING');
+    const expectedRel = path.join('output', 'resumes', 'Cross Listing - Acme Robotics Inc.docx');
+    assert.equal(/** @type {any} */ (result).renamed_to, expectedRel);
+    assert.equal(/** @type {any} */ (result).document.rel_path, 'resumes/Cross Listing - Acme Robotics Inc.docx');
+    // listingA's original document is untouched: still exactly one row, same rel_path.
+    const docsA = await client.query('SELECT rel_path FROM ic_job_documents WHERE listing_id = $1', [listingA]);
+    assert.equal(docsA.rows.length, 1);
+    assert.equal(docsA.rows[0].rel_path, 'resumes/Cross Listing.docx');
+  });
+
+  test('EMPTY_DOCX: renders and links a company-suffixed sibling instead of refusing', async () => {
+    const listingId = await insertListing({ company: 'Vertex Analytics' });
+    fs.writeFileSync(path.join(root, 'output', 'resumes', 'Empty Target.docx'), '');
+
+    const calls = [];
+    const result = await reuseExistingDocument(client, {
+      listingId, kind: 'resume', outputPath: 'output/resumes/Empty Target.docx', root,
+      source: 'fx/clean.md', outName: 'Empty Target', renderFn: stubRenderFn(calls),
+    });
+    assert.equal(result.ok, true, JSON.stringify(result));
+    assert.equal(calls.length, 1);
+    assert.equal(/** @type {any} */ (result).reused, false);
+    assert.equal(/** @type {any} */ (result).conflict_code, 'EMPTY_DOCX');
+    assert.equal(/** @type {any} */ (result).renamed_to, path.join('output', 'resumes', 'Empty Target - Vertex Analytics.docx'));
+    const docs = await client.query('SELECT id FROM ic_job_documents WHERE listing_id = $1 AND rel_path = $2', [listingId, 'resumes/Empty Target - Vertex Analytics.docx']);
+    assert.equal(docs.rowCount, 1);
+  });
+
+  test('second-level fallback: a company-suffixed sibling already taken by ANOTHER listing falls back to the listingId-qualified name', async () => {
+    const listingA = await insertListing({ company: 'Shared Co' });
+    const listingB = await insertListing({ company: 'Shared Co' });
+    const listingC = await insertListing({ company: 'Shared Co' });
+    fs.writeFileSync(path.join(root, 'output', 'resumes', 'Fallback Test.docx'), 'listingA-bytes');
+    await linkRenderedDocument(client, { listingId: listingA, kind: 'resume', outputPath: 'output/resumes/Fallback Test.docx', root });
+    // listingB already occupies the company-suffixed sibling name that listingC would otherwise try first.
+    fs.writeFileSync(path.join(root, 'output', 'resumes', 'Fallback Test - Shared Co.docx'), 'listingB-bytes');
+    await linkRenderedDocument(client, { listingId: listingB, kind: 'resume', outputPath: 'output/resumes/Fallback Test - Shared Co.docx', root });
+
+    const calls = [];
+    const result = await reuseExistingDocument(client, {
+      listingId: listingC, kind: 'resume', outputPath: 'output/resumes/Fallback Test.docx', root,
+      source: 'fx/clean.md', outName: 'Fallback Test', renderFn: stubRenderFn(calls),
+    });
+    assert.equal(result.ok, true, JSON.stringify(result));
+    assert.equal(calls.length, 1, 'renders exactly once, at the second-level (listingId-qualified) candidate');
+    const expectedRel = path.join('output', 'resumes', `Fallback Test - Shared Co ${listingC}.docx`);
+    assert.equal(/** @type {any} */ (result).renamed_to, expectedRel);
+    // listingA and listingB documents are both untouched.
+    const docsA = await client.query('SELECT rel_path FROM ic_job_documents WHERE listing_id = $1', [listingA]);
+    const docsB = await client.query('SELECT rel_path FROM ic_job_documents WHERE listing_id = $1', [listingB]);
+    assert.equal(docsA.rows[0].rel_path, 'resumes/Fallback Test.docx');
+    assert.equal(docsB.rows[0].rel_path, 'resumes/Fallback Test - Shared Co.docx');
+  });
+
+  test('a company-suffixed sibling already on disk, non-empty, and linked to THIS SAME listing is reused, never re-rendered', async () => {
+    const listingId = await insertListing({ company: 'Reuse Sibling Co' });
+    fs.writeFileSync(path.join(root, 'output', 'resumes', 'Same Listing Sibling.docx'), '');
+    fs.writeFileSync(path.join(root, 'output', 'resumes', 'Same Listing Sibling - Reuse Sibling Co.docx'), 'already-rendered-bytes');
+    await linkRenderedDocument(client, { listingId, kind: 'resume', outputPath: 'output/resumes/Same Listing Sibling - Reuse Sibling Co.docx', root });
+
+    const calls = [];
+    const result = await reuseExistingDocument(client, {
+      listingId, kind: 'resume', outputPath: 'output/resumes/Same Listing Sibling.docx', root,
+      source: 'fx/clean.md', outName: 'Same Listing Sibling', renderFn: stubRenderFn(calls),
+    });
+    assert.equal(result.ok, true, JSON.stringify(result));
+    assert.equal(calls.length, 0, 'the sibling was already real and already this listing\'s: never re-rendered');
+    assert.equal(/** @type {any} */ (result).reused, true);
+    assert.equal(/** @type {any} */ (result).renamed_to, path.join('output', 'resumes', 'Same Listing Sibling - Reuse Sibling Co.docx'));
+  });
+
+  test('null/blank company: skips the company-suffixed name and goes straight to the listingId-only sibling', async () => {
+    const listingId = await insertListing({ company: '' });
+    fs.writeFileSync(path.join(root, 'output', 'resumes', 'No Company.docx'), '');
+
+    const calls = [];
+    const result = await reuseExistingDocument(client, {
+      listingId, kind: 'resume', outputPath: 'output/resumes/No Company.docx', root,
+      source: 'fx/clean.md', outName: 'No Company', renderFn: stubRenderFn(calls),
+    });
+    assert.equal(result.ok, true, JSON.stringify(result));
+    assert.equal(calls.length, 1);
+    assert.equal(/** @type {any} */ (result).renamed_to, path.join('output', 'resumes', `No Company - ${listingId}.docx`));
   });
 });

@@ -61,20 +61,22 @@ apply in headless mode. There is no one to ask.
   `force:true`. This links the already-on-disk file to the listing/
   application exactly as a fresh render would. Do not treat `EXISTS` itself as
   a dead end.
-  - If that re-call comes back `EMPTY_DOCX` (the on-disk file is 0 bytes,
-    nothing real to reuse) or `EXISTS_OTHER_LISTING` (the file is already
-    linked to a different listing's application): these ARE dead ends, output
-    `HEADLESS_ABORT: docx_empty` or `HEADLESS_ABORT: docx_other_listing`
-    respectively, and stop.
+  - `render_doc` resolves `EMPTY_DOCX` and `EXISTS_OTHER_LISTING` itself:
+    instead of refusing, it renders a listing-unique, company-suffixed
+    sibling file (e.g. `<name> - Acme.docx`) and links that one. Neither is a
+    headless abort. The result comes back `ok:true` with `renamed_to` set to
+    the new file's path; nothing further to do beyond continuing as if this
+    had been the render all along.
 - **`LOCKED`** (the DOCX is open in Word) is still an unconditional dead end in
   headless mode: output `HEADLESS_ABORT: docx_locked` and stop. Never pass
   `force:true` or `reuse_existing:true` to try to get past it.
-- On any other unrecoverable condition (a `render_doc` check that cannot be
-  fixed without asking the candidate something only they would know, or any
-  other dead end): output the single line `HEADLESS_ABORT: <snake_case_reason>`
-  (a short, specific reason, e.g. `HEADLESS_ABORT: role_inclusion_conflict`)
-  and stop. Never guess an answer that would normally require asking the
-  candidate.
+- `no_description` (above) and `docx_locked` (`LOCKED`, above) are the only
+  named headless aborts. On any other unrecoverable condition (a `render_doc`
+  check that cannot be fixed without asking the candidate something only they
+  would know, or any other dead end): output the single line
+  `HEADLESS_ABORT: <snake_case_reason>` (a short, specific reason, e.g.
+  `HEADLESS_ABORT: role_inclusion_conflict`) and stop. Never guess an answer
+  that would normally require asking the candidate.
 - Every other rule in this file (role inclusion, format, writing rules,
   output requirements) still applies in headless mode: headless changes only
   who gets asked what, never the quality bar.
