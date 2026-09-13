@@ -8,6 +8,7 @@ import { test, describe } from 'node:test';
 import assert from 'node:assert/strict';
 import {
   collectAutoApply, renderAutoApplyText, renderAutoApplyHtml, renderAutoApplyMarkdown, collectNeedsHumanApplications,
+  collectFailedApplications,
 } from '../src/core/report.js';
 import { registryFrom } from '../src/core/urlguard.js';
 
@@ -36,9 +37,10 @@ describe('collectAutoApply: no run today', () => {
     assert.deepEqual(data.skippedByReason, {});
     assert.equal(data.unresolved.length, 0);
     assert.deepEqual(data.needsHuman, []);
-    // No unresolved ids -> no listing lookup query; the needs_human itemization (spec section 3) always
-    // runs regardless, so exactly one query fires, never zero.
-    assert.equal(queryCount, 1);
+    assert.deepEqual(data.failed, []);
+    // No unresolved ids -> no listing lookup query; the needs_human and failed itemizations (spec section
+    // 3, single-path-chrome fix) always run regardless, so exactly two queries fire, never zero.
+    assert.equal(queryCount, 2);
   });
 });
 
@@ -160,6 +162,67 @@ describe('collectAutoApply/renderers: needs_human itemization (submit-on-resume 
     assert.match(renderAutoApplyText(data), /needs human input \(0\):/);
     assert.match(renderAutoApplyHtml(data), /needs human input: \(none\)/);
     assert.match(renderAutoApplyMarkdown(data), /needs human input \(0\):\n\(none\)/);
+  });
+});
+
+describe('collectAutoApply/renderers: failed itemization (single-path-chrome fix)', () => {
+  test('collectFailedApplications truncates a long error to 120 chars, tolerant of a missing error', async () => {
+    const longError = 'cannot connect to scan Chrome at the configured SCAN_CDP_URL: '.repeat(4);
+    const rows = [
+      { application_id: 1, listing_id: 10, title: 'CTO', company: 'Acme', error: longError },
+      { application_id: 2, listing_id: 20, title: 'CIO', company: 'Beta', error: null },
+    ];
+    const client = { async query() { return { rows }; } };
+    const out = await collectFailedApplications(client);
+    assert.equal(out.length, 2);
+    assert.ok(out[0].error.length <= 123, 'truncated to 120 chars plus the "..." marker');
+    assert.equal(out[0].error.startsWith(longError.slice(0, 120)), true);
+    assert.equal(out[1].error, null);
+  });
+
+  test('failed rows flow through collectAutoApply into data.failed and render in all three formats', async () => {
+    let call = 0;
+    const client = {
+      async query() {
+        call++;
+        // Second query in this path is the failed snapshot (first is needs_human; no unresolvedIds here).
+        if (call === 2) {
+          return { rows: [{ application_id: 8, listing_id: 80, title: 'VP E-Commerce', company: 'Nimbus', error: 'cannot connect to scan Chrome at the configured SCAN_CDP_URL' }] };
+        }
+        return { rows: [] };
+      },
+    };
+    const data = await collectAutoApply(client, { select: { results: [] }, applied: [] });
+    assert.equal(data.failed.length, 1);
+    assert.equal(data.failed[0].error, 'cannot connect to scan Chrome at the configured SCAN_CDP_URL');
+    assert.match(renderAutoApplyText(data), /failed \(1\):/);
+    assert.match(renderAutoApplyText(data), /Nimbus/);
+    assert.match(renderAutoApplyHtml(data), /failed \(1\)/);
+    assert.match(renderAutoApplyHtml(data), /Nimbus/);
+    assert.match(renderAutoApplyMarkdown(data), /failed \(1\)/);
+    assert.match(renderAutoApplyMarkdown(data), /Nimbus/);
+  });
+
+  test('zero failed rows render a distinct "(none)" line in every format, never omitted', async () => {
+    const client = { async query() { return { rows: [] }; } };
+    const data = await collectAutoApply(client, { select: { results: [] }, applied: [] });
+    assert.deepEqual(data.failed, []);
+    assert.match(renderAutoApplyText(data), /failed \(0\):/);
+    assert.match(renderAutoApplyHtml(data), /failed: \(none\)/);
+    assert.match(renderAutoApplyMarkdown(data), /failed \(0\):\n\(none\)/);
+  });
+
+  test('renderers are tolerant of an older summary shape with no `failed` field at all', () => {
+    const data = {
+      hasRun: true, dryRun: false, appliedCount: 0, submittedReviewFail: 0, submittedNoVerdict: 0, cappedCount: 0,
+      capUsed: null, capRemaining: null, skippedByReason: {}, warnings: [], funnel: null, dailyCap: null,
+      prepare: null, unresolved: [], needsHuman: [],
+      // `failed` deliberately omitted.
+    };
+    assert.doesNotThrow(() => renderAutoApplyText(data));
+    assert.doesNotThrow(() => renderAutoApplyHtml(data));
+    assert.doesNotThrow(() => renderAutoApplyMarkdown(data));
+    assert.match(renderAutoApplyText(data), /failed \(0\):/);
   });
 });
 

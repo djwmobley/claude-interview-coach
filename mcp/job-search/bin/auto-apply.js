@@ -93,7 +93,7 @@ import { persistApplyTargetForListing, LIFETIME_PROBE_ATTEMPTS } from '../src/co
 import { prepareLinkedInListing, adaptPlaywrightPage } from '../src/apply/linkedin-button-prepare.js';
 import { selectCandidates, isUsLocation, isHourlyPaySignal, classifyCandidate, countAutoApprovedToday } from '../src/core/auto-apply-select.js';
 import { exclusionConfigPath, loadExclusionConfig, classifyExclusion } from '../src/apply/exclusions.js';
-import { createApplication, approve, getApplication, transition, checkApplicationBlockers } from '../src/core/applications.js';
+import { createApplication, approve, getApplication, transition, retry, checkApplicationBlockers } from '../src/core/applications.js';
 import { createResumeRunner } from '../src/dashboard/resume-runner.js';
 import { createReviewRunner } from '../src/dashboard/review-runner.js';
 import { runApplyWorker } from '../src/apply/worker.js';
@@ -528,6 +528,33 @@ export async function openLinkedInBrowser(connectSession, env, config, log) {
 }
 
 /**
+ * Best-effort scan-Chrome launch (fix for the single-application-path bug where `--application <id>`
+ * reached the apply worker without ever launching Chrome, failing within 1.5 s with "cannot connect to
+ * scan Chrome at the configured SCAN_CDP_URL"): shared by the multi-candidate path (main(), before the
+ * lock/prepare phase) and runSingleApplication (before its one runWorker call, and only once every gate
+ * has passed -- there is no point launching Chrome for a re-drive that is about to be refused). Calls
+ * scan.js's own launchChrome and NEVER throws -- a launch failure or a self-heal warning is returned as a
+ * `CHROME_LAUNCH_FAILED`/launch warning for the caller to push onto its own warnings array and proceed,
+ * exactly matching CLAUDE.md's "unattended soft failures warn and proceed" and the multi-candidate path's
+ * pre-existing behavior.
+ * @param {import('../src/core/config.js').Env} env
+ * @param {(f: any) => void} log
+ * @param {typeof launchChrome} [launchChromeFn] test seam only -- production callers always use the
+ *   default (the real scan.js launchChrome), which itself self-heals; tests never touch real Chrome.
+ * @returns {Promise<Array<{ code: string, severity: 'warning', [k: string]: any }>>}
+ */
+export async function ensureScanChrome(env, log, launchChromeFn = launchChrome) {
+  try {
+    const chrome = await launchChromeFn(env, log);
+    return chrome && chrome.warning ? [chrome.warning] : [];
+  } catch (err) {
+    const f = errFields(err);
+    log({ evt: 'auto_apply_chrome_launch_failed', ...f });
+    return [{ code: 'CHROME_LAUNCH_FAILED', severity: 'warning', err_code: f.err_code, err_message: f.err_message }];
+  }
+}
+
+/**
  * The apply phase for ONE selected candidate: createApplication -> resume -> review (ADVISORY, never a
  * submit gate -- submit-on-resume spec section 1) -> approve (actor:'auto') -> runApplyWorker. Never
  * throws -- every phase's own failure is caught and reported as a closed outcome so the caller's loop
@@ -615,8 +642,10 @@ export async function applyOneCandidate(row, deps) {
   }
 }
 
-/** States runSingleApplication() (below) will re-drive; anything else is refused with `state_<state>`. */
-const RE_DRIVE_ALLOWED_STATES = Object.freeze(['drafting', 'needs_human', 'docs_ready']);
+/** States runSingleApplication() (below) will re-drive; anything else is refused with `state_<state>`.
+ * 'failed' (single-path-chrome fix): re-drives via retry(), never resume/review -- see this function's own
+ * doc comment. */
+const RE_DRIVE_ALLOWED_STATES = Object.freeze(['drafting', 'needs_human', 'docs_ready', 'failed']);
 
 /**
  * `--application <id>` re-drive (submit-on-resume spec section 4, amendments A1/A2/A3): re-runs the apply
@@ -653,6 +682,18 @@ const RE_DRIVE_ALLOWED_STATES = Object.freeze(['drafting', 'needs_human', 'docs_
  * shortcut) never runs the resume runner OR the review runner in this call -- there is nothing new to
  * review, and review only runs here against a markdown path THIS run's own resume runner just produced
  * (see this codebase's blind-spot notes for why there is no other way to locate that path).
+ *
+ * failed -> approved (single-path-chrome fix): a 'failed' application is re-driven via retry() (actor
+ * 'cli' -- see the cap-counting comment at that call site), never resume/review/approve() -- a failed
+ * application always already carries a linked resume document (see that call site's own comment), so this
+ * goes straight to the worker once retried.
+ *
+ * Chrome (single-path-chrome fix): unlike the multi-candidate path in main() (which launches scan Chrome
+ * unconditionally once a scan is not known to have finished today, before prepare even starts), this
+ * function only knows a worker step will run once every gate above has passed, so it calls the SAME shared
+ * ensureScanChrome() helper exactly once, immediately before its own runWorker call -- never earlier, since
+ * refusing a re-drive (a gate failure) or a resume-runner/approve failure has no worker step to launch
+ * Chrome for.
  * @param {number} id
  * @param {{
  *   withClientFn: typeof withClient,
@@ -669,9 +710,12 @@ const RE_DRIVE_ALLOWED_STATES = Object.freeze(['drafting', 'needs_human', 'docs_
  *   classifyCandidateFn?: typeof classifyCandidate,
  *   checkApplicationBlockersFn?: typeof checkApplicationBlockers,
  *   countAutoApprovedTodayFn?: typeof countAutoApprovedToday,
+ *   retryFn?: typeof retry,
+ *   launchChromeFn?: typeof launchChrome,
  * }} deps `classifyExclusionFn`/`classifyCandidateFn`/`checkApplicationBlockersFn`/
- *   `countAutoApprovedTodayFn` are test seams ONLY (never set by production wiring -- main() below leaves
- *   every one at its real default), matching this file's own `opts.classifyExclusion` seam on runPrepare.
+ *   `countAutoApprovedTodayFn`/`retryFn`/`launchChromeFn` are test seams ONLY (never set by production
+ *   wiring -- main() below leaves every one at its real default), matching this file's own
+ *   `opts.classifyExclusion` seam on runPrepare.
  */
 export async function runSingleApplication(id, deps) {
   const classifyExclusionFn = deps.classifyExclusionFn ?? classifyExclusion;
@@ -767,9 +811,38 @@ export async function runSingleApplication(id, deps) {
     app = await deps.withClientFn((c) => getApplication(c, id));
   }
 
+  // failed -> approved (single-path-chrome fix, spec point 2): a 'failed' application only ever gets there
+  // from 'submitting', which only ever gets there from 'approved', which requires docs_ready with a linked
+  // resume -- so the document is ALWAYS already linked here, unlike the needs_human/drafting branches
+  // above. retryFn (real default: applications.js's own retry()) moves failed -> approved directly,
+  // incrementing `attempt`; the resume runner, review runner, and approve() (which requires docs_ready, not
+  // failed, and would recompute hashes that have not changed) are all skipped entirely -- straight to the
+  // worker below.
+  //
+  // actor 'cli', not 'auto' (spec point 2's cap-counting choice, stated again in this PR's body):
+  // countAutoApprovedToday counts raw `to_state = 'approved' AND actor = 'auto'` EVENT ROWS, not distinct
+  // application ids. This same application already recorded one such row when it was first approved (by
+  // this same auto-apply pipeline) before it failed. If retry() recorded a SECOND 'auto' row for it today,
+  // countAutoApprovedToday would count it twice against one daily-cap slot. Recording this retry with actor
+  // 'cli' instead keeps the count accurate without changing countAutoApprovedToday's shared SQL (also read
+  // by the multi-candidate select path) to DISTINCT application_id, which would be a larger, riskier change
+  // for a narrower benefit.
+  const retryFn = deps.retryFn ?? retry;
+  let retriedFailed = false;
+  if (app.state === 'failed') {
+    try {
+      await deps.withClientFn((c) => retryFn(c, id, { actor: 'cli', note: 're-drive: retry after failure' }));
+    } catch (err) {
+      deps.log({ evt: 'auto_apply_single_retry_failed', application_id: id, ...errFields(err) });
+      return { outcome: 'retry_failed', applicationId: id, listingId: app.listing_id, reason: errFields(err).err_code, review_verdict: null, review_reason: null };
+    }
+    app = await deps.withClientFn((c) => getApplication(c, id));
+    retriedFailed = true;
+  }
+
   let markdownPath = null;
   let ranResumeRunner = false;
-  if (app.state !== 'docs_ready') {
+  if (!retriedFailed && app.state !== 'docs_ready') {
     if (app.resume_doc_id) {
       // A document is already linked despite the non-docs_ready state (edge case) -- move directly to
       // docs_ready rather than re-running the resume runner to draft a duplicate.
@@ -803,27 +876,37 @@ export async function runSingleApplication(id, deps) {
     }
   }
 
-  try {
-    await deps.withClientFn((c) => approve(c, id, { outputRoot: deps.outputRoot, actor: 'auto' }));
-  } catch (err) {
-    deps.log({ evt: 'auto_apply_single_approve_failed', application_id: id, ...errFields(err) });
-    return {
-      outcome: 'approve_failed', applicationId: id, listingId: app.listing_id, reason: errFields(err).err_code,
-      review_verdict: reviewVerdict, review_reason: reviewReason,
-    };
+  if (!retriedFailed) {
+    try {
+      await deps.withClientFn((c) => approve(c, id, { outputRoot: deps.outputRoot, actor: 'auto' }));
+    } catch (err) {
+      deps.log({ evt: 'auto_apply_single_approve_failed', application_id: id, ...errFields(err) });
+      return {
+        outcome: 'approve_failed', applicationId: id, listingId: app.listing_id, reason: errFields(err).err_code,
+        review_verdict: reviewVerdict, review_reason: reviewReason,
+      };
+    }
   }
+
+  // Chrome launch (single-path-chrome fix, spec point 1): mirrors main()'s own pre-prepare launch below,
+  // called here -- and ONLY here -- because every gate has now passed and a worker step is about to run.
+  // Never fatal: a launch failure or self-heal warning is folded into this outcome's own `warnings` (main()
+  // merges it into the run's top-level warnings array, same as the multi-candidate path) and the worker is
+  // attempted regardless, exactly like the CHROME_LAUNCH_FAILED warn-and-proceed handling below it mirrors.
+  const launchChromeFn = deps.launchChromeFn ?? launchChrome;
+  const chromeWarnings = await ensureScanChrome(deps.env, deps.log, launchChromeFn);
 
   try {
     const workerResult = await deps.runWorker(id, { env: deps.env, log: deps.log });
     return {
       outcome: workerResult.ok ? 'applied' : 'apply_failed', applicationId: id, listingId: app.listing_id,
-      workerStatus: workerResult.status, review_verdict: reviewVerdict, review_reason: reviewReason,
+      workerStatus: workerResult.status, review_verdict: reviewVerdict, review_reason: reviewReason, warnings: chromeWarnings,
     };
   } catch (err) {
     deps.log({ evt: 'auto_apply_single_worker_threw', application_id: id, ...errFields(err) });
     return {
       outcome: 'apply_failed', applicationId: id, listingId: app.listing_id, reason: errFields(err).err_code,
-      review_verdict: reviewVerdict, review_reason: reviewReason,
+      review_verdict: reviewVerdict, review_reason: reviewReason, warnings: chromeWarnings,
     };
   }
 }
@@ -978,6 +1061,12 @@ async function main() {
       });
       inFlight = null;
       log({ evt: 'auto_apply_single_done', ...single });
+      // Chrome-launch warnings (single-path-chrome fix): runSingleApplication returns its own
+      // ensureScanChrome() result on `single.warnings` rather than pushing onto the shared array itself
+      // (it has no reference to it) -- merged here into the SAME top-level `warnings` array the
+      // multi-candidate path uses, so the report's existing CHROME_LAUNCH_FAILED rendering covers both
+      // paths identically.
+      if (Array.isArray(single.warnings)) warnings.push(...single.warnings);
       summary.ok = true;
       summary.outcome = 'ok';
       summary.single = single;
@@ -1057,14 +1146,7 @@ async function main() {
     else if (scanState.state === 'abandoned') warnings.push({ code: 'SCAN_ABANDONED', severity: 'warning', detail: scanState.detail });
 
     if (scanState.state !== 'finished_today') {
-      try {
-        const chrome = await launchChrome(env, log);
-        if (chrome.warning) warnings.push(/** @type {any} */ (chrome.warning));
-      } catch (err) {
-        const f = errFields(err);
-        log({ evt: 'auto_apply_chrome_launch_failed', ...f });
-        warnings.push({ code: 'CHROME_LAUNCH_FAILED', severity: 'warning', err_code: f.err_code, err_message: f.err_message });
-      }
+      warnings.push(...await ensureScanChrome(env, log));
     }
 
     summary.phase = 'preparing';

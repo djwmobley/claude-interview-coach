@@ -21,6 +21,7 @@ import { pgConnectionConfig } from '../src/core/config.js';
 import { ensureAuxSchema } from '../src/core/schema.js';
 import { withClient, closePool } from '../src/core/db.js';
 import { getApplication } from '../src/core/applications.js';
+import { countAutoApprovedToday } from '../src/core/auto-apply-select.js';
 import { BUILT_IN_BLOCKED } from '../src/apply/exclusions.js';
 import { EventEmitter } from 'node:events';
 import {
@@ -1121,6 +1122,113 @@ describe('runSingleApplication: --application re-drive (submit-on-resume spec se
     const r = await runSingleApplication(999999999, baseSingleDeps());
     assert.equal(r.outcome, 'refused');
     assert.equal(r.reason, 'not_found');
+  });
+
+  // dailyCap: 1000 in these four tests (instead of baseSingleDeps' default 5): several earlier tests in
+  // this SAME describe block already reach 'applied' (each recording one real actor:'auto' approved event
+  // in this file's own real, freshly-bootstrapped test database), so by the time these run, the default
+  // cap of 5 is already exhausted and a real (not stubbed) countAutoApprovedTodayFn would refuse every one
+  // of them with daily_cap before ever reaching Chrome/the worker -- none of these tests are testing the
+  // cap gate itself (test 'the daily cap refuses...' above already covers that), so they raise it out of
+  // the way instead of stubbing countAutoApprovedTodayFn, keeping the real cap-counting code path exercised
+  // end to end.
+  const HIGH_CAP_CONFIG = { autoApply: { fitFloor: 60, floors: FLOORS, atsAllow: ['greenhouse'], dailyCap: 1000 }, adapters: { run: { timezone: 'America/Chicago' } }, configDir: '' };
+
+  test('single-path-chrome fix: launches scan Chrome exactly once, before the worker call, and never for a refused re-drive', async () => {
+    const listingId = await insertListing();
+    const appId = await seedApplication(listingId, { state: 'drafting' });
+    /** @type {string[]} */
+    const order = [];
+    const r = await runSingleApplication(appId, baseSingleDeps({
+      config: { ...HIGH_CAP_CONFIG, configDir: outputRoot },
+      launchChromeFn: async () => { order.push('chrome'); return { port: 9333 }; },
+      runWorker: async () => { order.push('worker'); return { ok: true, status: 'submitted' }; },
+    }));
+    assert.equal(r.outcome, 'applied');
+    assert.deepEqual(order, ['chrome', 'worker'], 'Chrome is launched before the worker runs');
+
+    // A refused re-drive (gate failure, no worker step) never launches Chrome at all.
+    let chromeCalled = false;
+    const blockedListingId = await insertListing({ company: 'Immunotec Research', companyNorm: 'immunotec research' });
+    const blockedAppId = await seedApplication(blockedListingId, { state: 'drafting' });
+    const refused = await runSingleApplication(blockedAppId, baseSingleDeps({
+      config: { ...HIGH_CAP_CONFIG, configDir: outputRoot },
+      launchChromeFn: async () => { chromeCalled = true; return { port: 9333 }; },
+    }));
+    assert.equal(refused.outcome, 'refused');
+    assert.equal(chromeCalled, false, 'Chrome is never launched for a gate refusal');
+  });
+
+  test('single-path-chrome fix: a Chrome launch failure warns and proceeds -- the worker still runs and the outcome still reaches applied', async () => {
+    const listingId = await insertListing();
+    const appId = await seedApplication(listingId, { state: 'drafting' });
+    let workerCalled = false;
+    const r = await runSingleApplication(appId, baseSingleDeps({
+      config: { ...HIGH_CAP_CONFIG, configDir: outputRoot },
+      launchChromeFn: async () => { throw new Error('cannot connect to scan Chrome at the configured SCAN_CDP_URL'); },
+      runWorker: async () => { workerCalled = true; return { ok: true, status: 'submitted' }; },
+    }));
+    assert.equal(workerCalled, true, 'a Chrome launch failure never blocks the worker');
+    assert.equal(r.outcome, 'applied');
+    assert.equal(r.warnings.length, 1);
+    assert.equal(r.warnings[0].code, 'CHROME_LAUNCH_FAILED');
+    assert.match(r.warnings[0].err_message, /cannot connect to scan Chrome/);
+  });
+
+  test('re-drive from failed: retry() moves failed -> approved directly (actor cli), skips resume runner AND review entirely, still launches Chrome and calls the worker', async () => {
+    const listingId = await insertListing();
+    const relPath = 'resumes/Already Failed.docx';
+    writeResumeFile(relPath);
+    const docId = await insertDocument(listingId, relPath);
+    const appId = await seedApplication(listingId, { state: 'failed', resumeDocId: docId });
+    let resumeCalled = false;
+    let reviewCalled = false;
+    let workerCalled = false;
+    let chromeCalled = false;
+    const r = await runSingleApplication(appId, baseSingleDeps({
+      config: { ...HIGH_CAP_CONFIG, configDir: outputRoot },
+      resumeRunner: { run: async () => { resumeCalled = true; return { ok: false }; } },
+      reviewRunner: { run: async () => { reviewCalled = true; return { ok: true, verdict: 'PASS' }; } },
+      runWorker: async () => { workerCalled = true; return { ok: true, status: 'submitted' }; },
+      launchChromeFn: async () => { chromeCalled = true; return { port: 9333 }; },
+    }));
+    assert.equal(resumeCalled, false, 'the resume runner is never invoked for a failed re-drive -- the document is already linked');
+    assert.equal(reviewCalled, false, 'review never runs when the resume runner did not just produce fresh markdown');
+    assert.equal(workerCalled, true);
+    assert.equal(chromeCalled, true);
+    assert.equal(r.outcome, 'applied');
+    assert.equal(r.review_verdict, null);
+    const row = await getApplication(client, appId);
+    assert.equal(row.state, 'approved', 'retry() lands directly on approved, never docs_ready/approve() again');
+    const events = await client.query(`SELECT from_state, to_state, actor FROM ic_job_application_events WHERE application_id = $1 ORDER BY id ASC`, [appId]);
+    const retryEvent = events.rows.find((e) => e.from_state === 'failed' && e.to_state === 'approved');
+    assert.ok(retryEvent, 'failed -> approved retry event recorded');
+    assert.equal(retryEvent.actor, 'cli', 'cap-counting choice: the retry is recorded as actor cli, never auto -- see this PR body');
+  });
+
+  test('re-drive from failed: cap accounting -- retry is recorded as actor cli, so countAutoApprovedToday does not double-count an application already approved by auto today', async () => {
+    // Baseline read BEFORE seeding this test's own event, rather than asserting a hardcoded count: earlier
+    // tests in this same describe block already recorded their own real actor:'auto' approved events
+    // today in this file's own freshly-bootstrapped test database, so the true starting count here is
+    // whatever those left behind, not zero.
+    const baseline = await countAutoApprovedToday(client, new Date(), 'America/Chicago');
+    const listingId = await insertListing();
+    const relPath = 'resumes/Cap Count.docx';
+    writeResumeFile(relPath);
+    const docId = await insertDocument(listingId, relPath);
+    const appId = await seedApplication(listingId, { state: 'failed', resumeDocId: docId });
+    // Simulate the ORIGINAL auto-apply approval that happened earlier today, before this application later
+    // failed at the submitting step -- exactly the history a real failed-and-retried application carries.
+    await client.query(
+      `INSERT INTO ic_job_application_events (application_id, kind, from_state, to_state, actor) VALUES ($1, 'state', 'docs_ready', 'approved', 'auto')`,
+      [appId],
+    );
+    const before = await countAutoApprovedToday(client, new Date(), 'America/Chicago');
+    assert.equal(before, baseline + 1);
+    const r = await runSingleApplication(appId, baseSingleDeps({ config: { ...HIGH_CAP_CONFIG, configDir: outputRoot } }));
+    assert.equal(r.outcome, 'applied');
+    const after = await countAutoApprovedToday(client, new Date(), 'America/Chicago');
+    assert.equal(after, before, 'the retry recorded actor cli, not a second auto row, so the daily-cap count is unchanged');
   });
 });
 
