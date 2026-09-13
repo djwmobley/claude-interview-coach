@@ -10,8 +10,8 @@ import fs from 'node:fs';
 import os from 'node:os';
 import path from 'node:path';
 import { fileURLToPath } from 'node:url';
-import { preflight, renderDoc, detectLocked, checkOutputName, loadStyleConfig, readProjectIndexCompanies, resolveSource, checkResumeStructure } from '../src/core/render.js';
-import { tool as renderDocTool } from '../src/tools/render_doc.js';
+import { preflight, renderDoc, renderToPath, detectLocked, checkOutputName, loadStyleConfig, readProjectIndexCompanies, resolveSource, checkResumeStructure } from '../src/core/render.js';
+import { tool as renderDocTool, sanitizeCompanyForFilename } from '../src/tools/render_doc.js';
 
 const HERE = path.dirname(fileURLToPath(import.meta.url));
 const CLEAN = path.join(HERE, 'fixtures', 'render', 'clean-resume.md');
@@ -344,6 +344,88 @@ describe('render_doc rendering', () => {
     const r = await renderDoc({ kind: 'cheatsheet', source: src, outName: 'Sheet' }, { root, style, execFile: /** @type {any} */ (exec) });
     assert.equal(r.code, 'RENDER_FAILED');
     assert.match(String(r.message), /boom/);
+  });
+});
+
+describe('renderToPath: renders to an explicit target, bypassing the outName-derived path', () => {
+  test('renders to the given absolute target and reports it as output_path', async () => {
+    const outDir = path.join(root, 'output', 'resumes');
+    fs.mkdirSync(outDir, { recursive: true });
+    const target = path.join(outDir, 'Jordan Reyes - CTO - Acme.docx');
+    const exec = async (/** @type {string} */ cmd, /** @type {string[]} */ args) => {
+      fs.writeFileSync(args[2], Buffer.alloc(42));
+      return { stdout: '', stderr: '' };
+    };
+    const r = await renderToPath({ kind: 'resume', source: 'fx/clean.md', outName: 'Jordan Reyes - CTO', allowMissing: ['Northwind Advisory'] }, target, { root, style, execFile: /** @type {any} */ (exec) });
+    assert.equal(r.ok, true, JSON.stringify(r));
+    assert.equal(r.bytes, 42);
+    assert.equal(r.output_path, path.relative(root, target));
+    assert.ok(fs.existsSync(target));
+  });
+
+  test('preflight failure still blocks rendering, exactly like renderDoc', async () => {
+    let called = 0;
+    const target = path.join(root, 'output', 'resumes', 'Whatever - Acme.docx');
+    const r = await renderToPath({ kind: 'resume', source: 'fx/clean.md', outName: 'Jordan Reyes - CTO' }, target, { root, style, execFile: /** @type {any} */ (async () => { called++; }) });
+    assert.equal(r.ok, false);
+    assert.equal(r.code, 'PREFLIGHT_FAILED');
+    assert.equal(called, 0);
+  });
+
+  test('refuses to overwrite an existing target without force, like renderDoc', async () => {
+    const target = path.join(root, 'output', 'resumes', 'Jordan Reyes - CTO - Existing.docx');
+    fs.mkdirSync(path.dirname(target), { recursive: true });
+    fs.writeFileSync(target, 'already here');
+    const r = await renderToPath({ kind: 'resume', source: 'fx/clean.md', outName: 'Jordan Reyes - CTO', allowMissing: ['Northwind Advisory'] }, target, { root, style, execFile: /** @type {any} */ (async () => {}) });
+    assert.equal(r.ok, false);
+    assert.equal(r.code, 'EXISTS');
+  });
+});
+
+describe('sanitizeCompanyForFilename (render_doc sibling-naming rule)', () => {
+  test('letters, digits, spaces, and hyphens survive unchanged (aside from whitespace collapse and trim)', () => {
+    assert.equal(sanitizeCompanyForFilename('Acme Robotics'), 'Acme Robotics');
+    assert.equal(sanitizeCompanyForFilename('  Acme   Robotics  '), 'Acme Robotics');
+    assert.equal(sanitizeCompanyForFilename('Baker-Tilly'), 'Baker-Tilly');
+    assert.equal(sanitizeCompanyForFilename('Acme 123'), 'Acme 123');
+  });
+
+  test('slashes, colons, and quotes are folded to spaces, not left in the filename', () => {
+    assert.equal(sanitizeCompanyForFilename('Acme/Beta'), 'Acme Beta');
+    assert.equal(sanitizeCompanyForFilename('Acme: A Robotics Co'), 'Acme A Robotics Co');
+    assert.equal(sanitizeCompanyForFilename('O\'Brien & Co "Group"'), 'O Brien Co Group');
+    assert.equal(sanitizeCompanyForFilename('Weird<>|?*Name'), 'Weird Name');
+  });
+
+  test('unicode letters are preserved (any script counts as a letter)', () => {
+    assert.equal(sanitizeCompanyForFilename('Ünïcode Cömpany'), 'Ünïcode Cömpany');
+    assert.equal(sanitizeCompanyForFilename('株式会社Acme'), '株式会社Acme');
+  });
+
+  test('very long company names are capped at 40 characters and re-trimmed', () => {
+    const long = 'A'.repeat(60);
+    const r = sanitizeCompanyForFilename(long);
+    assert.equal(r.length, 40);
+    assert.equal(r, 'A'.repeat(40));
+    // A truncation that lands mid-word still trims any trailing space cleanly.
+    const words = 'Word '.repeat(20); // 100 chars, truncates inside a trailing "Word"
+    const r2 = sanitizeCompanyForFilename(words);
+    assert.ok(r2.length <= 40);
+    assert.equal(r2, r2.trim());
+  });
+
+  test('a name that sanitizes to nothing (all punctuation, or all hyphens) returns null, not an empty or bare-hyphen string', () => {
+    assert.equal(sanitizeCompanyForFilename('---'), null);
+    assert.equal(sanitizeCompanyForFilename('***'), null);
+    assert.equal(sanitizeCompanyForFilename('   '), null);
+    assert.equal(sanitizeCompanyForFilename(''), null);
+  });
+
+  test('null, undefined, and non-string company values all fall back to null (caller uses the listingId-only name)', () => {
+    assert.equal(sanitizeCompanyForFilename(null), null);
+    assert.equal(sanitizeCompanyForFilename(undefined), null);
+    assert.equal(sanitizeCompanyForFilename(42), null);
+    assert.equal(sanitizeCompanyForFilename({}), null);
   });
 });
 

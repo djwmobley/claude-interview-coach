@@ -576,21 +576,17 @@ export function detectLocked(target) {
 }
 
 /**
- * @param {RenderRequest} req
- * @param {{ root?: string, python?: string, style?: StyleConfig, companies?: string[]|null, execFile?: typeof execFileP, timeoutMs?: number }} [opts]
- * @returns {Promise<{ ok: boolean, code?: string, checks: CheckResult[], output_path?: string, bytes?: number, hint?: string, message?: string }>}
+ * Shared tail of renderDoc()/renderToPath(): lock check, exists check, Python invocation, and result
+ * shaping against an explicit, already-computed absolute target. Kept as one function so the two callers
+ * (renderDoc's own outName-derived target, and render_doc.js's tool-layer listing-unique sibling target)
+ * can never drift on lock/exists/render-failure semantics.
+ * @param {{ script: string }} spec KIND_SPEC[kind]
+ * @param {{ checks: CheckResult[], sourceAbs: string }} pf a preflight() result (or shape-alike)
+ * @param {string} target absolute .docx path
+ * @param {{ root: string, python?: string, execFile?: typeof execFileP, timeoutMs?: number, force?: boolean }} opts
  */
-export async function renderDoc(req, opts = {}) {
-  const root = opts.root ?? repoRoot();
-  const pf = preflight(req, { root, style: opts.style, companies: opts.companies });
-  if (req.checkOnly) return { ok: pf.ok, checks: pf.checks };
-  if (!pf.ok) {
-    return { ok: false, code: 'PREFLIGHT_FAILED', checks: pf.checks, hint: 'fix the failing checks (or pass allowMissing for approved role omissions) and call again' };
-  }
-  const spec = KIND_SPEC[req.kind];
-  const outDir = path.join(root, spec.outDir);
-  fs.mkdirSync(outDir, { recursive: true });
-  const target = path.join(outDir, `${pf.outName}.docx`);
+async function renderToTargetPath(spec, pf, target, opts) {
+  const root = opts.root;
   const lock = detectLocked(target);
   if (lock.locked) {
     return {
@@ -601,7 +597,7 @@ export async function renderDoc(req, opts = {}) {
       hint: 'the DOCX is open in Word; ask whether to close it (then call again) or to edit the document directly. Never regenerate over a hand-edited DOCX.',
     };
   }
-  if (fs.existsSync(target) && !req.force) {
+  if (fs.existsSync(target) && !opts.force) {
     return {
       ok: false,
       code: 'EXISTS',
@@ -623,4 +619,47 @@ export async function renderDoc(req, opts = {}) {
   if (!fs.existsSync(target)) return { ok: false, code: 'RENDER_FAILED', checks: pf.checks, message: 'converter exited without writing the target' };
   const bytes = fs.statSync(target).size;
   return { ok: true, checks: pf.checks, output_path: path.relative(root, target), bytes };
+}
+
+/**
+ * @param {RenderRequest} req
+ * @param {{ root?: string, python?: string, style?: StyleConfig, companies?: string[]|null, execFile?: typeof execFileP, timeoutMs?: number }} [opts]
+ * @returns {Promise<{ ok: boolean, code?: string, checks: CheckResult[], output_path?: string, bytes?: number, hint?: string, message?: string }>}
+ */
+export async function renderDoc(req, opts = {}) {
+  const root = opts.root ?? repoRoot();
+  const pf = preflight(req, { root, style: opts.style, companies: opts.companies });
+  if (req.checkOnly) return { ok: pf.ok, checks: pf.checks };
+  if (!pf.ok) {
+    return { ok: false, code: 'PREFLIGHT_FAILED', checks: pf.checks, hint: 'fix the failing checks (or pass allowMissing for approved role omissions) and call again' };
+  }
+  const spec = KIND_SPEC[req.kind];
+  const outDir = path.join(root, spec.outDir);
+  fs.mkdirSync(outDir, { recursive: true });
+  const target = path.join(outDir, `${pf.outName}.docx`);
+  return renderToTargetPath(spec, pf, target, { ...opts, root, force: Boolean(req.force) });
+}
+
+/**
+ * render_doc's cross-listing-collision fallback (src/tools/render_doc.js's reuseExistingDocument): run the
+ * SAME preflight as renderDoc() against the SAME source markdown the caller supplied, but write to an
+ * explicit, caller-computed absolute target instead of the outName-derived one -- e.g. a listing-unique
+ * sibling filename such as "<stem> - <Company>.docx" sitting beside the original target in the same
+ * output directory. Never chooses the target itself; that policy lives at the tool-wrapper layer, which is
+ * the one that knows about listings and companies. checkOnly is not supported here (the whole point is to
+ * actually render); callers that only want checks should call preflight()/renderDoc({checkOnly:true}).
+ * @param {RenderRequest} req
+ * @param {string} targetAbs absolute .docx path, must sit inside KIND_SPEC[req.kind].outDir
+ * @param {{ root?: string, python?: string, style?: StyleConfig, companies?: string[]|null, execFile?: typeof execFileP, timeoutMs?: number, force?: boolean }} [opts]
+ * @returns {Promise<{ ok: boolean, code?: string, checks: CheckResult[], output_path?: string, bytes?: number, hint?: string, message?: string }>}
+ */
+export async function renderToPath(req, targetAbs, opts = {}) {
+  const root = opts.root ?? repoRoot();
+  const pf = preflight(req, { root, style: opts.style, companies: opts.companies });
+  if (!pf.ok) {
+    return { ok: false, code: 'PREFLIGHT_FAILED', checks: pf.checks, hint: 'fix the failing checks (or pass allowMissing for approved role omissions) and call again' };
+  }
+  const spec = KIND_SPEC[req.kind];
+  fs.mkdirSync(path.dirname(targetAbs), { recursive: true });
+  return renderToTargetPath(spec, pf, targetAbs, { ...opts, root, force: Boolean(opts.force) });
 }
