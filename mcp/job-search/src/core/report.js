@@ -1071,6 +1071,14 @@ export function renderReportMarkdown(data, registry, googleAuthState, dashboardH
  * @property {{ attempted?: number, resolved?: number, unresolved?: number, skipped?: number, skippedByReason?: Record<string, number>, stoppedBy?: string|null, remaining?: number }|null} prepare
  *   the prepare-phase stats bin/auto-apply.js's runPrepare() returned, or null when prepare was skipped
  *   this run (the still-running-at-deadline path, dry-run before any prepare ran, or an older summary).
+ * @property {number} submittedReviewFail submit-on-resume spec section 1: of `appliedCount`, how many
+ *   carried an advisory review_verdict of 'FAIL' -- submitted anyway, never blocked.
+ * @property {number} submittedNoVerdict submit-on-resume spec section 1: of `appliedCount`, how many
+ *   carried no review verdict at all (a review-runner throw, timeout, or unparseable result).
+ * @property {Array<{ applicationId: number, listingId: number, title: string|null, company: string|null, reason: string }>} needsHuman
+ *   submit-on-resume spec section 3: every application currently parked at needs_human (a CURRENT
+ *   database snapshot, not scoped to this run), so a resume failure or any other park reason is never
+ *   invisible to the operator.
  */
 
 /** Fixed rendering order for auto-apply warnings (spec amendment A7) -- any code not in this list still
@@ -1148,6 +1156,13 @@ export async function collectAutoApply(client, summary) {
   const results = Array.isArray(summary.select?.results) ? /** @type {Array<{ listingId: number, reason: string }>} */ (summary.select.results) : [];
   const applied = Array.isArray(summary.applied) ? summary.applied : [];
   const appliedCount = applied.filter((a) => a && a.outcome === 'applied').length;
+  // Advisory review (submit-on-resume spec section 1): every 'applied' outcome is a submission that
+  // actually went out regardless of what review found -- these two counts break appliedCount down by
+  // what the (advisory-only) review verdict was, so the operator can see how many of today's submissions
+  // went out DESPITE a FAIL or with no verdict at all (review-runner threw, timed out, or produced
+  // something unparseable), never silently folded into the same "applied" number as a clean PASS.
+  const submittedReviewFail = applied.filter((a) => a && a.outcome === 'applied' && a.review_verdict === 'FAIL').length;
+  const submittedNoVerdict = applied.filter((a) => a && a.outcome === 'applied' && (a.review_verdict === null || a.review_verdict === undefined)).length;
 
   /** @type {Record<string, number>} */
   const skippedByReason = {};
@@ -1166,10 +1181,13 @@ export async function collectAutoApply(client, summary) {
     const r = await client.query(`SELECT id, title, company, source, url, url_normalized FROM ic_job_listings WHERE id = ANY($1::int[])`, [unresolvedIds]);
     unresolvedRows = r.rows;
   }
+  const needsHuman = await collectNeedsHumanApplications(client);
   return {
     hasRun: true,
     dryRun: Boolean(summary.dry_run),
     appliedCount,
+    submittedReviewFail,
+    submittedNoVerdict,
     cappedCount,
     capUsed: typeof summary.select?.cap_used === 'number' ? summary.select.cap_used : null,
     capRemaining: typeof summary.select?.cap_remaining === 'number' ? summary.select.cap_remaining : null,
@@ -1183,7 +1201,37 @@ export async function collectAutoApply(client, summary) {
       const isLinkedin = typeof r.source === 'string' && r.source === 'linkedin';
       return { id: Number(r.id), title: r.title, company: r.company, source: r.source ?? null, url, linkedinDeepLink: isLinkedin ? url : null };
     }),
+    needsHuman,
   };
+}
+
+/**
+ * Visible resume failure (spec section 3): every application currently parked at needs_human, itemized
+ * so a stuck-in-drafting-turned-needs_human row (resume-runner.js's own fail() park, or a dashboard
+ * one-click apply park, or a screening question awaiting /apply-answer) is never invisible to the daily
+ * report. A snapshot of CURRENT database state -- not scoped to "since the last report" or to this one
+ * auto-apply run -- so a row parked yesterday and still unresolved keeps showing up until a human acts on
+ * it, exactly like collectReviewQueueSummary's own always-current-state semantics elsewhere in this file.
+ * Capped at 50 rows (an operator-facing digest, not a full export); newest-parked first.
+ * @param {import('pg').ClientBase} client
+ * @returns {Promise<Array<{ applicationId: number, listingId: number, title: string|null, company: string|null, reason: string }>>}
+ */
+export async function collectNeedsHumanApplications(client) {
+  const r = await client.query(`
+    SELECT a.id AS application_id, a.listing_id, a.pending_question, l.title, l.company
+    FROM ic_job_applications a
+    JOIN ic_job_listings l ON l.id = a.listing_id
+    WHERE a.state = 'needs_human'
+    ORDER BY a.updated_at DESC
+    LIMIT 50
+  `);
+  return r.rows.map((row) => ({
+    applicationId: Number(row.application_id),
+    listingId: Number(row.listing_id),
+    title: row.title ?? null,
+    company: row.company ?? null,
+    reason: row.pending_question && typeof row.pending_question.label === 'string' ? row.pending_question.label : 'Needs your attention.',
+  }));
 }
 
 /** Rendered skipped-reasons clause shared by all three renderers below (excludes 'daily_cap', already its own `cappedCount`). @param {AutoApplyReportData} data */
@@ -1199,6 +1247,17 @@ function warningLineText(w) {
   if (w.err_message) extra.push(String(w.err_message));
   if (typeof w.attempts === 'number') extra.push(`attempts=${w.attempts}`);
   return `[${w.code}]${extra.length ? ` ${extra.join(' ')}` : ''}`;
+}
+
+/** Submit-on-resume spec section 1: "of the N applied, M went out despite a review FAIL / P with no
+ * verdict at all" -- null when both counts are zero (every applied submission had a clean PASS, or this
+ * is an older summary predating review_verdict/review_reason on `applied[]` entries), so the common case
+ * never grows an extra line for nothing. @param {AutoApplyReportData} data */
+function submittedAdvisoryText(data) {
+  const fail = data.submittedReviewFail ?? 0;
+  const noVerdict = data.submittedNoVerdict ?? 0;
+  if (!fail && !noVerdict) return null;
+  return `submitted despite review: fail ${fail}, no verdict ${noVerdict}`;
 }
 
 /** Prepare-phase stats line (spec amendment A7: "probed, resolved, skipped by reason, stopped_by"), or null
@@ -1248,6 +1307,8 @@ export function renderAutoApplyText(data, registry) {
   const pLine = prepareStatsText(data);
   if (pLine) lines.push(pLine);
   lines.push(`applied ${data.appliedCount} | capped ${data.cappedCount} | cap used ${data.capUsed ?? '?'} | cap remaining ${data.capRemaining ?? '?'}`);
+  const advisoryLine = submittedAdvisoryText(data);
+  if (advisoryLine) lines.push(advisoryLine);
   lines.push(`skipped: ${skippedReasonsText(data)}`);
   lines.push(`unresolved apply targets (${data.unresolved.length}):`);
   for (const u of data.unresolved) {
@@ -1255,6 +1316,11 @@ export function renderAutoApplyText(data, registry) {
     const passes = urlPassesRegistry(candidate, reg);
     const link = !passes ? '' : u.linkedinDeepLink ? ` | linkedin: ${candidate}` : ` | ${candidate}`;
     lines.push(`  #${u.id} | ${u.title} | ${u.company} | ${u.source ?? 'n/a'}${link}`);
+  }
+  const needsHuman = data.needsHuman ?? [];
+  lines.push(`needs human input (${needsHuman.length}):`);
+  for (const n of needsHuman) {
+    lines.push(`  #${n.listingId} | app ${n.applicationId} | ${n.title ?? 'n/a'} | ${n.company ?? 'n/a'} | ${n.reason}`);
   }
   return lines.join('\n');
 }
@@ -1292,6 +1358,8 @@ export function renderAutoApplyHtml(data, registry) {
   const pLine = prepareStatsText(data);
   if (pLine) parts.push(`<p>${esc(pLine)}</p>`);
   parts.push(`<p>applied ${data.appliedCount}, capped ${data.cappedCount}, cap used ${data.capUsed ?? '?'}, cap remaining ${data.capRemaining ?? '?'}</p>`);
+  const advisoryLine = submittedAdvisoryText(data);
+  if (advisoryLine) parts.push(`<p>${esc(advisoryLine)}</p>`);
   parts.push(`<p>skipped: ${esc(skippedReasonsText(data))}</p>`);
   if (data.unresolved.length) {
     parts.push(`<p>unresolved apply targets (${data.unresolved.length}):</p><ul>`);
@@ -1306,6 +1374,16 @@ export function renderAutoApplyHtml(data, registry) {
     parts.push('</ul>');
   } else {
     parts.push('<p>unresolved apply targets: (none)</p>');
+  }
+  const needsHuman = data.needsHuman ?? [];
+  if (needsHuman.length) {
+    parts.push(`<p>needs human input (${needsHuman.length}):</p><ul>`);
+    for (const n of needsHuman) {
+      parts.push(`<li>#${n.listingId} (app ${n.applicationId}) ${esc(n.title ?? 'n/a')} at ${esc(n.company ?? 'n/a')}: ${esc(n.reason)}</li>`);
+    }
+    parts.push('</ul>');
+  } else {
+    parts.push('<p>needs human input: (none)</p>');
   }
   return parts.join('\n');
 }
@@ -1344,6 +1422,8 @@ export function renderAutoApplyMarkdown(data, registry) {
   if (pLine) { lines.push(pLine); lines.push(''); }
   lines.push(`applied ${data.appliedCount}, capped ${data.cappedCount}, cap used ${data.capUsed ?? '?'}, cap remaining ${data.capRemaining ?? '?'}`);
   lines.push('');
+  const advisoryLine = submittedAdvisoryText(data);
+  if (advisoryLine) { lines.push(advisoryLine); lines.push(''); }
   lines.push(`skipped: ${skippedReasonsText(data)}`);
   lines.push('');
   lines.push(`unresolved apply targets (${data.unresolved.length}):`);
@@ -1353,6 +1433,13 @@ export function renderAutoApplyMarkdown(data, registry) {
     const passes = urlPassesRegistry(candidate, reg);
     const link = !passes ? '' : u.linkedinDeepLink ? ` (linkedin: ${candidate})` : ` (${candidate})`;
     lines.push(`- #${u.id} ${u.title} at ${u.company}, ${u.source ?? 'n/a'}${link}`);
+  }
+  lines.push('');
+  const needsHuman = data.needsHuman ?? [];
+  lines.push(`needs human input (${needsHuman.length}):`);
+  if (needsHuman.length === 0) lines.push('(none)');
+  for (const n of needsHuman) {
+    lines.push(`- #${n.listingId} (app ${n.applicationId}) ${n.title ?? 'n/a'} at ${n.company ?? 'n/a'}: ${n.reason}`);
   }
   return lines.join('\n');
 }

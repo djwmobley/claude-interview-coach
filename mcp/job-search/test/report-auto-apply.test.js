@@ -7,7 +7,7 @@
 import { test, describe } from 'node:test';
 import assert from 'node:assert/strict';
 import {
-  collectAutoApply, renderAutoApplyText, renderAutoApplyHtml, renderAutoApplyMarkdown,
+  collectAutoApply, renderAutoApplyText, renderAutoApplyHtml, renderAutoApplyMarkdown, collectNeedsHumanApplications,
 } from '../src/core/report.js';
 import { registryFrom } from '../src/core/urlguard.js';
 
@@ -26,16 +26,19 @@ describe('collectAutoApply: no run today', () => {
     assert.equal(queried, false);
   });
 
-  test('a summary with no results/applied at all still renders zeros, no DB query needed', async () => {
-    let queried = false;
-    const client = { async query() { queried = true; return { rows: [] }; } };
+  test('a summary with no results/applied at all still renders zeros; the only query is the needs_human snapshot', async () => {
+    let queryCount = 0;
+    const client = { async query() { queryCount++; return { rows: [] }; } };
     const data = await collectAutoApply(client, { select: { results: [] }, applied: [] });
     assert.equal(data.hasRun, true);
     assert.equal(data.appliedCount, 0);
     assert.equal(data.cappedCount, 0);
     assert.deepEqual(data.skippedByReason, {});
     assert.equal(data.unresolved.length, 0);
-    assert.equal(queried, false); // no unresolved ids -> no listing lookup query at all
+    assert.deepEqual(data.needsHuman, []);
+    // No unresolved ids -> no listing lookup query; the needs_human itemization (spec section 3) always
+    // runs regardless, so exactly one query fires, never zero.
+    assert.equal(queryCount, 1);
   });
 });
 
@@ -73,6 +76,90 @@ describe('collectAutoApply: real data', () => {
     assert.equal(linkedin.linkedinDeepLink, 'https://www.linkedin.com/jobs/view/10/');
     const execBoard = data.unresolved.find((u) => u.id === 20);
     assert.equal(execBoard.linkedinDeepLink, null);
+  });
+});
+
+describe('collectAutoApply/renderers: advisory review counts (submit-on-resume spec section 1)', () => {
+  test('submittedReviewFail and submittedNoVerdict count only applied outcomes, broken out by review_verdict', async () => {
+    const client = { async query() { return { rows: [] }; } };
+    const summary = {
+      select: { results: [] },
+      applied: [
+        { listingId: 1, applicationId: 100, outcome: 'applied', review_verdict: 'PASS', review_reason: null },
+        { listingId: 2, applicationId: 101, outcome: 'applied', review_verdict: 'FAIL', review_reason: 'review_failed' },
+        { listingId: 3, applicationId: 102, outcome: 'applied', review_verdict: null, review_reason: null },
+        { listingId: 4, applicationId: 103, outcome: 'applied' }, // older-shaped entry, no review fields at all
+        { listingId: 5, applicationId: 104, outcome: 'resume_failed', review_verdict: 'FAIL' }, // never applied -- excluded
+      ],
+    };
+    const data = await collectAutoApply(client, summary);
+    assert.equal(data.appliedCount, 4);
+    assert.equal(data.submittedReviewFail, 1);
+    assert.equal(data.submittedNoVerdict, 2); // listing 3 (explicit null) + listing 4 (field absent)
+  });
+
+  test('the advisory line renders in text/html/markdown only when at least one count is nonzero', async () => {
+    const client = { async query() { return { rows: [] }; } };
+    const clean = await collectAutoApply(client, { select: { results: [] }, applied: [{ listingId: 1, outcome: 'applied', review_verdict: 'PASS' }] });
+    for (const render of [renderAutoApplyText, renderAutoApplyHtml, renderAutoApplyMarkdown]) {
+      assert.doesNotMatch(render(clean), /submitted despite review/);
+    }
+    const advisory = await collectAutoApply(client, {
+      select: { results: [] },
+      applied: [
+        { listingId: 1, outcome: 'applied', review_verdict: 'FAIL' },
+        { listingId: 2, outcome: 'applied', review_verdict: null },
+      ],
+    });
+    assert.match(renderAutoApplyText(advisory), /submitted despite review: fail 1, no verdict 1/);
+    assert.match(renderAutoApplyHtml(advisory), /submitted despite review: fail 1, no verdict 1/);
+    assert.match(renderAutoApplyMarkdown(advisory), /submitted despite review: fail 1, no verdict 1/);
+  });
+});
+
+describe('collectAutoApply/renderers: needs_human itemization (submit-on-resume spec section 3)', () => {
+  test('collectNeedsHumanApplications maps pending_question.label to reason, falls back when absent', async () => {
+    const rows = [
+      { application_id: 1, listing_id: 10, title: 'CTO', company: 'Acme', pending_question: { kind: 'resume_failed', label: 'Resume drafting failed: no_docs_ready' } },
+      { application_id: 2, listing_id: 20, title: 'CIO', company: 'Beta', pending_question: null },
+    ];
+    const client = { async query() { return { rows }; } };
+    const out = await collectNeedsHumanApplications(client);
+    assert.equal(out.length, 2);
+    assert.equal(out[0].reason, 'Resume drafting failed: no_docs_ready');
+    assert.equal(out[1].reason, 'Needs your attention.');
+  });
+
+  test('needs_human rows flow through collectAutoApply into data.needsHuman and render in all three formats', async () => {
+    let call = 0;
+    const client = {
+      async query() {
+        call++;
+        // First query in this path is the needs_human snapshot (no unresolvedIds in this summary).
+        if (call === 1) {
+          return { rows: [{ application_id: 7, listing_id: 70, title: 'VP Payments', company: 'Zenith', pending_question: { kind: 'resume_failed', label: 'Resume drafting failed: timeout' } }] };
+        }
+        return { rows: [] };
+      },
+    };
+    const data = await collectAutoApply(client, { select: { results: [] }, applied: [] });
+    assert.equal(data.needsHuman.length, 1);
+    assert.equal(data.needsHuman[0].reason, 'Resume drafting failed: timeout');
+    assert.match(renderAutoApplyText(data), /needs human input \(1\):/);
+    assert.match(renderAutoApplyText(data), /Zenith/);
+    assert.match(renderAutoApplyHtml(data), /needs human input \(1\)/);
+    assert.match(renderAutoApplyHtml(data), /Zenith/);
+    assert.match(renderAutoApplyMarkdown(data), /needs human input \(1\)/);
+    assert.match(renderAutoApplyMarkdown(data), /Zenith/);
+  });
+
+  test('zero needs_human rows render a distinct "(none)" line in every format, never omitted', async () => {
+    const client = { async query() { return { rows: [] }; } };
+    const data = await collectAutoApply(client, { select: { results: [] }, applied: [] });
+    assert.deepEqual(data.needsHuman, []);
+    assert.match(renderAutoApplyText(data), /needs human input \(0\):/);
+    assert.match(renderAutoApplyHtml(data), /needs human input: \(none\)/);
+    assert.match(renderAutoApplyMarkdown(data), /needs human input \(0\):\n\(none\)/);
   });
 });
 

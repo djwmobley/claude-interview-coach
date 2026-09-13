@@ -215,7 +215,80 @@ describe('createResumeRunner: DB-only success verification (spec item 4/5)', () 
     assert.equal(result.reason, 'listing_mismatch');
     const row = await getApplication(client, app.id);
     assert.equal(row.resume_doc_id, null, 'the mismatched link is reset');
-    assert.equal(row.state, 'drafting', 'the application is walked back to drafting');
+    // Visible resume failure (spec section 3, amendment A3): the mismatch reset walks the row back to
+    // drafting first, then fail() itself parks a still-drafting row to needs_human -- the row never
+    // stays silently at drafting.
+    assert.equal(row.state, 'needs_human', 'the failure is parked visibly, not left silently in drafting');
+    assert.equal(row.pending_question?.kind, 'resume_failed');
+    assert.match(row.pending_question?.label ?? '', /listing_mismatch/);
+  });
+});
+
+describe('createResumeRunner: visible resume failure parks needs_human (spec section 3, amendment A3)', () => {
+  test('precheck no_description parks needs_human with kind resume_failed and the reason in the label', async () => {
+    const listingId = await insertListing({ description: null });
+    const app = await createApplication(client, { listingId });
+    const runner = createResumeRunner(baseDeps({ spawn: () => { throw new Error('must not spawn'); } }));
+    await runner.run(app.id, listingId);
+    const row = await getApplication(client, app.id);
+    assert.equal(row.state, 'needs_human');
+    assert.equal(row.pending_question?.kind, 'resume_failed');
+    assert.equal(row.pending_question?.label, 'Resume drafting failed: no_description');
+  });
+
+  test('a non-docs_ready exit (no_docs_ready) parks needs_human', async () => {
+    const listingId = await insertListing();
+    const app = await createApplication(client, { listingId });
+    const spawnFn = makeFakeSpawn({ onSpawn: (child) => finishChild(child, { result: 'I finished but did nothing recorded.', exitCode: 0 }) });
+    const runner = createResumeRunner(baseDeps({ spawn: spawnFn }));
+    await runner.run(app.id, listingId);
+    const row = await getApplication(client, app.id);
+    assert.equal(row.state, 'needs_human');
+    assert.equal(row.pending_question?.kind, 'resume_failed');
+    assert.equal(row.pending_question?.label, 'Resume drafting failed: no_docs_ready');
+  });
+
+  test('a HEADLESS_ABORT reason parks needs_human with that reason in the label', async () => {
+    const listingId = await insertListing();
+    const app = await createApplication(client, { listingId });
+    const spawnFn = makeFakeSpawn({ onSpawn: (child) => finishChild(child, { result: 'Some text.\nHEADLESS_ABORT: docx_locked\n', exitCode: 0 }) });
+    const runner = createResumeRunner(baseDeps({ spawn: spawnFn }));
+    await runner.run(app.id, listingId);
+    const row = await getApplication(client, app.id);
+    assert.equal(row.state, 'needs_human');
+    assert.equal(row.pending_question?.label, 'Resume drafting failed: docx_locked');
+  });
+
+  test('a hard timeout parks needs_human with reason timeout', async () => {
+    const listingId = await insertListing();
+    const app = await createApplication(client, { listingId });
+    const spawnFn = makeFakeSpawn({ delayMs: 999999 });
+    const runner = createResumeRunner(baseDeps({
+      spawn: spawnFn, timeoutMs: 40, execFile: (cmd, args, cb) => cb(null, '', ''),
+    }));
+    await runner.run(app.id, listingId);
+    const row = await getApplication(client, app.id);
+    assert.equal(row.state, 'needs_human');
+    assert.equal(row.pending_question?.label, 'Resume drafting failed: timeout');
+  });
+
+  test('a row no longer in drafting when fail() checks state is left untouched (never force-parked)', async () => {
+    const listingId = await insertListing();
+    const app = await createApplication(client, { listingId });
+    const spawnFn = makeFakeSpawn({
+      onSpawn: async (child) => {
+        // Simulate another actor moving the row to withdrawn between the resume run finishing and
+        // fail()'s own read-then-transition check -- this application is no longer 'drafting' by the
+        // time fail() reads state, so the park attempt must be skipped entirely, never forced.
+        await client.query(`UPDATE ic_job_applications SET state = 'withdrawn', updated_at = now() WHERE id = $1`, [app.id]);
+        finishChild(child, { result: 'no draft happened', exitCode: 0 });
+      },
+    });
+    const runner = createResumeRunner(baseDeps({ spawn: spawnFn }));
+    const result = await runner.run(app.id, listingId);
+    assert.equal(result.ok, false);
+    const row = await getApplication(client, app.id);
+    assert.equal(row.state, 'withdrawn', 'a state fail() cannot legally enter needs_human from is left untouched');
   });
 });
 
