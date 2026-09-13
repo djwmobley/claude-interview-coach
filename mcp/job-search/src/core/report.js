@@ -1079,6 +1079,11 @@ export function renderReportMarkdown(data, registry, googleAuthState, dashboardH
  *   submit-on-resume spec section 3: every application currently parked at needs_human (a CURRENT
  *   database snapshot, not scoped to this run), so a resume failure or any other park reason is never
  *   invisible to the operator.
+ * @property {Array<{ applicationId: number, listingId: number, title: string|null, company: string|null, error: string|null }>} failed
+ *   single-path-chrome fix: every application currently in state 'failed' (a CURRENT database snapshot,
+ *   not scoped to this run -- same semantics as `needsHuman` above), so a failed submission is never
+ *   invisible to the operator and always carries the `--application <id>` re-drive it needs. `error` is
+ *   truncated to 120 characters.
  */
 
 /** Fixed rendering order for auto-apply warnings (spec amendment A7) -- any code not in this list still
@@ -1182,6 +1187,7 @@ export async function collectAutoApply(client, summary) {
     unresolvedRows = r.rows;
   }
   const needsHuman = await collectNeedsHumanApplications(client);
+  const failed = await collectFailedApplications(client);
   return {
     hasRun: true,
     dryRun: Boolean(summary.dry_run),
@@ -1202,7 +1208,42 @@ export async function collectAutoApply(client, summary) {
       return { id: Number(r.id), title: r.title, company: r.company, source: r.source ?? null, url, linkedinDeepLink: isLinkedin ? url : null };
     }),
     needsHuman,
+    failed,
   };
+}
+
+/** Auto-apply report itemization: caps an error string at 120 characters, tolerant of a missing/non-string
+ * value (returns null rather than throwing). @param {unknown} err */
+function truncateErrorText(err) {
+  if (typeof err !== 'string' || err.length === 0) return null;
+  return err.length > 120 ? `${err.slice(0, 120)}...` : err;
+}
+
+/**
+ * Every application currently in state 'failed' (single-path-chrome fix), itemized alongside
+ * collectNeedsHumanApplications above so a failed submission -- itself re-drivable via
+ * `node bin/auto-apply.js --application <id>` -- is never invisible to the daily report. A snapshot of
+ * CURRENT database state, not scoped to this run, matching collectNeedsHumanApplications's own semantics.
+ * Capped at 50 rows; newest-failed first.
+ * @param {import('pg').ClientBase} client
+ * @returns {Promise<Array<{ applicationId: number, listingId: number, title: string|null, company: string|null, error: string|null }>>}
+ */
+export async function collectFailedApplications(client) {
+  const r = await client.query(`
+    SELECT a.id AS application_id, a.listing_id, a.error, l.title, l.company
+    FROM ic_job_applications a
+    JOIN ic_job_listings l ON l.id = a.listing_id
+    WHERE a.state = 'failed'
+    ORDER BY a.updated_at DESC
+    LIMIT 50
+  `);
+  return r.rows.map((row) => ({
+    applicationId: Number(row.application_id),
+    listingId: Number(row.listing_id),
+    title: row.title ?? null,
+    company: row.company ?? null,
+    error: truncateErrorText(row.error),
+  }));
 }
 
 /**
@@ -1322,6 +1363,11 @@ export function renderAutoApplyText(data, registry) {
   for (const n of needsHuman) {
     lines.push(`  #${n.listingId} | app ${n.applicationId} | ${n.title ?? 'n/a'} | ${n.company ?? 'n/a'} | ${n.reason}`);
   }
+  const failed = data.failed ?? [];
+  lines.push(`failed (${failed.length}):`);
+  for (const f of failed) {
+    lines.push(`  #${f.listingId} | app ${f.applicationId} | ${f.title ?? 'n/a'} | ${f.company ?? 'n/a'} | ${f.error ?? 'n/a'}`);
+  }
   return lines.join('\n');
 }
 
@@ -1385,6 +1431,16 @@ export function renderAutoApplyHtml(data, registry) {
   } else {
     parts.push('<p>needs human input: (none)</p>');
   }
+  const failed = data.failed ?? [];
+  if (failed.length) {
+    parts.push(`<p>failed (${failed.length}):</p><ul>`);
+    for (const f of failed) {
+      parts.push(`<li>#${f.listingId} (app ${f.applicationId}) ${esc(f.title ?? 'n/a')} at ${esc(f.company ?? 'n/a')}: ${esc(f.error ?? 'n/a')}</li>`);
+    }
+    parts.push('</ul>');
+  } else {
+    parts.push('<p>failed: (none)</p>');
+  }
   return parts.join('\n');
 }
 
@@ -1440,6 +1496,13 @@ export function renderAutoApplyMarkdown(data, registry) {
   if (needsHuman.length === 0) lines.push('(none)');
   for (const n of needsHuman) {
     lines.push(`- #${n.listingId} (app ${n.applicationId}) ${n.title ?? 'n/a'} at ${n.company ?? 'n/a'}: ${n.reason}`);
+  }
+  lines.push('');
+  const failed = data.failed ?? [];
+  lines.push(`failed (${failed.length}):`);
+  if (failed.length === 0) lines.push('(none)');
+  for (const f of failed) {
+    lines.push(`- #${f.listingId} (app ${f.applicationId}) ${f.title ?? 'n/a'} at ${f.company ?? 'n/a'}: ${f.error ?? 'n/a'}`);
   }
   return lines.join('\n');
 }
