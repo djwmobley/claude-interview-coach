@@ -213,6 +213,84 @@ export async function runLifecycle(body, opts) {
   }
 }
 
+/**
+ * Second line of defense against the resume-runner.js / review-runner.js event-loop-drain bug (see those
+ * files' own doc comments on why `child.unref()` / an unref'd hard timer let Node exit mid-run with no
+ * terminal log line and no DB write): installs a `beforeExit` listener active for the lifetime of one
+ * `main()` run. `beforeExit` fires only when the event loop has genuinely run out of scheduled work --
+ * which never happens on a normal completion, since every normal exit path calls `finish()`, and `finish()`
+ * always ends in an explicit `exitFn` (real code: `process.exit()`, which never emits `beforeExit`). So
+ * seeing `beforeExit` fire before `finish()` has run is itself the bug signature, from any cause -- this
+ * runner's own known unref bug, a future one, or anything else that manages to unref every live handle
+ * mid-run -- and is treated as `loop_drained`: NEVER a silent, accidental exit 0.
+ *
+ * `getInFlight()` reports the one application (if any) actually in progress at the moment the drain is
+ * detected, so only THAT application is parked -- never a stale one from an earlier loop iteration, and
+ * never one whose state has already moved past 'drafting' by the time this fires (a resume that finished a
+ * moment before the drain, or one fail() already parked itself, is left untouched, exactly like
+ * resume-runner.js's own fail() re-check).
+ *
+ * `fired` guards against `beforeExit`'s own documented re-entrancy: the handler below AWAITS a DB
+ * transition, which is itself new scheduled work, so once that resolves (or the process has no more work
+ * left) Node can emit `beforeExit` again -- only the FIRST emission should do the real log/park/exit work.
+ * @param {import('node:events').EventEmitter} proc real `process` in production; a plain EventEmitter in
+ *   tests (this function never touches the real `process` object directly beyond taking it as `proc`).
+ * @param {{
+ *   isFinished: () => boolean,
+ *   getInFlight: () => { applicationId: number, phase: string } | null,
+ *   log: (f: any) => void,
+ *   summary: any,
+ *   summaryFile: string,
+ *   writeSummaryFn?: typeof writeAutoApplySummary,
+ *   withClientFn: typeof withClient,
+ *   getApplicationFn?: typeof getApplication,
+ *   transitionFn?: typeof transition,
+ *   exitFn?: (code: number) => void,
+ * }} opts
+ * @returns {() => void} uninstall function -- removes the listener; call once the run is otherwise done
+ *   (in production this line is never reached because `finish()`'s own `process.exit()` already terminated
+ *   the process, but it matters for tests, which stub `exitFn` and keep running afterward).
+ */
+export function installLoopDrainedGuard(proc, opts) {
+  const writeSummaryFn = opts.writeSummaryFn ?? writeAutoApplySummary;
+  const exitFn = opts.exitFn ?? ((code) => process.exit(code));
+  let fired = false;
+  const handler = () => {
+    if (opts.isFinished() || fired) return;
+    fired = true;
+    const inFlight = opts.getInFlight();
+    opts.log({
+      evt: 'auto_apply_loop_drained', phase: opts.summary.phase,
+      application_id: inFlight ? inFlight.applicationId : null,
+    });
+    opts.summary.phase = 'failed';
+    opts.summary.ok = false;
+    opts.summary.outcome = 'loop_drained';
+    try {
+      writeSummaryFn(opts.summaryFile, opts.summary);
+    } catch (err) {
+      opts.log({ evt: 'auto_apply_summary_write_failed', ...errFields(err) });
+    }
+    (async () => {
+      if (inFlight) {
+        try {
+          const app = await opts.withClientFn((c) => (opts.getApplicationFn ?? getApplication)(c, inFlight.applicationId));
+          if (app.state === 'drafting') {
+            await opts.withClientFn((c) => (opts.transitionFn ?? transition)(c, inFlight.applicationId, 'needs_human', {
+              actor: 'apply', pending_question: { kind: 'resume_failed', label: 'Resume drafting failed: process loop drained' },
+            }));
+          }
+        } catch (err) {
+          opts.log({ evt: 'auto_apply_loop_drained_park_failed', application_id: inFlight.applicationId, ...errFields(err) });
+        }
+      }
+      exitFn(1);
+    })();
+  };
+  proc.on('beforeExit', handler);
+  return () => proc.removeListener('beforeExit', handler);
+}
+
 /** @param {string[]} argv */
 export function parseArgs(argv) {
   /** @type {{ dryRun: boolean, json: string|null|undefined, help: boolean, applicationId: number|undefined }} */
@@ -479,6 +557,10 @@ export async function applyOneCandidate(row, deps) {
     deps.log({ evt: 'auto_apply_create_application_failed', listing_id: row.listingId, ...errFields(err) });
     return { outcome: 'create_failed', listingId: row.listingId, review_verdict: null, review_reason: null };
   }
+  // Reports the newly created application id back to main()'s loop-drained guard (installLoopDrainedGuard
+  // above) so a mid-run event-loop drain parks THIS application, never a stale one -- optional so every
+  // existing test/caller that does not pass it is unaffected.
+  deps.onApplicationStarted?.(app.id);
 
   /** @type {any} */
   let resumeResult;
@@ -824,7 +906,18 @@ async function main() {
     log({ evt: 'auto_apply_running_marker_write_failed', ...errFields(err) });
   }
 
-  const finish = createFinish({ summary, summaryFile, logDir: env.JOBSEARCH_LOG_DIR, now, timezone, jsonArg: args.json, log, markerFile });
+  const rawFinish = createFinish({ summary, summaryFile, logDir: env.JOBSEARCH_LOG_DIR, now, timezone, jsonArg: args.json, log, markerFile });
+  // `finished`/`inFlight` back the loop-drained guard installed just below: `finished` marks the ONE point
+  // (this wrapper) every terminal exit passes through, and `inFlight` is updated at the two places this
+  // file actually starts work on a specific application (the --application path, and applyOneCandidate's
+  // onApplicationStarted callback in the multi-candidate loop below).
+  let finished = false;
+  const finish = async (/** @type {number} */ code) => { finished = true; await rawFinish(code); };
+  /** @type {{ applicationId: number, phase: string } | null} */
+  let inFlight = null;
+  const uninstallLoopDrainedGuard = installLoopDrainedGuard(process, {
+    isFinished: () => finished, getInFlight: () => inFlight, log, summary, summaryFile, withClientFn: withClient,
+  });
 
   // runLifecycle (spec-adversary finding on the original PR, fixed here; residual gap fixed here too):
   // EVERY exit path from this point on -- the apply exclusion gate config load, normal completion, the
@@ -876,10 +969,14 @@ async function main() {
       const resumeRunner = createResumeRunner(runnerDeps);
       const reviewRunner = createReviewRunner(runnerDeps);
       const outputRoot = path.join(repoRoot(), 'output');
+      // Known target application, set BEFORE the run starts (unlike the multi-candidate loop below, this
+      // id is known up front -- there is no createApplication step to wait on first).
+      inFlight = { applicationId: args.applicationId, phase: summary.phase };
       const single = await runSingleApplication(args.applicationId, {
         withClientFn: withClient, resumeRunner, reviewRunner, runWorker: runApplyWorker, outputRoot, env, log,
         config, now, exclusionConfig,
       });
+      inFlight = null;
       log({ evt: 'auto_apply_single_done', ...single });
       summary.ok = true;
       summary.outcome = 'ok';
@@ -1035,7 +1132,11 @@ async function main() {
       for (const row of selection.eligible) {
         const r = await applyOneCandidate(row, {
           withClientFn: withClient, resumeRunner, reviewRunner, runWorker: runApplyWorker, outputRoot, env, log,
+          // createApplication runs inside applyOneCandidate, so the id isn't known until it reports back
+          // here -- unlike the --application path above, which already has it before the run starts.
+          onApplicationStarted: (id) => { inFlight = { applicationId: id, phase: summary.phase }; },
         });
+        inFlight = null;
         applyResults.push(r);
         log({ evt: 'auto_apply_candidate_done', ...r });
       }
@@ -1046,6 +1147,10 @@ async function main() {
     summary.applied = applyResults;
     await finish(0);
   }, { summary, finish, log });
+  // Production never reaches this line -- finish()'s own process.exit() already terminated the process on
+  // every path above. It exists so tests (which stub exitFn) leave no dangling listener on the real
+  // `process` object between test cases.
+  uninstallLoopDrainedGuard();
 }
 
 const isMain = process.argv[1] && path.resolve(process.argv[1]) === fileURLToPath(import.meta.url);

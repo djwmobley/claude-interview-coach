@@ -236,10 +236,18 @@ export function createResumeRunner(deps) {
       const spawnEnv = { ...process.env, ...deps.env };
       for (const k of STRIP_ENV_VARS) delete spawnEnv[k];
 
+      // detached:true is kept ONLY so the hard-timeout branch below can taskkill /T the whole process tree
+      // (the claude CLI can itself spawn further node/tool processes; without a detached child as the head
+      // of its own process group, taskkill /PID alone can leave orphaned descendants running) -- it is NOT
+      // a signal that this process should stop waiting on the child. child.unref() must never be called
+      // here: run() awaits this child's 'exit' event below, and unref() removes it from the event loop's
+      // reference count, which -- once anything else keeping the loop alive (e.g. the pg pool) goes idle --
+      // lets Node drain and exit the WHOLE process mid-run, silently, with no terminal log line and no DB
+      // write (see this file's own bug history: bin/auto-apply.js's single-application path has no other
+      // live handle once the pool idles, so this exact mechanism killed --application re-drives outright).
       const child = deps.spawn(claudeBin, argv, {
         cwd: deps.repoRoot, detached: true, stdio: ['ignore', 'pipe', 'pipe'], windowsHide: true, env: spawnEnv,
       });
-      child.unref();
       say({ evt: 'resume_runner_started', application_id: applicationId, listing_id: listingId, pid: child.pid ?? null });
 
       let stdout = '';
@@ -257,7 +265,11 @@ export function createResumeRunner(deps) {
           });
           finish({ timedOut: true, exitCode: null, spawnError: false });
         }, timeoutMs);
-        hardTimer.unref?.();
+        // Deliberately left ref'd (no hardTimer.unref() here): this timer, together with the ref'd child
+        // above, is what keeps the event loop alive for the FULL duration of this await -- unref'ing it
+        // reopens the exact same premature-exit hole child.unref() used to (see the comment on the spawn
+        // call above). It is still cleared on every settle path below so it never fires after the child
+        // has already exited or errored.
         child.on('exit', (code) => { clearTimeout(hardTimer); finish({ timedOut: false, exitCode: code, spawnError: false }); });
         child.on('error', (err) => { clearTimeout(hardTimer); say({ evt: 'resume_runner_spawn_error', application_id: applicationId, err_message: errFields(err).err_message }); finish({ timedOut: false, exitCode: null, spawnError: true }); });
       });

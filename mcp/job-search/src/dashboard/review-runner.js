@@ -198,10 +198,14 @@ export function createReviewRunner(deps) {
       const spawnEnv = { ...process.env, ...deps.env };
       for (const k of STRIP_ENV_VARS) delete spawnEnv[k];
 
+      // detached:true is kept ONLY so the hard-timeout branch below can taskkill /T the whole process tree
+      // (see resume-runner.js's matching comment for the full rationale -- this file is the same shape).
+      // child.unref() must never be called here: run() awaits this child's 'exit' event below, and unref()
+      // removes it from the event loop's reference count, which can let Node drain and exit the whole
+      // process mid-run once nothing else (e.g. the pg pool) is keeping the loop alive.
       const child = deps.spawn(claudeBin, argv, {
         cwd: deps.repoRoot, detached: true, stdio: ['ignore', 'pipe', 'pipe'], windowsHide: true, env: spawnEnv,
       });
-      child.unref();
       say({ evt: 'review_runner_started', application_id: applicationId, listing_id: listingId, pid: child.pid ?? null });
 
       let stdout = '';
@@ -219,7 +223,9 @@ export function createReviewRunner(deps) {
           });
           finish({ timedOut: true, exitCode: null, spawnError: false });
         }, timeoutMs);
-        hardTimer.unref?.();
+        // Deliberately left ref'd (no hardTimer.unref() here): see resume-runner.js's matching comment --
+        // this timer, together with the ref'd child above, keeps the event loop alive for the full await.
+        // It is still cleared on every settle path below so it never fires after the child already exited.
         child.on('exit', (code) => { clearTimeout(hardTimer); finish({ timedOut: false, exitCode: code, spawnError: false }); });
         child.on('error', (err) => { clearTimeout(hardTimer); say({ evt: 'review_runner_spawn_error', application_id: applicationId, err_message: errFields(err).err_message }); finish({ timedOut: false, exitCode: null, spawnError: true }); });
       });

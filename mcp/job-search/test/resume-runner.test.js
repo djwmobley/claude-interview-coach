@@ -13,6 +13,8 @@ import fs from 'node:fs';
 import os from 'node:os';
 import path from 'node:path';
 import { EventEmitter } from 'node:events';
+import { spawn as nodeSpawn } from 'node:child_process';
+import { fileURLToPath } from 'node:url';
 import pg from 'pg';
 import { pgConnectionConfig } from '../src/core/config.js';
 import { ensureAuxSchema } from '../src/core/schema.js';
@@ -349,5 +351,65 @@ describe('createResumeRunner: single-flight and hard-timeout backstop', () => {
     assert.equal(result.ok, false);
     assert.equal(result.reason, 'timeout');
     assert.ok(killCalls.some((k) => k.cmd === 'taskkill'));
+  });
+});
+
+describe('createResumeRunner: event-loop keep-alive (loop-drain bug regression)', () => {
+  test('run() awaits a REAL child process to its actual exit and never calls child.unref() on it', async () => {
+    const listingId = await insertListing();
+    const app = await createApplication(client, { listingId });
+    const docId = await insertDocument(listingId, 'resumes/Keepalive Test.docx');
+    const fixture = fileURLToPath(new URL('./fixtures/sleep-then-exit.js', import.meta.url));
+    let unrefCalls = 0;
+    // A REAL node:child_process.spawn'd process (never the fake EventEmitter double every other test in
+    // this file uses) -- only a real ChildProcess has real event-loop ref-counting semantics, so only a
+    // real one can prove resume-runner.js never detaches from the loop it needs to stay alive on. cmd/args
+    // built by resume-runner.js itself (claudeBin/argv) are deliberately ignored here; this test cares only
+    // about how the runner treats WHATEVER child it gets back from spawn().
+    const realSpawn = () => {
+      const child = nodeSpawn(process.execPath, [fixture], { stdio: ['ignore', 'pipe', 'pipe'] });
+      const originalUnref = child.unref.bind(child);
+      child.unref = (...a) => { unrefCalls++; return originalUnref(...a); };
+      // Simulates the /write-resume skill's own DB side effect completing partway through the fixture's
+      // 3s sleep -- the fixture itself has no DB access, so this test does it directly.
+      setTimeout(() => {
+        fs.writeFileSync(path.join(repoRoot, 'output', 'markdown', 'keepalive-test.md'), '# resume\n');
+        client.query('UPDATE ic_job_applications SET state = $2, resume_doc_id = $3, updated_at = now() WHERE id = $1', [app.id, 'docs_ready', docId]).catch(() => {});
+      }, 500);
+      return child;
+    };
+    const runner = createResumeRunner(baseDeps({ spawn: realSpawn, timeoutMs: 15000 }));
+    const result = await runner.run(app.id, listingId);
+    assert.equal(result.ok, true, 'the run must resolve from the real child\'s actual exit, not an early drain');
+    assert.equal(result.markdownPath, 'output/markdown/keepalive-test.md');
+    assert.equal(unrefCalls, 0, 'resume-runner must never unref() the child it is awaiting (loop-drain regression)');
+  });
+
+  test('does not unref the hard-timeout timer (it must stay ref-counted for the full await)', async () => {
+    const listingId = await insertListing();
+    const app = await createApplication(client, { listingId });
+    const timeoutMs = 87654; // distinctive delay unlikely to collide with any other timer this test creates
+    const originalSetTimeout = global.setTimeout;
+    /** @type {any[]} */
+    const captured = [];
+    // @ts-ignore -- test-only global monkey-patch, restored in `finally` below.
+    global.setTimeout = (fn, ms, ...rest) => {
+      const t = originalSetTimeout(fn, ms, ...rest);
+      if (ms === timeoutMs) {
+        const originalUnref = t.unref.bind(t);
+        t.unref = (...a) => { t.__unreffed = true; return originalUnref(...a); };
+        captured.push(t);
+      }
+      return t;
+    };
+    try {
+      const spawnFn = makeFakeSpawn({ onSpawn: (child) => finishChild(child, { result: 'x', exitCode: 0 }) });
+      const runner = createResumeRunner(baseDeps({ spawn: spawnFn, timeoutMs }));
+      await runner.run(app.id, listingId);
+    } finally {
+      global.setTimeout = originalSetTimeout;
+    }
+    assert.equal(captured.length, 1, 'the hard timer must be created with this run\'s configured timeoutMs');
+    assert.equal(Boolean(captured[0].__unreffed), false, 'the hard-timeout timer must never be unref()\'d');
   });
 });
