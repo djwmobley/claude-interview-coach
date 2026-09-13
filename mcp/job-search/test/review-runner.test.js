@@ -12,6 +12,8 @@ import fs from 'node:fs';
 import os from 'node:os';
 import path from 'node:path';
 import { EventEmitter } from 'node:events';
+import { spawn as nodeSpawn } from 'node:child_process';
+import { fileURLToPath } from 'node:url';
 import pg from 'pg';
 import { pgConnectionConfig } from '../src/core/config.js';
 import { ensureAuxSchema } from '../src/core/schema.js';
@@ -296,5 +298,58 @@ describe('createReviewRunner: single-flight and hard-timeout backstop', () => {
     assert.equal(result.ok, false);
     assert.equal(result.reason, 'timeout');
     assert.ok(killCalls.some((k) => k.cmd === 'taskkill'));
+  });
+});
+
+describe('createReviewRunner: event-loop keep-alive (loop-drain bug regression)', () => {
+  test('run() awaits a REAL child process to its actual exit and never calls child.unref() on it', async () => {
+    const listingId = await insertListing();
+    const app = await createApplication(client, { listingId });
+    const fixture = fileURLToPath(new URL('./fixtures/sleep-then-exit.js', import.meta.url));
+    let unrefCalls = 0;
+    // A REAL node:child_process.spawn'd process (never the fake EventEmitter double every other test in
+    // this file uses) -- see resume-runner.test.js's matching test for the full rationale. The fixture's
+    // own `result` text is not VERDICT-shaped, so this resolves ok:false/no_verdict; that is fine, the
+    // point of this test is only that the run resolves from the real child's actual exit (never a
+    // premature drain) and that the child is never unref()'d.
+    const realSpawn = () => {
+      const child = nodeSpawn(process.execPath, [fixture], { stdio: ['ignore', 'pipe', 'pipe'] });
+      const originalUnref = child.unref.bind(child);
+      child.unref = (...a) => { unrefCalls++; return originalUnref(...a); };
+      return child;
+    };
+    const runner = createReviewRunner(baseDeps({ spawn: realSpawn, timeoutMs: 15000 }));
+    const result = await runner.run(app.id, 'output/markdown/x.md', listingId);
+    assert.equal(result.ok, false);
+    assert.equal(result.reason, 'no_verdict', 'the real child\'s actual stdout was parsed, not a timeout/drain');
+    assert.equal(unrefCalls, 0, 'review-runner must never unref() the child it is awaiting (loop-drain regression)');
+  });
+
+  test('does not unref the hard-timeout timer (it must stay ref-counted for the full await)', async () => {
+    const listingId = await insertListing();
+    const app = await createApplication(client, { listingId });
+    const timeoutMs = 76543; // distinctive delay unlikely to collide with any other timer this test creates
+    const originalSetTimeout = global.setTimeout;
+    /** @type {any[]} */
+    const captured = [];
+    // @ts-ignore -- test-only global monkey-patch, restored in `finally` below.
+    global.setTimeout = (fn, ms, ...rest) => {
+      const t = originalSetTimeout(fn, ms, ...rest);
+      if (ms === timeoutMs) {
+        const originalUnref = t.unref.bind(t);
+        t.unref = (...a) => { t.__unreffed = true; return originalUnref(...a); };
+        captured.push(t);
+      }
+      return t;
+    };
+    try {
+      const spawnFn = makeFakeSpawn({ onSpawn: (child) => finishChild(child, { result: PASS_BLOCK, exitCode: 0 }) });
+      const runner = createReviewRunner(baseDeps({ spawn: spawnFn, timeoutMs }));
+      await runner.run(app.id, 'output/markdown/x.md', listingId);
+    } finally {
+      global.setTimeout = originalSetTimeout;
+    }
+    assert.equal(captured.length, 1, 'the hard timer must be created with this run\'s configured timeoutMs');
+    assert.equal(Boolean(captured[0].__unreffed), false, 'the hard-timeout timer must never be unref()\'d');
   });
 });

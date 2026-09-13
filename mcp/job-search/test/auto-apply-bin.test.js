@@ -22,9 +22,10 @@ import { ensureAuxSchema } from '../src/core/schema.js';
 import { withClient, closePool } from '../src/core/db.js';
 import { getApplication } from '../src/core/applications.js';
 import { BUILT_IN_BLOCKED } from '../src/apply/exclusions.js';
+import { EventEmitter } from 'node:events';
 import {
   parseArgs, acquireLockWithPoll, applyOneCandidate, runPrepare, datedRunJsonPath, writeRunJsonNoOverwrite,
-  AutoApplyLockedError, createFinish, runLifecycle, runSingleApplication,
+  AutoApplyLockedError, createFinish, runLifecycle, runSingleApplication, installLoopDrainedGuard,
 } from '../bin/auto-apply.js';
 
 /** A candidate row from runPrepare's own SELECT, with every field the new pre-filters/caps need. */
@@ -273,6 +274,203 @@ describe('applyOneCandidate: advisory review (submit-on-resume spec section 1) -
     assert.equal(r.review_verdict, 'FAIL');
     assert.equal(r.review_reason, 'review_failed');
     assert.equal(withClientCalls, 2);
+  });
+
+  test('reports the new application id via onApplicationStarted right after createApplication, before resume runs', async () => {
+    /** @type {number[]} */
+    const reported = [];
+    /** @type {string[]} */
+    const calls = [];
+    const deps = {
+      withClientFn: async () => ({ id: 42, listing_id: 1 }),
+      resumeRunner: { run: async () => { calls.push('resume'); return { ok: false, reason: 'no_description' }; } },
+      reviewRunner: { run: async () => { calls.push('review'); return { ok: true, verdict: 'PASS' }; } },
+      runWorker: async () => { calls.push('worker'); return { ok: true, status: 'submitted' }; },
+      outputRoot: '/tmp/output',
+      env: {},
+      log: () => {},
+      onApplicationStarted: (id) => reported.push(id),
+    };
+    const r = await applyOneCandidate(makeRow(), deps);
+    assert.equal(r.outcome, 'resume_failed');
+    assert.deepEqual(reported, [42], 'the application id must be reported exactly once, as soon as it exists');
+    assert.deepEqual(calls, ['resume']);
+  });
+
+  test('omitting onApplicationStarted is a no-op -- existing callers are unaffected', async () => {
+    const deps = {
+      withClientFn: async () => ({ id: 43, listing_id: 1 }),
+      resumeRunner: { run: async () => ({ ok: true, markdownPath: 'output/markdown/x.md' }) },
+      reviewRunner: { run: async () => ({ ok: true, verdict: 'PASS' }) },
+      runWorker: async () => ({ ok: true, status: 'submitted' }),
+      outputRoot: '/tmp/output',
+      env: {},
+      log: () => {},
+    };
+    const r = await applyOneCandidate(makeRow(), deps);
+    assert.equal(r.outcome, 'applied');
+  });
+});
+
+describe('installLoopDrainedGuard: catches a mid-run event-loop drain (resume-runner/review-runner keep-alive bug, second line of defense)', () => {
+  /** A fake process -- a plain EventEmitter, never the real `process` object (spec requirement: unit-test
+   * the guard with an injected process emitter, not real process exit). */
+  function fakeProc() {
+    return new EventEmitter();
+  }
+
+  test('a beforeExit before finish() logs auto_apply_loop_drained, marks the summary failed, parks a drafting application, and exits 1', async () => {
+    const proc = fakeProc();
+    /** @type {any[]} */
+    const logs = [];
+    const summary = { phase: 'applying', ok: null, outcome: null };
+    let summaryWritten = null;
+    /** @type {number[]} */
+    const exitCodes = [];
+    let getApplicationCalls = 0;
+    let transitionArgs = null;
+    const uninstall = installLoopDrainedGuard(proc, {
+      isFinished: () => false,
+      getInFlight: () => ({ applicationId: 99, phase: 'applying' }),
+      log: (f) => logs.push(f),
+      summary,
+      summaryFile: '/fake/auto-apply-latest.json',
+      writeSummaryFn: (file, s) => { summaryWritten = { file, s: { ...s } }; },
+      withClientFn: async (fn) => fn({}),
+      getApplicationFn: async () => { getApplicationCalls++; return { id: 99, state: 'drafting' }; },
+      transitionFn: async (c, id, state, opts) => { transitionArgs = { id, state, opts }; },
+      exitFn: (code) => exitCodes.push(code),
+    });
+    proc.emit('beforeExit');
+    // The handler's own park-and-exit work is async (it awaits withClientFn/getApplicationFn/transitionFn)
+    // -- give the microtask/macrotask queue a turn to let it settle before asserting.
+    await new Promise((resolve) => setTimeout(resolve, 20));
+    uninstall();
+
+    assert.ok(logs.some((l) => l.evt === 'auto_apply_loop_drained' && l.phase === 'applying' && l.application_id === 99));
+    assert.equal(summary.phase, 'failed');
+    assert.equal(summary.ok, false);
+    assert.equal(summary.outcome, 'loop_drained');
+    assert.ok(summaryWritten, 'the latest.json summary must be persisted before parking/exiting');
+    assert.equal(summaryWritten.s.outcome, 'loop_drained');
+    assert.equal(getApplicationCalls, 1);
+    assert.equal(transitionArgs.id, 99);
+    assert.equal(transitionArgs.state, 'needs_human');
+    assert.equal(transitionArgs.opts.pending_question.kind, 'resume_failed');
+    assert.match(transitionArgs.opts.pending_question.label, /process loop drained/);
+    assert.deepEqual(exitCodes, [1]);
+  });
+
+  test('no application in flight: still logs and exits 1, but never calls getApplication/transition', async () => {
+    const proc = fakeProc();
+    const summary = { phase: 'preparing', ok: null, outcome: null };
+    /** @type {number[]} */
+    const exitCodes = [];
+    let dbCalls = 0;
+    const uninstall = installLoopDrainedGuard(proc, {
+      isFinished: () => false,
+      getInFlight: () => null,
+      log: () => {},
+      summary,
+      summaryFile: '/fake/auto-apply-latest.json',
+      writeSummaryFn: () => {},
+      withClientFn: async (fn) => { dbCalls++; return fn({}); },
+      exitFn: (code) => exitCodes.push(code),
+    });
+    proc.emit('beforeExit');
+    await new Promise((resolve) => setTimeout(resolve, 20));
+    uninstall();
+    assert.equal(dbCalls, 0, 'never touches the DB when nothing is in flight');
+    assert.deepEqual(exitCodes, [1]);
+  });
+
+  test('an application already past drafting (a race with a normal finish) is left untouched, never parked', async () => {
+    const proc = fakeProc();
+    const summary = { phase: 'applying', ok: null, outcome: null };
+    let transitionCalled = false;
+    const uninstall = installLoopDrainedGuard(proc, {
+      isFinished: () => false,
+      getInFlight: () => ({ applicationId: 7, phase: 'applying' }),
+      log: () => {},
+      summary,
+      summaryFile: '/fake/auto-apply-latest.json',
+      writeSummaryFn: () => {},
+      withClientFn: async (fn) => fn({}),
+      getApplicationFn: async () => ({ id: 7, state: 'docs_ready' }),
+      transitionFn: async () => { transitionCalled = true; },
+      exitFn: () => {},
+    });
+    proc.emit('beforeExit');
+    await new Promise((resolve) => setTimeout(resolve, 20));
+    uninstall();
+    assert.equal(transitionCalled, false, 'a state other than drafting must never be force-parked');
+  });
+
+  test('isFinished() true means a normal exit already happened -- beforeExit is a no-op, nothing fires', () => {
+    const proc = fakeProc();
+    /** @type {any[]} */
+    const logs = [];
+    const exitCodes = [];
+    const uninstall = installLoopDrainedGuard(proc, {
+      isFinished: () => true,
+      getInFlight: () => ({ applicationId: 1, phase: 'applying' }),
+      log: (f) => logs.push(f),
+      summary: { phase: 'done', ok: true, outcome: 'ok' },
+      summaryFile: '/fake/auto-apply-latest.json',
+      withClientFn: async (fn) => fn({}),
+      exitFn: (code) => exitCodes.push(code),
+    });
+    proc.emit('beforeExit');
+    uninstall();
+    assert.deepEqual(logs, []);
+    assert.deepEqual(exitCodes, []);
+  });
+
+  test('a second beforeExit emission while the first is still parking is a no-op (fired guard)', async () => {
+    const proc = fakeProc();
+    /** @type {any[]} */
+    const logs = [];
+    const exitCodes = [];
+    let getApplicationCalls = 0;
+    const uninstall = installLoopDrainedGuard(proc, {
+      isFinished: () => false,
+      getInFlight: () => ({ applicationId: 5, phase: 'applying' }),
+      log: (f) => logs.push(f),
+      summary: { phase: 'applying', ok: null, outcome: null },
+      summaryFile: '/fake/auto-apply-latest.json',
+      writeSummaryFn: () => {},
+      withClientFn: async (fn) => fn({}),
+      getApplicationFn: async () => { getApplicationCalls++; return { id: 5, state: 'drafting' }; },
+      transitionFn: async () => {},
+      exitFn: (code) => exitCodes.push(code),
+    });
+    proc.emit('beforeExit');
+    proc.emit('beforeExit'); // re-entrant emission (beforeExit's own documented behavior) while async work is in flight
+    await new Promise((resolve) => setTimeout(resolve, 20));
+    uninstall();
+    assert.equal(getApplicationCalls, 1, 'only the FIRST emission does real work');
+    assert.equal(logs.filter((l) => l.evt === 'auto_apply_loop_drained').length, 1);
+    assert.deepEqual(exitCodes, [1]);
+  });
+
+  test('uninstall() removes the listener -- a beforeExit emitted afterward does nothing', async () => {
+    const proc = fakeProc();
+    /** @type {any[]} */
+    const logs = [];
+    const uninstall = installLoopDrainedGuard(proc, {
+      isFinished: () => false,
+      getInFlight: () => null,
+      log: (f) => logs.push(f),
+      summary: { phase: 'applying', ok: null, outcome: null },
+      summaryFile: '/fake/auto-apply-latest.json',
+      writeSummaryFn: () => {},
+      withClientFn: async (fn) => fn({}),
+      exitFn: () => {},
+    });
+    uninstall();
+    proc.emit('beforeExit');
+    await new Promise((resolve) => setTimeout(resolve, 20));
+    assert.equal(logs.length, 0);
   });
 });
 
