@@ -100,6 +100,20 @@ export function createResumeRunner(deps) {
   }
 
   /**
+   * Visible resume failure (spec section 3, amendment A3): every fail() path -- precheck, spawn, timeout,
+   * a non-docs_ready exit, the listing-mismatch reset -- parks the application at needs_human rather than
+   * leaving it silently stuck in drafting. Only fires when the application is STILL in drafting after the
+   * error event above (the listing-mismatch path above already walked it back to drafting itself before
+   * calling fail(); every other path never left drafting in the first place). `pending_question.kind` is
+   * 'resume_failed' (amendment A3, not the generic 'question' kind the original spec draft used) so a
+   * later `--application` re-drive (bin/auto-apply.js's runSingleApplication) can recognize this exact
+   * park reason and safely re-run the resume runner, never a screening-question park -- see A3's own
+   * doc comment there.
+   *
+   * A race (the row already moved on -- parked by the dashboard's own parkApplyChain, or advanced past
+   * drafting by another actor -- between the error event above and this transition) is a benign,
+   * expected VALIDATION rejection from TRANSITIONS, logged and swallowed here rather than thrown: the
+   * error event and the { ok: false, reason } result already happened either way.
    * @param {number} applicationId
    * @param {string|null} reason
    * @param {{ meta?: unknown }} [opts]
@@ -108,6 +122,20 @@ export function createResumeRunner(deps) {
     await deps.withClient((c) => recordApplicationEvent(c, {
       applicationId, kind: 'error', actor: 'apply', note: `resume runner failed: ${reason}`, meta: opts.meta,
     }));
+    try {
+      const app = await deps.withClient((c) => getApplication(c, applicationId));
+      if (app.state === 'drafting') {
+        await deps.withClient((c) => transition(c, applicationId, 'needs_human', {
+          actor: 'apply', pending_question: { kind: 'resume_failed', label: `Resume drafting failed: ${reason}` },
+        }));
+      }
+    } catch (err) {
+      if (err instanceof JobSearchError && err.code === 'VALIDATION') {
+        say({ evt: 'resume_runner_park_skipped', application_id: applicationId, reason, err_message: errFields(err).err_message });
+      } else {
+        throw err;
+      }
+    }
     return { ok: false, reason };
   }
 

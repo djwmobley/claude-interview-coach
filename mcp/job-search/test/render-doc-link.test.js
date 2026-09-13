@@ -19,7 +19,7 @@ import { pgConnectionConfig } from '../src/core/config.js';
 import { ensureAuxSchema } from '../src/core/schema.js';
 import { listEvents } from '../src/core/events.js';
 import { createApplication, getApplication } from '../src/core/applications.js';
-import { linkRenderedDocument } from '../src/tools/render_doc.js';
+import { linkRenderedDocument, reuseExistingDocument } from '../src/tools/render_doc.js';
 
 const CO = `ZZ-TEST-RENDER-DOC-LINK-${process.pid}`;
 /** @type {pg.Client} */
@@ -188,5 +188,71 @@ describe('linkRenderedDocument: applicationId (one-click apply PR A spec item 4,
     const app = await createApplication(client, { listingId });
     const { application_link } = await linkRenderedDocument(client, { listingId, kind: 'resume', outputPath: 'output/resumes/Jordan Reyes - CTO.docx', root });
     assert.equal(/** @type {any} */ (application_link).application.id, app.id);
+  });
+});
+
+describe('reuseExistingDocument (submit-on-resume spec section 2, amendment A4)', () => {
+  test('a non-empty existing DOCX is linked exactly like a fresh render: ok:true, document + application_link present', async () => {
+    const listingId = await insertListing();
+    const app = await createApplication(client, { listingId });
+    fs.writeFileSync(path.join(root, 'output', 'resumes', 'Reuse Happy Path.docx'), 'fake-resume-bytes');
+    const result = await reuseExistingDocument(client, {
+      listingId, kind: 'resume', outputPath: 'output/resumes/Reuse Happy Path.docx', root,
+    });
+    assert.equal(result.ok, true);
+    assert.equal(/** @type {any} */ (result).document.rel_path, 'resumes/Reuse Happy Path.docx');
+    assert.equal(/** @type {any} */ (result).application_link.ignored, false);
+    const row = await getApplication(client, app.id);
+    assert.equal(row.state, 'docs_ready');
+    assert.ok(row.resume_doc_id);
+  });
+
+  test('reuseExistingDocument scopes the link to a specific applicationId, like linkRenderedDocument', async () => {
+    const listingId = await insertListing();
+    const app = await createApplication(client, { listingId });
+    fs.writeFileSync(path.join(root, 'output', 'resumes', 'Reuse Application Scoped.docx'), 'fake-resume-bytes');
+    const result = await reuseExistingDocument(client, {
+      listingId, kind: 'resume', outputPath: 'output/resumes/Reuse Application Scoped.docx', root, applicationId: app.id,
+    });
+    assert.equal(result.ok, true);
+    assert.equal(/** @type {any} */ (result).application_link.application.id, app.id);
+  });
+
+  test('EMPTY_DOCX: a 0-byte on-disk file refuses to link, no ic_job_documents row is created', async () => {
+    const listingId = await insertListing();
+    fs.writeFileSync(path.join(root, 'output', 'resumes', 'Empty Resume.docx'), '');
+    const result = await reuseExistingDocument(client, {
+      listingId, kind: 'resume', outputPath: 'output/resumes/Empty Resume.docx', root,
+    });
+    assert.deepEqual(result, { ok: false, code: 'EMPTY_DOCX' });
+    const docs = await client.query('SELECT id FROM ic_job_documents WHERE listing_id = $1', [listingId]);
+    assert.equal(docs.rowCount, 0);
+  });
+
+  test('EXISTS_OTHER_LISTING: the same rel_path already linked to a different listing refuses without re-linking', async () => {
+    const listingA = await insertListing();
+    const listingB = await insertListing();
+    fs.writeFileSync(path.join(root, 'output', 'resumes', 'Shared Name.docx'), 'shared-bytes');
+    await linkRenderedDocument(client, { listingId: listingA, kind: 'resume', outputPath: 'output/resumes/Shared Name.docx', root });
+
+    const result = await reuseExistingDocument(client, {
+      listingId: listingB, kind: 'resume', outputPath: 'output/resumes/Shared Name.docx', root,
+    });
+    assert.equal(result.ok, false);
+    assert.equal(/** @type {any} */ (result).code, 'EXISTS_OTHER_LISTING');
+    assert.equal(/** @type {any} */ (result).otherListingId, listingA);
+    // listingB never got a document row out of this refused call.
+    const docs = await client.query('SELECT id FROM ic_job_documents WHERE listing_id = $1', [listingB]);
+    assert.equal(docs.rowCount, 0);
+  });
+
+  test('a row already linked to THIS SAME listing is not a conflict: reuse still links normally', async () => {
+    const listingId = await insertListing();
+    fs.writeFileSync(path.join(root, 'output', 'resumes', 'Same Listing Reuse.docx'), 'bytes');
+    await linkRenderedDocument(client, { listingId, kind: 'resume', outputPath: 'output/resumes/Same Listing Reuse.docx', root });
+    const result = await reuseExistingDocument(client, {
+      listingId, kind: 'resume', outputPath: 'output/resumes/Same Listing Reuse.docx', root,
+    });
+    assert.equal(result.ok, true);
   });
 });

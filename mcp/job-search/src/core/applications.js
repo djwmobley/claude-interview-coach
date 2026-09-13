@@ -13,6 +13,11 @@
  *   - needs_human -> submitted: "I applied by hand" (the dashboard's needs_human card offers this as an
  *     explicit action alongside Resume/Retry -- the human did the ATS form themselves and is telling the
  *     tracker so).
+ *   - needs_human -> drafting (submit-on-resume spec amendment A2): the `--application` re-drive
+ *     (bin/auto-apply.js's runSingleApplication) clears a resume_failed park (resume-runner.js's own
+ *     visible-failure park, spec section 3) so the resume runner can run again, actor 'cli'. Never used
+ *     to jump straight to docs_ready -- the resume runner's own document-link step performs that move,
+ *     exactly as it does for a fresh drafting application.
  *   - needs_human -> approved and failed -> approved: Resume and Retry. Both re-enter the approved state
  *     (the point the worker picks up submission from) and both increment `attempt`, via the resume()/
  *     retry() helpers rather than the general transition() function, so a caller can never increment
@@ -73,7 +78,7 @@ export const TRANSITIONS = Object.freeze({
   approved: Object.freeze(['submitting', 'withdrawn']),
   submitting: Object.freeze(['submitted', 'needs_human', 'failed']),
   submitted: Object.freeze(['confirmed', 'withdrawn']),
-  needs_human: Object.freeze(['approved', 'submitted', 'withdrawn']),
+  needs_human: Object.freeze(['approved', 'submitted', 'drafting', 'withdrawn']),
   failed: Object.freeze(['approved', 'withdrawn']),
   confirmed: Object.freeze([]),
   withdrawn: Object.freeze([]),

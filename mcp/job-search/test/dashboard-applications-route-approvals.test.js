@@ -271,6 +271,16 @@ describe('GET /api/applications: row shape, blocked/sibling_active flags, cap an
     assert.equal(row.parked_reason, 'What is your notice period?');
   });
 
+  test('parked_reason surfaces pending_question.label for kind resume_failed too (spec section 3, amendment A3: no kind allow-list)', async () => {
+    const listingId = await seedListing();
+    const appId = await seedApplication(listingId, {
+      state: 'needs_human', pendingQuestion: { kind: 'resume_failed', label: 'Resume drafting failed: no_docs_ready' },
+    });
+    const r = await get('/api/applications?state=needs_human');
+    const row = r.json.rows.find((x) => x.application_id === appId);
+    assert.equal(row.parked_reason, 'Resume drafting failed: no_docs_ready');
+  });
+
   test('total reflects the full matching count, independent of the 200-row cap', async () => {
     const listingId = await seedListing();
     await seedApplication(listingId, { state: 'docs_ready' });

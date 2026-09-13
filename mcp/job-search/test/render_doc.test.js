@@ -11,6 +11,7 @@ import os from 'node:os';
 import path from 'node:path';
 import { fileURLToPath } from 'node:url';
 import { preflight, renderDoc, detectLocked, checkOutputName, loadStyleConfig, readProjectIndexCompanies, resolveSource, checkResumeStructure } from '../src/core/render.js';
+import { tool as renderDocTool } from '../src/tools/render_doc.js';
 
 const HERE = path.dirname(fileURLToPath(import.meta.url));
 const CLEAN = path.join(HERE, 'fixtures', 'render', 'clean-resume.md');
@@ -343,5 +344,51 @@ describe('render_doc rendering', () => {
     const r = await renderDoc({ kind: 'cheatsheet', source: src, outName: 'Sheet' }, { root, style, execFile: /** @type {any} */ (exec) });
     assert.equal(r.code, 'RENDER_FAILED');
     assert.match(String(r.message), /boom/);
+  });
+});
+
+describe('render_doc tool: reuse_existing schema rules (submit-on-resume spec section 2)', () => {
+  test('reuse_existing and force together are rejected with VALIDATION before renderDoc ever runs, no DB touched', async () => {
+    const deps = { withClient: async () => { throw new Error('withClient must never be called'); } };
+    await assert.rejects(
+      () => renderDocTool.handler({ kind: 'resume', source: 'fx/clean.md', reuse_existing: true, force: true }, /** @type {any} */ (deps)),
+      (/** @type {any} */ err) => err.code === 'VALIDATION' && /mutually exclusive/.test(err.message),
+    );
+  });
+
+  test('reuse_existing without listingId never touches the DB and returns the raw EXISTS result unmodified', async () => {
+    let withClientCalled = false;
+    const existsResult = { ok: false, code: 'EXISTS', checks: [], output_path: 'output\\resumes\\X.docx', hint: 'target exists' };
+    const deps = {
+      withClient: async (fn) => { withClientCalled = true; return fn({}); },
+      renderDocFn: async () => existsResult,
+    };
+    const r = await renderDocTool.handler(
+      { kind: 'resume', source: 'fx/clean.md', reuse_existing: true },
+      /** @type {any} */ (deps),
+    );
+    // reuse_existing is set, but listingId is absent -- the reuse branch's own guard
+    // (`a.listingId !== undefined`) must never fire, so this falls through to the plain "return the raw
+    // renderDoc result" path, exactly as if reuse_existing had never been passed.
+    assert.equal(withClientCalled, false);
+    assert.deepEqual(r, existsResult);
+  });
+
+  test('reuse_existing with listingId on an EXISTS result calls reuseExistingDocument via withClient', async () => {
+    const existsResult = { ok: false, code: 'EXISTS', checks: [], output_path: 'output\\resumes\\X.docx', hint: 'target exists' };
+    let withClientCalled = false;
+    const deps = {
+      withClient: async (fn) => { withClientCalled = true; return fn({}); },
+      renderDocFn: async () => existsResult,
+    };
+    // reuseExistingDocument itself is not stubbed here (it is exercised directly, against a real DB and
+    // real files, in test/render-doc-link.test.js) -- this test only proves the tool handler reaches
+    // withClient with the EXISTS output_path when reuse_existing+listingId are both present. It is
+    // expected to reject (no real file behind this fake client), which is enough to prove the branch fired.
+    await assert.rejects(() => renderDocTool.handler(
+      { kind: 'resume', source: 'fx/clean.md', reuse_existing: true, listingId: 42 },
+      /** @type {any} */ (deps),
+    ));
+    assert.equal(withClientCalled, true);
   });
 });

@@ -1,18 +1,30 @@
 // @ts-check
 /**
  * bin/auto-apply.js (auto-apply PR B): argument parsing, lock-poll contention, the apply-phase chain's
- * review-FAIL-parks behavior, and runPrepare's dry-run no-write guarantee -- all against fakes, no real
+ * advisory-review behavior, and runPrepare's dry-run no-write guarantee -- against fakes, no real
  * database, no real Chrome, no real claude CLI.
+ *
+ * runSingleApplication (submit-on-resume spec section 4) is the one exception: its gate reuses the real
+ * applications.js state machine (getApplication/transition/approve/checkApplicationBlockers) and the real
+ * auto-apply-select.js classification, so its own describe block below uses a real test database
+ * (matching test/resume-runner.test.js's own convention) while still faking resumeRunner/reviewRunner/
+ * runWorker -- no real claude CLI, no real Chrome, exactly like the rest of this file.
  */
-import { test, describe } from 'node:test';
+import { test, describe, before, after } from 'node:test';
 import assert from 'node:assert/strict';
 import fs from 'node:fs';
 import os from 'node:os';
 import path from 'node:path';
+import pg from 'pg';
 import { JobSearchError, errFields } from '../src/core/errors.js';
+import { pgConnectionConfig } from '../src/core/config.js';
+import { ensureAuxSchema } from '../src/core/schema.js';
+import { withClient, closePool } from '../src/core/db.js';
+import { getApplication } from '../src/core/applications.js';
+import { BUILT_IN_BLOCKED } from '../src/apply/exclusions.js';
 import {
   parseArgs, acquireLockWithPoll, applyOneCandidate, runPrepare, datedRunJsonPath, writeRunJsonNoOverwrite,
-  AutoApplyLockedError, createFinish, runLifecycle,
+  AutoApplyLockedError, createFinish, runLifecycle, runSingleApplication,
 } from '../bin/auto-apply.js';
 
 /** A candidate row from runPrepare's own SELECT, with every field the new pre-filters/caps need. */
@@ -37,6 +49,18 @@ describe('parseArgs', () => {
   test('bare --json sets json to null', () => assert.equal(parseArgs(['--json']).json, null));
   test('--json <file>', () => assert.equal(parseArgs(['--json', 'out.json']).json, 'out.json'));
   test('--help sets help', () => assert.equal(parseArgs(['--help']).help, true));
+  test('--application <n> sets applicationId', () => assert.equal(parseArgs(['--application', '42']).applicationId, 42));
+  test('--application with no value throws', () => assert.throws(() => parseArgs(['--application']), /positive integer/));
+  test('--application with a non-numeric value throws', () => assert.throws(() => parseArgs(['--application', 'abc']), /positive integer/));
+  test('--application with zero or a negative value throws', () => {
+    assert.throws(() => parseArgs(['--application', '0']), /positive integer/);
+    assert.throws(() => parseArgs(['--application', '-5']), /positive integer/);
+  });
+  test('--application combines with other flags', () => {
+    const out = parseArgs(['--application', '7', '--dry-run']);
+    assert.equal(out.applicationId, 7);
+    assert.equal(out.dryRun, true);
+  });
 });
 
 describe('acquireLockWithPoll: contention', () => {
@@ -115,16 +139,15 @@ describe('runPrepare: dry-run makes zero writes', () => {
   });
 });
 
-describe('applyOneCandidate: review FAIL parks without approving', () => {
+describe('applyOneCandidate: advisory review (submit-on-resume spec section 1) -- any produced resume is submitted', () => {
   function makeRow(overrides = {}) {
     return { listingId: 1, applyAts: 'greenhouse', applyUrl: 'https://boards.greenhouse.io/acme/jobs/1', ...overrides };
   }
 
-  test('a FAIL verdict never calls approve, never calls the worker', async () => {
+  test('a FAIL verdict still calls approve and the worker (advisory only), and consumes a cap slot', async () => {
     /** @type {string[]} */
     const calls = [];
     const deps = {
-      withClientFn: async (fn) => fn({}),
       resumeRunner: { run: async () => { calls.push('resume'); return { ok: true, markdownPath: 'output/markdown/x.md' }; } },
       reviewRunner: { run: async () => { calls.push('review'); return { ok: true, verdict: 'FAIL', reason: 'review_failed' }; } },
       runWorker: async () => { calls.push('worker'); return { ok: true, status: 'submitted' }; },
@@ -132,24 +155,40 @@ describe('applyOneCandidate: review FAIL parks without approving', () => {
       env: {},
       log: () => {},
     };
-    // Stub createApplication indirectly via withClientFn -- applyOneCandidate calls
-    // deps.withClientFn((c) => createApplication(c, ...)), so withClientFn must invoke the real
-    // createApplication against something -- instead we short-circuit by making withClientFn's callback
-    // never actually run createApplication: we replace withClientFn to return a canned app row on the
-    // FIRST call (createApplication) and otherwise track calls; approve() would be the second withClientFn
-    // call, which must never happen here.
     let withClientCalls = 0;
-    deps.withClientFn = async (fn) => {
+    deps.withClientFn = async () => {
       withClientCalls++;
       if (withClientCalls === 1) return { id: 99, listing_id: 1 }; // stands in for createApplication's row
       calls.push('approve_or_other_db_call');
-      return fn({});
+      return { id: 99, state: 'approved' }; // stands in for approve()'s row -- fn is never actually invoked
     };
     const r = await applyOneCandidate(makeRow(), deps);
-    assert.equal(r.outcome, 'review_failed');
+    assert.equal(r.outcome, 'applied');
     assert.equal(r.applicationId, 99);
-    assert.deepEqual(calls, ['resume', 'review']);
-    assert.equal(withClientCalls, 1); // only createApplication -- approve() was never reached
+    assert.equal(r.review_verdict, 'FAIL');
+    assert.equal(r.review_reason, 'review_failed');
+    assert.deepEqual(calls, ['resume', 'review', 'approve_or_other_db_call', 'worker']);
+    assert.equal(withClientCalls, 2); // createApplication + approve -- a cap slot IS consumed
+  });
+
+  test('a review-runner throw is advisory, never a review_failed outcome -- the chain still proceeds with review_verdict null', async () => {
+    /** @type {string[]} */
+    const calls = [];
+    let withClientCalls = 0;
+    const deps = {
+      withClientFn: async () => { withClientCalls++; return withClientCalls === 1 ? { id: 7, listing_id: 1 } : { id: 7, state: 'approved' }; },
+      resumeRunner: { run: async () => { calls.push('resume'); return { ok: true, markdownPath: 'output/markdown/x.md' }; } },
+      reviewRunner: { run: async () => { calls.push('review'); throw new Error('review-cv skill crashed'); } },
+      runWorker: async () => { calls.push('worker'); return { ok: true, status: 'submitted' }; },
+      outputRoot: '/tmp/output',
+      env: {},
+      log: () => {},
+    };
+    const r = await applyOneCandidate(makeRow(), deps);
+    assert.equal(r.outcome, 'applied');
+    assert.equal(r.review_verdict, null);
+    assert.equal(r.review_reason, null);
+    assert.deepEqual(calls, ['resume', 'review', 'worker']);
   });
 
   test('an ok:false resume result parks with resume_failed, never reaches review or approve', async () => {
@@ -168,11 +207,13 @@ describe('applyOneCandidate: review FAIL parks without approving', () => {
     const r = await applyOneCandidate(makeRow(), deps);
     assert.equal(r.outcome, 'resume_failed');
     assert.equal(r.reason, 'no_description');
+    assert.equal(r.review_verdict, null);
+    assert.equal(r.review_reason, null);
     assert.deepEqual(calls, ['resume']);
     assert.equal(withClientCalls, 1);
   });
 
-  test('a PASS verdict proceeds through approve and the worker', async () => {
+  test('a PASS verdict proceeds through approve and the worker, review_verdict/review_reason recorded', async () => {
     /** @type {string[]} */
     const calls = [];
     let withClientCalls = 0;
@@ -187,6 +228,8 @@ describe('applyOneCandidate: review FAIL parks without approving', () => {
     };
     const r = await applyOneCandidate(makeRow(), deps);
     assert.equal(r.outcome, 'applied');
+    assert.equal(r.review_verdict, 'PASS');
+    assert.equal(r.review_reason, null);
     assert.deepEqual(calls, ['resume', 'review', 'worker']);
     assert.equal(withClientCalls, 2); // createApplication + approve
   });
@@ -205,7 +248,31 @@ describe('applyOneCandidate: review FAIL parks without approving', () => {
     };
     const r = await applyOneCandidate(makeRow(), deps);
     assert.equal(r.outcome, 'create_failed');
+    assert.equal(r.review_verdict, null);
+    assert.equal(r.review_reason, null);
     assert.deepEqual(calls, []);
+  });
+
+  test('approve() throwing after an advisory review still reports the review verdict on approve_failed', async () => {
+    let withClientCalls = 0;
+    const deps = {
+      withClientFn: async () => {
+        withClientCalls++;
+        if (withClientCalls === 1) return { id: 11, listing_id: 1 }; // createApplication's row
+        throw new Error('approve boom'); // second call is approve()
+      },
+      resumeRunner: { run: async () => ({ ok: true, markdownPath: 'output/markdown/x.md' }) },
+      reviewRunner: { run: async () => ({ ok: true, verdict: 'FAIL', reason: 'review_failed' }) },
+      runWorker: async () => ({ ok: true, status: 'submitted' }),
+      outputRoot: '/tmp/output',
+      env: {},
+      log: () => {},
+    };
+    const r = await applyOneCandidate(makeRow(), deps);
+    assert.equal(r.outcome, 'approve_failed');
+    assert.equal(r.review_verdict, 'FAIL');
+    assert.equal(r.review_reason, 'review_failed');
+    assert.equal(withClientCalls, 2);
   });
 });
 
@@ -587,3 +654,275 @@ describe('runLifecycle + createFinish: every terminal exit writes a phase:"done"
     }
   });
 });
+
+describe('runSingleApplication: --application re-drive (submit-on-resume spec section 4, amendments A1-A3)', () => {
+  const CO = `ZZ-TEST-AUTOAPPLYSINGLE-${process.pid}`;
+  const LONG_DESCRIPTION = 'A senior technology leadership role. '.repeat(20);
+  const FLOORS = { texas_or_remote: 225000, relocation: 275000 };
+  /** @type {pg.Client} */
+  let client;
+  /** @type {string} */
+  let outputRoot;
+  /** @type {number[]} */
+  const listingIds = [];
+
+  /** @param {Partial<{ company: string, companyNorm: string, locationNorm: string, fitScore: number|null, salaryMax: number|null, salaryPeriod: string|null, salaryRaw: string|null, applyAts: string, applyConfidence: string, applyEasyOnly: boolean, status: string|null, description: string|null }>} o */
+  async function insertListing(o = {}) {
+    const n = Math.floor(Math.random() * 1e9);
+    const r = await client.query(
+      `INSERT INTO ic_job_listings (
+         title, company, source, external_id, record_kind, company_norm, title_norm, location_norm,
+         dedup_hash, last_seen, description, fit_score, salary_max, salary_period, salary_raw,
+         apply_url, apply_ats, apply_ats_confidence, apply_easy_only, status
+       ) VALUES (
+         'AutoApply Single Test', $1, $2, $3, 'listing', $4, $5, $6, $7, now(), $8, $9, $10, $11, $12,
+         $13, $14, $15, $16, $17
+       ) RETURNING id`,
+      [
+        o.company ?? CO, `zz-test-autoapplysingle-${process.pid}`, `zz-test-autoapplysingle-${process.pid}:${n}`,
+        o.companyNorm ?? `zzautoapplysingleco${n}`, `zzautoapplysinglerole${n}`, o.locationNorm ?? 'country-us',
+        `zz-autoapplysingle-hash-${n}`, o.description === undefined ? LONG_DESCRIPTION : o.description,
+        o.fitScore === undefined ? 90 : o.fitScore, o.salaryMax ?? null, o.salaryPeriod ?? null, o.salaryRaw ?? null,
+        'https://boards.greenhouse.io/acme/jobs/1', o.applyAts ?? 'greenhouse', o.applyConfidence ?? 'exact',
+        o.applyEasyOnly ?? false, o.status ?? null,
+      ],
+    );
+    const id = Number(r.rows[0].id);
+    listingIds.push(id);
+    return id;
+  }
+
+  /** @param {number} listingId @param {{ state?: string, pendingQuestion?: unknown, resumeDocId?: number|null }} [o] */
+  async function seedApplication(listingId, o = {}) {
+    const cols = ['listing_id', 'state'];
+    const vals = [listingId, o.state ?? 'drafting'];
+    const placeholders = ['$1', '$2'];
+    let i = 2;
+    if (o.pendingQuestion !== undefined) { i += 1; cols.push('pending_question'); vals.push(JSON.stringify(o.pendingQuestion)); placeholders.push(`$${i}::jsonb`); }
+    if (o.resumeDocId !== undefined) { i += 1; cols.push('resume_doc_id'); vals.push(o.resumeDocId); placeholders.push(`$${i}`); }
+    const r = await client.query(`INSERT INTO ic_job_applications (${cols.join(', ')}) VALUES (${placeholders.join(', ')}) RETURNING id`, vals);
+    return Number(r.rows[0].id);
+  }
+
+  /** @param {number} listingId @param {string} relPath */
+  async function insertDocument(listingId, relPath) {
+    const r = await client.query(`INSERT INTO ic_job_documents (listing_id, kind, rel_path, actor) VALUES ($1, 'resume', $2, 'mcp') RETURNING id`, [listingId, relPath]);
+    return Number(r.rows[0].id);
+  }
+
+  function writeResumeFile(relPath, bytes = 'fake-resume-bytes') {
+    const abs = path.join(outputRoot, 'output', relPath);
+    fs.mkdirSync(path.dirname(abs), { recursive: true });
+    fs.writeFileSync(abs, bytes);
+  }
+
+  async function cleanup() {
+    if (listingIds.length === 0) return;
+    await client.query('DELETE FROM ic_job_application_events WHERE application_id IN (SELECT id FROM ic_job_applications WHERE listing_id = ANY($1::int[]))', [listingIds]);
+    await client.query('DELETE FROM ic_job_applications WHERE listing_id = ANY($1::int[])', [listingIds]);
+    await client.query('DELETE FROM ic_job_documents WHERE listing_id = ANY($1::int[])', [listingIds]);
+    await client.query('DELETE FROM ic_job_events WHERE listing_id = ANY($1::int[])', [listingIds]);
+    await client.query('DELETE FROM ic_followups WHERE listing_id = ANY($1::int[])', [listingIds]);
+    await client.query('DELETE FROM ic_job_listings WHERE id = ANY($1::int[])', [listingIds]);
+    listingIds.length = 0;
+  }
+
+  before(async () => {
+    client = new pg.Client(pgConnectionConfig());
+    await client.connect();
+    await ensureAuxSchema(client);
+    await cleanup();
+    outputRoot = fs.mkdtempSync(path.join(os.tmpdir(), 'jobsearch-autoapplysingle-'));
+    fs.mkdirSync(path.join(outputRoot, 'output', 'resumes'), { recursive: true });
+  });
+  after(async () => {
+    await cleanup();
+    await client.end();
+    await closePool();
+    fs.rmSync(outputRoot, { recursive: true, force: true });
+  });
+
+  /** A fake resumeRunner that mimics the real one's DB side effect (link a resume doc, flip docs_ready)
+   * so approve() downstream has something real to hash -- never spawns a claude CLI. */
+  function fakeResumeRunnerSucceeds() {
+    return {
+      run: async (applicationId, listingId) => {
+        const relPath = `resumes/App ${applicationId}.docx`;
+        writeResumeFile(relPath);
+        const docId = await insertDocument(listingId, relPath);
+        await client.query(`UPDATE ic_job_applications SET state = 'docs_ready', resume_doc_id = $2, updated_at = now() WHERE id = $1`, [applicationId, docId]);
+        return { ok: true, markdownPath: 'output/markdown/fake.md' };
+      },
+    };
+  }
+
+  function baseSingleDeps(overrides = {}) {
+    return {
+      withClientFn: withClient,
+      resumeRunner: fakeResumeRunnerSucceeds(),
+      reviewRunner: { run: async () => ({ ok: true, verdict: 'PASS' }) },
+      runWorker: async () => ({ ok: true, status: 'submitted' }),
+      outputRoot: path.join(outputRoot, 'output'),
+      env: {},
+      log: () => {},
+      config: {
+        autoApply: { fitFloor: 60, floors: FLOORS, atsAllow: ['greenhouse'], dailyCap: 5 },
+        adapters: { run: { timezone: 'America/Chicago' } },
+        configDir: outputRoot,
+      },
+      now: new Date(),
+      exclusionConfig: { blockedCompanies: [...BUILT_IN_BLOCKED], appliedHistory: [] },
+      ...overrides,
+    };
+  }
+
+  test('a state outside drafting/needs_human/docs_ready is refused with state_<state>, no gate checks run', async () => {
+    const listingId = await insertListing();
+    const appId = await seedApplication(listingId, { state: 'submitted' });
+    const r = await runSingleApplication(appId, baseSingleDeps());
+    assert.equal(r.outcome, 'refused');
+    assert.equal(r.reason, 'state_submitted');
+  });
+
+  test('needs_human with a non-resume_failed kind is refused pointing at /apply-answer, never re-runs the resume runner', async () => {
+    const listingId = await insertListing();
+    const appId = await seedApplication(listingId, { state: 'needs_human', pendingQuestion: { kind: 'question', label: 'What is your notice period?' } });
+    let resumeCalled = false;
+    const r = await runSingleApplication(appId, baseSingleDeps({ resumeRunner: { run: async () => { resumeCalled = true; return { ok: true }; } } }));
+    assert.equal(r.outcome, 'refused');
+    assert.equal(r.reason, 'needs_human_not_resume_failed');
+    assert.match(r.message, /apply-answer/);
+    assert.equal(resumeCalled, false);
+    const row = await getApplication(client, appId);
+    assert.equal(row.state, 'needs_human', 'never transitioned when refused');
+  });
+
+  test('the apply exclusion gate refuses a blocked-employer listing (amendment A1), excludeApplicationId set so it is never "already applied" against itself', async () => {
+    const listingId = await insertListing({ company: 'Immunotec Research', companyNorm: 'immunotec research' });
+    const appId = await seedApplication(listingId, { state: 'drafting' });
+    const r = await runSingleApplication(appId, baseSingleDeps());
+    assert.equal(r.outcome, 'refused');
+    assert.equal(r.reason, 'exclusion_blocked_company');
+  });
+
+  test('the same salary/hourly classification auto-apply-select.js uses refuses hourly pay (amendment A1)', async () => {
+    const listingId = await insertListing({ salaryPeriod: 'hour' });
+    const appId = await seedApplication(listingId, { state: 'drafting' });
+    const r = await runSingleApplication(appId, baseSingleDeps());
+    assert.equal(r.outcome, 'refused');
+    assert.equal(r.reason, 'hourly_pay');
+  });
+
+  test('the same classification refuses salary below the resolved floor', async () => {
+    const listingId = await insertListing({ locationNorm: 'country-us', salaryMax: 100000 });
+    const appId = await seedApplication(listingId, { state: 'drafting' });
+    const r = await runSingleApplication(appId, baseSingleDeps());
+    assert.equal(r.outcome, 'refused');
+    assert.equal(r.reason, 'salary_below_floor');
+  });
+
+  test('checkApplicationBlockers refuses a closed listing status', async () => {
+    const listingId = await insertListing({ status: 'lost' });
+    const appId = await seedApplication(listingId, { state: 'drafting' });
+    const r = await runSingleApplication(appId, baseSingleDeps());
+    assert.equal(r.outcome, 'refused');
+    assert.match(r.reason, /"lost"/);
+  });
+
+  test('the daily cap refuses when already exhausted, exit-code-0-shaped outcome (never a throw)', async () => {
+    const listingId = await insertListing();
+    const appId = await seedApplication(listingId, { state: 'drafting' });
+    const r = await runSingleApplication(appId, baseSingleDeps({
+      config: { autoApply: { fitFloor: 60, floors: FLOORS, atsAllow: ['greenhouse'], dailyCap: 2 }, adapters: { run: { timezone: 'America/Chicago' } }, configDir: outputRoot },
+      countAutoApprovedTodayFn: async () => 2,
+    }));
+    assert.equal(r.outcome, 'refused');
+    assert.equal(r.reason, 'daily_cap');
+  });
+
+  test('re-drive from drafting: runs the resume runner, review (advisory), approve, worker -> applied', async () => {
+    const listingId = await insertListing();
+    const appId = await seedApplication(listingId, { state: 'drafting' });
+    const r = await runSingleApplication(appId, baseSingleDeps());
+    assert.equal(r.outcome, 'applied');
+    assert.equal(r.review_verdict, 'PASS');
+    const row = await getApplication(client, appId);
+    assert.equal(row.state, 'approved');
+  });
+
+  test('re-drive from needs_human (kind resume_failed): transitions to drafting first (actor cli), then runs normally -> applied', async () => {
+    const listingId = await insertListing();
+    const appId = await seedApplication(listingId, {
+      state: 'needs_human', pendingQuestion: { kind: 'resume_failed', label: 'Resume drafting failed: timeout' },
+    });
+    const r = await runSingleApplication(appId, baseSingleDeps());
+    assert.equal(r.outcome, 'applied');
+    const events = await client.query(`SELECT from_state, to_state, actor FROM ic_job_application_events WHERE application_id = $1 ORDER BY id ASC`, [appId]);
+    const parkClearEvent = events.rows.find((e) => e.from_state === 'needs_human' && e.to_state === 'drafting');
+    assert.ok(parkClearEvent, 'needs_human -> drafting transition recorded');
+    assert.equal(parkClearEvent.actor, 'cli');
+  });
+
+  test('re-drive from needs_human (resume_failed) with a document ALREADY linked: shortcuts straight to docs_ready, never re-runs the resume runner', async () => {
+    const listingId = await insertListing();
+    const relPath = 'resumes/Already Linked.docx';
+    writeResumeFile(relPath);
+    const docId = await insertDocument(listingId, relPath);
+    const appId = await seedApplication(listingId, {
+      state: 'needs_human', pendingQuestion: { kind: 'resume_failed', label: 'Resume drafting failed: approve_failed' }, resumeDocId: docId,
+    });
+    let resumeCalled = false;
+    const r = await runSingleApplication(appId, baseSingleDeps({ resumeRunner: { run: async () => { resumeCalled = true; return { ok: false }; } } }));
+    assert.equal(resumeCalled, false, 'the resume runner is never invoked when a document is already linked');
+    assert.equal(r.outcome, 'applied');
+    // No fresh markdown from this run -- review must never have been asked to run.
+    assert.equal(r.review_verdict, null);
+  });
+
+  test('re-drive from docs_ready: skips the resume runner AND review entirely, still approves and submits', async () => {
+    const listingId = await insertListing();
+    const relPath = 'resumes/Already Docs Ready.docx';
+    writeResumeFile(relPath);
+    const docId = await insertDocument(listingId, relPath);
+    const appId = await seedApplication(listingId, { state: 'docs_ready', resumeDocId: docId });
+    let resumeCalled = false;
+    let reviewCalled = false;
+    const r = await runSingleApplication(appId, baseSingleDeps({
+      resumeRunner: { run: async () => { resumeCalled = true; return { ok: false }; } },
+      reviewRunner: { run: async () => { reviewCalled = true; return { ok: true, verdict: 'PASS' }; } },
+    }));
+    assert.equal(resumeCalled, false);
+    assert.equal(reviewCalled, false);
+    assert.equal(r.outcome, 'applied');
+    assert.equal(r.review_verdict, null);
+  });
+
+  test('a resume-runner failure on re-drive is reported as resume_failed with review fields null', async () => {
+    const listingId = await insertListing();
+    const appId = await seedApplication(listingId, { state: 'drafting' });
+    const r = await runSingleApplication(appId, baseSingleDeps({
+      resumeRunner: { run: async () => ({ ok: false, reason: 'no_description' }) },
+    }));
+    assert.equal(r.outcome, 'resume_failed');
+    assert.equal(r.reason, 'no_description');
+    assert.equal(r.review_verdict, null);
+    assert.equal(r.review_reason, null);
+  });
+
+  test('a review-runner throw during re-drive is advisory only -- the chain still reaches applied', async () => {
+    const listingId = await insertListing();
+    const appId = await seedApplication(listingId, { state: 'drafting' });
+    const r = await runSingleApplication(appId, baseSingleDeps({
+      reviewRunner: { run: async () => { throw new Error('review-cv crashed'); } },
+    }));
+    assert.equal(r.outcome, 'applied');
+    assert.equal(r.review_verdict, null);
+  });
+
+  test('a nonexistent application id is refused, never throws', async () => {
+    const r = await runSingleApplication(999999999, baseSingleDeps());
+    assert.equal(r.outcome, 'refused');
+    assert.equal(r.reason, 'not_found');
+  });
+});
+

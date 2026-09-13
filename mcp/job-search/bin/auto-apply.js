@@ -4,9 +4,14 @@
  * Auto-apply CLI (auto-apply PR B, docs/auto-apply-spec.md), scheduled 06:55 daily as Windows Scheduled
  * Task "job-search auto-apply" via scripts/register-auto-apply-task.ps1.
  *
- *   node bin/auto-apply.js [--dry-run] [--json [out]]
+ *   node bin/auto-apply.js [--dry-run] [--json [out]] [--application <id>]
  *
- * Four phases, in order:
+ * --application <id> (submit-on-resume spec section 4): re-drives ONE existing application by id,
+ * entirely bypassing the four phases below -- see runSingleApplication()'s own doc comment for its gate
+ * and needs_human handling. Mutually usable with --json; --dry-run has no effect on this path (there is
+ * no read-only "would have selected" concept for a single, caller-specified application).
+ *
+ * Four phases, in order (skipped entirely when --application is given):
  *   wait -- (fix for the 2026-09-04 race: the scan task's Task Scheduler random delay can push a scan
  *     start well past auto-apply's own fixed 06:55, so auto-apply used to run against stale/unresolved
  *     data and select would report hundreds of rows as below_fit when the real blocker was simply that
@@ -38,13 +43,18 @@
  *     no second evaluation -- so the report can show where candidates actually fell out instead of the
  *     first gate (fit) misleadingly absorbing every later failure.
  *   apply -- for each selected candidate, in order: createApplication (preferring the resolved
- *     listing.apply_url) -> resume runner -> review runner (VERDICT PASS required) -> approve() ->
- *     runApplyWorker(). A non-PASS review, or any other failure, leaves the application wherever the chain
- *     stopped and moves on to the next candidate -- CLAUDE.md's "unattended soft failures warn and
- *     proceed" -- never aborts the whole run. approve() is called with actor:'auto' specifically so
- *     src/core/auto-apply-select.js's countAutoApprovedToday() (the daily-cap accounting) counts exactly
- *     the applications THIS pipeline actually advanced, and a review FAIL (which never reaches approve())
- *     never consumes a cap slot.
+ *     listing.apply_url) -> resume runner -> review runner (ADVISORY ONLY, submit-on-resume spec section
+ *     1: "any application whose resume DOCX gets produced or linked is submitted unattended. Review is
+ *     advisory.") -> approve() -> runApplyWorker(). A review FAIL, no verdict at all (a review-runner
+ *     throw, an unparseable result, or a timeout), and a PASS are all treated identically here: the chain
+ *     always proceeds to approve() + the worker regardless of what review found, recording whatever
+ *     verdict/reason it got (`review_verdict`/`review_reason`, both null when review never produced one)
+ *     on the outcome. Only a resume-runner failure (never a review-runner one) stops the chain before
+ *     approve() -- CLAUDE.md's "unattended soft failures warn and proceed" -- never aborts the whole run.
+ *     approve() is called with actor:'auto' specifically so src/core/auto-apply-select.js's
+ *     countAutoApprovedToday() (the daily-cap accounting) counts exactly the applications THIS pipeline
+ *     actually advanced; a review FAIL now DOES consume a cap slot, because it is submitted (spec section
+ *     1: "a review FAIL now consumes a daily-cap slot because it is submitted").
  *
  * Lock: one pg_try_advisory_lock on src/core/scan-run.js's own LOCK_KEY (730193001), polled every
  * config/auto-apply.json's pollSeconds up to (hardDeadline - now) minutes -- NEVER the configured
@@ -81,9 +91,9 @@ import { buildProbeRegistryFromAtsApply } from '../src/apply/probe-registry.js';
 import { INTERMEDIARY_HOSTS } from '../src/apply/apply-target.js';
 import { persistApplyTargetForListing, LIFETIME_PROBE_ATTEMPTS } from '../src/core/apply-target-persist.js';
 import { prepareLinkedInListing, adaptPlaywrightPage } from '../src/apply/linkedin-button-prepare.js';
-import { selectCandidates, isUsLocation, isHourlyPaySignal } from '../src/core/auto-apply-select.js';
+import { selectCandidates, isUsLocation, isHourlyPaySignal, classifyCandidate, countAutoApprovedToday } from '../src/core/auto-apply-select.js';
 import { exclusionConfigPath, loadExclusionConfig, classifyExclusion } from '../src/apply/exclusions.js';
-import { createApplication, approve } from '../src/core/applications.js';
+import { createApplication, approve, getApplication, transition, checkApplicationBlockers } from '../src/core/applications.js';
 import { createResumeRunner } from '../src/dashboard/resume-runner.js';
 import { createReviewRunner } from '../src/dashboard/review-runner.js';
 import { runApplyWorker } from '../src/apply/worker.js';
@@ -95,7 +105,7 @@ import { waitForScan, localDeadline, defaultQueryLatestScanRun } from '../src/co
 import { launchChrome } from './scan.js';
 import { runningMarkerPath, writeRunningMarker, deleteRunningMarker } from '../src/core/running-marker.js';
 
-const USAGE = 'usage: node bin/auto-apply.js [--dry-run] [--json [out]]';
+const USAGE = 'usage: node bin/auto-apply.js [--dry-run] [--json [out]] [--application <id>]';
 
 /** Thrown by main()'s prepare phase when acquireLockWithPoll's poll window expires without ever acquiring
  * the lock -- a distinct, catchable signal (rather than a direct console.log/process.exit inline) so the
@@ -205,8 +215,8 @@ export async function runLifecycle(body, opts) {
 
 /** @param {string[]} argv */
 export function parseArgs(argv) {
-  /** @type {{ dryRun: boolean, json: string|null|undefined, help: boolean }} */
-  const out = { dryRun: false, json: undefined, help: false };
+  /** @type {{ dryRun: boolean, json: string|null|undefined, help: boolean, applicationId: number|undefined }} */
+  const out = { dryRun: false, json: undefined, help: false, applicationId: undefined };
   for (let i = 0; i < argv.length; i++) {
     const a = argv[i];
     if (a === '--dry-run') out.dryRun = true;
@@ -216,6 +226,14 @@ export function parseArgs(argv) {
         out.json = v;
         i++;
       } else out.json = null;
+    } else if (a === '--application') {
+      const v = argv[i + 1];
+      const n = Number(v);
+      if (!v || v.startsWith('--') || !Number.isInteger(n) || n <= 0) {
+        throw new Error(`--application requires a positive integer application id (${USAGE})`);
+      }
+      out.applicationId = n;
+      i++;
     } else if (a === '--help' || a === '-h') out.help = true;
   }
   return out;
@@ -432,9 +450,13 @@ export async function openLinkedInBrowser(connectSession, env, config, log) {
 }
 
 /**
- * The apply phase for ONE selected candidate: createApplication -> resume -> review (PASS required) ->
- * approve (actor:'auto') -> runApplyWorker. Never throws -- every phase's own failure is caught and
- * reported as a closed outcome so the caller's loop always proceeds to the next candidate.
+ * The apply phase for ONE selected candidate: createApplication -> resume -> review (ADVISORY, never a
+ * submit gate -- submit-on-resume spec section 1) -> approve (actor:'auto') -> runApplyWorker. Never
+ * throws -- every phase's own failure is caught and reported as a closed outcome so the caller's loop
+ * always proceeds to the next candidate. Only a resume-runner failure stops the chain before approve();
+ * review's outcome (PASS, FAIL, or no verdict at all) is recorded on `review_verdict`/`review_reason` and
+ * otherwise ignored by the control flow -- every returned outcome object carries these two fields (both
+ * null when review never ran or never produced a verdict), never only the 'applied' ones.
  * @param {import('../src/core/auto-apply-select.js').CandidateRow} row
  * @param {{
  *   withClientFn: typeof withClient,
@@ -455,7 +477,7 @@ export async function applyOneCandidate(row, deps) {
     }));
   } catch (err) {
     deps.log({ evt: 'auto_apply_create_application_failed', listing_id: row.listingId, ...errFields(err) });
-    return { outcome: 'create_failed', listingId: row.listingId };
+    return { outcome: 'create_failed', listingId: row.listingId, review_verdict: null, review_reason: null };
   }
 
   /** @type {any} */
@@ -464,40 +486,263 @@ export async function applyOneCandidate(row, deps) {
     resumeResult = await deps.resumeRunner.run(app.id, row.listingId);
   } catch (err) {
     deps.log({ evt: 'auto_apply_resume_runner_threw', application_id: app.id, ...errFields(err) });
-    return { outcome: 'resume_failed', listingId: row.listingId, applicationId: app.id, reason: errFields(err).err_code };
+    return { outcome: 'resume_failed', listingId: row.listingId, applicationId: app.id, reason: errFields(err).err_code, review_verdict: null, review_reason: null };
   }
   if (!resumeResult.ok || !resumeResult.markdownPath) {
-    return { outcome: 'resume_failed', listingId: row.listingId, applicationId: app.id, reason: resumeResult.reason ?? null };
+    return { outcome: 'resume_failed', listingId: row.listingId, applicationId: app.id, reason: resumeResult.reason ?? null, review_verdict: null, review_reason: null };
   }
 
-  /** @type {any} */
-  let reviewResult;
+  // Advisory review (spec section 1): review-cv's verdict no longer gates submission. A review-runner
+  // throw is no longer its own 'review_failed' outcome that stops the chain here -- it is logged
+  // (auto_apply_review_advisory) and the chain proceeds exactly as if review had returned no verdict at
+  // all (review-runner.js's own storeReview() already persisted review_verdict/review_findings for
+  // whatever DID complete before the throw, if anything; a throw before that point simply leaves both
+  // columns at their prior value, and reviewVerdict/reviewReason here stay null either way).
+  let reviewVerdict = null;
+  let reviewReason = null;
   try {
-    reviewResult = await deps.reviewRunner.run(app.id, resumeResult.markdownPath, row.listingId);
+    const reviewResult = await deps.reviewRunner.run(app.id, resumeResult.markdownPath, row.listingId);
+    reviewVerdict = reviewResult.verdict ?? null;
+    reviewReason = reviewResult.reason ?? null;
   } catch (err) {
-    deps.log({ evt: 'auto_apply_review_runner_threw', application_id: app.id, ...errFields(err) });
-    return { outcome: 'review_failed', listingId: row.listingId, applicationId: app.id, reason: errFields(err).err_code };
-  }
-  if (!reviewResult.ok || reviewResult.verdict !== 'PASS') {
-    // A review FAIL parks the application at docs_ready with review_verdict/review_findings recorded
-    // (review-runner.js's own storeReview) -- Approve stays available for a human. This never calls
-    // approve(), so it never consumes a daily-cap slot (spec: "a review FAIL never consumes a slot").
-    return { outcome: 'review_failed', listingId: row.listingId, applicationId: app.id, reason: reviewResult.reason ?? 'review_failed' };
+    deps.log({ evt: 'auto_apply_review_advisory', application_id: app.id, ...errFields(err) });
   }
 
   try {
     await deps.withClientFn((c) => approve(c, app.id, { outputRoot: deps.outputRoot, actor: 'auto' }));
   } catch (err) {
     deps.log({ evt: 'auto_apply_approve_failed', application_id: app.id, ...errFields(err) });
-    return { outcome: 'approve_failed', listingId: row.listingId, applicationId: app.id, reason: errFields(err).err_code };
+    return {
+      outcome: 'approve_failed', listingId: row.listingId, applicationId: app.id, reason: errFields(err).err_code,
+      review_verdict: reviewVerdict, review_reason: reviewReason,
+    };
   }
 
   try {
     const workerResult = await deps.runWorker(app.id, { env: deps.env, log: deps.log });
-    return { outcome: workerResult.ok ? 'applied' : 'apply_failed', listingId: row.listingId, applicationId: app.id, workerStatus: workerResult.status };
+    return {
+      outcome: workerResult.ok ? 'applied' : 'apply_failed', listingId: row.listingId, applicationId: app.id,
+      workerStatus: workerResult.status, review_verdict: reviewVerdict, review_reason: reviewReason,
+    };
   } catch (err) {
     deps.log({ evt: 'auto_apply_worker_threw', application_id: app.id, ...errFields(err) });
-    return { outcome: 'apply_failed', listingId: row.listingId, applicationId: app.id, reason: errFields(err).err_code };
+    return {
+      outcome: 'apply_failed', listingId: row.listingId, applicationId: app.id, reason: errFields(err).err_code,
+      review_verdict: reviewVerdict, review_reason: reviewReason,
+    };
+  }
+}
+
+/** States runSingleApplication() (below) will re-drive; anything else is refused with `state_<state>`. */
+const RE_DRIVE_ALLOWED_STATES = Object.freeze(['drafting', 'needs_human', 'docs_ready']);
+
+/**
+ * `--application <id>` re-drive (submit-on-resume spec section 4, amendments A1/A2/A3): re-runs the apply
+ * chain for ONE existing application, bypassing wait/prepare/select entirely. Never throws for a refusal
+ * -- a gate failure is a normal, expected outcome (`{ outcome: 'refused', reason }`), not a crash; the
+ * caller (main()) always exits 0 for a refusal, per amendment A1 ("Any skip reason refuses the re-drive
+ * with that reason in the summary and exit code 0").
+ *
+ * Gate (amendment A1), checked in this order, first failure wins:
+ *   1. state must be one of RE_DRIVE_ALLOWED_STATES.
+ *   2. a needs_human park is only re-driven when `pending_question.kind === 'resume_failed'` (amendment
+ *      A3, resume-runner.js's own visible-failure park, spec section 3) -- any other kind (a screening
+ *      question, a credential prompt, etc.) is refused pointing at the /apply-answer skill, since
+ *      re-running the resume runner would not address what is actually parking the application.
+ *   3. the apply exclusion gate (src/apply/exclusions.js's classifyExclusion) -- `excludeApplicationId`
+ *      is set to THIS application's own id so it never counts as "already applied" against itself (the
+ *      exact hazard checkApplicationBlockers's own doc comment describes for the identical reason).
+ *   4. the SAME salary/hourly/fit/US/etc classification auto-apply-select.js's selectCandidates() uses
+ *      per candidate row (classifyCandidate: not_scored/below_fit/human_fit_override/not_us/
+ *      salary_below_floor/no_description/apply_target_unresolved/easy_apply_only/ats_not_allowed/
+ *      confidence_not_exact/hourly_pay) -- `hasActiveApplication` is deliberately forced to `false` here
+ *      (gate 3 above already handled "already applied" correctly, excluding this application's own row;
+ *      classifyCandidate has no such exclusion parameter, so this is the only way to avoid it reporting
+ *      'active_application' against the very application being re-driven).
+ *   5. checkApplicationBlockers() -- closed listing status anywhere in the dedup tree, or another sibling
+ *      application already actively progressing (SIBLING_ACTIVE_STATES).
+ *   6. the daily cap (countAutoApprovedToday vs config.autoApply.dailyCap) -- already exhausted today.
+ *
+ * needs_human -> drafting -> resume (amendment A2): a resume_failed park is transitioned needs_human ->
+ * drafting (actor 'cli', the TRANSITIONS edge amendment A2 adds) BEFORE anything else runs. If the
+ * application already carries a linked resume_doc_id at that point (an edge case: a document was linked
+ * before whatever parked it), this transitions drafting -> docs_ready directly rather than re-running the
+ * resume runner to draft a duplicate. A docs_ready application (from the start, or reached via that
+ * shortcut) never runs the resume runner OR the review runner in this call -- there is nothing new to
+ * review, and review only runs here against a markdown path THIS run's own resume runner just produced
+ * (see this codebase's blind-spot notes for why there is no other way to locate that path).
+ * @param {number} id
+ * @param {{
+ *   withClientFn: typeof withClient,
+ *   resumeRunner: ReturnType<typeof createResumeRunner>,
+ *   reviewRunner: ReturnType<typeof createReviewRunner>,
+ *   runWorker: typeof runApplyWorker,
+ *   outputRoot: string,
+ *   env: import('../src/core/config.js').Env,
+ *   log: (f: any) => void,
+ *   config: import('../src/core/config.js').LoadedConfig,
+ *   now: Date,
+ *   exclusionConfig?: import('../src/apply/exclusions.js').ExclusionConfig,
+ *   classifyExclusionFn?: typeof classifyExclusion,
+ *   classifyCandidateFn?: typeof classifyCandidate,
+ *   checkApplicationBlockersFn?: typeof checkApplicationBlockers,
+ *   countAutoApprovedTodayFn?: typeof countAutoApprovedToday,
+ * }} deps `classifyExclusionFn`/`classifyCandidateFn`/`checkApplicationBlockersFn`/
+ *   `countAutoApprovedTodayFn` are test seams ONLY (never set by production wiring -- main() below leaves
+ *   every one at its real default), matching this file's own `opts.classifyExclusion` seam on runPrepare.
+ */
+export async function runSingleApplication(id, deps) {
+  const classifyExclusionFn = deps.classifyExclusionFn ?? classifyExclusion;
+  const classifyCandidateFn = deps.classifyCandidateFn ?? classifyCandidate;
+  const checkApplicationBlockersFn = deps.checkApplicationBlockersFn ?? checkApplicationBlockers;
+  const countAutoApprovedTodayFn = deps.countAutoApprovedTodayFn ?? countAutoApprovedToday;
+
+  /** @type {any} */
+  let app;
+  try {
+    app = await deps.withClientFn((c) => getApplication(c, id));
+  } catch (err) {
+    deps.log({ evt: 'auto_apply_single_not_found', application_id: id, ...errFields(err) });
+    return { outcome: 'refused', applicationId: id, listingId: null, reason: 'not_found' };
+  }
+
+  if (!RE_DRIVE_ALLOWED_STATES.includes(app.state)) {
+    return { outcome: 'refused', applicationId: id, listingId: app.listing_id, reason: `state_${app.state}` };
+  }
+
+  if (app.state === 'needs_human') {
+    const kind = app.pending_question && typeof app.pending_question.kind === 'string' ? app.pending_question.kind : null;
+    if (kind !== 'resume_failed') {
+      return {
+        outcome: 'refused', applicationId: id, listingId: app.listing_id, reason: 'needs_human_not_resume_failed',
+        message: 'Parked on something other than a visible resume failure (e.g. a screening question). Use the /apply-answer skill to resolve it, then re-drive.',
+      };
+    }
+  }
+
+  const listingRes = await deps.withClientFn((c) => c.query(
+    `SELECT l.id, l.fit_score, l.duplicate_of, l.location_norm, l.remote_mode, l.salary_max, l.salary_period,
+            l.salary_raw, l.description, l.apply_url, l.apply_ats, l.apply_ats_confidence, l.apply_easy_only,
+            l.company, l.company_norm, l.title, l.title_norm, coalesce(l.url_normalized, l.url) AS source_url,
+            (SELECT actor FROM ic_job_events e WHERE e.listing_id = l.id AND e.kind = 'fit' ORDER BY e.at DESC, e.id DESC LIMIT 1) AS fit_actor
+     FROM ic_job_listings l WHERE l.id = $1`,
+    [app.listing_id],
+  ));
+  if (listingRes.rowCount === 0) {
+    return { outcome: 'refused', applicationId: id, listingId: app.listing_id, reason: 'listing_not_found' };
+  }
+  const l = listingRes.rows[0];
+
+  const exclusionConfig = deps.exclusionConfig ?? loadExclusionConfig(deps.config.configDir);
+  const exclusionListing = {
+    id: Number(app.listing_id), company: l.company ?? null, companyNorm: l.company_norm ?? null,
+    title: l.title ?? null, titleNorm: l.title_norm ?? null, applyUrl: l.apply_url ?? null,
+    sourceUrl: l.source_url ?? null, description: l.description ?? null,
+  };
+  const excl = await deps.withClientFn((c) => classifyExclusionFn(exclusionListing, { client: c, config: exclusionConfig, excludeApplicationId: id }));
+  if (excl.branch !== 'eligible') {
+    return { outcome: 'refused', applicationId: id, listingId: app.listing_id, reason: `exclusion_${excl.branch}` };
+  }
+
+  const candidateRow = {
+    listingId: Number(app.listing_id), fitScore: l.fit_score === null ? null : Number(l.fit_score),
+    fitActor: l.fit_actor ?? null, duplicateOf: l.duplicate_of === null ? null : Number(l.duplicate_of),
+    locationNorm: l.location_norm ?? null, remoteMode: l.remote_mode ?? null,
+    salaryMax: l.salary_max === null ? null : Number(l.salary_max), salaryPeriod: l.salary_period ?? null,
+    salaryRaw: l.salary_raw ?? null,
+    // Deliberately false -- see this function's own doc comment (gate 4).
+    hasActiveApplication: false,
+    description: l.description ?? null, applyUrl: l.apply_url ?? null, applyAts: l.apply_ats ?? null,
+    applyConfidence: l.apply_ats_confidence ?? null, applyEasyOnly: Boolean(l.apply_easy_only),
+  };
+  const candidateReason = classifyCandidateFn(candidateRow, {
+    fitFloor: deps.config.autoApply.fitFloor, floors: deps.config.autoApply.floors, atsAllow: deps.config.autoApply.atsAllow,
+  });
+  if (candidateReason !== 'eligible') {
+    return { outcome: 'refused', applicationId: id, listingId: app.listing_id, reason: candidateReason };
+  }
+
+  const blockers = await deps.withClientFn((c) => checkApplicationBlockersFn(c, { id: app.id, listing_id: app.listing_id }, { config: exclusionConfig }));
+  if (blockers.blocked) {
+    return { outcome: 'refused', applicationId: id, listingId: app.listing_id, reason: blockers.blockedReason };
+  }
+  if (blockers.siblingActive) {
+    return { outcome: 'refused', applicationId: id, listingId: app.listing_id, reason: 'sibling_active' };
+  }
+
+  // Amendment A5 (ACCEPTED, no lock work): a scheduled auto-apply run and a manual --application re-drive
+  // can race on this exact count between this read and either one's own approve() a moment later, in
+  // principle letting the daily cap be exceeded by one slot on an unlucky interleaving. Damian's own
+  // ruling on this: accepted as-is, not worth a cross-process lock for a once-a-day operator-triggered
+  // action against an already-generous cap.
+  const capUsed = await deps.withClientFn((c) => countAutoApprovedTodayFn(c, deps.now, deps.config.adapters.run.timezone));
+  if (capUsed >= deps.config.autoApply.dailyCap) {
+    return { outcome: 'refused', applicationId: id, listingId: app.listing_id, reason: 'daily_cap' };
+  }
+
+  if (app.state === 'needs_human') {
+    await deps.withClientFn((c) => transition(c, id, 'drafting', { actor: 'cli', note: 're-drive: resume_failed park cleared for another attempt' }));
+    app = await deps.withClientFn((c) => getApplication(c, id));
+  }
+
+  let markdownPath = null;
+  let ranResumeRunner = false;
+  if (app.state !== 'docs_ready') {
+    if (app.resume_doc_id) {
+      // A document is already linked despite the non-docs_ready state (edge case) -- move directly to
+      // docs_ready rather than re-running the resume runner to draft a duplicate.
+      await deps.withClientFn((c) => transition(c, id, 'docs_ready', { actor: 'cli', note: 're-drive: resume already linked' }));
+    } else {
+      /** @type {any} */
+      let resumeResult;
+      try {
+        resumeResult = await deps.resumeRunner.run(id, app.listing_id);
+      } catch (err) {
+        deps.log({ evt: 'auto_apply_single_resume_runner_threw', application_id: id, ...errFields(err) });
+        return { outcome: 'resume_failed', applicationId: id, listingId: app.listing_id, reason: errFields(err).err_code, review_verdict: null, review_reason: null };
+      }
+      if (!resumeResult.ok || !resumeResult.markdownPath) {
+        return { outcome: 'resume_failed', applicationId: id, listingId: app.listing_id, reason: resumeResult.reason ?? null, review_verdict: null, review_reason: null };
+      }
+      markdownPath = resumeResult.markdownPath;
+      ranResumeRunner = true;
+    }
+  }
+
+  let reviewVerdict = null;
+  let reviewReason = null;
+  if (ranResumeRunner && markdownPath) {
+    try {
+      const reviewResult = await deps.reviewRunner.run(id, markdownPath, app.listing_id);
+      reviewVerdict = reviewResult.verdict ?? null;
+      reviewReason = reviewResult.reason ?? null;
+    } catch (err) {
+      deps.log({ evt: 'auto_apply_single_review_advisory', application_id: id, ...errFields(err) });
+    }
+  }
+
+  try {
+    await deps.withClientFn((c) => approve(c, id, { outputRoot: deps.outputRoot, actor: 'auto' }));
+  } catch (err) {
+    deps.log({ evt: 'auto_apply_single_approve_failed', application_id: id, ...errFields(err) });
+    return {
+      outcome: 'approve_failed', applicationId: id, listingId: app.listing_id, reason: errFields(err).err_code,
+      review_verdict: reviewVerdict, review_reason: reviewReason,
+    };
+  }
+
+  try {
+    const workerResult = await deps.runWorker(id, { env: deps.env, log: deps.log });
+    return {
+      outcome: workerResult.ok ? 'applied' : 'apply_failed', applicationId: id, listingId: app.listing_id,
+      workerStatus: workerResult.status, review_verdict: reviewVerdict, review_reason: reviewReason,
+    };
+  } catch (err) {
+    deps.log({ evt: 'auto_apply_single_worker_threw', application_id: id, ...errFields(err) });
+    return {
+      outcome: 'apply_failed', applicationId: id, listingId: app.listing_id, reason: errFields(err).err_code,
+      review_verdict: reviewVerdict, review_reason: reviewReason,
+    };
   }
 }
 
@@ -617,6 +862,29 @@ async function main() {
       log({ evt: 'auto_apply_no_apply_config_invalid', ...f });
       Object.assign(summary, { ok: false, no_apply: { file: exclusionConfigPath(config.configDir), message: f.err_message } });
       await finish(1);
+      return;
+    }
+
+    // --application <id> re-drive (submit-on-resume spec section 4): entirely bypasses wait/prepare/
+    // select -- this run is about ONE specific, already-existing application, never today's candidate
+    // pool. Always exits 0 (even a gate refusal, per amendment A1): a refusal here is a normal, expected
+    // outcome the operator reads from the summary, not a process failure.
+    if (args.applicationId !== undefined) {
+      summary.phase = 'applying';
+      persist();
+      const runnerDeps = { env, logDir: env.JOBSEARCH_LOG_DIR, repoRoot: repoRoot(), withClient, spawn };
+      const resumeRunner = createResumeRunner(runnerDeps);
+      const reviewRunner = createReviewRunner(runnerDeps);
+      const outputRoot = path.join(repoRoot(), 'output');
+      const single = await runSingleApplication(args.applicationId, {
+        withClientFn: withClient, resumeRunner, reviewRunner, runWorker: runApplyWorker, outputRoot, env, log,
+        config, now, exclusionConfig,
+      });
+      log({ evt: 'auto_apply_single_done', ...single });
+      summary.ok = true;
+      summary.outcome = 'ok';
+      summary.single = single;
+      await finish(0);
       return;
     }
 
