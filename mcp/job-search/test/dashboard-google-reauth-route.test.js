@@ -25,6 +25,7 @@ import { EventEmitter } from 'node:events';
 import { createRouter } from '../src/dashboard/router.js';
 import { register as registerGoogle, categoryForState } from '../src/dashboard/routes/google.js';
 import { register as registerGoogleReauth } from '../src/dashboard/routes/google-reauth.js';
+import { packageRoot } from '../src/core/config.js';
 
 /** @type {string} */
 let tmp = '';
@@ -242,6 +243,10 @@ describe('POST /api/google/reauth', () => {
     assert.equal(c.opts.detached, true);
     assert.equal(c.opts.windowsHide, true);
     assert.equal(c.opts.stdio, 'ignore');
+    // cwd is deliberately pinned to packageRoot() (unlike scan-run.js's own spawn, which sets no cwd at
+    // all) -- see the route's own comment for why: this asserts against the same packageRoot() the
+    // config module itself computes, i.e. the injected package root, not a hardcoded path.
+    assert.equal(c.opts.cwd, packageRoot());
     assert.equal('env' in c.opts, false, "no explicit env override -- inherits process.env exactly like scan-run.js's own spawn call");
   });
 

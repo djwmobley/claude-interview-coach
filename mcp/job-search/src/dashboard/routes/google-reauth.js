@@ -78,9 +78,10 @@ export function register(router, deps) {
 
     const spawnImpl = deps.spawn ?? nodeSpawn;
     try {
-      // Exactly src/core/scan-run.js's own unattended-reauth spawn shape (process.execPath + the script
-      // path as argv, --wait-ms/--token-file, detached/windowsHide/stdio:ignore, NO explicit `env`
-      // override -- the child inherits this process's environment verbatim, same as scan-run.js's call).
+      // env mirrors src/core/scan-run.js's own unattended-reauth spawn exactly: no explicit `env`
+      // override, so the child inherits this process's environment verbatim, same as scan-run.js's call.
+      // cwd is deliberately pinned to packageRoot() here (scan-run.js sets none), so the helper's working
+      // directory is correct regardless of what directory the dashboard process itself was launched from.
       const child = spawnImpl(
         process.execPath,
         [path.join(packageRoot(), 'bin', 'google-reauth.js'), '--wait-ms', '3600000', '--token-file', tokenFile],
