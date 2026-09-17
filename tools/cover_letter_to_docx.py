@@ -27,6 +27,8 @@ from docx.enum.text import WD_ALIGN_PARAGRAPH
 from docx.oxml import OxmlElement
 from docx.oxml.ns import qn
 
+from docx_metadata import apply_document_metadata, resolve_author_from_profile
+
 NAVY  = RGBColor(0x0D, 0x21, 0x37)
 BLUE  = RGBColor(0x1A, 0x3A, 0x5C)
 GREY  = RGBColor(0x55, 0x55, 0x55)
@@ -213,6 +215,8 @@ def convert(txt_path, docx_path):
     if s["closing"]:
         para(doc, s["closing"], size=BODY_PT, bold=False, color=BLACK, before=SPACE_PT)
 
+    author = resolve_author_from_profile()
+    apply_document_metadata(doc, author)
     doc.save(docx_path)
     print(f"Cover letter written to {docx_path}")
 
