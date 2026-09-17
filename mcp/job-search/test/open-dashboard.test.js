@@ -8,7 +8,18 @@
 import { test, describe } from 'node:test';
 import assert from 'node:assert/strict';
 import { EventEmitter } from 'node:events';
-import { openDashboard, assertLoopbackCdpUrl } from '../src/core/open-dashboard.js';
+import { execFile } from 'node:child_process';
+import { promisify } from 'node:util';
+import {
+  openDashboard,
+  assertLoopbackCdpUrl,
+  assertLaunchableUrl,
+  launchOsBrowser,
+  encodePowerShellCommand,
+  buildWin32LaunchArgv,
+} from '../src/core/open-dashboard.js';
+
+const execFileP = promisify(execFile);
 
 const DASHBOARD_URL = 'http://127.0.0.1:7311/';
 const CDP_URL = 'http://127.0.0.1:9222';
@@ -149,9 +160,16 @@ describe('openDashboard', () => {
     const r = await openDashboard({ dashboardUrl: DASHBOARD_URL, cdpUrl: CDP_URL, fetchImpl, spawnImpl, platform: 'win32', log });
     assert.deepEqual(r, { ok: true, mode: 'os_browser' });
     assert.equal(calls.length, 1);
-    assert.equal(calls[0].cmd, 'cmd.exe');
-    assert.deepEqual(calls[0].args, ['/c', 'start', '', DASHBOARD_URL]);
+    // 2026-09-17 incident fix: no more `cmd.exe /c start` (an unquoted URL there gets split at every `&`
+    // by cmd's own parser) -- win32 now hands the URL to powershell.exe -EncodedCommand instead, which
+    // never passes the URL through any shell/cmd tokenizer.
+    assert.equal(calls[0].cmd, 'powershell.exe');
+    assert.deepEqual(calls[0].args.slice(0, 4), ['-NoProfile', '-NonInteractive', '-ExecutionPolicy', 'Bypass']);
+    assert.equal(calls[0].args[4], '-EncodedCommand');
+    const decoded = Buffer.from(calls[0].args[5], 'base64').toString('utf16le');
+    assert.equal(decoded, `Start-Process -FilePath '${DASHBOARD_URL}'`);
     assert.equal(calls[0].opts.detached, true);
+    assert.equal(calls[0].opts.shell, false);
     assert.ok(lines.some((l) => l.evt === 'open_dashboard' && l.mode === 'os_browser'));
   });
 
@@ -202,5 +220,79 @@ describe('openDashboard', () => {
     const { log } = collectLog();
     const r = await openDashboard({ dashboardUrl: DASHBOARD_URL, cdpUrl: CDP_URL, fetchImpl, spawnImpl, platform: 'win32', log });
     assert.equal(r.mode, 'os_browser');
+  });
+});
+
+describe('win32 launch encoding (2026-09-17 incident fix)', () => {
+  test('(a) buildWin32LaunchArgv: EncodedCommand decodes to the exact URL, quote-doubled, with &, %2F, %20 intact', () => {
+    const url = "http://127.0.0.1:7311/?a=1&b=x%2Fy%20z&note=it's%20a%20test&c=d";
+    const [cmd, args] = buildWin32LaunchArgv(url);
+    assert.equal(cmd, 'powershell.exe');
+    assert.deepEqual(args.slice(0, 4), ['-NoProfile', '-NonInteractive', '-ExecutionPolicy', 'Bypass']);
+    assert.equal(args[4], '-EncodedCommand');
+    assert.equal(args.length, 6);
+    const decoded = Buffer.from(args[5], 'base64').toString('utf16le');
+    const expectedEscapedUrl = url.replace(/'/g, "''");
+    assert.equal(decoded, `Start-Process -FilePath '${expectedEscapedUrl}'`);
+    assert.ok(decoded.includes('&'), 'decoded command must retain the literal &');
+    assert.ok(decoded.includes('%2F'), 'decoded command must retain %2F untouched');
+    assert.ok(decoded.includes('%20'), 'decoded command must retain %20 untouched');
+    assert.ok(decoded.includes("''"), "a single quote in the URL must be doubled in the decoded command");
+    assert.equal((decoded.match(/'/g) || []).length, (url.match(/'/g) || []).length * 2 + 2, 'every URL quote doubled, plus the two -FilePath wrapper quotes');
+  });
+
+  test('(b) win32-only round-trip: real powershell.exe -EncodedCommand decodes byte-equal for a 3000+ char URL with shell metacharacters and a quote', async (t) => {
+    if (process.platform !== 'win32') {
+      t.skip('win32-only round-trip test');
+      return;
+    }
+    const specialChars = "&%^!=:/?#'";
+    const filler = 'x'.repeat(3000 - specialChars.length - 40);
+    const url = `http://127.0.0.1:7311/?payload=${filler}${specialChars}&tail=end`;
+    assert.ok(url.length >= 3000, `fixture URL should be >= 3000 chars, got ${url.length}`);
+    const escaped = url.replace(/'/g, "''");
+    const psCommand = `Write-Output '${escaped}'`;
+    const encoded = encodePowerShellCommand(psCommand);
+    const { stdout } = await execFileP('powershell.exe', ['-NoProfile', '-NonInteractive', '-ExecutionPolicy', 'Bypass', '-EncodedCommand', encoded], { encoding: 'utf8', maxBuffer: 1024 * 1024 });
+    assert.equal(stdout.replace(/\r?\n$/, ''), url, 'stdout must be byte-equal to the original URL');
+  });
+
+  describe('(c) invalid_url branch: assertLaunchableUrl / launchOsBrowser refuse before ever spawning', () => {
+    test('assertLaunchableUrl throws VALIDATION with details.reason === "invalid_url" for javascript:, file:, and a non-string', () => {
+      for (const bad of ['javascript:alert(1)', 'file:///etc/passwd', /** @type {any} */ (null), /** @type {any} */ (undefined), /** @type {any} */ (42), '']) {
+        assert.throws(
+          () => assertLaunchableUrl(bad),
+          (/** @type {any} */ e) => e.code === 'VALIDATION' && e.details.reason === 'invalid_url',
+          `expected invalid_url for ${JSON.stringify(bad)}`,
+        );
+      }
+    });
+
+    test('launchOsBrowser never spawns for a javascript: URL', async () => {
+      const { fn: spawnImpl, calls } = fakeSpawn('spawn');
+      await assert.rejects(
+        () => launchOsBrowser({ dashboardUrl: 'javascript:alert(1)', spawnImpl, platform: 'win32' }),
+        (/** @type {any} */ e) => e.code === 'VALIDATION' && e.details.reason === 'invalid_url',
+      );
+      assert.equal(calls.length, 0);
+    });
+
+    test('launchOsBrowser never spawns for a file: URL', async () => {
+      const { fn: spawnImpl, calls } = fakeSpawn('spawn');
+      await assert.rejects(
+        () => launchOsBrowser({ dashboardUrl: 'file:///etc/passwd', spawnImpl, platform: 'win32' }),
+        (/** @type {any} */ e) => e.code === 'VALIDATION' && e.details.reason === 'invalid_url',
+      );
+      assert.equal(calls.length, 0);
+    });
+
+    test('launchOsBrowser never spawns for a non-string URL', async () => {
+      const { fn: spawnImpl, calls } = fakeSpawn('spawn');
+      await assert.rejects(
+        () => launchOsBrowser({ dashboardUrl: /** @type {any} */ (null), spawnImpl, platform: 'win32' }),
+        (/** @type {any} */ e) => e.code === 'VALIDATION' && e.details.reason === 'invalid_url',
+      );
+      assert.equal(calls.length, 0);
+    });
   });
 });

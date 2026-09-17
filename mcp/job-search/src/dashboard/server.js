@@ -26,6 +26,7 @@ import { register as registerMemory } from './routes/memory.js';
 import { register as registerAnalytics } from './routes/analytics.js';
 import { register as registerSources } from './routes/sources.js';
 import { register as registerGoogle } from './routes/google.js';
+import { register as registerGoogleReauth } from './routes/google-reauth.js';
 
 /**
  * @typedef {Object} RouteContext
@@ -66,6 +67,18 @@ import { register as registerGoogle } from './routes/google.js';
  * @property {string} [version]
  * @property {string} [startedAt] ISO, set once at process start
  * @property {(fields: Record<string, string|number|boolean|null>) => void} [log]
+ * @property {typeof import('node:child_process').spawn} [spawn]
+ *   routes/google-reauth.js's POST /api/google/reauth (2026-09-17). bin/dashboard.js always wires the
+ *   real node:child_process spawn; route tests inject a fake the same way deps.spawn is stubbed in
+ *   src/dashboard/scan-runner.js.
+ * @property {string} [reauthLockFile] test seam only: overrides the lock path routes/google.js and
+ *   routes/google-reauth.js read via src/core/google-reauth.js's readReauthLock(); production always
+ *   omits this and gets that module's own default (logs/google-reauth.lock under packageRoot()).
+ * @property {string} [reauthLastOutcomeFile] test seam only: same idea as reauthLockFile, for
+ *   readLastReauthOutcome()'s default path (logs/google-reauth.last.json).
+ * @property {typeof import('../core/google.js').classifyGoogleTokenState} [classifyGoogleTokenState]
+ *   test seam only, same pattern src/core/scan-run.js already uses for this exact function: production
+ *   always omits this and falls through to the real classifier.
  */
 
 const STATIC_EXTS = Object.freeze({ '.html': 'text/html; charset=utf-8', '.css': 'text/css; charset=utf-8', '.js': 'text/javascript; charset=utf-8', '.svg': 'image/svg+xml' });
@@ -243,6 +256,7 @@ export function createDashboardServer(deps, opts = {}) {
   registerAnalytics(router, deps);
   registerSources(router, deps);
   registerGoogle(router, deps);
+  registerGoogleReauth(router, deps);
   registerStreamRoute(router, streamHub);
 
   const httpServer = http.createServer((req, res) => {

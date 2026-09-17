@@ -67,6 +67,57 @@ function originOf(url) {
 }
 
 /**
+ * Total classification of a launch-target URL (2026-09-17 incident: an unquoted URL handed to `cmd.exe
+ * /c start` on win32 got split at every `&`, so Google only ever received `access_type=offline`): only
+ * http: and https: may ever be handed to the OS browser launcher. Every other input -- an unparseable
+ * string, a non-string, or a parseable-but-non-http(s) scheme such as javascript:/file:/data: -- throws
+ * VALIDATION with details.reason === 'invalid_url'. This is a total classification (every input maps to
+ * a branch), not a denylist of schemes to avoid.
+ * @param {unknown} url
+ */
+export function assertLaunchableUrl(url) {
+  if (typeof url !== 'string' || url.length === 0) {
+    throw new JobSearchError('VALIDATION', 'open-dashboard: launch URL must be a non-empty string', { details: { reason: 'invalid_url' } });
+  }
+  /** @type {URL} */
+  let u;
+  try {
+    u = new URL(url);
+  } catch {
+    throw new JobSearchError('VALIDATION', `open-dashboard: launch URL is not a valid URL (reason: invalid_url): ${url}`, { details: { reason: 'invalid_url' } });
+  }
+  if (u.protocol !== 'http:' && u.protocol !== 'https:') {
+    throw new JobSearchError('VALIDATION', `open-dashboard: launch URL protocol "${u.protocol}" is not http/https; refusing to launch (reason: invalid_url)`, { details: { reason: 'invalid_url' } });
+  }
+}
+
+/**
+ * Base64-encode UTF-16LE text for `powershell.exe -EncodedCommand`, PowerShell's own documented way to
+ * hand it a command string with zero shell/cmd metacharacter interpretation (no quoting layer for `&`,
+ * `%`, `^`, `!`, `<`, `>`, `|` to survive at all -- the command never passes through a shell parser).
+ * @param {string} text
+ */
+export function encodePowerShellCommand(text) {
+  return Buffer.from(text, 'utf16le').toString('base64');
+}
+
+/**
+ * Build the win32 argv for launching the default browser on `dashboardUrl` via `Start-Process`, with
+ * every single quote in the URL doubled (PowerShell's own single-quoted-string escape) before it is
+ * embedded in the `-FilePath '...'` argument. The whole command then travels as an `-EncodedCommand`
+ * base64 blob, so nothing about the URL (including a literal `&`) is ever interpreted by cmd.exe or by
+ * PowerShell's own command-line tokenizer.
+ * @param {string} url
+ * @returns {[string, string[]]}
+ */
+export function buildWin32LaunchArgv(url) {
+  const escaped = url.replace(/'/g, "''");
+  const psCommand = `Start-Process -FilePath '${escaped}'`;
+  const encoded = encodePowerShellCommand(psCommand);
+  return ['powershell.exe', ['-NoProfile', '-NonInteractive', '-ExecutionPolicy', 'Bypass', '-EncodedCommand', encoded]];
+}
+
+/**
  * Send Page.reload over the target's own WebSocket debugger URL and wait for the matching response
  * (id:1) or a 3s timeout.
  * @param {string} wsUrl
@@ -159,15 +210,20 @@ async function tryCdp({ dashboardUrl, cdpUrl, fetchImpl, WebSocketImpl }) {
  */
 export function launchOsBrowser({ dashboardUrl, spawnImpl, platform }) {
   return new Promise((resolve, reject) => {
+    // Synchronous throw inside a Promise executor rejects the returned promise; nothing is ever spawned
+    // for a URL that fails this check (spec: "do not launch, return/log a refusal with reason invalid_url").
+    assertLaunchableUrl(dashboardUrl);
     const [cmd, cmdArgs] = platform === 'win32'
-      ? ['cmd.exe', ['/c', 'start', '', dashboardUrl]]
+      ? buildWin32LaunchArgv(dashboardUrl)
       : platform === 'darwin'
         ? ['open', [dashboardUrl]]
         : ['xdg-open', [dashboardUrl]];
     /** @type {import('node:child_process').ChildProcess} */
     let child;
     try {
-      child = spawnImpl(cmd, cmdArgs, { detached: true, stdio: 'ignore' });
+      // shell:false is the default already, but spelled out here: this must never re-enter a shell that
+      // could reinterpret the argv, on win32 or any other platform.
+      child = spawnImpl(cmd, cmdArgs, { detached: true, stdio: 'ignore', shell: false });
     } catch (err) {
       reject(err);
       return;

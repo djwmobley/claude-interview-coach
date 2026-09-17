@@ -150,6 +150,8 @@ table { border-collapse: collapse; width: 100%; }
 .badge--manual { background: var(--purple-dim); color: var(--purple); }
 .badge--dup { background: var(--tag-bg); color: var(--muted); }
 .badge--error { background: var(--red-dim); color: var(--red); }
+.badge--ok { background: var(--green-dim); color: var(--green); }
+.badge--neutral { background: var(--tag-bg); color: var(--muted); }
 .badge--google { background: var(--accent-dim); color: var(--accent); }
 .badge--followup { background: var(--pink-dim); color: var(--pink); }
 .badge--variants { background: var(--tag-bg); color: var(--muted-2); margin-left: 8px; font-size: 10px; }
