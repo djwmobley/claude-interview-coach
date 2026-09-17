@@ -55,9 +55,25 @@ before(() => {
   }
 });
 
-/** @param {string} script @param {string} mdPath @param {string} docxPath */
-function renderTo(script, mdPath, docxPath) {
-  execFileSync('python', [script, mdPath, docxPath], { cwd: ROOT, windowsHide: true, stdio: 'pipe' });
+/** @param {string} script @param {string} mdPath @param {string} docxPath @param {string} [cwd] */
+function renderTo(script, mdPath, docxPath, cwd = ROOT) {
+  execFileSync('python', [script, mdPath, docxPath], { cwd, windowsHide: true, stdio: 'pipe' });
+}
+
+/**
+ * cheatsheet_to_docx.py and cover_letter_to_docx.py resolve their author
+ * name from "data/profile.md" relative to cwd (tools/docx_metadata.py's
+ * resolve_author_from_profile), since they carry no name of their own.
+ * data/profile.md is gitignored and personal, so it is not guaranteed to
+ * exist on a fresh checkout or in a worktree. Tests that render through
+ * either of those two writers must not depend on it being present:
+ * this builds an isolated cwd with its own throwaway profile.md fixture.
+ */
+function makeProfileCwd() {
+  const dir = fs.mkdtempSync(path.join(os.tmpdir(), 'docx-output-test-profile-'));
+  fs.mkdirSync(path.join(dir, 'data'), { recursive: true });
+  fs.writeFileSync(path.join(dir, 'data', 'profile.md'), '# Profile\n\n- **Name:** Jordan Reyes\n', 'utf8');
+  return dir;
 }
 
 /**
@@ -261,7 +277,7 @@ describe('docx-output: real bullets, uniform 10pt sizing, EDUCATION/CERTIFICATIO
       'utf8',
     );
     const outPath = path.join(tmpDir, 'cheatsheet-fixture.docx');
-    renderTo(CHEATSHEET_TO_DOCX, mdPath, outPath);
+    renderTo(CHEATSHEET_TO_DOCX, mdPath, outPath, makeProfileCwd());
     const buf = fs.readFileSync(outPath);
     const documentXml = readZipEntryText(buf, 'word/document.xml');
     const stylesXml = readZipEntryText(buf, 'word/styles.xml');

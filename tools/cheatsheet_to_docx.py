@@ -23,6 +23,8 @@ from docx.oxml import OxmlElement
 from docx.oxml.ns import qn
 from docx.shared import Inches, Pt, RGBColor
 
+from docx_metadata import apply_document_metadata, resolve_author_from_profile
+
 # ── Palette ───────────────────────────────────────────────────────────────────
 NAVY  = RGBColor(0x0D, 0x21, 0x37)
 BLUE  = RGBColor(0x1A, 0x3A, 0x5C)
@@ -184,6 +186,8 @@ def convert(md_path, docx_path):
 
         i += 1
 
+    author = resolve_author_from_profile()
+    apply_document_metadata(doc, author)
     doc.save(docx_path)
     print(f"Cheat sheet written to {docx_path}")
 
