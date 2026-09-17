@@ -15,7 +15,8 @@ import http from 'node:http';
 import crypto from 'node:crypto';
 import {
   reauthorizeGoogle, mergeToken, naiveUtcExpiry, writeMergedToken, resolveRedirectUris,
-  DEFAULT_REDIRECT_URIS, loginHintFromFilename,
+  DEFAULT_REDIRECT_URIS, loginHintFromFilename, readReauthLock, readLastReauthOutcome,
+  LOCK_STALE_GRACE_MS, LOCK_STALE_FALLBACK_WAIT_MS,
 } from '../src/core/google-reauth.js';
 
 /** @type {string} */
@@ -38,6 +39,11 @@ function writeToken(fields) {
 let lockSeq = 0;
 function freshLockFile() {
   return path.join(tmp, `lock-${process.pid}-${lockSeq++}.lock`);
+}
+
+let lastSeq = 0;
+function freshLastFile() {
+  return path.join(tmp, `last-${process.pid}-${lastSeq++}.json`);
 }
 
 /** A free 127.0.0.1 port, discovered by binding then immediately releasing. */
@@ -146,6 +152,131 @@ describe('reauthorizeGoogle: lock file', () => {
     const result = await resultP;
     assert.equal(result.outcome, 'aborted');
     assert.equal(fs.existsSync(lockFile), false, 'the lock is released immediately on an outcome other than timeout');
+  });
+});
+
+describe('readReauthLock', () => {
+  test('no lock file on disk -> held:false, stale:false', () => {
+    const lockFile = freshLockFile();
+    const r = readReauthLock(lockFile, new Date());
+    assert.deepEqual(r, { held: false, pid: null, startedAt: null, waitMs: null, stale: false, raw: null });
+  });
+
+  test('unparseable JSON -> held:true, stale:true, raw carries the unparsed text', () => {
+    const lockFile = freshLockFile();
+    fs.writeFileSync(lockFile, 'not json at all');
+    const r = readReauthLock(lockFile, new Date());
+    assert.equal(r.held, true);
+    assert.equal(r.stale, true);
+    assert.equal(r.pid, null);
+    assert.equal(r.raw, 'not json at all');
+  });
+
+  test('a live pid, fresh timestamp, within its own recorded waitMs -> held:true, stale:false', () => {
+    const lockFile = freshLockFile();
+    const now = new Date('2026-09-17T15:00:00.000Z');
+    fs.writeFileSync(lockFile, JSON.stringify({ pid: process.pid, port: null, started_at: now.toISOString(), waitMs: 600000 }));
+    const r = readReauthLock(lockFile, new Date(now.getTime() + 60000)); // 1 minute later, well within 10-minute waitMs
+    assert.deepEqual(r, { held: true, pid: process.pid, startedAt: now.toISOString(), waitMs: 600000, stale: false, raw: r.raw });
+  });
+
+  test('dead pid -> stale:true regardless of age', () => {
+    const lockFile = freshLockFile();
+    const now = new Date();
+    fs.writeFileSync(lockFile, JSON.stringify({ pid: 999999, port: null, started_at: now.toISOString(), waitMs: 600000 }));
+    const r = readReauthLock(lockFile, now);
+    assert.equal(r.stale, true);
+  });
+
+  test('pid-reused-but-old-lock: a live pid (this test process) whose lock age exceeds its own waitMs + grace is stale even though the pid itself is alive', () => {
+    const lockFile = freshLockFile();
+    const started = new Date('2026-09-17T10:00:00.000Z');
+    const waitMs = 600000; // 10 minutes
+    fs.writeFileSync(lockFile, JSON.stringify({ pid: process.pid, port: null, started_at: started.toISOString(), waitMs }));
+    const justUnderBound = new Date(started.getTime() + waitMs + LOCK_STALE_GRACE_MS - 1000);
+    const justOverBound = new Date(started.getTime() + waitMs + LOCK_STALE_GRACE_MS + 1000);
+    assert.equal(readReauthLock(lockFile, justUnderBound).stale, false, 'still within waitMs + grace');
+    assert.equal(readReauthLock(lockFile, justOverBound).stale, true, 'past waitMs + grace, even with a live (possibly reused) pid');
+  });
+
+  test('a lock record with no waitMs at all falls back to LOCK_STALE_FALLBACK_WAIT_MS + grace', () => {
+    const lockFile = freshLockFile();
+    const started = new Date('2026-09-17T10:00:00.000Z');
+    fs.writeFileSync(lockFile, JSON.stringify({ pid: process.pid, port: null, started_at: started.toISOString() }));
+    const justUnderBound = new Date(started.getTime() + LOCK_STALE_FALLBACK_WAIT_MS + LOCK_STALE_GRACE_MS - 1000);
+    const justOverBound = new Date(started.getTime() + LOCK_STALE_FALLBACK_WAIT_MS + LOCK_STALE_GRACE_MS + 1000);
+    assert.equal(readReauthLock(lockFile, justUnderBound).stale, false);
+    assert.equal(readReauthLock(lockFile, justOverBound).stale, true);
+  });
+
+  test('acquireLock (via reauthorizeGoogle) treats a stale-by-age lock (live pid, expired waitMs) as free', async () => {
+    const file = writeToken({});
+    const lockFile = freshLockFile();
+    const started = new Date(Date.now() - (LOCK_STALE_FALLBACK_WAIT_MS + LOCK_STALE_GRACE_MS + 5000));
+    fs.writeFileSync(lockFile, JSON.stringify({ pid: process.pid, port: null, started_at: started.toISOString() }));
+    const controller = new AbortController();
+    controller.abort(); // aborted before a port could ever bind -- just proves the lock was taken over
+    const result = await reauthorizeGoogle({ tokenFile: file, signal: controller.signal, lockFile });
+    assert.notEqual(result.outcome, 'lock_held');
+  });
+});
+
+describe('readLastReauthOutcome / last.json (every exit path writes one)', () => {
+  test('no file on disk -> null', () => {
+    assert.equal(readLastReauthOutcome(freshLastFile()), null);
+  });
+
+  test('malformed JSON on disk -> null, never throws', () => {
+    const lastFile = freshLastFile();
+    fs.writeFileSync(lastFile, 'not json');
+    assert.equal(readLastReauthOutcome(lastFile), null);
+  });
+
+  test('lock_held exit path writes { outcome, at, pid, port:null } atomically', async () => {
+    const file = writeToken({});
+    const lockFile = freshLockFile();
+    const lastFile = freshLastFile();
+    fs.writeFileSync(lockFile, JSON.stringify({ pid: process.pid, port: null, started_at: new Date().toISOString() }));
+    const result = await reauthorizeGoogle({ tokenFile: file, signal: new AbortController().signal, lockFile, lastOutcomeFile: lastFile });
+    assert.equal(result.outcome, 'lock_held');
+    const last = readLastReauthOutcome(lastFile);
+    assert.ok(last);
+    assert.equal(last.outcome, 'lock_held');
+    assert.equal(last.pid, process.pid);
+    assert.equal(last.port, null);
+    assert.ok(typeof last.at === 'string' && !Number.isNaN(Date.parse(last.at)));
+  });
+
+  test('no_client_creds exit path writes a last.json record', async () => {
+    const file = writeToken({ client_id: undefined, client_secret: undefined });
+    const lastFile = freshLastFile();
+    const result = await reauthorizeGoogle({ tokenFile: file, signal: new AbortController().signal, lockFile: freshLockFile(), lastOutcomeFile: lastFile });
+    assert.equal(result.outcome, 'no_client_creds');
+    assert.equal(readLastReauthOutcome(lastFile).outcome, 'no_client_creds');
+  });
+
+  test('a real bound-port outcome (aborted mid-flow) writes last.json with the actual bound port, not null', async () => {
+    const file = writeToken({});
+    const lastFile = freshLastFile();
+    const controller = new AbortController();
+    const calls = [];
+    const port = await freePort();
+    const result = await reauthorizeGoogle({
+      tokenFile: file,
+      redirectUris: [`http://localhost:${port}/oauth2callback`],
+      signal: controller.signal,
+      lockFile: freshLockFile(),
+      lastOutcomeFile: lastFile,
+      timeoutMs: 10000,
+      deps: { makeOAuthClient: fakeMakeOAuthClient(calls) },
+      async openUrl() {
+        controller.abort();
+      },
+    });
+    assert.equal(result.outcome, 'aborted');
+    const last = readLastReauthOutcome(lastFile);
+    assert.equal(last.outcome, 'aborted');
+    assert.equal(last.port, port);
   });
 });
 
@@ -297,6 +428,34 @@ describe('reauthorizeGoogle: consent callback', () => {
     const missing = path.join(tmp, `does-not-exist-${fileSeq++}.json`);
     const creds = { client_id: 'zz-cid', client_secret: 'zz-secret', refresh_token: 'zz-rt', scopes: ['https://www.googleapis.com/auth/gmail.readonly'] };
     assert.throws(() => writeMergedToken(missing, { access_token: 'x' }, [], 'irrelevant-hash', creds), /not readable/);
+  });
+
+  test('google_reauth_consent_url log event carries url_length alongside the (MAX_STRING-truncatable) url, so a 300-char logger truncation is visible rather than silently hiding the real URL length', async () => {
+    const file = writeToken({});
+    const port = await freePort();
+    const calls = [];
+    /** @type {Record<string, unknown>[]} */
+    const logLines = [];
+    const result = await reauthorizeGoogle({
+      tokenFile: file,
+      redirectUris: [`http://localhost:${port}/oauth2callback`],
+      signal: new AbortController().signal,
+      lockFile: freshLockFile(),
+      timeoutMs: 10000,
+      log: (f) => logLines.push(f),
+      deps: { makeOAuthClient: fakeMakeOAuthClient(calls) },
+      async openUrl(url) {
+        await tick();
+        const line = logLines.find((l) => l.evt === 'google_reauth_consent_url');
+        assert.ok(line, 'google_reauth_consent_url must have been logged before openUrl runs');
+        assert.equal(line.url, url);
+        assert.equal(line.url_length, url.length);
+        assert.equal(typeof line.url_length, 'number');
+        const state = calls[0].generateAuthUrlOpts.state;
+        await fetch(`http://127.0.0.1:${port}/oauth2callback?state=${encodeURIComponent(state)}&code=abc123`);
+      },
+    });
+    assert.equal(result.outcome, 'exchange_failed', 'unused fakeMakeOAuthClient has no exchangeCode dep; the outcome itself is irrelevant to this test');
   });
 });
 

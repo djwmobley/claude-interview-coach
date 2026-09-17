@@ -25,6 +25,13 @@
  * (signal, openUrl, log, now, lockFile) or goes through an injectable `deps` seam (deps.makeOAuthClient,
  * deps.exchangeCode) so tests never open a real browser, never contact Google, and never depend on wall
  * time longer than they choose to wait.
+ *
+ * Dashboard status surface (2026-09-17 incident follow-up): every exit path of reauthorizeGoogle() also
+ * writes logs/google-reauth.last.json (atomically, tmp then rename) -- readLastReauthOutcome() reads it
+ * back. readReauthLock() reports the current lock's holder/staleness so a caller (the dashboard's POST
+ * /api/google/reauth route) can tell "another run is genuinely in flight" apart from "a lock file is
+ * lying around from a process that is gone or long past its own wait window" -- acquireLock() itself now
+ * uses the exact same staleness classification, so a stale lock is free real estate for a new run too.
  */
 import fs from 'node:fs';
 import path from 'node:path';
@@ -52,6 +59,21 @@ export const REAUTH_OUTCOMES = Object.freeze([
 
 /** How long the bound socket stays alive after timeoutMs to serve a plain "link expired" page (spec A3). */
 export const EXPIRED_GRACE_MS = 30000;
+
+/** Grace window added on top of a lock's own waitMs before its age alone makes it stale. */
+export const LOCK_STALE_GRACE_MS = 5 * 60 * 1000;
+/** Fallback wait window (spec: "2 h") for a lock record written before waitMs existed on disk. */
+export const LOCK_STALE_FALLBACK_WAIT_MS = 2 * 60 * 60 * 1000;
+
+/** Same lock path every caller (reauthorizeGoogle, readReauthLock, the dashboard route) derives by default. */
+function defaultLockFile() {
+  return path.join(packageRoot(), 'logs', 'google-reauth.lock');
+}
+
+/** Where reauthorizeGoogle's outcome-on-every-exit-path record lands by default. */
+function defaultLastOutcomeFile() {
+  return path.join(packageRoot(), 'logs', 'google-reauth.last.json');
+}
 
 const SUCCESS_HTML = '<!doctype html><html><head><title>Google re-authorization</title></head><body><p>Google re-authorization complete. You can close this tab.</p></body></html>';
 const STATE_MISMATCH_HTML = '<!doctype html><html><head><title>Google re-authorization</title></head><body><p>This request could not be verified. Close this tab and try again.</p></body></html>';
@@ -190,20 +212,93 @@ function isPidAlive(pid) {
 }
 
 /**
+ * Read logs/google-reauth.lock and classify it (spec A2/B1): `held` is true whenever a lock file exists
+ * at all (parseable or not) -- staleness is reported separately in `stale` so a caller can tell "no lock"
+ * apart from "a lock exists but nothing is really holding it any more". `stale` is a total classification
+ * of every reason a lock can no longer be trusted: unparseable JSON, a pid that is not alive, or an age
+ * beyond the lock's own recorded waitMs (plus a LOCK_STALE_GRACE_MS cushion so a helper that is still
+ * mid-flight right at its deadline is never treated as abandoned) -- falling back to
+ * LOCK_STALE_FALLBACK_WAIT_MS when the lock record predates waitMs being written at all.
+ * @param {string} [lockFile] defaults to the same path reauthorizeGoogle itself resolves to.
+ * @param {Date} [nowDate]
+ * @returns {{ held: boolean, pid: number|null, startedAt: string|null, waitMs: number|null, stale: boolean, raw: any }}
+ */
+export function readReauthLock(lockFile = defaultLockFile(), nowDate = new Date()) {
+  /** @type {string} */
+  let text;
+  try {
+    text = fs.readFileSync(lockFile, 'utf8');
+  } catch {
+    return { held: false, pid: null, startedAt: null, waitMs: null, stale: false, raw: null };
+  }
+  const raw = parseJsonSafe(text);
+  if (!raw || typeof raw !== 'object') {
+    return { held: true, pid: null, startedAt: null, waitMs: null, stale: true, raw: text };
+  }
+  const pidNum = Number(/** @type {any} */ (raw).pid);
+  const pid = Number.isInteger(pidNum) && pidNum > 0 ? pidNum : null;
+  const startedAt = typeof (/** @type {any} */ (raw).started_at) === 'string' ? /** @type {any} */ (raw).started_at : null;
+  const waitMsNum = Number(/** @type {any} */ (raw).waitMs);
+  const waitMs = Number.isFinite(waitMsNum) && waitMsNum > 0 ? waitMsNum : null;
+
+  const staleByPid = pid === null || !isPidAlive(pid);
+  const startedMs = startedAt ? Date.parse(startedAt) : NaN;
+  const boundMs = (waitMs ?? LOCK_STALE_FALLBACK_WAIT_MS) + LOCK_STALE_GRACE_MS;
+  const staleByAge = !Number.isFinite(startedMs) || (nowDate.getTime() - startedMs) > boundMs;
+
+  return { held: true, pid, startedAt, waitMs, stale: staleByPid || staleByAge, raw };
+}
+
+/**
  * @param {string} lockFile
  * @param {Date} nowDate
+ * @param {number|null|undefined} waitMs recorded on the lock so a later readReauthLock (or another
+ *   process's acquireLock) can judge staleness without guessing this run's own timeout.
  * @returns {{ ok: boolean }}
  */
-function acquireLock(lockFile, nowDate) {
-  try {
-    const cur = parseJsonSafe(fs.readFileSync(lockFile, 'utf8'));
-    if (cur && isPidAlive(Number(cur.pid))) return { ok: false };
-  } catch {
-    /* missing or unreadable -> nothing alive to contend with */
-  }
+function acquireLock(lockFile, nowDate, waitMs) {
+  // A stale lock (dead pid, or past its own waitMs + grace) is free real estate (spec B1): reuses
+  // readReauthLock's own classification so the two never drift apart on what counts as stale.
+  const existing = readReauthLock(lockFile, nowDate);
+  if (existing.held && !existing.stale) return { ok: false };
   fs.mkdirSync(path.dirname(lockFile), { recursive: true });
-  fs.writeFileSync(lockFile, JSON.stringify({ pid: process.pid, port: null, started_at: nowDate.toISOString() }));
+  fs.writeFileSync(lockFile, JSON.stringify({ pid: process.pid, port: null, started_at: nowDate.toISOString(), waitMs: Number.isFinite(waitMs) ? waitMs : null }));
   return { ok: true };
+}
+
+/**
+ * Atomic (tmp then rename) best-effort write of the last reauth outcome; never throws (a failure here
+ * must never mask or replace the real outcome reauthorizeGoogle is about to return).
+ * @param {string} lastFile
+ * @param {{ outcome: string, at: string, pid: number, port: number|null }} record
+ */
+function writeLastOutcome(lastFile, record) {
+  try {
+    const dir = path.dirname(lastFile);
+    fs.mkdirSync(dir, { recursive: true });
+    const tmp = path.join(dir, `${path.basename(lastFile)}.${process.pid}.tmp`);
+    fs.writeFileSync(tmp, JSON.stringify(record, null, 2));
+    fs.renameSync(tmp, lastFile);
+  } catch {
+    /* best-effort only */
+  }
+}
+
+/**
+ * Read the last-outcome record a prior reauthorizeGoogle() run left behind. Missing/unreadable/malformed
+ * -> null (never throws): a dashboard route reading this is a health-surface concern, not a control-flow
+ * one, and a caller with no prior outcome on disk is a completely normal state (e.g. first run ever).
+ * @param {string} [lastFile] defaults to the same path reauthorizeGoogle itself resolves to.
+ * @returns {{ outcome: string, at: string, pid: number, port: number|null }|null}
+ */
+export function readLastReauthOutcome(lastFile = defaultLastOutcomeFile()) {
+  try {
+    const raw = JSON.parse(fs.readFileSync(lastFile, 'utf8'));
+    if (raw && typeof raw === 'object' && typeof raw.outcome === 'string') return raw;
+  } catch {
+    /* missing, unreadable, or malformed -> no last outcome */
+  }
+  return null;
 }
 
 /**
@@ -253,9 +348,12 @@ function bindServer(port) {
  *     exchangeCode?: (client: any, code: string, redirectUri: string) => Promise<any>,
  *   },
  * }} opts
+ * @param {{ port: number|null }} portRef mutated once a redirect URI's port is actually bound, so the
+ *   exported reauthorizeGoogle() wrapper can include it in the last-outcome record even though `port` is
+ *   otherwise a variable local to this function's own closure.
  * @returns {Promise<{ outcome: string, reason: string|null }>}
  */
-export async function reauthorizeGoogle(opts) {
+async function reauthorizeGoogleCore(opts, portRef) {
   const o = opts || /** @type {any} */ ({});
   const tokenFile = o.tokenFile;
   const extraScopes = Array.isArray(o.extraScopes) ? o.extraScopes : [];
@@ -309,7 +407,7 @@ export async function reauthorizeGoogle(opts) {
   };
 
   try {
-    const lock = acquireLock(lockFile, nowDate);
+    const lock = acquireLock(lockFile, nowDate, timeoutMs);
     if (!lock.ok) return { outcome: 'lock_held', reason: 'another google-reauth process holds logs/google-reauth.lock' };
 
     if (signal.aborted) {
@@ -337,6 +435,7 @@ export async function reauthorizeGoogle(opts) {
       cleanup();
       return { outcome: 'port_unavailable', reason: `none of ${uris.length} configured redirect URI port(s) are free on 127.0.0.1` };
     }
+    portRef.port = Number(new URL(chosenUri).port);
     // Best-effort: record the actual bound port on the lock file (never fatal if this fails).
     try {
       const cur = parseJsonSafe(fs.readFileSync(lockFile, 'utf8'));
@@ -361,7 +460,10 @@ export async function reauthorizeGoogle(opts) {
       ...(loginHint ? { login_hint: loginHint } : {}),
     });
 
-    log({ evt: 'google_reauth_consent_url', url: authUrl, port: Number(new URL(chosenUri).port) });
+    // url_length alongside the (logger.js MAX_STRING-truncated-at-300-chars) url itself: the 2026-09-17
+    // incident's consent URL was 2780 chars, so the truncated log line alone could never show whether the
+    // full URL had been mangled -- url_length makes that truncation visible instead of silently hiding it.
+    log({ evt: 'google_reauth_consent_url', url: authUrl, url_length: authUrl.length, port: Number(new URL(chosenUri).port) });
 
     let expired = false;
     /** @type {{ done: boolean }} */
@@ -491,4 +593,36 @@ export async function reauthorizeGoogle(opts) {
     cleanup();
     return { outcome: 'failed', reason: String(err instanceof Error ? err.message : err).slice(0, 200) };
   }
+}
+
+/**
+ * @param {{
+ *   tokenFile: string,
+ *   extraScopes?: string[],
+ *   redirectUris?: string[],
+ *   timeoutMs?: number,
+ *   signal: AbortSignal,
+ *   openUrl?: (url: string) => (void|Promise<void>),
+ *   log?: (fields: Record<string, string|number|boolean|null>) => void,
+ *   now?: Date,
+ *   lockFile?: string,
+ *   lastOutcomeFile?: string,
+ *   deps?: {
+ *     makeOAuthClient?: (clientId: string, clientSecret: string, redirectUri: string) => any,
+ *     exchangeCode?: (client: any, code: string, redirectUri: string) => Promise<any>,
+ *   },
+ * }} opts
+ * @returns {Promise<{ outcome: string, reason: string|null }>}
+ */
+export async function reauthorizeGoogle(opts) {
+  const o = opts || /** @type {any} */ ({});
+  const lastFile = typeof o.lastOutcomeFile === 'string' && o.lastOutcomeFile ? o.lastOutcomeFile : defaultLastOutcomeFile();
+  const nowDate = o.now instanceof Date ? o.now : new Date();
+  const portRef = { port: /** @type {number|null} */ (null) };
+  // Every branch inside reauthorizeGoogleCore is a `return`, never a throw that escapes it (its own
+  // top-level try/catch maps every unexpected error to outcome 'failed') -- so wrapping it here is enough
+  // to cover every exit path with exactly one last.json write, rather than needing one at each return site.
+  const result = await reauthorizeGoogleCore(opts, portRef);
+  writeLastOutcome(lastFile, { outcome: result.outcome, at: nowDate.toISOString(), pid: process.pid, port: portRef.port });
+  return result;
 }

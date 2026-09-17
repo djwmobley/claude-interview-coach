@@ -257,6 +257,19 @@ export function shortDate(value) {
 }
 
 /**
+ * Bare 24-hour "HH:MM" for a same-day compact status line (Google reauth badge: "running since 14:05"),
+ * where a full date would be redundant. Invalid/missing input renders as 'unknown', never throws.
+ * @param {string|Date|null|undefined} value
+ */
+export function hhmm(value) {
+  if (!value) return 'unknown';
+  const d = value instanceof Date ? value : new Date(value);
+  if (Number.isNaN(d.getTime())) return 'unknown';
+  const pad = (/** @type {number} */ n) => String(n).padStart(2, '0');
+  return `${pad(d.getHours())}:${pad(d.getMinutes())}`;
+}
+
+/**
  * Format a datetime for display, e.g. "Aug 27, 9:00 AM".
  * @param {string|Date|null|undefined} value
  */

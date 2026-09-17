@@ -163,6 +163,8 @@ async function main() {
     startedAt: new Date().toISOString(),
     log,
     healthBanner,
+    // routes/google-reauth.js's POST /api/google/reauth (2026-09-17): the real node:child_process spawn.
+    spawn: nodeSpawn,
   };
 
   const app = createDashboardServer(/** @type {any} */ (deps));
