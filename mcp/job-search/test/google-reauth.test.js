@@ -278,6 +278,58 @@ describe('readLastReauthOutcome / last.json (every exit path writes one)', () =>
     assert.equal(last.outcome, 'aborted');
     assert.equal(last.port, port);
   });
+
+  test('at is the exit timestamp, not the start timestamp (injected clock, deterministic)', async () => {
+    // Regression for the 2026-09-19 bug: `at` used to be stamped with the run's START clock (captured
+    // before reauthorizeGoogleCore ran), so it exactly equalled the lock's own started_at instead of the
+    // time the run actually finished. now/finishNow are two distinct injected instants here specifically
+    // so the test fails if the code ever goes back to writing one shared timestamp for both.
+    const file = writeToken({ client_id: undefined, client_secret: undefined });
+    const lastFile = freshLastFile();
+    const started = new Date('2026-09-19T02:30:15.358Z');
+    const finished = new Date('2026-09-19T02:34:05.744Z');
+    const result = await reauthorizeGoogle({
+      tokenFile: file,
+      signal: new AbortController().signal,
+      lockFile: freshLockFile(),
+      lastOutcomeFile: lastFile,
+      now: started,
+      finishNow: finished,
+    });
+    assert.equal(result.outcome, 'no_client_creds');
+    const last = readLastReauthOutcome(lastFile);
+    assert.equal(last.started_at, started.toISOString());
+    assert.equal(last.at, finished.toISOString());
+    assert.notEqual(last.at, last.started_at);
+    assert.ok(Date.parse(last.at) > Date.parse(last.started_at));
+  });
+
+  test('at trails started_at by real elapsed run time on the default (uninjected) clock', async () => {
+    const file = writeToken({});
+    const lastFile = freshLastFile();
+    const controller = new AbortController();
+    const calls = [];
+    const port = await freePort();
+    const result = await reauthorizeGoogle({
+      tokenFile: file,
+      redirectUris: [`http://localhost:${port}/oauth2callback`],
+      signal: controller.signal,
+      lockFile: freshLockFile(),
+      lastOutcomeFile: lastFile,
+      timeoutMs: 10000,
+      deps: { makeOAuthClient: fakeMakeOAuthClient(calls) },
+      async openUrl() {
+        // A measurable delay between the run's start (stamped into started_at) and its finish (stamped
+        // into at). If `at` were ever reused from the pre-run clock again, this delta would be ~0.
+        await new Promise((r) => setTimeout(r, 30));
+        controller.abort();
+      },
+    });
+    assert.equal(result.outcome, 'aborted');
+    const last = readLastReauthOutcome(lastFile);
+    const deltaMs = Date.parse(last.at) - Date.parse(last.started_at);
+    assert.ok(deltaMs >= 20, `expected at to trail started_at by ~30ms, got ${deltaMs}ms (at=${last.at} started_at=${last.started_at})`);
+  });
 });
 
 describe('reauthorizeGoogle: port selection', () => {
