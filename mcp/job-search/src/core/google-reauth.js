@@ -270,7 +270,7 @@ function acquireLock(lockFile, nowDate, waitMs) {
  * Atomic (tmp then rename) best-effort write of the last reauth outcome; never throws (a failure here
  * must never mask or replace the real outcome reauthorizeGoogle is about to return).
  * @param {string} lastFile
- * @param {{ outcome: string, at: string, pid: number, port: number|null }} record
+ * @param {{ outcome: string, at: string, started_at: string, pid: number, port: number|null }} record
  */
 function writeLastOutcome(lastFile, record) {
   try {
@@ -289,7 +289,7 @@ function writeLastOutcome(lastFile, record) {
  * -> null (never throws): a dashboard route reading this is a health-surface concern, not a control-flow
  * one, and a caller with no prior outcome on disk is a completely normal state (e.g. first run ever).
  * @param {string} [lastFile] defaults to the same path reauthorizeGoogle itself resolves to.
- * @returns {{ outcome: string, at: string, pid: number, port: number|null }|null}
+ * @returns {{ outcome: string, at: string, started_at: string, pid: number, port: number|null }|null}
  */
 export function readLastReauthOutcome(lastFile = defaultLastOutcomeFile()) {
   try {
@@ -605,6 +605,7 @@ async function reauthorizeGoogleCore(opts, portRef) {
  *   openUrl?: (url: string) => (void|Promise<void>),
  *   log?: (fields: Record<string, string|number|boolean|null>) => void,
  *   now?: Date,
+ *   finishNow?: Date,
  *   lockFile?: string,
  *   lastOutcomeFile?: string,
  *   deps?: {
@@ -617,12 +618,23 @@ async function reauthorizeGoogleCore(opts, portRef) {
 export async function reauthorizeGoogle(opts) {
   const o = opts || /** @type {any} */ ({});
   const lastFile = typeof o.lastOutcomeFile === 'string' && o.lastOutcomeFile ? o.lastOutcomeFile : defaultLastOutcomeFile();
-  const nowDate = o.now instanceof Date ? o.now : new Date();
+  const startedAt = o.now instanceof Date ? o.now : new Date();
   const portRef = { port: /** @type {number|null} */ (null) };
   // Every branch inside reauthorizeGoogleCore is a `return`, never a throw that escapes it (its own
   // top-level try/catch maps every unexpected error to outcome 'failed') -- so wrapping it here is enough
   // to cover every exit path with exactly one last.json write, rather than needing one at each return site.
   const result = await reauthorizeGoogleCore(opts, portRef);
-  writeLastOutcome(lastFile, { outcome: result.outcome, at: nowDate.toISOString(), pid: process.pid, port: portRef.port });
+  // Bug fixed 2026-09-19: this used to stamp `at` with startedAt (captured above, before the run), so the
+  // dashboard showed the run's START time as if it were the finish time -- it exactly matched the lock's
+  // own started_at. The exit timestamp must be captured AFTER reauthorizeGoogleCore resolves. finishNow
+  // mirrors `now`'s injectable-clock seam so tests can assert `at` deterministically without real sleeps.
+  const finishedAt = o.finishNow instanceof Date ? o.finishNow : new Date();
+  writeLastOutcome(lastFile, {
+    outcome: result.outcome,
+    at: finishedAt.toISOString(),
+    started_at: startedAt.toISOString(),
+    pid: process.pid,
+    port: portRef.port,
+  });
   return result;
 }
