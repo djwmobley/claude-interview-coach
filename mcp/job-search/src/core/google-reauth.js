@@ -30,7 +30,7 @@
  * writes logs/google-reauth.last.json (atomically, tmp then rename) -- readLastReauthOutcome() reads it
  * back. readReauthLock() reports the current lock's holder/staleness so a caller (the dashboard's POST
  * /api/google/reauth route) can tell "another run is genuinely in flight" apart from "a lock file is
- * lying around from a process that is gone or long past its own wait window" -- acquireLock() itself now
+ * lying around from a process that is gone or long past its own wait window" -- acquireReauthLock() itself now
  * uses the exact same staleness classification, so a stale lock is free real estate for a new run too.
  */
 import fs from 'node:fs';
@@ -260,14 +260,50 @@ export function readReauthLock(lockFile = defaultLockFile(), nowDate = new Date(
  *   same value, so a reader can tell this run's consent link apart from a stale one.
  * @returns {{ ok: boolean }}
  */
-function acquireLock(lockFile, nowDate, waitMs, nonce) {
-  // A stale lock (dead pid, or past its own waitMs + grace) is free real estate (spec B1): reuses
-  // readReauthLock's own classification so the two never drift apart on what counts as stale.
-  const existing = readReauthLock(lockFile, nowDate);
-  if (existing.held && !existing.stale) return { ok: false };
+export function acquireReauthLock(lockFile, nowDate, waitMs, nonce) {
+  // Atomic acquire (PR #72 follow-up; the old read-then-write let two simultaneous helpers both win):
+  // the full record is written to a private tmp file first, then hard-linked into place. link() is an
+  // exclusive create (EEXIST if the lock exists) AND the lock is never visible empty or half-written,
+  // so a concurrent reader can never mistake a just-created lock for an unparseable (stale) one.
+  // On EEXIST: a stale lock (dead pid, or past its own waitMs + grace; readReauthLock's own
+  // classification, spec B1) is removed and the exclusive create retried ONCE; a live lock -> held.
   fs.mkdirSync(path.dirname(lockFile), { recursive: true });
-  fs.writeFileSync(lockFile, JSON.stringify({ pid: process.pid, port: null, started_at: nowDate.toISOString(), waitMs: Number.isFinite(waitMs) ? waitMs : null, nonce }));
-  return { ok: true };
+  const tmp = `${lockFile}.${process.pid}.${nonce}.tmp`;
+  fs.writeFileSync(tmp, JSON.stringify({ pid: process.pid, port: null, started_at: nowDate.toISOString(), waitMs: Number.isFinite(waitMs) ? waitMs : null, nonce }));
+  try {
+    for (let attempt = 0; attempt < 2; attempt++) {
+      try {
+        fs.linkSync(tmp, lockFile);
+        return { ok: true };
+      } catch (err) {
+        if (/** @type {any} */ (err)?.code !== 'EEXIST') throw err;
+      }
+      if (attempt === 1) break;
+      /** @type {string} */
+      let seenText;
+      try {
+        seenText = fs.readFileSync(lockFile, 'utf8');
+      } catch {
+        continue; // vanished between link and read: just retry the exclusive create
+      }
+      const existing = readReauthLock(lockFile, nowDate);
+      if (existing.held && !existing.stale) return { ok: false };
+      // Remove only the exact stale record judged above: if another reclaimer already replaced it with
+      // a live lock, the content differs and that lock is left alone (the retry then hits EEXIST).
+      try {
+        if (fs.readFileSync(lockFile, 'utf8') === seenText) fs.unlinkSync(lockFile);
+      } catch {
+        /* already gone */
+      }
+    }
+    return { ok: false };
+  } finally {
+    try {
+      fs.unlinkSync(tmp);
+    } catch {
+      /* already gone */
+    }
+  }
 }
 
 /**
@@ -306,12 +342,16 @@ export function readLastReauthOutcome(lastFile = defaultLastOutcomeFile()) {
 }
 
 /**
+ * Delete the lock only when it carries this run's nonce (PR #72 follow-up): a pid match alone could
+ * delete a lock another run wrote after this one's was reclaimed.
  * @param {string} lockFile
+ * @param {string} nonce
  */
-function releaseOwnLock(lockFile) {
+export function releaseOwnLock(lockFile, nonce) {
+  if (typeof nonce !== 'string' || !nonce) return;
   try {
     const cur = parseJsonSafe(fs.readFileSync(lockFile, 'utf8'));
-    if (cur && Number(cur.pid) === process.pid) fs.unlinkSync(lockFile);
+    if (cur && cur.nonce === nonce) fs.unlinkSync(lockFile);
   } catch {
     /* already gone, or never ours */
   }
@@ -412,11 +452,11 @@ async function reauthorizeGoogleCore(opts, portRef) {
       /* already closed */
     }
     deleteOwnConsentFile(consentFile, nonce);
-    releaseOwnLock(lockFile);
+    releaseOwnLock(lockFile, nonce);
   };
 
   try {
-    const lock = acquireLock(lockFile, nowDate, timeoutMs, nonce);
+    const lock = acquireReauthLock(lockFile, nowDate, timeoutMs, nonce);
     if (!lock.ok) return { outcome: 'lock_held', reason: 'another google-reauth process holds logs/google-reauth.lock' };
     // This run now holds the lock, so any consent file on disk belongs to a run that no longer does.
     unlinkConsentFile(consentFile);
@@ -450,7 +490,13 @@ async function reauthorizeGoogleCore(opts, portRef) {
     // Best-effort: record the actual bound port on the lock file (never fatal if this fails).
     try {
       const cur = parseJsonSafe(fs.readFileSync(lockFile, 'utf8'));
-      if (cur && Number(cur.pid) === process.pid) fs.writeFileSync(lockFile, JSON.stringify({ ...cur, port: Number(new URL(chosenUri).port) }));
+      // tmp + rename (never an in-place truncate-then-write): a concurrent reader must never see the
+      // lock empty, which would classify it unparseable -> stale -> reclaimable.
+      if (cur && cur.nonce === nonce) {
+        const portTmp = `${lockFile}.${process.pid}.${nonce}.port.tmp`;
+        fs.writeFileSync(portTmp, JSON.stringify({ ...cur, port: Number(new URL(chosenUri).port) }));
+        fs.renameSync(portTmp, lockFile);
+      }
     } catch {
       /* non-fatal */
     }
