@@ -400,14 +400,94 @@ export async function withdrawApplication(client, id, opts = {}) {
     const updated = await transitionUnwrapped(c, id, 'withdrawn', { actor, note }, { expectedFromState: row.state, helperName: 'withdrawApplication' });
     // A submitted application carries the 5-day "no confirmation yet" nudge (markSubmittedUnwrapped);
     // once withdrawn it must not fire. Cancelled in the same transaction; done/cancelled rows are left
-    // alone. A linked calendar event is not deleted here (no calendar client in this path), the same
-    // posture mail-confirm.js's completeNudge takes.
+    // alone. A linked calendar event is NOT deleted inside this transaction: the row keeps its
+    // calendar_event_id, which is the pending-cleanup record cleanupWithdrawnNudgeCalendar() (below)
+    // acts on after the commit, so a Google failure can never roll back or block the withdraw.
     await c.query(
       `UPDATE ic_followups SET status = 'cancelled', updated_at = now() WHERE created_from = $1 AND status IN ('open', 'snoozed')`,
       [`${APPLY_NUDGE_PREFIX}${id}`],
     );
     return { outcome: /** @type {const} */ ('withdrawn'), row: updated };
   });
+}
+
+/**
+ * Delete the Google Calendar events still linked to the cancelled 5-day nudges of withdrawn
+ * applications. Runs OUTSIDE any withdraw transaction (the dashboard withdraw route calls it after the
+ * commit, scoped to one application; bin/remind.js's daily follow-ups pass calls it unscoped as the
+ * retry). The pending-cleanup record is the nudge row itself: status 'cancelled', a non-null
+ * calendar_event_id, created_from 'apply-nudge:<id>', and that application in state 'withdrawn'. A
+ * successful delete clears calendar_event_id (only if it still holds the same id); any failure leaves
+ * it in place for the next pass. Never throws for a calendar problem: an unavailable calendar (not
+ * configured, or a Google token that needs re-authorizing) or a failed delete becomes a warning.
+ * The calendar getter is only called when at least one event is pending, so a withdraw with no linked
+ * event never touches Google.
+ * @param {import('pg').ClientBase} client
+ * @param {(() => Promise<import('./followups.js').CalendarDeps|null>)|null|undefined} getCalendar
+ * @param {{ applicationId?: number }} [opts]
+ * @returns {Promise<{ pending: number, deleted: { followup_id: number, event_id: string }[], failed: { followup_id: number, event_id: string, message: string }[], warnings: string[] }>}
+ */
+export async function cleanupWithdrawnNudgeCalendar(client, getCalendar, opts = {}) {
+  /** @type {unknown[]} */
+  const params = [APPLY_NUDGE_PREFIX];
+  let scope = '';
+  if (opts.applicationId !== undefined) {
+    params.push(opts.applicationId);
+    scope = ` AND a.id = $${params.length}`;
+  }
+  const r = await client.query(
+    `SELECT f.id, f.calendar_event_id
+       FROM ic_followups f
+       JOIN ic_job_applications a ON f.created_from = $1 || a.id::text
+      WHERE a.state = 'withdrawn' AND f.status = 'cancelled' AND f.calendar_event_id IS NOT NULL${scope}
+      ORDER BY f.id`,
+    params,
+  );
+  /** @type {{ followup_id: number, event_id: string }[]} */
+  const deleted = [];
+  /** @type {{ followup_id: number, event_id: string, message: string }[]} */
+  const failed = [];
+  /** @type {string[]} */
+  const warnings = [];
+  const pending = r.rows.map((row) => ({ followup_id: Number(row.id), event_id: String(row.calendar_event_id) }));
+  if (pending.length === 0) return { pending: 0, deleted, failed, warnings };
+
+  /** @type {import('./followups.js').CalendarDeps|null} */
+  let calendar = null;
+  /** @type {string|null} */
+  let unavailableWhy = null;
+  try {
+    calendar = getCalendar ? await getCalendar() : null;
+    if (!calendar) unavailableWhy = getCalendar ? 'Google auth may need re-authorizing' : 'calendar not configured';
+  } catch (err) {
+    unavailableWhy = errMessage(err);
+  }
+  if (!calendar) {
+    for (const p of pending) failed.push({ ...p, message: unavailableWhy ?? 'calendar unavailable' });
+    warnings.push(`calendar unavailable (${unavailableWhy}): ${pending.length} calendar event${pending.length === 1 ? '' : 's'} on withdrawn nudges left in place; will retry on the next follow-ups pass`);
+    return { pending: pending.length, deleted, failed, warnings };
+  }
+  for (const p of pending) {
+    try {
+      await calendar.deleteEvent(p.event_id);
+      await client.query(
+        'UPDATE ic_followups SET calendar_event_id = NULL, updated_at = now() WHERE id = $1 AND calendar_event_id = $2',
+        [p.followup_id, p.event_id],
+      );
+      deleted.push(p);
+    } catch (err) {
+      const message = errMessage(err);
+      failed.push({ ...p, message });
+      warnings.push(`calendar event ${p.event_id} (follow-up ${p.followup_id}) not deleted: ${message}; will retry on the next follow-ups pass`);
+    }
+  }
+  return { pending: pending.length, deleted, failed, warnings };
+
+  /** @param {unknown} err */
+  function errMessage(err) {
+    const msg = err && typeof err === 'object' && 'message' in err ? String(/** @type {{ message: unknown }} */ (err).message) : String(err);
+    return msg.slice(0, 200);
+  }
 }
 
 /**
