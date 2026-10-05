@@ -270,6 +270,45 @@ export async function runDeterministicTriage(client, runId, cfg, opts = {}) {
 }
 
 /**
+ * Deterministic triage for an explicit id list rather than a run's items (dedup scope-gate amendment
+ * F9: the review-queue backlog mode triages the rows it just returned to status null). Same logic as
+ * runDeterministicTriage() above, and so as bin/triage-backfill.js's replay: classifyForTriage() per
+ * row, the same `FOR UPDATE` re-check that the status is still null, and applyMark() with actor 'auto'.
+ * model_band rows are counted and left untriaged (the model step needs a run and a `claude` process;
+ * the next bin/triage-backfill.js pass or scan picks them up). Runs in one transaction on `client`.
+ * @param {import('pg').ClientBase} client
+ * @param {number[]} ids
+ * @param {{ deterministic: { enabled: boolean, floor: number, ceiling: number } }} cfg
+ * @param {{ now?: Date }} [opts]
+ * @returns {Promise<Record<string, number>>} count per classifyForTriage branch, plus `marked`
+ */
+export async function runDeterministicTriageForIds(client, ids, cfg, opts = {}) {
+  const now = opts.now ?? new Date();
+  /** @type {Record<string, number>} */
+  const counts = { marked: 0 };
+  const list = [...new Set((ids ?? []).map(Number).filter(Number.isInteger))];
+  if (!cfg.deterministic.enabled || list.length === 0) return counts;
+  await withTransaction(client, async (c) => {
+    const rows = (await c.query(
+      `SELECT l.id, l.status, l.noise_class, l.prescore, l.record_kind, l.duplicate_of, l.expired_at,
+         EXISTS (SELECT 1 FROM ic_job_review_queue q WHERE q.candidate_id = l.id AND q.resolved_at IS NULL) AS has_open_review
+       FROM ic_job_listings l WHERE l.id = ANY($1::int[]) ORDER BY l.id`,
+      [list],
+    )).rows;
+    for (const row of rows) {
+      const result = classifyForTriage(row, cfg);
+      counts[result.branch] = (counts[result.branch] ?? 0) + 1;
+      if (result.action !== 'skip' && result.action !== 'new') continue;
+      const cur = await c.query('SELECT status FROM ic_job_listings WHERE id = $1 FOR UPDATE', [row.id]);
+      if (cur.rowCount === 0 || cur.rows[0].status !== null) continue;
+      await applyMark(c, { id: row.id, status: result.action === 'skip' ? 'skip' : 'new', statusNote: result.reason }, { now, explicit: true, actor: 'auto', runId: null });
+      counts.marked++;
+    }
+  });
+  return counts;
+}
+
+/**
  * Fresh model_band id list, queried after the deterministic step's transaction has committed (spec
  * section 5, item 2), with NO cap applied. `runTriage()` (below) merges this with the deterministic
  * step's `autoNewIds` into ONE combined list before applying `cfg.model.maxListingsPerRun` exactly

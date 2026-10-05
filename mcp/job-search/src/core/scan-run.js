@@ -42,6 +42,7 @@ import { log as defaultLog } from './logger.js';
 import { normalizeListing, DETAIL_MIN_CHARS } from './normalize.js';
 import { classify, makePgLookups } from './dedup.js';
 import { applyDecision, adoptUnclassifiedRows, updateListing } from './upsert.js';
+import { loadScopeProfiles } from './scope.js';
 import { buildScanFitSweepQuery } from './detail-fit-sweep.js';
 import { prescore } from './prescore.js';
 import { classifyNoise, weightedPrescore, getDefaultNoiseRules } from './noise.js';
@@ -171,6 +172,9 @@ export const CLOSE_ALL_TIMEOUT_MS = 10000;
  *   persisted shape is the same (a new row, duplicate_of the root, no queue entry) -- this is the count
  *   of that subset specifically caused by sticky-skip rather than an ordinary corroborated cross-source
  *   match.
+ * @property {number} dedup_scope_separated rows whose would-be review-queue pair the relevance gate closed
+ *   instead (dedup scope-gate spec A4/B3, src/core/upsert.js's scopeGateRule()): inserted as an ordinary
+ *   new row with an already-resolved audit queue row; also counted under `new` above.
  * @property {number} adopted
  * @property {number} expired
  * @property {Record<string, number>} pages_by_source
@@ -317,6 +321,9 @@ export async function runScan(args, deps, opts) {
       return { ok: false, status: 'locked', hint: 'another scan holds the lock; scans({action:"status", last:1}) shows it, or retry later' };
     }
     const profile = await loadProfile(client, args);
+    // Relevance gate (dedup scope-gate spec A3, F12): EVERY ic_search_profiles row, loaded once per run
+    // beside the run's own profile, so a listing in scope for any profile keeps its pair queued.
+    const scopeProfiles = await loadScopeProfiles(client);
     const sources = resolveSources(args.sources && args.sources.length > 0 ? args.sources : profile.sources, config);
 
     // 4. run row
@@ -334,7 +341,7 @@ export async function runScan(args, deps, opts) {
     }
     log({ evt: 'run_started', run_id: runId, profile: profile.name, trigger: opts.trigger, dry_run: dryRun, sources: sources.map((s) => s.name).join(',') });
 
-    const execute = () => executeRun({ client, runId, profile, sources, config, env, args, deps, opts, log, progress, now, connectSession });
+    const execute = () => executeRun({ client, runId, profile, scopeProfiles, sources, config, env, args, deps, opts, log, progress, now, connectSession });
     handedOff = true;
     if (args.wait === false) {
       // Detach: the lock and client are released by executeRun's finally.
@@ -361,10 +368,10 @@ export async function runScan(args, deps, opts) {
 }
 
 /**
- * @param {{ client: import('pg').Client, runId: number, profile: any, sources: Array<{ name: string, adapter: import('../adapters/base.js').Adapter, cfg: any }>, config: import('./config.js').LoadedConfig, env: import('./config.js').Env, args: RunArgs, deps: RunDeps, opts: RunOpts, log: (f: any) => void, progress: (f: any) => void, now: Date, connectSession: any }} p
+ * @param {{ client: import('pg').Client, runId: number, profile: any, scopeProfiles: import('./scope.js').ScopeProfile[], sources: Array<{ name: string, adapter: import('../adapters/base.js').Adapter, cfg: any }>, config: import('./config.js').LoadedConfig, env: import('./config.js').Env, args: RunArgs, deps: RunDeps, opts: RunOpts, log: (f: any) => void, progress: (f: any) => void, now: Date, connectSession: any }} p
  */
 async function executeRun(p) {
-  const { client, runId, profile, sources, config, env, args, deps, opts, log, progress, now } = p;
+  const { client, runId, profile, scopeProfiles, sources, config, env, args, deps, opts, log, progress, now } = p;
   const dryRun = Boolean(args.dryRun);
   const runCfg = config.adapters.run;
   const dedupCfg = config.adapters.dedup;
@@ -398,7 +405,7 @@ async function executeRun(p) {
     detail_fetched: 0, detail_empty: 0, detail_error: 0, detail_skipped_budget: 0, detail_skipped_run_cap: 0, detail_skipped_gate: 0, detail_skipped_cancelled: 0, detail_not_queued: 0, detail_timeout: 0,
     detail_fit_sweep_queued: 0, detail_fit_sweep_fetched: 0,
     details_by_source: {},
-    dedup_sticky_skip_merged: 0, adopted: 0, expired: 0, pages_by_source: {},
+    dedup_sticky_skip_merged: 0, dedup_scope_separated: 0, adopted: 0, expired: 0, pages_by_source: {},
   };
   /**
    * Shared per-source details_by_source bucket, always carrying the fit-sweep counters (spec S3) alongside
@@ -774,6 +781,9 @@ async function executeRun(p) {
         // auto-actor STICKY-ELIGIBLE root on this row's own already-computed prescore (`ps` above)
         // against the SAME floor auto-triage itself would use to decide skip_low.
         prescore: ps, prescoreRaw: psRaw, noiseClass, detailSkipped, detailOutcome, embedding, now, stickyFloor: config.triage.deterministic.floor,
+        // Relevance gate (dedup scope-gate spec A3, F11): the prescore floor is the same triage floor;
+        // the fit floor is scope.js's own SCOPE_FIT_FLOOR constant, never this value.
+        scopeProfiles, scopePrescoreFloor: config.triage.deterministic.floor,
       }));
     }
     if (!dryRun && applyDetail && applied.id) await maybeSaveApplyTarget(s.name, applied.id, rec, applyDetail);
@@ -783,6 +793,10 @@ async function executeRun(p) {
     else if (applied.outcome === 'repost') stats.repost++;
     else if (applied.outcome === 'ambiguous') stats.ambiguous++;
     if (applied.stickySkipMerged) stats.dedup_sticky_skip_merged++;
+    if (applied.scopeSeparated) {
+      stats.dedup_scope_separated++;
+      log({ evt: 'dedup_scope_separated', run_id: runId, source: rec.source, id: applied.id, rule: applied.scopeRule ?? null, prescore: ps });
+    }
     rows.push({
       id: applied.id,
       title: rec.title,

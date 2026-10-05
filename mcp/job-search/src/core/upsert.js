@@ -9,7 +9,9 @@
  */
 import crypto from 'node:crypto';
 import { withSavepoint, isUniqueViolation } from './db.js';
-import { classify, LISTING_COLUMNS, makePgLookups } from './dedup.js';
+import { classify, inheritStatus, LISTING_COLUMNS, makePgLookups } from './dedup.js';
+import { evaluatePairScope, isGatedReason } from './scope.js';
+import { classifyForBulkSeparate } from './review-bulk.js';
 import { normalizeLegacyRow } from './normalize.js';
 import { classifyNoise } from './noise.js';
 import { JobSearchError } from './errors.js';
@@ -52,6 +54,11 @@ export function computeProfileRev(p) {
  *   default 40 -- src/core/sticky-skip.js's DEFAULT_STICKY_FLOOR), used ONLY to gate an auto-actor
  *   STICKY-ELIGIBLE root against `prescore` above (auto-skip-sticky spec). Omitted callers fall back to
  *   DEFAULT_STICKY_FLOOR inside stickyEligibleFor().
+ * @property {import('./scope.js').ScopeProfile[]} [scopeProfiles] every ic_search_profiles row, loaded
+ *   once per run (dedup scope-gate spec A3, F12). Absent means the relevance gate never closes a pair
+ *   (rule (a): unknown, keep queued).
+ * @property {number} [scopePrescoreFloor] config/triage.json's deterministic.floor for the relevance
+ *   gate's prescore rule (F11); never the fit floor, which is scope.js's SCOPE_FIT_FLOOR constant.
  */
 
 /**
@@ -382,12 +389,65 @@ export async function findStickySkipRootForSameRow(client, rec, targetId, ctx = 
 }
 
 /**
+ * Branch 3b (dedup scope-gate spec B2, amendment F5): classify() saw the root through its lookups;
+ * re-read the root's status here, inside the caller's transaction, and inherit from THAT. When the
+ * root is gone, is no longer a root, has expired, or its status would need a queue row (C3), return
+ * classify()'s queued fallback decision instead, so a merge never hides a row that needs review.
+ * @param {import('pg').ClientBase} c
+ * @param {import('./dedup.js').Decision} decision
+ * @returns {Promise<import('./dedup.js').Decision>}
+ */
+export async function confirmSameSourceLiveDup(c, decision) {
+  const fallback = decision.fallback ?? {
+    ...decision, branch: '4-ambiguous', outcome: 'ambiguous', target: null, rootId: null, repostOf: null, inherit: null, reason: 'same_source_hash_within_gap', queue: true,
+  };
+  if (decision.rootId == null) return fallback;
+  const root = (await c.query('SELECT id, status, duplicate_of, expired_at FROM ic_job_listings WHERE id = $1', [decision.rootId])).rows[0];
+  if (!root || root.duplicate_of != null || root.expired_at != null) return fallback;
+  const inh = inheritStatus(root.status);
+  if (inh.queueReason) return fallback;
+  return { ...decision, inherit: inh, queue: false, reason: null };
+}
+
+/**
+ * Relevance gate for one gated 4-ambiguous decision (dedup scope-gate spec A3, B3). Returns the rule
+ * that closes the pair, or null to keep it queued. Total: anything this cannot positively establish
+ * (no profiles in ctx, a match row missing, an unknown scope signal) returns null.
+ *
+ *   'location' B3: title_similar_same_company with exactly one match, same title-token key, both
+ *              locations eligible and different, neither remote (review-bulk.js's existing
+ *              classifyForBulkSeparate predicate, unchanged).
+ *   'scope'    A2: the candidate (rec.title + ctx.prescore) and every matched row, plus each matched
+ *              row's root, classify 'out' (src/core/scope.js).
+ * @param {import('pg').ClientBase} c
+ * @param {import('./normalize.js').NormalizedListing} rec
+ * @param {import('./dedup.js').Decision} decision
+ * @param {ApplyContext} ctx
+ * @returns {Promise<'scope'|'location'|null>}
+ */
+export async function scopeGateRule(c, rec, decision, ctx) {
+  const matchIds = [...new Set((decision.matches ?? []).filter((n) => typeof n === 'number'))];
+  if (decision.reason === 'title_similar_same_company' && matchIds.length === 1) {
+    const match = (await c.query('SELECT id, status, company_norm, title_norm, location_norm FROM ic_job_listings WHERE id = $1', [matchIds[0]])).rows[0] ?? null;
+    const cand = { status: 'review', company_norm: rec.company_norm ?? null, title_norm: rec.title_norm ?? null, location_norm: rec.location_norm ?? null };
+    const verdict = classifyForBulkSeparate({ resolution: null, reason: decision.reason, matches: matchIds }, cand, match);
+    if (verdict.decision === 'separate') return 'location';
+  }
+  if (!Array.isArray(ctx.scopeProfiles)) return null;
+  const candidate = { title: rec.title ?? null, status: null, status_actor: null, fit_score: null, prescore: ctx.prescore ?? null };
+  const verdict = await evaluatePairScope(c, candidate, matchIds, ctx.scopeProfiles, { prescoreFloor: ctx.scopePrescoreFloor });
+  return verdict.out ? 'scope' : null;
+}
+
+/**
  * Persist one classify() decision. Runs inside a SAVEPOINT.
  * @param {import('pg').ClientBase} client
  * @param {import('./normalize.js').NormalizedListing} rec
  * @param {import('./dedup.js').Decision} decision
  * @param {ApplyContext} ctx
- * @returns {Promise<{ id: number, outcome: string, queued: number|null, branch: string, status: string|null, stickySkipMerged?: boolean, stickySkipRootId?: number|null }>}
+ * @returns {Promise<{ id: number, outcome: string, queued: number|null, branch: string, status: string|null, stickySkipMerged?: boolean, stickySkipRootId?: number|null, scopeSeparated?: boolean, scopeRule?: 'scope'|'location'|null }>}
+ *   `scopeSeparated` is true when the relevance gate closed the pair (no open queue row; an
+ *   already-resolved audit row records it), `scopeRule` says which rule did.
  */
 export async function applyDecision(client, rec, decision, ctx) {
   return withSavepoint(client, async (c) => {
@@ -426,16 +486,21 @@ export async function applyDecision(client, rec, decision, ctx) {
       };
     }
 
-    // New-listing path: outcome new / ambiguous / cross_source_dup / repost (branch 3-repost or
-    // 6-state-remote-dup all insert a fresh row anchored to their match; 1a/1b above never reach here).
+    // New-listing path: outcome new / ambiguous / cross_source_dup / repost (branch 3-repost,
+    // 3b-same-source-live-dup or 6-state-remote-dup all insert a fresh row anchored to their match;
+    // 1a/1b above never reach here).
+    // Branch 3b (dedup scope-gate spec B2/F5): re-read the root inside this transaction; when its
+    // current status would need a queue row (or it is no longer a live root), use classify()'s queued
+    // fallback decision instead of merging (C3 applied live).
+    const base = decision.branch === '3b-same-source-live-dup' ? await confirmSameSourceLiveDup(c, decision) : decision;
     // Sticky-skip check (spec part B) runs only when this candidate would otherwise create a queue row.
-    let effective = decision;
+    let effective = base;
     let stickyRoot = null;
-    if (decision.queue && decision.reason) {
-      stickyRoot = await findStickySkipRoot(c, rec, decision, ctx);
+    if (base.queue && base.reason) {
+      stickyRoot = await findStickySkipRoot(c, rec, base, ctx);
       if (stickyRoot) {
         effective = {
-          ...decision,
+          ...base,
           outcome: 'cross_source_dup',
           rootId: stickyRoot.id,
           repostOf: null,
@@ -445,10 +510,29 @@ export async function applyDecision(client, rec, decision, ctx) {
         };
       }
     }
+    // Relevance gate (dedup scope-gate spec A3/A4, B3): only when sticky found no root, only for a
+    // 4-ambiguous decision carrying a GATED reason. A closed pair inserts as an ordinary new row and
+    // leaves an already-resolved audit row in the queue instead of an open one.
+    /** @type {{ rule: 'scope'|'location', reason: string, matches: number[] }|null} */
+    let scopeClosed = null;
+    if (!stickyRoot && effective.queue && effective.reason && effective.branch === '4-ambiguous' && isGatedReason(effective.reason)) {
+      const rule = await scopeGateRule(c, rec, effective, ctx);
+      if (rule) {
+        scopeClosed = { rule, reason: effective.reason, matches: effective.matches ?? [] };
+        effective = { ...effective, outcome: 'new', target: null, rootId: null, repostOf: null, inherit: { status: null, queueReason: null }, queue: false, reason: null };
+      }
+    }
 
     const inserted = await insertListing(c, rec, effective, ctx);
     id = inserted.id;
     await recordRunItem(c, ctx.runId, id, rec.source, effective.outcome, ctx.pageIndex ?? null);
+    if (scopeClosed) {
+      await c.query(
+        `INSERT INTO ic_job_review_queue (run_id, candidate, candidate_id, matches, reason, status_at_create, resolution, resolved_at)
+         VALUES ($1, $2::jsonb, $3, $4::int[], $5, NULL, 'separate', $6)`,
+        [ctx.runId ?? null, JSON.stringify(candidateSnapshot(rec)), id, scopeClosed.matches, scopeClosed.reason, ctx.now ?? new Date()],
+      );
+    }
     if (effective.queue && effective.reason) {
       const statusAtCreate = effective.outcome === 'ambiguous' ? 'review' : effective.inherit?.status ?? null;
       queued = await enqueueReview(c, { runId: ctx.runId, candidate: candidateSnapshot(rec), candidateId: id, matches: effective.matches, reason: effective.reason, statusAtCreate });
@@ -471,7 +555,8 @@ export async function applyDecision(client, rec, decision, ctx) {
     }
     const status = effective.outcome === 'ambiguous' ? 'review' : effective.inherit?.status ?? null;
     return {
-      id, outcome: effective.outcome, queued, branch: decision.branch, status, stickySkipMerged: Boolean(stickyRoot), stickySkipRootId: stickyRoot?.id ?? null,
+      id, outcome: effective.outcome, queued, branch: base.branch, status, stickySkipMerged: Boolean(stickyRoot), stickySkipRootId: stickyRoot?.id ?? null,
+      scopeSeparated: Boolean(scopeClosed), scopeRule: scopeClosed?.rule ?? null,
     };
   });
 }

@@ -21,8 +21,21 @@ import { recordEvent } from '../core/events.js';
 import { withTransaction } from '../core/db.js';
 import { classifyForBulkSeparate, classifyForStickySkip, BULK_REASON_REASONS } from '../core/review-bulk.js';
 import { loadStickyEligibility, stickyEligibleFor } from '../core/sticky-skip.js';
+import { classifyScopeItem } from '../core/scope-backlog.js';
+import { loadScopeProfiles } from '../core/scope.js';
+import { runDeterministicTriageForIds } from '../core/triage.js';
 
 export const REVIEW_BULK_MODES = Object.freeze(['rule', 'reason', 'stale', 'sticky-skip']);
+
+/**
+ * Backlog mode for the dedup scope gate (spec C). Deliberately NOT in REVIEW_BULK_MODES: that list feeds
+ * the MCP schema and the dashboard route, and this mode is exposed only through bin/review-bulk.js
+ * (spec C1), since a live run takes the scan advisory lock and runs auto-triage itself.
+ */
+export const REVIEW_BULK_SCOPE_MODE = 'scope';
+
+/** Scan advisory lock key; must equal src/core/scan-run.js's LOCK_KEY (a test pins the two together). */
+export const SCAN_LOCK_KEY = 730193001;
 
 /**
  * Queue reasons that mean "the target this candidate matches already resolves to the candidate itself"
@@ -77,7 +90,7 @@ async function uniqueConflict(c, cand) {
 /**
  * Resolve one queue item. Runs inside the caller's transaction. Exported for tests.
  * @param {import('pg').ClientBase} c
- * @param {{ queueId: number, resolution: 'merge'|'separate'|'repost', targetId?: number|null, now?: Date, auto?: boolean, actor?: 'dashboard'|'mcp'|'cli'|'migration'|'seed', note?: string, stickyFloor?: number }} r
+ * @param {{ queueId: number, resolution: 'merge'|'separate'|'repost', targetId?: number|null, now?: Date, auto?: boolean, actor?: 'dashboard'|'mcp'|'cli'|'migration'|'seed'|'auto', note?: string, stickyFloor?: number }} r
  *   actor defaults to 'mcp' (dashboard PR 2 passes 'dashboard' for its own mutating requests). `note`
  *   overrides the default 'resolved:separate' event note on the separate branch only (bulkResolve below
  *   passes 'resolved:separate:bulk:<mode>[:<reason>]' so a listing's event history can tell a bulk
@@ -298,14 +311,24 @@ async function classifyOpenQueueForStickySkip(deps, whereSql, params, floor) {
  * stay open, tallied in `counts.leave_by_reason` with one of `STICKY_SKIP_LEAVE_REASONS`.
  *
  * @param {{ withClient: <T>(fn: (c: import('pg').PoolClient) => Promise<T>) => Promise<T> }} deps
- * @param {{ mode: 'rule'|'reason'|'stale'|'sticky-skip', reason?: string, dryRun: boolean, confirm: boolean, actor?: 'dashboard'|'mcp'|'cli', reviewAutoSeparateDays?: number, now?: Date, stickyFloor?: number }} opts
+ * 'scope' (dedup scope-gate spec C) is handled entirely by bulkResolveScope() below; its extra options
+ * are documented there.
+ * @param {{ mode: 'rule'|'reason'|'stale'|'sticky-skip'|'scope', reason?: string, dryRun: boolean, confirm: boolean, actor?: 'dashboard'|'mcp'|'cli'|'auto', reviewAutoSeparateDays?: number, now?: Date, stickyFloor?: number,
+ *   profiles?: import('../core/scope.js').ScopeProfile[], prescoreFloor?: number, repostGapDays?: number, triageConfig?: any }} opts
  *   `stickyFloor` (auto-skip-sticky spec): current triage floor, threaded into `classifyForStickySkip`'s
  *   root eligibility ('sticky-skip'/'stale' modes) and into `resolveItem`'s own re-check ('sticky-skip'
  *   mode's live resolve). Omitted falls back to sticky-skip.js's DEFAULT_STICKY_FLOOR.
  */
 export async function bulkResolve(deps, opts) {
-  if (!REVIEW_BULK_MODES.includes(opts.mode)) throw new JobSearchError('VALIDATION', `mode must be one of ${REVIEW_BULK_MODES.join(', ')}`);
+  if (!REVIEW_BULK_MODES.includes(opts.mode) && opts.mode !== REVIEW_BULK_SCOPE_MODE) {
+    throw new JobSearchError('VALIDATION', `mode must be one of ${[...REVIEW_BULK_MODES, REVIEW_BULK_SCOPE_MODE].join(', ')}`);
+  }
   if (typeof opts.dryRun !== 'boolean') throw new JobSearchError('VALIDATION', 'dryRun must be a boolean (the string "false" is not accepted)');
+  if (opts.mode === REVIEW_BULK_SCOPE_MODE) {
+    if (typeof opts.confirm !== 'boolean') throw new JobSearchError('VALIDATION', 'confirm must be a boolean (the string "false" is not accepted)');
+    if (!opts.dryRun && !opts.confirm) throw new JobSearchError('VALIDATION', 'confirm must be true for a live (dryRun:false) bulk resolve');
+    return bulkResolveScope(deps, opts);
+  }
   if (opts.mode === 'reason' && opts.reason === 'reopened_skip') {
     // Sticky-skip spec part C: reopened_skip items are now handled by mode:'sticky-skip' (which
     // re-checks STICKY-ELIGIBLE per candidate, not a blanket separate of every reopened_skip row
@@ -437,6 +460,114 @@ export async function bulkResolve(deps, opts) {
   }
 
   return { mode: opts.mode, dryRun, counts, ids };
+}
+
+/**
+ * Bulk mode 'scope' (dedup scope-gate spec C, amendments F3/F8/F9): one-time backlog cleanup of the open
+ * review queue using src/core/scope-backlog.js's classifyScopeItem(). merge/repost exact same-source
+ * pairs, separate different-location pairs and out-of-scope pairs, leave everything else with a
+ * recorded reason.
+ *
+ * Dry run (the default) runs the classification inside a READ ONLY transaction: zero writes, by the
+ * database's own guarantee rather than by code discipline. A live run (dryRun false + confirm true):
+ *   - takes the scan advisory lock non-blocking on the client it then does all its work on (F8); when
+ *     a scan holds it, throws LOCKED before touching anything;
+ *   - re-queries the open queue at execution time and re-classifies each item inside its OWN
+ *     transaction with the queue row locked FOR UPDATE, so an item resolved since (or by an earlier
+ *     run) counts as skipped/already_resolved, never an error: re-running is idempotent;
+ *   - resolves through resolveItem() with actor 'auto' (events.js accepts it);
+ *   - afterwards runs deterministic auto-triage over the rows it returned to status null (separated or
+ *     reposted), same logic as bin/triage-backfill.js (F9), and reports those counts. model_band rows
+ *     are counted and left for the next triage pass.
+ * @param {{ withClient: <T>(fn: (c: import('pg').PoolClient) => Promise<T>) => Promise<T> }} deps
+ * @param {{ dryRun: boolean, confirm: boolean, actor?: 'dashboard'|'mcp'|'cli'|'auto', now?: Date, stickyFloor?: number,
+ *   profiles?: import('../core/scope.js').ScopeProfile[], prescoreFloor?: number, repostGapDays?: number,
+ *   triageConfig?: { deterministic: { enabled: boolean, floor: number, ceiling: number } }|null }} opts
+ *   `profiles` overrides loading every ic_search_profiles row (F12; tests only). `prescoreFloor` is
+ *   config/triage.json's deterministic.floor (F11). `triageConfig` is config.triage; absent means the
+ *   F9 triage step is reported as skipped.
+ */
+async function bulkResolveScope(deps, opts) {
+  const actor = opts.actor ?? 'auto';
+  const now = opts.now ?? new Date();
+  const classifyOpts = (/** @type {any} */ profiles) => ({ profiles, prescoreFloor: opts.prescoreFloor, repostGapDays: opts.repostGapDays });
+  const counts = {
+    merged: 0, reposted: 0, separated: 0, separated_by_rule: /** @type {Record<string, number>} */ ({}),
+    leave_by_reason: /** @type {Record<string, number>} */ ({}), skipped_by_reason: /** @type {Record<string, number>} */ ({}), errors: 0,
+    triage: /** @type {Record<string, number|string>} */ ({}),
+  };
+  const ids = {
+    merged: /** @type {number[]} */ ([]), reposted: /** @type {number[]} */ ([]), separated: /** @type {number[]} */ ([]),
+    left: /** @type {{ id: number, reason: string }[]} */ ([]), skipped: /** @type {number[]} */ ([]), errors: /** @type {{id: number, message: string}[]} */ ([]),
+  };
+  const bump = (/** @type {Record<string, number>} */ m, /** @type {string} */ k) => { m[k] = (m[k] ?? 0) + 1; };
+  const tally = (/** @type {number} */ queueId, /** @type {import('../core/scope-backlog.js').ScopeItemDecision} */ d) => {
+    if (d.action === 'leave') { bump(counts.leave_by_reason, d.reason); ids.left.push({ id: queueId, reason: d.reason }); return; }
+    if (d.action === 'merge') { counts.merged++; ids.merged.push(queueId); return; }
+    if (d.action === 'repost') { counts.reposted++; ids.reposted.push(queueId); return; }
+    counts.separated++; bump(counts.separated_by_rule, d.rule); ids.separated.push(queueId);
+  };
+  const OPEN_SQL = 'SELECT id, candidate_id, matches, reason, resolution, resolved_at, status_at_create FROM ic_job_review_queue WHERE resolved_at IS NULL ORDER BY id';
+
+  if (opts.dryRun) {
+    await deps.withClient(async (c) => {
+      await c.query('BEGIN READ ONLY');
+      try {
+        const profiles = opts.profiles ?? await loadScopeProfiles(c);
+        const items = (await c.query(OPEN_SQL)).rows;
+        for (const item of items) tally(Number(item.id), await classifyScopeItem(c, item, classifyOpts(profiles)));
+      } finally {
+        await c.query('ROLLBACK');
+      }
+    });
+    return { mode: REVIEW_BULK_SCOPE_MODE, dryRun: true, counts, ids };
+  }
+
+  await deps.withClient(async (lc) => {
+    const lock = await lc.query('SELECT pg_try_advisory_lock($1::bigint) AS ok', [SCAN_LOCK_KEY]);
+    if (!lock.rows[0].ok) {
+      throw new JobSearchError('LOCKED', 'the scan advisory lock is held (a scan is running); scope backlog made no changes, retry after the scan finishes');
+    }
+    try {
+      const profiles = opts.profiles ?? await loadScopeProfiles(lc);
+      const queueIds = (await lc.query(OPEN_SQL)).rows.map((r) => Number(r.id));
+      /** @type {number[]} */
+      const triageIds = [];
+      for (const queueId of queueIds) {
+        try {
+          const out = await withTransaction(lc, async (c) => {
+            const item = (await c.query('SELECT id, candidate_id, matches, reason, resolution, resolved_at, status_at_create FROM ic_job_review_queue WHERE id = $1 FOR UPDATE', [queueId])).rows[0];
+            if (!item || item.resolved_at != null) return { skipped: 'already_resolved' };
+            const d = await classifyScopeItem(c, item, classifyOpts(profiles));
+            if (d.action === 'leave') return { d };
+            if (d.action === 'merge' || d.action === 'repost') {
+              const r = await resolveItem(c, { queueId, resolution: d.action, targetId: d.targetId, actor, now, stickyFloor: opts.stickyFloor });
+              return r.resolution === d.action ? { d, candidateId: Number(item.candidate_id) } : { skipped: 'unresolved' };
+            }
+            const note = d.rule === 'scope' ? 'resolved:separate:bulk:scope' : `resolved:separate:bulk:scope:${d.rule}`;
+            const r = await resolveItem(c, { queueId, resolution: 'separate', actor, now, note });
+            if (r.resolution === 'separate') return { d, candidateId: Number(item.candidate_id) };
+            return { skipped: r.blocked === 'separate_blocked_unique' ? 'unique_conflict' : 'unresolved' };
+          });
+          if ('skipped' in out && out.skipped) { bump(counts.skipped_by_reason, out.skipped); ids.skipped.push(queueId); continue; }
+          const d = /** @type {import('../core/scope-backlog.js').ScopeItemDecision} */ (out.d);
+          tally(queueId, d);
+          if ((d.action === 'separate' || d.action === 'repost') && out.candidateId) triageIds.push(out.candidateId);
+        } catch (err) {
+          counts.errors++;
+          ids.errors.push({ id: queueId, message: err instanceof Error ? err.message : String(err) });
+        }
+      }
+      if (!opts.triageConfig) counts.triage = { skipped: 'no_triage_config' };
+      else if (!opts.triageConfig.deterministic.enabled) counts.triage = { skipped: 'deterministic_disabled' };
+      else {
+        counts.triage = await runDeterministicTriageForIds(lc, triageIds, opts.triageConfig, { now });
+      }
+    } finally {
+      await lc.query('SELECT pg_advisory_unlock($1::bigint)', [SCAN_LOCK_KEY]);
+    }
+  });
+  return { mode: REVIEW_BULK_SCOPE_MODE, dryRun: false, counts, ids };
 }
 
 /** @type {import('./_shared.js').ToolDef} */
