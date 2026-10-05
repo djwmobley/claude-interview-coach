@@ -105,9 +105,9 @@ describe('session.js awaiting_submit tab exemption', () => {
     assert.equal(awaiting._closed, false);
     assert.equal(leftover._closed, true);
   });
-  test('a new page with no opener or an untracked opener is never armed nor closed by closeAll', async () => {
+  test('a new page with no opener (noopener) or an untracked opener is armed with the scan policy and closed by closeAll', async () => {
     const f = fakeChromium();
-    const s = await connectSession({ cdpUrl: 'x', chromium: f.chromium, awaitingTabs: tabs(new Set()) });
+    const s = await connectSession({ cdpUrl: 'x', chromium: f.chromium, awaitingTabs: tabs(new Set(['AWAIT-1'])) });
     const noOpener = makePage();
     noOpener.opener = async () => null;
     const stranger = makePage();
@@ -115,12 +115,34 @@ describe('session.js awaiting_submit tab exemption', () => {
     fromStranger.opener = async () => stranger;
     f.context.fire(noOpener);
     f.context.fire(fromStranger);
-    await new Promise((r) => setImmediate(r));
-    assert.equal(noOpener._routes.length, 0);
-    assert.equal(fromStranger._routes.length, 0);
+    await new Promise((r) => setTimeout(r, 20));
+    assert.equal(noOpener._routes.length, 1);
+    assert.equal(fromStranger._routes.length, 1);
     await s.closeAll();
-    assert.equal(noOpener._closed, false);
-    assert.equal(fromStranger._closed, false);
+    assert.equal(noOpener._closed, true);
+    assert.equal(fromStranger._closed, true);
+  });
+  test('a new page whose target id is awaiting_submit is never armed nor closed', async () => {
+    const f = fakeChromium();
+    const s = await connectSession({ cdpUrl: 'x', chromium: f.chromium, awaitingTabs: tabs(new Set(['AWAIT-1'])) });
+    const awaiting = makePage({ targetId: 'AWAIT-1' });
+    awaiting.opener = async () => null;
+    f.context.fire(awaiting);
+    await new Promise((r) => setTimeout(r, 20));
+    assert.equal(awaiting._routes.length, 0);
+    await s.closeAll();
+    assert.equal(awaiting._closed, false);
+  });
+  test('when the exempt set cannot be read, a new page is armed (fail closed), even an awaiting one', async () => {
+    const f = fakeChromium();
+    const s = await connectSession({ cdpUrl: 'x', chromium: f.chromium, awaitingTabs: tabs(new Error('db down')) });
+    const p = makePage({ targetId: 'AWAIT-1' });
+    p.opener = async () => null;
+    f.context.fire(p);
+    await new Promise((r) => setTimeout(r, 20));
+    assert.equal(p._routes.length, 1);
+    await s.closeAll();
+    assert.equal(p._closed, true);
   });
   test('detachLeaveOpen unroutes tracked pages and never closes them', async () => {
     const f = fakeChromium();

@@ -165,6 +165,16 @@ function fakeChromium() {
   };
 }
 
+/**
+ * arm() is fired-and-forgotten from the context 'page' listener, and (assisted Easy Apply) first resolves
+ * the page's target id and the awaiting_submit exempt set, so arming takes a few event-loop turns rather
+ * than one. Poll until the page has a route handler (bounded).
+ * @param {{ _routes: unknown[] }} page
+ */
+async function waitForArmed(page) {
+  for (let i = 0; i < 200 && page._routes.length === 0; i++) await new Promise((r) => { setTimeout(r, 10); });
+}
+
 describe('session.js: apply-mode route policy end to end (fakes, no real Chrome)', () => {
   test('scan-mode page still aborts every non-exempt non-GET request (unchanged)', async () => {
     const chromium = fakeChromium();
@@ -199,7 +209,7 @@ describe('session.js: apply-mode route policy end to end (fakes, no real Chrome)
     popup.opener = async () => openerPage;
     chromium._context._firePage(popup);
     // arm() is fired-and-forgotten from the context 'page' listener; give the microtask queue a turn.
-    await new Promise((r) => setImmediate(r));
+    await waitForArmed(popup);
 
     const outcome = await popup.simulateRequest({ method: 'POST', resourceType: 'xhr', url: 'https://boards.greenhouse.io/acme/submit' });
     assert.equal(outcome.allow, false, 'a scan-opened popup must stay locked down to abort-all-non-GET');
@@ -214,7 +224,7 @@ describe('session.js: apply-mode route policy end to end (fakes, no real Chrome)
     const popup = makeFakePage();
     popup.opener = async () => openerPage;
     chromium._context._firePage(popup);
-    await new Promise((r) => setImmediate(r));
+    await waitForArmed(popup);
 
     const allowed = await popup.simulateRequest({ method: 'POST', resourceType: 'xhr', url: 'https://boards.greenhouse.io/acme/submit' });
     assert.equal(allowed.allow, true, 'an apply-opened popup must keep the apply tenant scope');
@@ -231,7 +241,7 @@ describe('session.js: apply-mode route policy end to end (fakes, no real Chrome)
     const popup = makeFakePage();
     popup.opener = async () => { throw new Error('cannot resolve'); };
     chromium._context._firePage(popup);
-    await new Promise((r) => setImmediate(r));
+    await waitForArmed(popup);
 
     const outcome = await popup.simulateRequest({ method: 'POST', resourceType: 'xhr', url: 'https://boards.greenhouse.io/acme/submit' });
     assert.equal(outcome.allow, false, 'an unresolvable opener must never be inferred as apply-scoped');

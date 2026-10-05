@@ -53,8 +53,10 @@
  * submits. Every session therefore loads that exempt target-id set (`awaitingTabs`, DB-backed by default
  * via src/core/easy-apply-tabs.js -- a core module, so the scan side still never imports src/apply/) and:
  * reconcile()/reconcileTargets() never close an exempt id, and close NOTHING when the set cannot be read;
- * a new page with no opener or with an opener this session does not track is never armed with a route
- * policy and never closed (only popups of our own tracked pages are adopted); and on connect, awaiting
+ * every new page not created through attachPage is still armed with the scan policy (or its tracked
+ * opener's policy) and closed by closeAll() -- EXCEPT a page whose CDP target id is in the awaiting_submit
+ * set, which is never armed and never closed; when that set cannot be read the page is armed (fail
+ * closed); and on connect, awaiting
  * rows whose tab no longer exists (the scan Chrome restarted or self-healed) are demoted to needs_human
  * kind 'abandoned_tab' against the live Target.getTargets list -- an unreadable list demotes nothing.
  * detachLeaveOpen() unroutes and forgets every tracked page without closing any of them.
@@ -346,22 +348,33 @@ export async function connectSession(opts = {}) {
   // resolved, or is not itself a tracked page, falls back to the 'scan' policy -- the safe default, never
   // 'apply' by inference.
   //
-  // Assisted Easy Apply (spec B5): a page with NO opener, or whose opener is a page this session does not
-  // track, is not ours -- it may be the awaiting_submit Easy Apply tab (opened over raw CDP by
-  // src/apply/easy-apply-flow.js) or something Damian opened. It is never armed (no route policy) and so
-  // never closed by closeAll(). Only an opener lookup that THROWS keeps the old safe default (scan policy).
+  // Assisted Easy Apply (spec B5, approver fix): every new page keeps the default above -- armed with the
+  // tracked opener's policy, or the scan policy, and tracked for closeAll() -- EXCEPT a page whose CDP
+  // target id is in the awaiting_submit exempt set, which is left untouched (no route, never closed). If
+  // the exempt set cannot be read (null, a DB error, a timeout) or the target id cannot be resolved, the
+  // page is armed: fail closed.
   context.on('page', (p) => {
     if (pages.has(p)) return;
     (async () => {
       let opener = null;
-      let unresolvable = false;
       try {
         opener = typeof p.opener === 'function' ? await p.opener() : (p.opener ?? null);
       } catch {
-        unresolvable = true;
+        opener = null;
       }
-      if (!unresolvable && (!opener || !pages.has(opener))) return;
       const inherited = opener && pages.has(opener) ? /** @type {PagePolicy} */ (pages.get(opener)) : { mode: /** @type {'scan'} */ ('scan'), blockedCount: 0 };
+      const id = await lookupTargetId(p);
+      /** @type {Set<string>|null} */
+      let ex = null;
+      try {
+        ex = await Promise.race([
+          awaitingTabs.exemptTargetIds(),
+          new Promise((resolve) => { setTimeout(() => resolve(null), 5000).unref?.(); }),
+        ]);
+      } catch {
+        ex = null;
+      }
+      if (id && ex && ex.has(id)) return;
       await arm(p, inherited);
     })().catch(() => {});
   });

@@ -367,8 +367,8 @@ budget), morning window 09:00-19:00 America/Chicago, 20-40 minute jittered spaci
 spacing, 1.5-4 s per action, 60-160 ms per character, 24-hour breaker.
 
 **Tabs.** `src/browser/session.js` never closes an `awaiting_submit` target (reconcile, reconcileTargets),
-closes nothing when that set cannot be read, never adopts a page that is not a popup of its own tracked
-pages, and on connect demotes awaiting rows whose tab is gone to `abandoned_tab`; `bin/scan.js`'s
+closes nothing when that set cannot be read, arms every new page not created through attachPage with the
+scan policy except an awaiting_submit target (armed anyway if the set cannot be read), and on connect demotes awaiting rows whose tab is gone to `abandoned_tab`; `bin/scan.js`'s
 `launchChrome` demotes them all after any relaunch. Awaiting rows older than 24 hours are flagged `stale`,
 never closed. `reconcileStale` leaves a `linkedin_easy` submitting row alone for 20 minutes.
 
