@@ -26,6 +26,8 @@ import { tool as review } from './tools/review.js';
 import { tool as renderDoc } from './tools/render_doc.js';
 import { tool as followups } from './tools/followups.js';
 import { tool as scanReport } from './tools/scan_report.js';
+import { tool as easyApply } from './tools/easy_apply.js';
+import { LEASE_ENV } from './core/easy-apply-state.js';
 
 export const SERVER_INFO = Object.freeze({ name: 'job-search', version: '0.1.0' });
 
@@ -33,8 +35,18 @@ export const SERVER_INFO = Object.freeze({ name: 'job-search', version: '0.1.0' 
 export const TOOLS = Object.freeze([searchJobs, queryJobs, getJob, markJobs, profiles, scans, review, renderDoc, followups, scanReport]);
 
 /**
+ * Assisted LinkedIn Easy Apply lease mode (src/apply/easy-apply-runner.js): when the server is started
+ * with a lease token in JOBSEARCH_EASY_APPLY_LEASE, easy_apply is the ONLY tool it exposes; without one,
+ * easy_apply is not registered at all (an ordinary interactive session can never reach it).
+ * @param {NodeJS.ProcessEnv} [env]
+ */
+export function toolsForEnv(env = process.env) {
+  return typeof env[LEASE_ENV] === 'string' && env[LEASE_ENV] ? Object.freeze([easyApply]) : TOOLS;
+}
+
+/**
  * Build the McpServer with all nine tools registered.
- * @param {Partial<import('./tools/_shared.js').ToolDeps>} [overrides]
+ * @param {Partial<import('./tools/_shared.js').ToolDeps> & { processEnv?: NodeJS.ProcessEnv }} [overrides]
  */
 export function buildServer(overrides = {}) {
   const env = getEnv();
@@ -45,10 +57,11 @@ export function buildServer(overrides = {}) {
   } catch (err) {
     log.warn({ evt: 'config_invalid', ...errFields(err) });
   }
-  const deps = defaultDeps({ withClient, config, env, calendar: makeCalendarProvider(env), ...overrides });
+  const { processEnv, ...depOverrides } = overrides;
+  const deps = defaultDeps({ withClient, config, env, calendar: makeCalendarProvider(env), ...depOverrides });
   if (!deps.fetchDetail) deps.fetchDetail = (row) => fetchDetailForRow(/** @type {any} */ (row), { withClient: deps.withClient, config: deps.config, env: deps.env, fetch: deps.fetch });
   const server = new McpServer(SERVER_INFO, { capabilities: { tools: {}, logging: {} } });
-  for (const t of TOOLS) {
+  for (const t of toolsForEnv(processEnv ?? process.env)) {
     server.registerTool(t.name, { description: t.description, inputSchema: t.schema }, wrapHandler(t, deps));
   }
   return { server, deps };
@@ -64,7 +77,7 @@ export async function main() {
   await startupDb();
   const transport = new StdioServerTransport();
   await server.connect(transport);
-  log.info({ evt: 'server_started', tools: TOOLS.length, pid: process.pid });
+  log.info({ evt: 'server_started', tools: toolsForEnv().length, pid: process.pid });
   const shutdown = async () => {
     try {
       await server.close();

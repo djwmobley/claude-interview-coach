@@ -38,6 +38,10 @@ import { makeApplyCapability } from './apply-capability.js';
 import { ADAPTERS } from './adapters/index.js';
 import { credentialTarget, readCredential, writeCredential, generatePassword } from '../core/credentials.js';
 import { findVerificationMessage } from './gmail-verify.js';
+import { easyApplyStartGate, runAssistedEasyApply, easyApplyConfig } from './easy-apply-flow.js';
+import { createEasyApplyRunner } from './easy-apply-runner.js';
+import { parkAwaitingSubmit } from '../core/easy-apply-state.js';
+import { spawn as nodeSpawn } from 'node:child_process';
 
 /** Same numeric key as src/core/scan-run.js's LOCK_KEY -- see the module doc comment. Never a different key. */
 export const LOCK_KEY = 730193001;
@@ -106,6 +110,19 @@ export async function preSubmitExclusionRecheck(client, app, exclusionConfig, op
 
 /** Hard per-application timeout (amended spec: "hard 6-minute abort"). */
 export const APPLY_TIMEOUT_MS = 6 * 60 * 1000;
+
+/** Assisted LinkedIn Easy Apply's own budget (spec B4: 15 minutes for this path). */
+export const EASY_APPLY_TIMEOUT_MS = 15 * 60 * 1000;
+
+/**
+ * True when a thrown error is a unique-index violation (directly, or wrapped by a helper that kept the
+ * driver error as `cause` / in its message).
+ * @param {unknown} err
+ */
+function isUniqueViolationLike(err) {
+  const e = /** @type {any} */ (err);
+  return Boolean(e && (e.code === '23505' || (e.cause && e.cause.code === '23505') || /duplicate key value|easy_apply_inflight_uq/.test(String(e.message ?? ''))));
+}
 
 /**
  * @param {string} [file]
@@ -176,6 +193,9 @@ function hashLinkedFile(outputRoot, relPath) {
  *   default). An adapter never touches env.GOOGLE_TOKEN_FILE or google.js directly.
  * @property {(ms: number) => Promise<void>} [sleep] apply pipeline slice 6 test seam: ctx.sleep, used by an
  *   adapter's own bounded poll loop (e.g. Workday's verify-email wait). Real `setTimeout` by default.
+ * @property {import('./easy-apply-flow.js').EasyApplyDeps} [easyApply] assisted LinkedIn Easy Apply seams
+ *   and the run's trigger ('dashboard' by default; bin/auto-apply.js passes 'morning'). Production wires
+ *   the real CDP connector, driver, and src/apply/easy-apply-runner.js when omitted.
  * @property {import('./exclusions.js').ExclusionConfig} [exclusionConfig] apply exclusion gate test seam:
  *   override config/apply-exclusions.json's loaded shape (src/apply/exclusions.js's loadExclusionConfig by
  *   default). A missing/invalid file is a hard error here exactly as it is for auto-apply's select phase.
@@ -237,12 +257,37 @@ export async function runApplyWorker(applicationId, deps = {}) {
       return { ok: true, status: 'skipped', state: app.state };
     }
 
+    // Assisted LinkedIn Easy Apply (operator decision 2026-10-04): breaker, window/spacing, the single
+    // in-flight slot, and the daily cap are all checked BEFORE the claim, so a refusal leaves the
+    // application 'approved' for a later run. The cap reservation (last) is consumed at attempt start.
+    const assisted = Boolean(adapters[app.ats_type] && adapters[app.ats_type].assisted);
+    /** @type {import('./easy-apply-flow.js').EasyApplyDeps} */
+    const easyApplyDeps = deps.easyApply ?? {};
+    if (assisted) {
+      const gate = await easyApplyStartGate(client, { config, easyApply: easyApplyDeps });
+      if (!gate.ok) {
+        log({ evt: 'easy_apply_deferred', application_id: applicationId, reason: gate.reason });
+        return { ok: true, status: 'deferred', reason: gate.reason, state: 'approved' };
+      }
+    }
+
     // Apply exclusion gate, pre-submit recheck (spec item 4): the FULL classifyExclusion runs again here,
     // inside the same transaction that moves approved -> submitting, under an advisory lock on the
     // listing's dedup root -- see preSubmitExclusionRecheck's own doc comment. New information that
     // surfaced between Approve and now (a duplicate listing applied to elsewhere, a config change) parks
     // the application in needs_human instead of ever reaching the adapter.
-    const preSubmitVerdict = await runPreSubmitExclusionRecheck(client, app, exclusionConfig, { actor: 'apply' });
+    /** @type {Awaited<ReturnType<typeof preSubmitExclusionRecheck>>} */
+    let preSubmitVerdict;
+    try {
+      preSubmitVerdict = await runPreSubmitExclusionRecheck(client, app, exclusionConfig, { actor: 'apply' });
+    } catch (err) {
+      // G9: the unique partial index refused a second linkedin_easy row in submitting/awaiting_submit.
+      if (assisted && isUniqueViolationLike(err)) {
+        log({ evt: 'easy_apply_deferred', application_id: applicationId, reason: 'easy_apply_in_flight' });
+        return { ok: true, status: 'deferred', reason: 'easy_apply_in_flight', state: 'approved' };
+      }
+      throw err;
+    }
     if (preSubmitVerdict.branch !== 'eligible') {
       log({ evt: 'apply_presubmit_exclusion_blocked', application_id: applicationId, branch: preSubmitVerdict.branch });
       progress({ applicationId, message: 'needs_human' });
@@ -252,15 +297,26 @@ export async function runApplyWorker(applicationId, deps = {}) {
     log({ evt: 'apply_started', application_id: applicationId, ats: app.ats_type });
 
     const controller = new AbortController();
-    const timeout = setTimeout(() => controller.abort(), APPLY_TIMEOUT_MS);
+    const timeout = setTimeout(() => controller.abort(), assisted ? EASY_APPLY_TIMEOUT_MS : APPLY_TIMEOUT_MS);
     timeout.unref?.();
 
-    /** @type {{ outcome: 'submitted', confirmationRef: string|null } | { outcome: 'needs_human', pendingQuestion: any }} */
+    /** @type {any} */
     let result;
     try {
-      result = await runOneApplication({
-        client, app, controller, adapters, outputRoot, bank, env, config, connectSession, progress, log, lookup: deps.lookup, targetMarkerFile, credentials, gmailVerify, sleep,
-      });
+      result = assisted
+        ? await runAssistedEasyApply({
+          client, app, config, env, outputRoot, lookup: deps.lookup, log,
+          easyApply: {
+            ...easyApplyDeps,
+            runner: easyApplyDeps.runner ?? createEasyApplyRunner({
+              env, logDir: env.JOBSEARCH_LOG_DIR, repoRoot: repoRoot(), spawn: nodeSpawn,
+              timeoutMs: Math.max(60000, (easyApplyConfig(config).runTimeoutMinutes - 2) * 60000),
+            }),
+          },
+        })
+        : await runOneApplication({
+          client, app, controller, adapters, outputRoot, bank, env, config, connectSession, progress, log, lookup: deps.lookup, targetMarkerFile, credentials, gmailVerify, sleep,
+        });
     } catch (err) {
       clearTimeout(timeout);
       // "no assume-ok path": any throw the adapter/browser layer raises is a failure UNLESS the durable
@@ -290,6 +346,17 @@ export async function runApplyWorker(applicationId, deps = {}) {
       progress({ applicationId, message: 'submitted' });
       log({ evt: 'apply_submitted', application_id: applicationId });
       return { ok: true, status: 'submitted' };
+    }
+    if (result.outcome === 'awaiting_submit') {
+      // Spec G12: the tab stays open, its CDP target id is stored, and nothing here (or anywhere else) ever
+      // clicks Submit. Damian submits in the scan Chrome and confirms with "I submitted".
+      await parkAwaitingSubmit(client, applicationId, {
+        targetId: result.targetId, ledger: result.ledger, screenshotRelPath: result.screenshotRelPath,
+        note: `easy apply filled and stopped at Review (${result.reason})`, pageUrl: app.apply_url ?? null, reason: result.reason,
+      });
+      progress({ applicationId, message: 'awaiting_submit' });
+      log({ evt: 'easy_apply_awaiting_submit', application_id: applicationId, reason: result.reason });
+      return { ok: true, status: 'awaiting_submit' };
     }
     if (result.outcome === 'needs_human') {
       await transition(client, applicationId, 'needs_human', { actor: 'apply', note: 'parked for human input', pending_question: result.pendingQuestion });

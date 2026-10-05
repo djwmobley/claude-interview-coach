@@ -83,7 +83,7 @@ export const CLOSED_REASONS = Object.freeze([
   // through to the checks below, never adding a reason of its own).
   ...EXCLUSION_BRANCHES.filter((b) => b !== 'eligible').map((b) => `exclusion_${b}`),
   'not_scored', 'below_fit', 'human_fit_override', 'duplicate_of', 'not_us', 'salary_below_floor',
-  'active_application', 'no_description', 'apply_target_unresolved', 'easy_apply_only', 'ats_not_allowed',
+  'active_application', 'no_description', 'apply_target_unresolved', 'easy_apply_only', 'easy_apply_assisted', 'ats_not_allowed',
   'confidence_not_exact', 'hourly_pay', 'daily_cap', 'eligible',
 ]);
 
@@ -104,7 +104,10 @@ export const GATES = Object.freeze([
   { name: 'salary_below_floor', reasons: Object.freeze(['salary_below_floor']) },
   { name: 'active_application', reasons: Object.freeze(['active_application']) },
   { name: 'no_description', reasons: Object.freeze(['no_description']) },
-  { name: 'easy_apply_only', reasons: Object.freeze(['easy_apply_only']) },
+  // 'easy_apply_assisted' (a LinkedIn easy-apply-only listing) leaves the ordinary funnel here exactly like
+  // 'easy_apply_only' does: it is routed to the assisted LinkedIn Easy Apply path (selectCandidates'
+  // easyApplyEligible), never submitted through the ordinary worker, never counted against dailyCap.
+  { name: 'easy_apply_only', reasons: Object.freeze(['easy_apply_only', 'easy_apply_assisted']) },
   { name: 'apply_target_unresolved', reasons: Object.freeze(['apply_target_unresolved']) },
   { name: 'ats_not_allowed', reasons: Object.freeze(['ats_not_allowed']) },
   { name: 'confidence_not_exact', reasons: Object.freeze(['confidence_not_exact']) },
@@ -161,6 +164,9 @@ export function computeFunnel(classified) {
  * @property {string|null} applyAts
  * @property {string|null} applyConfidence
  * @property {boolean} applyEasyOnly
+ * @property {string|null} [source] ic_job_listings.source -- a LinkedIn easy-apply-only listing routes to
+ *   the assisted Easy Apply path ('easy_apply_assisted'); any other easy-apply-only source stays
+ *   'easy_apply_only'
  * @property {string|null} [company] ic_job_listings.company -- apply exclusion gate input
  * @property {string|null} [companyNorm] ic_job_listings.company_norm -- apply exclusion gate input
  * @property {string|null} [title] ic_job_listings.title -- apply exclusion gate input
@@ -192,7 +198,13 @@ export function classifyCandidate(row, ctx) {
   if (typeof row.salaryMax === 'number' && row.salaryMax < floor) return 'salary_below_floor';
   if (row.hasActiveApplication) return 'active_application';
   if (typeof row.description !== 'string' || row.description.trim().length === 0) return 'no_description';
-  if (row.applyEasyOnly) return 'easy_apply_only';
+  if (row.applyEasyOnly) {
+    // Assisted LinkedIn Easy Apply (operator decision 2026-10-04): only LinkedIn, and hourly pay still
+    // excludes it exactly as it excludes an ordinary candidate further down.
+    if (row.source !== 'linkedin') return 'easy_apply_only';
+    if (isHourlyPaySignal(row.salaryPeriod ?? null, row.salaryRaw ?? null)) return 'hourly_pay';
+    return 'easy_apply_assisted';
+  }
   if (!row.applyUrl || !row.applyAts) return 'apply_target_unresolved';
   if (!ctx.atsAllow.includes(row.applyAts)) return 'ats_not_allowed';
   if (row.applyConfidence !== 'exact') return 'confidence_not_exact';
@@ -331,7 +343,7 @@ export async function fetchCandidateRows(client) {
     SELECT
       l.id AS listing_id, l.fit_score, l.duplicate_of, l.location_norm, l.remote_mode,
       l.salary_max, l.salary_period, l.salary_raw, l.description, l.apply_url, l.apply_ats, l.apply_ats_confidence, l.apply_easy_only,
-      l.company, l.company_norm, l.title, l.title_norm, coalesce(l.url_normalized, l.url) AS source_url,
+      l.company, l.company_norm, l.title, l.title_norm, coalesce(l.url_normalized, l.url) AS source_url, l.source,
       (SELECT actor FROM ic_job_events e WHERE e.listing_id = l.id AND e.kind = 'fit' ORDER BY e.at DESC, e.id DESC LIMIT 1) AS fit_actor,
       EXISTS (SELECT 1 FROM ic_job_applications a WHERE a.listing_id = l.id AND a.state <> 'withdrawn') AS has_active_application
     FROM ic_job_listings l
@@ -362,6 +374,7 @@ export async function fetchCandidateRows(client) {
     title: row.title ?? null,
     titleNorm: row.title_norm ?? null,
     sourceUrl: row.source_url ?? null,
+    source: row.source ?? null,
   }));
 }
 
@@ -369,6 +382,8 @@ export async function fetchCandidateRows(client) {
  * @typedef {Object} SelectResult
  * @property {Array<{ listingId: number, reason: string }>} results every considered row, one reason each
  * @property {CandidateRow[]} eligible the rows selected to actually apply through this run, in order
+ * @property {CandidateRow[]} easyApplyEligible LinkedIn easy-apply-only rows for the assisted path, in order,
+ *   deduplicated by source URL (their own cap is linkedin.easyApplyDaily, enforced by the worker)
  * @property {number} capUsed slots already consumed today before this run
  * @property {number} capRemaining slots left after `eligible` (never negative)
  * @property {number} dailyCap the configured daily cap this run used (spec amendment A7: "applied N of cap 5")
@@ -407,9 +422,20 @@ export async function selectCandidates(client, opts) {
   const remaining = Math.max(0, opts.dailyCap - capUsed);
   const capped = applyDailyCap(deduped, remaining);
   const eligible = capped.filter((e) => e.reason === 'eligible').map((e) => e.row);
+  /** @type {Set<string>} */
+  const seenAssisted = new Set();
+  const finalRows = capped.map((e) => {
+    if (e.reason !== 'easy_apply_assisted') return e;
+    const key = String(e.row.sourceUrl ?? `listing:${e.row.listingId}`);
+    if (seenAssisted.has(key)) return { row: e.row, reason: 'duplicate_of' };
+    seenAssisted.add(key);
+    return e;
+  });
+  const easyApplyEligible = finalRows.filter((e) => e.reason === 'easy_apply_assisted').map((e) => e.row);
   return {
-    results: capped.map((e) => ({ listingId: e.row.listingId, reason: e.reason })),
+    results: finalRows.map((e) => ({ listingId: e.row.listingId, reason: e.reason })),
     eligible,
+    easyApplyEligible,
     capUsed,
     capRemaining: Math.max(0, remaining - eligible.length),
     dailyCap: opts.dailyCap,

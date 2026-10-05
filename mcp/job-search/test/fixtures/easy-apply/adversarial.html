@@ -1,0 +1,35 @@
+<!doctype html>
+<!--
+  SYNTHETIC fixture (not recorded from linkedin.com): an Easy Apply dialog step whose buttons carry every
+  adversarial label shape spec G13 lists. Each button's click sets window.__clicked[<id>] so the tests can
+  prove the driver refused it without clicking. Progress is 50% so the terminal-step rule (G2) is never the
+  reason a refusal happens here; only the G1 label rules are.
+-->
+<html>
+<head><meta charset="utf-8"><title>Adversarial step</title>
+<style>.visually-hidden { position: absolute; width: 1px; height: 1px; overflow: hidden; clip: rect(0 0 0 0); } .gone { display: none; }</style>
+</head>
+<body>
+<div class="jobs-easy-apply-modal artdeco-modal" role="dialog" aria-labelledby="h">
+  <h2 id="h">Apply to Acme Corp</h2>
+  <progress max="100" value="50"></progress>
+  <div><label for="q">City</label><input id="q" type="text" value="Houston"></div>
+  <button id="hidden-span" type="button">Next<span class="gone">Submit application</span></button>
+  <button id="sr-span" type="button">Next<span class="visually-hidden"> and submit</span></button>
+  <button id="aria-mismatch" type="button" aria-label="Next"><span>Finish</span></button>
+  <button id="aria-submit" type="button" aria-label="Submit application"><span>Next</span></button>
+  <button id="data-value" type="button" data-control-name="submit_unify"><span>Next</span></button>
+  <button id="data-name" type="button" data-live-test-easy-apply-submit-button><span>Next</span></button>
+  <button id="empty" type="button"><span></span></button>
+  <button id="linkedin-like" type="button" aria-label="Continue to next step" data-easy-apply-next-button><span>Next</span></button>
+  <div id="div-button" role="button" tabindex="0">Next</div>
+  <input id="input-submit" type="submit" value="Next">
+  <button id="plain-next" type="button"><span>Next</span></button>
+</div>
+<button id="outside" type="button">Next</button>
+<script>
+  window.__clicked = {};
+  document.addEventListener('click', (ev) => { const t = ev.target.closest('[id]'); if (t) window.__clicked[t.id] = true; }, true);
+</script>
+</body>
+</html>

@@ -87,3 +87,13 @@ describe('classify(): section 4 table, one case per named branch', () => {
     assert.equal(rTeapot.kind, 'internal');
   });
 });
+
+describe('classify(): assisted Easy Apply conflicts', () => {
+  test('TAB_GONE, NOT_AWAITING_SUBMIT, and USE_EASY_APPLY_SUBMITTED map to easy_apply_conflict with the server message', () => {
+    for (const code of ['TAB_GONE', 'NOT_AWAITING_SUBMIT', 'USE_EASY_APPLY_SUBMITTED']) {
+      const r = /** @type {any} */ (classify(409, { ok: false, code, message: 'm' }));
+      assert.equal(r.kind, 'easy_apply_conflict', code);
+      assert.equal(r.message, 'm');
+    }
+  });
+});

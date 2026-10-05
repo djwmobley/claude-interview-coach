@@ -55,6 +55,13 @@
  *     countAutoApprovedToday() (the daily-cap accounting) counts exactly the applications THIS pipeline
  *     actually advanced; a review FAIL now DOES consume a cap slot, because it is submitted (spec section
  *     1: "a review FAIL now consumes a daily-cap slot because it is submitted").
+ *   easy apply (assisted LinkedIn Easy Apply, operator decision 2026-10-04) -- after the ordinary apply
+ *     phase, src/apply/easy-apply-morning.js's runEasyApplyMorning() takes select's easyApplyEligible rows
+ *     (LinkedIn easy-apply-only listings, reason 'easy_apply_assisted'): drafts and approves (actor
+ *     'apply', so the ordinary dailyCap is untouched), then runs the worker only inside 09:00-19:00
+ *     America/Chicago with 20-40 minute jittered spacing, stopping while one Easy Apply is in flight or
+ *     awaiting Damian's own Submit. The worker fills the form and stops at LinkedIn's Review screen; it
+ *     never submits. This phase can keep the process alive until the window opens.
  *
  * Lock: one pg_try_advisory_lock on src/core/scan-run.js's own LOCK_KEY (730193001), polled every
  * config/auto-apply.json's pollSeconds up to (hardDeadline - now) minutes -- NEVER the configured
@@ -104,6 +111,8 @@ import { defaultAutoApplySummaryFile, writeAutoApplySummary } from '../src/core/
 import { waitForScan, localDeadline, defaultQueryLatestScanRun } from '../src/core/scan-wait.js';
 import { launchChrome } from './scan.js';
 import { runningMarkerPath, writeRunningMarker, deleteRunningMarker } from '../src/core/running-marker.js';
+import { runEasyApplyMorning, defaultMorningDeps } from '../src/apply/easy-apply-morning.js';
+import { markStaleAwaiting } from '../src/core/easy-apply-state.js';
 
 const USAGE = 'usage: node bin/auto-apply.js [--dry-run] [--json [out]] [--application <id>]';
 
@@ -749,7 +758,7 @@ export async function runSingleApplication(id, deps) {
   const listingRes = await deps.withClientFn((c) => c.query(
     `SELECT l.id, l.fit_score, l.duplicate_of, l.location_norm, l.remote_mode, l.salary_max, l.salary_period,
             l.salary_raw, l.description, l.apply_url, l.apply_ats, l.apply_ats_confidence, l.apply_easy_only,
-            l.company, l.company_norm, l.title, l.title_norm, coalesce(l.url_normalized, l.url) AS source_url,
+            l.company, l.company_norm, l.title, l.title_norm, coalesce(l.url_normalized, l.url) AS source_url, l.source,
             (SELECT actor FROM ic_job_events e WHERE e.listing_id = l.id AND e.kind = 'fit' ORDER BY e.at DESC, e.id DESC LIMIT 1) AS fit_actor
      FROM ic_job_listings l WHERE l.id = $1`,
     [app.listing_id],
@@ -779,12 +788,15 @@ export async function runSingleApplication(id, deps) {
     // Deliberately false -- see this function's own doc comment (gate 4).
     hasActiveApplication: false,
     description: l.description ?? null, applyUrl: l.apply_url ?? null, applyAts: l.apply_ats ?? null,
-    applyConfidence: l.apply_ats_confidence ?? null, applyEasyOnly: Boolean(l.apply_easy_only),
+    applyConfidence: l.apply_ats_confidence ?? null, applyEasyOnly: Boolean(l.apply_easy_only), source: l.source ?? null,
   };
   const candidateReason = classifyCandidateFn(candidateRow, {
     fitFloor: deps.config.autoApply.fitFloor, floors: deps.config.autoApply.floors, atsAllow: deps.config.autoApply.atsAllow,
   });
-  if (candidateReason !== 'eligible') {
+  // Assisted LinkedIn Easy Apply: a linkedin_easy application re-drives on the assisted reason (its own
+  // cap and gates live in the worker's start gate, never the ordinary dailyCap below).
+  const assistedRedrive = app.ats_type === 'linkedin_easy' && candidateReason === 'easy_apply_assisted';
+  if (candidateReason !== 'eligible' && !assistedRedrive) {
     return { outcome: 'refused', applicationId: id, listingId: app.listing_id, reason: candidateReason };
   }
 
@@ -802,7 +814,7 @@ export async function runSingleApplication(id, deps) {
   // ruling on this: accepted as-is, not worth a cross-process lock for a once-a-day operator-triggered
   // action against an already-generous cap.
   const capUsed = await deps.withClientFn((c) => countAutoApprovedTodayFn(c, deps.now, deps.config.adapters.run.timezone));
-  if (capUsed >= deps.config.autoApply.dailyCap) {
+  if (!assistedRedrive && capUsed >= deps.config.autoApply.dailyCap) {
     return { outcome: 'refused', applicationId: id, listingId: app.listing_id, reason: 'daily_cap' };
   }
 
@@ -878,7 +890,7 @@ export async function runSingleApplication(id, deps) {
 
   if (!retriedFailed) {
     try {
-      await deps.withClientFn((c) => approve(c, id, { outputRoot: deps.outputRoot, actor: 'auto' }));
+      await deps.withClientFn((c) => approve(c, id, { outputRoot: deps.outputRoot, actor: assistedRedrive ? 'apply' : 'auto' }));
     } catch (err) {
       deps.log({ evt: 'auto_apply_single_approve_failed', application_id: id, ...errFields(err) });
       return {
@@ -1221,6 +1233,30 @@ async function main() {
         inFlight = null;
         applyResults.push(r);
         log({ evt: 'auto_apply_candidate_done', ...r });
+      }
+    }
+
+    // Assisted LinkedIn Easy Apply (see the module doc comment's "easy apply" phase). Runs even when the
+    // ordinary eligible list is empty, so leftover approved linkedin_easy applications are re-driven.
+    if (!dryRun) {
+      try {
+        await withClient((c) => markStaleAwaiting(c, new Date(), config.autoApply.linkedin?.staleAwaitingHours ?? 24));
+      } catch (err) {
+        log({ evt: 'easy_apply_mark_stale_failed', ...errFields(err) });
+      }
+      summary.phase = 'easy_apply';
+      persist();
+      try {
+        const runnerDeps = { env, logDir: env.JOBSEARCH_LOG_DIR, repoRoot: repoRoot(), withClient, spawn };
+        const easy = await runEasyApplyMorning(selection.easyApplyEligible ?? [], defaultMorningDeps({
+          withClientFn: withClient, resumeRunner: createResumeRunner(runnerDeps), reviewRunner: createReviewRunner(runnerDeps),
+          runApplyWorker, outputRoot, env, log, config, timezone,
+        }));
+        summary.easy_apply = easy;
+        log({ evt: 'auto_apply_easy_apply_done', attempts: easy.results.length, stop_reason: easy.stopReason });
+      } catch (err) {
+        log({ evt: 'auto_apply_easy_apply_failed', ...errFields(err) });
+        summary.easy_apply = { results: [], stopReason: 'error' };
       }
     }
 

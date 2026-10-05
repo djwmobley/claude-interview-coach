@@ -605,7 +605,10 @@ export async function reconcileStale(client, opts = {}) {
   const maxAgeMinutes = opts.maxAgeMinutes ?? 10;
   return withTransaction(client, async (c) => {
     const stale = await c.query(
-      `SELECT id FROM ic_job_applications WHERE state = 'submitting' AND updated_at < now() - ($1 || ' minutes')::interval FOR UPDATE`,
+      // Assisted LinkedIn Easy Apply runs legitimately stay in 'submitting' for up to 15 minutes (the
+      // headless fill session), so a linkedin_easy row is only stale after 20 minutes.
+      `SELECT id FROM ic_job_applications WHERE state = 'submitting' AND updated_at < now() - ($1 || ' minutes')::interval
+         AND NOT (ats_type = 'linkedin_easy' AND updated_at >= now() - interval '20 minutes') FOR UPDATE`,
       [maxAgeMinutes],
     );
     const results = [];

@@ -32,6 +32,10 @@ const ANSWER_BANK_PATH = path.join(packageRoot(), 'data', 'apply-answers.md');
  * below -- this one only ever gates the resume-doc-link reset, never re-click eligibility. */
 export const STALE_REUSE_RESET_MS = 7 * 24 * 60 * 60 * 1000;
 
+/** Hard kill for a dashboard-started linkedin_easy run: the worker's own 15-minute Easy Apply budget plus a
+ * two-minute grace period to unwind and park the result. */
+export const EASY_APPLY_HARD_TIMEOUT_MS = 17 * 60 * 1000;
+
 /**
  * Apply-chain-park fix, spec item 3: how long a re-clicked "Apply" on a listing's own still-drafting
  * application is treated as "the earlier click's chain is presumably still in flight" and refused a
@@ -182,11 +186,22 @@ export async function applyExclusionGate(deps, res, listingId, opts) {
  * @param {import('../server.js').DashboardDeps} deps
  * @param {number} applicationId
  */
-function kickApplyRunner(deps, applicationId) {
+function kickApplyRunner(deps, applicationId, row) {
   if (!deps.applyRunner) return;
-  Promise.resolve(deps.applyRunner.start(applicationId)).catch((err) => {
+  const runner = deps.applyRunner;
+  // Assisted LinkedIn Easy Apply runs up to 15 minutes in the worker (src/apply/worker.js
+  // EASY_APPLY_TIMEOUT_MS); the default 7-minute hard kill would cut the headless fill session off, so a
+  // linkedin_easy application gets EASY_APPLY_HARD_TIMEOUT_MS instead. `row` (the application row the
+  // calling route already has) decides synchronously; without it the row is read first.
+  const startFor = (/** @type {any} */ app) => (app && app.ats_type === 'linkedin_easy' ? runner.start(applicationId, { hardTimeoutMs: EASY_APPLY_HARD_TIMEOUT_MS }) : runner.start(applicationId));
+  const fail = (/** @type {unknown} */ err) => {
     deps.log?.({ evt: 'apply_runner_start_failed', application_id: applicationId, err_message: err instanceof Error ? err.message.slice(0, 300) : String(err).slice(0, 300) });
-  });
+  };
+  if (row) {
+    Promise.resolve().then(() => startFor(row)).catch(fail);
+    return;
+  }
+  Promise.resolve(deps.withClient((c) => getApplication(c, applicationId))).then(startFor).catch(fail);
 }
 
 /**
@@ -231,9 +246,9 @@ async function runApplyNowChain(deps, streamHub, applicationId, listingId) {
     if (!reviewResult.ok || reviewResult.verdict !== 'PASS') return;
 
     await progress('one-click apply: approving');
-    await deps.withClient((c) => approve(c, applicationId, { outputRoot: deps.outputRoot, actor: 'apply' }));
+    const approvedRow = await deps.withClient((c) => approve(c, applicationId, { outputRoot: deps.outputRoot, actor: 'apply' }));
     notify();
-    kickApplyRunner(deps, applicationId);
+    kickApplyRunner(deps, applicationId, approvedRow);
   } catch (err) {
     deps.log?.({
       evt: 'apply_now_chain_failed', application_id: applicationId,
@@ -436,7 +451,7 @@ export function register(router, deps, streamHub) {
     if (!Number.isInteger(id) || id <= 0) throw new JobSearchError('VALIDATION', 'id must be a positive integer');
     const row = await deps.withClient((c) => approve(c, id, { outputRoot: deps.outputRoot, actor: 'dashboard' }));
     streamHub?.notifyChanged('events');
-    kickApplyRunner(deps, id);
+    kickApplyRunner(deps, id, row);
     sendJson(ctx.res, 200, { ok: true, row });
   }, { allowEmptyBody: true });
 
@@ -446,7 +461,7 @@ export function register(router, deps, streamHub) {
     if (!Number.isInteger(id) || id <= 0) throw new JobSearchError('VALIDATION', 'id must be a positive integer');
     const row = await deps.withClient((c) => retry(c, id, { actor: 'dashboard', note: 'retried from dashboard' }));
     streamHub?.notifyChanged('events');
-    kickApplyRunner(deps, id);
+    kickApplyRunner(deps, id, row);
     sendJson(ctx.res, 200, { ok: true, row });
   }, { allowEmptyBody: true });
 
@@ -455,6 +470,12 @@ export function register(router, deps, streamHub) {
   router.register('POST', '/api/applications/:id/applied-by-hand', async (ctx) => {
     const id = Number(ctx.params.id);
     if (!Number.isInteger(id) || id <= 0) throw new JobSearchError('VALIDATION', 'id must be a positive integer');
+    // Assisted Easy Apply: an awaiting_submit card goes through "I submitted" (routes/easy-apply.js), which
+    // checks LinkedIn's Applied badge first; the generic action never bypasses that check.
+    const current = await deps.withClient((c) => getApplication(c, id));
+    if (current.pending_question && current.pending_question.kind === 'awaiting_submit') {
+      return sendJson(ctx.res, 409, { ok: false, code: 'USE_EASY_APPLY_SUBMITTED', message: 'Use "I submitted" on this Easy Apply card; it checks LinkedIn for the Applied badge first.' });
+    }
     const row = await deps.withClient((c) => markAppliedByHand(c, id, { actor: 'dashboard' }));
     streamHub?.notifyChanged('events');
     sendJson(ctx.res, 200, { ok: true, row });
@@ -504,7 +525,7 @@ export function register(router, deps, streamHub) {
       note: `answer saved for "${String(pq.label ?? '').slice(0, 200)}"${save && key ? ' (promoted to learned)' : ' (one-time)'}: ${b.text.slice(0, 500)}`,
     }));
     streamHub?.notifyChanged('events');
-    kickApplyRunner(deps, id);
+    kickApplyRunner(deps, id, row);
     sendJson(ctx.res, 200, { ok: true, row });
   });
 

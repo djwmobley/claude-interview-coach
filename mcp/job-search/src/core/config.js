@@ -456,6 +456,21 @@ export const autoApplySchema = z.object({
   probeFitFloor: z.number().int().min(0).max(100).default(70),
   probeRowCapWithBrowser: z.number().int().positive().default(40),
   probeTimeBudgetMs: z.number().int().positive().default(600000),
+  // Assisted LinkedIn Easy Apply (operator decision 2026-10-04; src/apply/easy-apply-policy.js mirrors these
+  // defaults as EASY_APPLY_DEFAULTS). easyApplyDaily is consumed at attempt start via reserveBudget (and
+  // also charged against LinkedIn's own daily budget); morning runs only inside windowStartLocal-
+  // windowEndLocal America/Chicago with a 20-40 minute jittered gap; dashboard clicks need a 5 minute gap.
+  linkedin: z.object({
+    easyApplyDaily: z.number().int().min(0).max(25).default(5),
+    windowStartLocal: z.string().regex(/^\d{2}:\d{2}$/).default('09:00'),
+    windowEndLocal: z.string().regex(/^\d{2}:\d{2}$/).default('19:00'),
+    morningSpacingMinMinutes: z.number().int().positive().default(20),
+    morningSpacingMaxMinutes: z.number().int().positive().default(40),
+    dashboardSpacingMinutes: z.number().int().positive().default(5),
+    breakerHours: z.number().positive().default(24),
+    runTimeoutMinutes: z.number().int().positive().default(15),
+    staleAwaitingHours: z.number().positive().default(24),
+  }).default({}),
 });
 
 export const companyAliasesSchema = z.object({

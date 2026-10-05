@@ -66,9 +66,11 @@ export function createApplyRunner(deps) {
 
   /**
    * @param {number} applicationId
+   * @param {{ hardTimeoutMs?: number }} [opts] per-run hard timeout override (assisted LinkedIn Easy Apply
+   *   passes routes/applications.js's EASY_APPLY_HARD_TIMEOUT_MS; every other ATS keeps the default)
    * @returns {Promise<{ applicationId: number, pid: number|null }>}
    */
-  async function start(applicationId) {
+  async function start(applicationId, opts = {}) {
     if (!Number.isInteger(applicationId) || applicationId <= 0) {
       throw new JobSearchError('VALIDATION', 'apply-runner.start: applicationId must be a positive integer');
     }
@@ -109,7 +111,7 @@ export function createApplyRunner(deps) {
           if (current === entry) current = null;
         });
       }
-    }, hardTimeoutMs);
+    }, typeof opts.hardTimeoutMs === 'number' && opts.hardTimeoutMs > 0 ? opts.hardTimeoutMs : hardTimeoutMs);
     hardTimer.unref?.();
 
     return new Promise((resolve, reject) => {

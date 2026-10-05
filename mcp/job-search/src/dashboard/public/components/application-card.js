@@ -11,7 +11,7 @@
  * design note on why this reuses the existing plumbing instead of a new SSE event type.
  */
 import { h, hApplicationScreenshot } from '../lib/dom.js';
-import { postJson } from '../lib/api.js';
+import { postJson, getJson } from '../lib/api.js';
 import { handleOutcome } from '../lib/outcome.js';
 import { showToast } from '../lib/toast.js';
 import { chipClassName, applicationStateChip } from './chips.js';
@@ -222,8 +222,109 @@ export function applicationCard(opts) {
     ]);
   }
 
+  /**
+   * Assisted LinkedIn Easy Apply card (pending_question.kind 'awaiting_submit'): the filled form waits on
+   * LinkedIn's Review screen in the scan Chrome. Damian reviews and clicks Submit THERE; nothing here
+   * submits. "I submitted" checks LinkedIn's Applied badge first; when it is not found, a
+   * confirm-anyway button appears. Abandon needs a second click (no native confirm dialogs).
+   * @param {any} pq
+   */
+  function easyApplyPanel(pq) {
+    const ledger = Array.isArray(pq.ledger) ? pq.ledger : [];
+    const statusLine = h('p', { className: 'application-card__hint', text: '' });
+    getJson('/api/easy-apply/status').then((outcome) => {
+      if (outcome.kind === 'ok' && outcome.body && outcome.body.breaker && outcome.body.breaker.tripped) {
+        statusLine.textContent = `Easy Apply is paused until ${String(outcome.body.breaker.until ?? '')} (${String(outcome.body.breaker.reason ?? 'breaker')}).`;
+      }
+    }).catch(() => {});
+    const confirmAnyway = h('button', {
+      className: 'btn btn--small btn--hidden',
+      attrs: { type: 'button' },
+      text: 'I did submit: confirm anyway',
+      on: {
+        click: async () => {
+          const outcome = handleOutcome(await postJson(`/api/applications/${application.id}/easy-apply/submitted`, { confirm_anyway: true }));
+          if (outcome.kind === 'ok') {
+            showToast({ message: 'Marked applied.' });
+            opts.onChanged();
+          }
+        },
+      },
+    });
+    const checkMessage = h('p', { className: 'application-card__note', text: pq.last_check && pq.last_check.message ? String(pq.last_check.message) : '' });
+    if (pq.last_check) confirmAnyway.classList.remove('btn--hidden');
+    const submittedButton = h('button', {
+      className: 'btn btn--primary',
+      attrs: { type: 'button' },
+      text: 'I submitted',
+      on: {
+        click: async () => {
+          const outcome = handleOutcome(await postJson(`/api/applications/${application.id}/easy-apply/submitted`, {}));
+          if (outcome.kind !== 'ok') return;
+          const body = /** @type {any} */ (outcome).body ?? {};
+          if (body.outcome === 'submitted') {
+            showToast({ message: 'LinkedIn shows Applied. Marked applied.' });
+            opts.onChanged();
+            return;
+          }
+          checkMessage.textContent = String(body.message ?? 'LinkedIn does not show Applied yet.');
+          confirmAnyway.classList.remove('btn--hidden');
+          showToast({ message: String(body.message ?? 'LinkedIn does not show Applied yet.'), tone: 'error' });
+        },
+      },
+    });
+    const focusButton = h('button', {
+      className: 'btn btn--small',
+      attrs: { type: 'button' },
+      text: 'Focus tab',
+      on: {
+        click: async () => {
+          const outcome = handleOutcome(await postJson(`/api/applications/${application.id}/focus-tab`, {}));
+          if (outcome.kind === 'ok') showToast({ message: 'Switched the scan Chrome to that LinkedIn tab.' });
+          else opts.onChanged();
+        },
+      },
+    });
+    let abandonArmed = false;
+    const abandonButton = h('button', {
+      className: 'btn btn--small',
+      attrs: { type: 'button' },
+      text: 'Abandon',
+      on: {
+        click: async () => {
+          if (!abandonArmed) {
+            abandonArmed = true;
+            showToast({ message: 'Click Abandon again to withdraw this application and close its tab.' });
+            return;
+          }
+          const outcome = handleOutcome(await postJson(`/api/applications/${application.id}/easy-apply/abandon`, {}));
+          if (outcome.kind === 'ok') {
+            showToast({ message: 'Easy Apply abandoned.' });
+            opts.onChanged();
+          }
+        },
+      },
+    });
+    return h('div', { className: 'credential-prompt' }, [
+      h('h4', { text: 'LinkedIn Easy Apply: ready for your review' }),
+      h('p', { className: 'application-card__note', text: pq.label ? String(pq.label) : '' }),
+      pq.stale ? h('p', { className: 'application-card__note', text: 'Waiting more than 24 hours. It stays open until you act on it.' }) : null,
+      statusLine,
+      h('h4', { text: 'Filled answers' }),
+      ledger.length === 0
+        ? h('p', { className: 'application-card__hint', text: 'No answers recorded.' })
+        : h('ul', { className: 'application-card__ledger' }, ledger.map((/** @type {any} */ e) => h('li', {
+          text: `${String(e.question ?? '')} = ${String(e.value ?? '')}${e.bank_key ? ` (bank: ${String(e.bank_key)})` : ''}`,
+        }))),
+      checkMessage,
+      h('div', { className: 'application-card__actions' }, [focusButton, submittedButton, confirmAnyway, abandonButton]),
+    ]);
+  }
+
   let needsHumanPanel = null;
-  if (application.state === 'needs_human' && application.pending_question) {
+  if (application.state === 'needs_human' && application.pending_question && application.pending_question.kind === 'awaiting_submit') {
+    needsHumanPanel = h('div', { className: 'application-card__needs-human' }, [screenshotEl, easyApplyPanel(application.pending_question)]);
+  } else if (application.state === 'needs_human' && application.pending_question) {
     const pq = application.pending_question;
     /** @type {any} */
     let kindPanel;

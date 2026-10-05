@@ -500,3 +500,8 @@ textarea.notes-textarea { min-height: 100px; }
 }
 
 .layout-narrow .app-shell { display: none; }
+
+/* Assisted LinkedIn Easy Apply card (application-card.js easyApplyPanel) */
+.btn--hidden { display: none; }
+.application-card__ledger { margin: 4px 0 8px; padding-left: 18px; }
+.application-card__actions { display: flex; flex-wrap: wrap; gap: 8px; margin-top: 8px; }

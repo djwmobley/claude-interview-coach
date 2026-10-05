@@ -134,6 +134,7 @@ describe('classifyCandidate: one reason per test, closed enum', () => {
       classifyCandidate(row({ hasActiveApplication: true }), CTX),
       classifyCandidate(row({ description: null }), CTX),
       classifyCandidate(row({ applyEasyOnly: true, applyUrl: null, applyAts: null }), CTX),
+      classifyCandidate(row({ applyEasyOnly: true, applyUrl: null, applyAts: null, source: 'linkedin' }), CTX),
       classifyCandidate(row({ applyUrl: null, applyAts: null }), CTX),
       classifyCandidate(row({ applyAts: 'workday', applyUrl: 'https://acme.wd1.myworkdayjobs.com/en-US/External/job/x' }), CTX),
       classifyCandidate(row({ applyConfidence: 'inferred' }), CTX),

@@ -48,6 +48,18 @@ import { createLogger, dailyLogPath, pruneLogs } from '../src/core/logger.js';
 import { errFields } from '../src/core/errors.js';
 import { runScan } from '../src/core/scan-run.js';
 import { probeDevToolsProtocol, selfHealingLaunch } from '../src/core/chrome-launch.js';
+import { connectDedicated } from '../src/core/db.js';
+import { demoteAbandonedTabs } from '../src/core/easy-apply-tabs.js';
+
+/** @param {string} reason */
+async function defaultDemoteAwaiting(reason) {
+  const c = await connectDedicated();
+  try {
+    return await demoteAbandonedTabs(c, { aliveTargetIds: null, reason });
+  } finally {
+    await c.end().catch(() => {});
+  }
+}
 
 /** Closed list of valid --trigger values; default 'cli'. Anything else is a visible error (see main()). */
 export const SCAN_TRIGGERS = Object.freeze(['cli', 'dashboard']);
@@ -170,7 +182,10 @@ export async function cdpReachable(cdpUrl) {
  * attempt a launch, not launch failures to retry through.
  * @param {import('../src/core/config.js').Env} env
  * @param {(f: Record<string, string|number|boolean|null>) => void} log
- * @param {{ probe?: typeof probeDevToolsProtocol, listProcesses?: Function, killTree?: Function, spawn?: typeof spawn, sleep?: (ms: number) => Promise<void> }} [deps]
+ * @param {{ probe?: typeof probeDevToolsProtocol, listProcesses?: Function, killTree?: Function, spawn?: typeof spawn, sleep?: (ms: number) => Promise<void>, demoteAwaiting?: (reason: string) => Promise<number[]> }} [deps]
+ *   demoteAwaiting (assisted Easy Apply, spec B5): called after any relaunch -- a killed or freshly started scan
+ *   Chrome has lost every tab, so every awaiting_submit application is demoted to needs_human kind
+ *   'abandoned_tab'. Never fatal.
  */
 export async function launchChrome(env, log, deps = {}) {
   const u = new URL(env.SCAN_CDP_URL);
@@ -206,6 +221,14 @@ export async function launchChrome(env, log, deps = {}) {
     { cdpUrl: env.SCAN_CDP_URL, profileDir: env.SCAN_PROFILE_DIR },
     { probe: deps.probe ?? probeDevToolsProtocol, spawnChrome: spawnChromeOnce, listProcesses: deps.listProcesses, killTree: deps.killTree, log, sleep: deps.sleep },
   );
+  if (result.launched || (Array.isArray(result.killedPids) && result.killedPids.length > 0)) {
+    try {
+      const demoted = await (deps.demoteAwaiting ?? defaultDemoteAwaiting)('scan_chrome_restarted');
+      if (demoted.length > 0) log({ evt: 'easy_apply_awaiting_demoted_on_relaunch', count: demoted.length });
+    } catch (err) {
+      log({ evt: 'easy_apply_awaiting_demote_failed', ...errFields(err) });
+    }
+  }
   return { port, ...result };
 }
 
