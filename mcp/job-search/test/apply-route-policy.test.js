@@ -90,6 +90,7 @@ function makeFakePage() {
     _targetId: null,
     on(evt, cb) { (listeners[evt] ??= []).push(cb); },
     async route(pattern, handler) { routes.push({ pattern, handler }); },
+    async unroute() { routes.length = 0; },
     async close() {
       page._closed = true;
       for (const cb of listeners.close ?? []) cb();
@@ -125,9 +126,13 @@ function fakeChromium() {
 
   const context = {
     pages() { return openedPages.filter((p) => !p._closed); },
+    // Real Playwright fires the context 'page' event for pages context.newPage() creates, before newPage()
+    // resolves; this fake does the same so session.js's own 'page' handler races attachPage exactly as it
+    // does live.
     async newPage() {
       const page = makeFakePage();
       openedPages.push(page);
+      for (const cb of pageListeners) cb(page);
       return page;
     },
     on(evt, cb) { if (evt === 'page') pageListeners.push(cb); },
@@ -245,6 +250,34 @@ describe('session.js: apply-mode route policy end to end (fakes, no real Chrome)
 
     const outcome = await popup.simulateRequest({ method: 'POST', resourceType: 'xhr', url: 'https://boards.greenhouse.io/acme/submit' });
     assert.equal(outcome.allow, false, 'an unresolvable opener must never be inferred as apply-scoped');
+    await session.closeAll();
+  });
+});
+
+describe('session.js: attachPage vs the context page event (PR #74 approver fix)', () => {
+  /** @param {number} ms */
+  const slowTabs = (ms) => ({
+    async exemptTargetIds() { await new Promise((r) => { setTimeout(r, ms); }); return new Set(); },
+    async demoteMissing() { return []; },
+  });
+  test('an apply page from attachPage keeps exactly one route handler and its apply policy after the page event handler finishes', async () => {
+    const chromium = fakeChromium();
+    const session = await connectSession({ cdpUrl: 'x', chromium, awaitingTabs: slowTabs(30) });
+    const page = /** @type {any} */ (await session.attachPage({ mode: 'apply', tenantHost: 'boards.greenhouse.io', atsHosts: [], uploadHosts: [] }));
+    await new Promise((r) => { setTimeout(r, 120); });
+    assert.equal(page._routes.length, 1, 'exactly one route handler');
+    assert.equal(session.policyFor(page)?.mode, 'apply');
+    const allowed = await page.simulateRequest({ method: 'POST', resourceType: 'xhr', url: 'https://boards.greenhouse.io/acme/submit' });
+    assert.equal(allowed.allow, true, 'tenant-host POST must be allowed, never post_denied by a late scan re-arm');
+    await session.closeAll();
+  });
+  test('a scan page from attachPage also keeps exactly one route handler', async () => {
+    const chromium = fakeChromium();
+    const session = await connectSession({ cdpUrl: 'x', chromium, awaitingTabs: slowTabs(30) });
+    const page = /** @type {any} */ (await session.attachPage({ mode: 'scan' }));
+    await new Promise((r) => { setTimeout(r, 120); });
+    assert.equal(page._routes.length, 1);
+    assert.equal(session.policyFor(page)?.mode, 'scan');
     await session.closeAll();
   });
 });

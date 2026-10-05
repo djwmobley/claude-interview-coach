@@ -322,14 +322,42 @@ export async function connectSession(opts = {}) {
    * @param {import('playwright-core').Page} page
    * @param {PagePolicy} policy
    */
-  async function arm(page, policy) {
+  /** Pages whose 'close' listener is already installed (arm() may run twice for one page). */
+  const closeHooked = new WeakSet();
+
+  /**
+   * Arm a page with `policy`. Race-safe (PR #74 approver fix): real Playwright fires the context 'page'
+   * event for pages attachPage itself creates, so the event handler below and attachPage can both reach
+   * here for the same page. Rules:
+   *   - without opts.override, a page that is already tracked is left alone (whoever claimed it first wins);
+   *   - with opts.override (attachPage only), this policy replaces any earlier one: the old route is
+   *     removed before the new one is registered, so exactly one route handler remains;
+   *   - after every await, a call whose policy is no longer the page's current policy stops without
+   *     registering anything, so a superseded scan arm can never land after an apply arm.
+   * @param {import('playwright-core').Page} page
+   * @param {PagePolicy} policy
+   * @param {{ override?: boolean }} [opts]
+   */
+  async function arm(page, policy, opts = {}) {
+    const already = pages.has(page);
+    if (already && !opts.override) return;
     pages.set(page, policy);
     const id = await lookupTargetId(page);
+    if (pages.get(page) !== policy) return;
     if (id) targetIds.set(page, id);
-    page.on('close', () => {
-      pages.delete(page);
-      targetIds.delete(page);
-    });
+    if (!closeHooked.has(page)) {
+      closeHooked.add(page);
+      page.on('close', () => {
+        pages.delete(page);
+        targetIds.delete(page);
+      });
+    }
+    try {
+      await page.unroute('**/*');
+    } catch {
+      /* nothing registered yet, or the page is gone */
+    }
+    if (pages.get(page) !== policy) return;
     await page.route('**/*', (route) => {
       const r = route.request();
       const d = routeDecision({ method: r.method(), resourceType: r.resourceType(), url: r.url() }, policy);
@@ -375,6 +403,9 @@ export async function connectSession(opts = {}) {
         ex = null;
       }
       if (id && ex && ex.has(id)) return;
+      // Re-check AFTER every await above: attachPage may have claimed this page (with its own policy) while
+      // this handler was waiting on opener(), the target id, or the exempt set. arm() re-checks again.
+      if (pages.has(p)) return;
       await arm(p, inherited);
     })().catch(() => {});
   });
@@ -404,7 +435,8 @@ export async function connectSession(opts = {}) {
       if (o.signal && o.signal.aborted) throw new JobSearchError('INTERNAL', 'run aborted');
       const policy = buildPolicy(o);
       const page = await context.newPage();
-      await arm(page, policy);
+      // override: the context 'page' handler may already have armed this page with the scan policy.
+      await arm(page, policy, { override: true });
       if (o.signal) o.signal.addEventListener('abort', () => { page.close().catch(() => {}); }, { once: true });
       log.info({ evt: 'page_attached', mode: policy.mode, open_pages: pages.size });
       return page;

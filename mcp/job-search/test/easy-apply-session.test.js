@@ -37,7 +37,8 @@ function fakeChromium(o = {}) {
   const closedTargetIds = /** @type {string[]} */ ([]);
   const context = {
     pages() { return pages.filter((p) => !p._closed); },
-    async newPage() { const p = makePage(); pages.push(p); return p; },
+    // Like real Playwright, newPage() fires the context 'page' event before it resolves.
+    async newPage() { const p = makePage(); pages.push(p); for (const cb of listeners) cb(p); return p; },
     on(/** @type {string} */ evt, /** @type {any} */ cb) { if (evt === 'page') listeners.push(cb); },
     fire(/** @type {any} */ p) { pages.push(p); for (const cb of listeners) cb(p); },
     async newCDPSession(/** @type {any} */ page) {
@@ -148,9 +149,12 @@ describe('session.js awaiting_submit tab exemption', () => {
     const f = fakeChromium();
     const s = await connectSession({ cdpUrl: 'x', chromium: f.chromium, awaitingTabs: tabs(new Set()) });
     const p = /** @type {any} */ (await s.attachPage({ mode: 'scan' }));
+    await new Promise((r) => setTimeout(r, 20));
     assert.equal(p._routes.length, 1);
+    const unroutedBefore = p._unrouted;
     await s.detachLeaveOpen();
-    assert.equal(p._unrouted, 1);
+    assert.equal(p._unrouted, unroutedBefore + 1);
+    assert.equal(p._routes.length, 0);
     assert.equal(p._closed, false);
     assert.equal(s.openPages(), 0);
     await s.closeAll();
