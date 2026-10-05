@@ -428,3 +428,19 @@ export function approvalRowApproveState(row, state = {}) {
   }
   return { visible: true, disabled: false, reason: null };
 }
+
+/**
+ * Whether an application card or Review row shows the Withdraw button: drafting, failed, and parked
+ * needs_human rows only. An awaiting_submit Easy Apply card has its own Abandon (which also closes the
+ * LinkedIn tab), so it never shows Withdraw. Every other or unknown state hides it; the server
+ * (core/applications.js classifyWithdraw) is the authority either way. Accepts either a full application
+ * row (pending_question) or a GET /api/applications list row (pending_kind).
+ * @param {any} row
+ */
+export function withdrawButtonVisible(row) {
+  if (!row || typeof row !== 'object') return false;
+  if (row.state === 'drafting' || row.state === 'failed') return true;
+  if (row.state !== 'needs_human') return false;
+  const kind = row.pending_kind ?? (row.pending_question && typeof row.pending_question === 'object' ? row.pending_question.kind : null);
+  return kind !== 'awaiting_submit';
+}

@@ -16,6 +16,8 @@ import { handleOutcome } from '../lib/outcome.js';
 import { showToast } from '../lib/toast.js';
 import { chipClassName, applicationStateChip } from './chips.js';
 import { credentialPrompt } from './credential-prompt.js';
+import { withdrawControl } from './withdraw-control.js';
+import { withdrawButtonVisible } from '../lib/format.js';
 
 /** Apply exclusion gate (src/apply/exclusions.js): branches that are never overridable from the dashboard. */
 const HARD_EXCLUSION_BRANCHES = new Set(['blocked_company', 'already_applied_listing', 'already_applied_history']);
@@ -380,5 +382,7 @@ export function applicationCard(opts) {
     findingsPanel,
     needsHumanPanel,
     failedPanel,
+    // Withdraw (drafting, failed, parked needs_human; never an awaiting_submit card, which has Abandon).
+    withdrawButtonVisible(application) ? withdrawControl(application.id, opts.onChanged) : null,
   ]);
 }

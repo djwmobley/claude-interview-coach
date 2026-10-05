@@ -2,7 +2,7 @@
 /** Pure formatting function tests (pr3-spec-decisions.md section 12 item 2). No DOM required. */
 import { test, describe } from 'node:test';
 import assert from 'node:assert/strict';
-import { relativeTime, ageDays, agingBucket, scoreBucket, fitBucket, fitDisplayState, applyButtonState, STALE_ACTIONABLE_MS, DETAIL_MIN_CHARS, shortDate, shortDateTime, salaryRange, formatMoney, pluralize, truncate, sourceLabel, formatPercent, normalizeAgendaTime, agendaTimeLabel, approvalRowFindingsState, approvalRowApproveState } from '../src/dashboard/public/lib/format.js';
+import { relativeTime, ageDays, agingBucket, scoreBucket, fitBucket, fitDisplayState, applyButtonState, STALE_ACTIONABLE_MS, DETAIL_MIN_CHARS, shortDate, shortDateTime, salaryRange, formatMoney, pluralize, truncate, sourceLabel, formatPercent, normalizeAgendaTime, agendaTimeLabel, approvalRowFindingsState, approvalRowApproveState, withdrawButtonVisible } from '../src/dashboard/public/lib/format.js';
 import { STALE_ACTIONABLE_MS as SERVER_STALE_ACTIONABLE_MS } from '../src/dashboard/routes/applications.js';
 import { DETAIL_MIN_CHARS as SERVER_DETAIL_MIN_CHARS } from '../src/core/normalize.js';
 
@@ -510,5 +510,20 @@ describe('approvalRowApproveState (review-approvals-list PR spec A3): Approve bu
   test('eligible row (resume linked, not blocked, no active sibling, not in flight): visible and enabled', () => {
     const r = approvalRowApproveState({ resume_doc_id: 1, blocked: false, blocked_reason: null, sibling_active: false });
     assert.deepEqual(r, { visible: true, disabled: false, reason: null });
+  });
+});
+
+describe('withdrawButtonVisible', () => {
+  test('shown on drafting, failed, and parked needs_human rows; hidden on awaiting_submit and every other state', () => {
+    assert.equal(withdrawButtonVisible({ state: 'drafting' }), true);
+    assert.equal(withdrawButtonVisible({ state: 'failed' }), true);
+    assert.equal(withdrawButtonVisible({ state: 'needs_human', pending_kind: 'question' }), true);
+    assert.equal(withdrawButtonVisible({ state: 'needs_human', pending_question: { kind: 'credential' } }), true);
+    assert.equal(withdrawButtonVisible({ state: 'needs_human', pending_kind: 'awaiting_submit' }), false);
+    assert.equal(withdrawButtonVisible({ state: 'needs_human', pending_question: { kind: 'awaiting_submit' } }), false);
+    for (const s of ['docs_ready', 'approved', 'submitting', 'submitted', 'confirmed', 'withdrawn', 'archived', undefined]) {
+      assert.equal(withdrawButtonVisible({ state: s }), false, String(s));
+    }
+    assert.equal(withdrawButtonVisible(null), false);
   });
 });

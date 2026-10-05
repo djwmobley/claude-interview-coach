@@ -88,6 +88,15 @@ describe('classify(): section 4 table, one case per named branch', () => {
   });
 });
 
+describe('classify(): withdraw refusals', () => {
+  test('409 WITHDRAW_REFUSED maps to withdraw_refused with the reason and server message', () => {
+    const r = /** @type {any} */ (classify(409, { ok: false, code: 'WITHDRAW_REFUSED', reason: 'submission_in_flight', message: 'm' }));
+    assert.equal(r.kind, 'withdraw_refused');
+    assert.equal(r.reason, 'submission_in_flight');
+    assert.equal(r.message, 'm');
+  });
+});
+
 describe('classify(): assisted Easy Apply conflicts', () => {
   test('TAB_GONE, NOT_AWAITING_SUBMIT, and USE_EASY_APPLY_SUBMITTED map to easy_apply_conflict with the server message', () => {
     for (const code of ['TAB_GONE', 'NOT_AWAITING_SUBMIT', 'USE_EASY_APPLY_SUBMITTED']) {

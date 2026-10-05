@@ -313,6 +313,96 @@ export async function transition(client, id, toState, opts = {}) {
 }
 
 /**
+ * Closed set of reasons withdrawApplication() refuses with. Every refusal names exactly one of these.
+ *   submission_in_flight  state is submitting: a worker is driving a form right now
+ *   lease_held            an open (unclosed, unexpired) Easy Apply lease exists for the application
+ *   apply_running         the dashboard's apply runner child process is running this application
+ *   chain_running         a one-click apply chain (resume -> review -> approve -> apply) is in flight
+ *   awaiting_submit       a filled LinkedIn Easy Apply form is open in a tab; Abandon closes the tab too
+ *   terminal              confirmed: the employer acknowledged it; nothing to withdraw in the tracker
+ *   unknown_state         a state this module does not know (default branch)
+ */
+export const WITHDRAW_REFUSAL_REASONS = Object.freeze([
+  'submission_in_flight', 'lease_held', 'apply_running', 'chain_running', 'awaiting_submit', 'terminal', 'unknown_state',
+]);
+
+/** @type {Readonly<Record<string, string>>} */
+const WITHDRAW_REFUSAL_MESSAGES = Object.freeze({
+  submission_in_flight: 'A submission is in progress for this application. Wait for it to finish, then withdraw.',
+  lease_held: 'An Easy Apply session still holds this application. Wait for it to finish, then withdraw.',
+  apply_running: 'The apply runner is working on this application right now. Wait for it to finish, then withdraw.',
+  chain_running: 'Apply now is still drafting this application. Wait for it to finish, then withdraw.',
+  awaiting_submit: 'This Easy Apply form is open in a LinkedIn tab. Use Abandon on its card, which also closes the tab.',
+  terminal: 'This application is confirmed; it cannot be withdrawn from the tracker.',
+  unknown_state: 'This application is in a state the dashboard does not recognize, so it was not withdrawn.',
+});
+
+/**
+ * Total classification of a withdraw request (dashboard Withdraw button). Every input maps to exactly one
+ * branch; anything unrecognized falls to the refusing default. Order matters: a held lease or a live apply
+ * run refuses before the state is even read (the state alone cannot prove no worker is attached), except
+ * that an already-withdrawn row is always an idempotent noop.
+ * @param {{ state?: unknown, pending_question?: any }} row
+ * @param {{ leaseHeld?: boolean, applyRunning?: boolean, chainRunning?: boolean }} [ctx]
+ * @returns {{ action: 'withdraw' } | { action: 'noop' } | { action: 'refuse', reason: string, message: string }}
+ */
+export function classifyWithdraw(row, ctx = {}) {
+  /** @param {string} reason */
+  const refuse = (reason) => ({ action: /** @type {const} */ ('refuse'), reason, message: WITHDRAW_REFUSAL_MESSAGES[reason] });
+  const state = row && typeof row.state === 'string' ? row.state : null;
+  if (state === 'withdrawn') return { action: 'noop' };
+  if (ctx.leaseHeld) return refuse('lease_held');
+  if (ctx.applyRunning) return refuse('apply_running');
+  switch (state) {
+    case 'drafting':
+      return ctx.chainRunning ? refuse('chain_running') : { action: 'withdraw' };
+    case 'docs_ready':
+    case 'approved':
+    case 'submitted':
+    case 'failed':
+      return { action: 'withdraw' };
+    case 'needs_human': {
+      const pq = row.pending_question;
+      return pq && typeof pq === 'object' && pq.kind === 'awaiting_submit' ? refuse('awaiting_submit') : { action: 'withdraw' };
+    }
+    case 'submitting':
+      return refuse('submission_in_flight');
+    case 'confirmed':
+      return refuse('terminal');
+    default:
+      return refuse('unknown_state');
+  }
+}
+
+/**
+ * Withdraw an application from the dashboard. One transaction: locks the row, checks for an open Easy
+ * Apply lease, classifies (classifyWithdraw above), and only on 'withdraw' moves the row through
+ * transitionUnwrapped (the TRANSITIONS check and exactly one 'state' event with actor and note), guarded by
+ * expectedFromState so a concurrent move between the read and the write is rejected, never overwritten.
+ * The in-process signals (apply runner, Apply now chain) are passed in by the route because only the
+ * dashboard process knows them.
+ * @param {import('pg').ClientBase} client
+ * @param {number} id
+ * @param {{ actor?: string, note?: string|null, applyRunning?: boolean, chainRunning?: boolean }} [opts]
+ * @returns {Promise<{ outcome: 'withdrawn'|'already_withdrawn', row: any } | { outcome: 'refused', reason: string, message: string, state: unknown }>}
+ */
+export async function withdrawApplication(client, id, opts = {}) {
+  const actor = opts.actor ?? 'dashboard';
+  const note = typeof opts.note === 'string' && opts.note.trim() ? opts.note.trim() : 'withdrawn from the dashboard';
+  return withTransaction(client, async (c) => {
+    const cur = await c.query(`SELECT ${APPLICATION_COLS} FROM ic_job_applications WHERE id = $1 FOR UPDATE`, [id]);
+    if (cur.rowCount === 0) throw new JobSearchError('NOT_FOUND', `application ${id} not found`);
+    const row = cur.rows[0];
+    const lease = await c.query('SELECT 1 FROM ic_easy_apply_leases WHERE application_id = $1 AND closed_at IS NULL AND expires_at > now() LIMIT 1', [id]);
+    const verdict = classifyWithdraw(row, { leaseHeld: (lease.rowCount ?? 0) > 0, applyRunning: opts.applyRunning, chainRunning: opts.chainRunning });
+    if (verdict.action === 'noop') return { outcome: /** @type {const} */ ('already_withdrawn'), row };
+    if (verdict.action === 'refuse') return { outcome: /** @type {const} */ ('refused'), reason: verdict.reason, message: verdict.message, state: row.state };
+    const updated = await transitionUnwrapped(c, id, 'withdrawn', { actor, note }, { expectedFromState: row.state, helperName: 'withdrawApplication' });
+    return { outcome: /** @type {const} */ ('withdrawn'), row: updated };
+  });
+}
+
+/**
  * needs_human -> approved ("Resume" in the dashboard credential/question prompt), incrementing `attempt`.
  * Rejects with VALIDATION if the application is not currently in needs_human (rather than silently
  * falling through to TRANSITIONS' own less specific rejection).
