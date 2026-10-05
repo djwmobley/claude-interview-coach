@@ -14,6 +14,10 @@
  *                                                       { confirm_anyway: true } is Damian's explicit
  *                                                       override and marks it submitted.
  *   POST /api/applications/:id/easy-apply/abandon       withdraws the application and closes its tab
+ *
+ * Assisted-apply rename (spec v2 A14): each /easy-apply/ route is also registered at the same path with
+ * /assisted-apply/ (same handler). The /easy-apply/ paths stay as aliases for one release; the dashboard
+ * client still calls them.
  */
 import { JobSearchError } from '../../core/errors.js';
 import { getApplication, markAppliedByHand, transition, recordApplicationEvent } from '../../core/applications.js';
@@ -59,8 +63,17 @@ async function loadAwaiting(deps, id) {
  */
 export function register(router, deps, streamHub) {
   const notify = () => streamHub?.notifyChanged('events');
+  /**
+   * Register a route and, when its path has an /easy-apply/ segment, the same handler at /assisted-apply/.
+   * @param {string} method @param {string} routePath @param {any} handler
+   */
+  const registerWithAlias = (method, routePath, handler) => {
+    router.register(method, routePath, handler);
+    const renamed = routePath.replace('/easy-apply/', '/assisted-apply/');
+    if (renamed !== routePath) router.register(method, renamed, handler);
+  };
 
-  router.register('GET', '/api/easy-apply/status', async (ctx) => {
+  registerWithAlias('GET', '/api/easy-apply/status', async (ctx) => {
     const out = await deps.withClient(async (/** @type {any} */ c) => ({ breaker: await breakerStatus(c), awaiting: await listAwaitingTargets(c) }));
     sendJson(ctx.res, 200, {
       ok: true,
@@ -89,7 +102,7 @@ export function register(router, deps, streamHub) {
     sendJson(ctx.res, 200, { ok: true });
   }, { allowEmptyBody: true });
 
-  router.register('POST', '/api/applications/:id/easy-apply/submitted', async (ctx) => {
+  registerWithAlias('POST', '/api/applications/:id/easy-apply/submitted', async (ctx) => {
     const id = parseId(ctx.params.id);
     const body = /** @type {any} */ (ctx.body) ?? {};
     const found = await loadAwaiting(deps, id);
@@ -140,7 +153,7 @@ export function register(router, deps, streamHub) {
     sendJson(ctx.res, 200, { ok: false, outcome: 'badge_not_found', badge: badge.state, message, confirm_anyway_available: true });
   }, { allowEmptyBody: true });
 
-  router.register('POST', '/api/applications/:id/easy-apply/abandon', async (ctx) => {
+  registerWithAlias('POST', '/api/applications/:id/easy-apply/abandon', async (ctx) => {
     const id = parseId(ctx.params.id);
     const found = await loadAwaiting(deps, id);
     if (!found) return sendJson(ctx.res, 409, { ok: false, code: 'NOT_AWAITING_SUBMIT', message: `application ${id} is not waiting on an Easy Apply Review tab` });

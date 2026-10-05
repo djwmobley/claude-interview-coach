@@ -1,0 +1,692 @@
+{
+  "normalizeName": [
+    "review your application",
+    "next",
+    "next",
+    "continue",
+    "next",
+    "",
+    "",
+    ""
+  ],
+  "classifyAdvanceButton": {
+    "plain next": {
+      "ok": true,
+      "reason": null,
+      "name": "next",
+      "kind": "next"
+    },
+    "continue": {
+      "ok": true,
+      "reason": null,
+      "name": "continue",
+      "kind": "next"
+    },
+    "continue to next step aria": {
+      "ok": true,
+      "reason": null,
+      "name": "continue to next step",
+      "kind": "next"
+    },
+    "review": {
+      "ok": true,
+      "reason": null,
+      "name": "review your application",
+      "kind": "review"
+    },
+    "review plain": {
+      "ok": true,
+      "reason": null,
+      "name": "review",
+      "kind": "review"
+    },
+    "next with arrow": {
+      "ok": true,
+      "reason": null,
+      "name": "next",
+      "kind": "next"
+    },
+    "next nbsp and zero width": {
+      "ok": true,
+      "reason": null,
+      "name": "next",
+      "kind": "next"
+    },
+    "anchor": {
+      "ok": false,
+      "reason": "not_button",
+      "name": "",
+      "kind": null
+    },
+    "input": {
+      "ok": false,
+      "reason": "not_button",
+      "name": "",
+      "kind": null
+    },
+    "outside dialog": {
+      "ok": false,
+      "reason": "outside_dialog",
+      "name": "",
+      "kind": null
+    },
+    "disabled": {
+      "ok": false,
+      "reason": "disabled",
+      "name": "",
+      "kind": null
+    },
+    "submit application": {
+      "ok": false,
+      "reason": "denied_term",
+      "name": "submit application",
+      "kind": null
+    },
+    "hidden span submit": {
+      "ok": false,
+      "reason": "denied_term",
+      "name": "next submit application",
+      "kind": null
+    },
+    "aria submit text next": {
+      "ok": false,
+      "reason": "denied_term",
+      "name": "submit application",
+      "kind": null
+    },
+    "aria next text send": {
+      "ok": false,
+      "reason": "denied_term",
+      "name": "send",
+      "kind": null
+    },
+    "data value submit": {
+      "ok": false,
+      "reason": "denied_term",
+      "name": "submit_unify",
+      "kind": null
+    },
+    "data name submit": {
+      "ok": false,
+      "reason": "denied_term",
+      "name": "data-live-test-easy-apply-submit-button",
+      "kind": null
+    },
+    "data send": {
+      "ok": false,
+      "reason": "denied_term",
+      "name": "send",
+      "kind": null
+    },
+    "data done": {
+      "ok": false,
+      "reason": "denied_term",
+      "name": "done",
+      "kind": null
+    },
+    "data easy-apply only": {
+      "ok": true,
+      "reason": null,
+      "name": "next",
+      "kind": "next"
+    },
+    "apply word": {
+      "ok": false,
+      "reason": "denied_term",
+      "name": "apply",
+      "kind": null
+    },
+    "apply now": {
+      "ok": false,
+      "reason": "denied_term",
+      "name": "apply now",
+      "kind": null
+    },
+    "easy apply": {
+      "ok": false,
+      "reason": "denied_term",
+      "name": "easy apply",
+      "kind": null
+    },
+    "applying word (no word boundary)": {
+      "ok": false,
+      "reason": "unknown_button",
+      "name": "applying",
+      "kind": null
+    },
+    "done": {
+      "ok": false,
+      "reason": "denied_term",
+      "name": "done",
+      "kind": null
+    },
+    "title send": {
+      "ok": false,
+      "reason": "denied_term",
+      "name": "send now",
+      "kind": null
+    },
+    "labelledby submit": {
+      "ok": false,
+      "reason": "denied_term",
+      "name": "submit",
+      "kind": null
+    },
+    "value submit": {
+      "ok": false,
+      "reason": "denied_term",
+      "name": "submit",
+      "kind": null
+    },
+    "fullwidth submit (NFKC)": {
+      "ok": false,
+      "reason": "denied_term",
+      "name": "submit",
+      "kind": null
+    },
+    "zero width inside submit": {
+      "ok": false,
+      "reason": "denied_term",
+      "name": "submit",
+      "kind": null
+    },
+    "empty": {
+      "ok": false,
+      "reason": "unknown_button",
+      "name": "",
+      "kind": null
+    },
+    "whitespace only": {
+      "ok": false,
+      "reason": "unknown_button",
+      "name": "",
+      "kind": null
+    },
+    "dismiss": {
+      "ok": false,
+      "reason": "unknown_button",
+      "name": "dismiss",
+      "kind": null
+    },
+    "next vs finish": {
+      "ok": false,
+      "reason": "unknown_button",
+      "name": "finish",
+      "kind": null
+    },
+    "review aria next text": {
+      "ok": false,
+      "reason": "unknown_button",
+      "name": "next",
+      "kind": null
+    },
+    "next step": {
+      "ok": false,
+      "reason": "unknown_button",
+      "name": "next step",
+      "kind": null
+    },
+    "localized postular with marker": {
+      "ok": false,
+      "reason": "not_button",
+      "name": "",
+      "kind": null
+    },
+    "non-array data attrs": {
+      "ok": true,
+      "reason": null,
+      "name": "next",
+      "kind": "next"
+    },
+    "malformed data pair": {
+      "ok": true,
+      "reason": null,
+      "name": "next",
+      "kind": "next"
+    },
+    "null": {
+      "ok": false,
+      "reason": "not_button",
+      "name": "",
+      "kind": null
+    },
+    "string": {
+      "ok": false,
+      "reason": "not_button",
+      "name": "",
+      "kind": null
+    }
+  },
+  "isSubmitMarked": {
+    "plain next": false,
+    "continue": false,
+    "continue to next step aria": false,
+    "review": false,
+    "review plain": false,
+    "next with arrow": false,
+    "next nbsp and zero width": false,
+    "anchor": false,
+    "input": false,
+    "outside dialog": false,
+    "disabled": false,
+    "submit application": true,
+    "hidden span submit": true,
+    "aria submit text next": true,
+    "aria next text send": true,
+    "data value submit": true,
+    "data name submit": true,
+    "data send": true,
+    "data done": true,
+    "data easy-apply only": false,
+    "apply word": true,
+    "apply now": true,
+    "easy apply": true,
+    "applying word (no word boundary)": false,
+    "done": true,
+    "title send": true,
+    "labelledby submit": true,
+    "value submit": true,
+    "fullwidth submit (NFKC)": true,
+    "zero width inside submit": true,
+    "empty": false,
+    "whitespace only": false,
+    "dismiss": false,
+    "next vs finish": false,
+    "review aria next text": false,
+    "next step": false,
+    "localized postular with marker": true,
+    "non-array data attrs": false,
+    "malformed data pair": false,
+    "null": false,
+    "string": false
+  },
+  "checkNotLastStep": {
+    "next 50": {
+      "ok": true,
+      "reason": "progress_below_100"
+    },
+    "next 0": {
+      "ok": true,
+      "reason": "progress_below_100"
+    },
+    "next 99": {
+      "ok": true,
+      "reason": "progress_below_100"
+    },
+    "next 100": {
+      "ok": false,
+      "reason": "uncertain_last_step"
+    },
+    "next agree within 1": {
+      "ok": true,
+      "reason": "progress_below_100"
+    },
+    "next disagree": {
+      "ok": false,
+      "reason": "uncertain_last_step"
+    },
+    "next negative": {
+      "ok": false,
+      "reason": "uncertain_last_step"
+    },
+    "next nan": {
+      "ok": false,
+      "reason": "uncertain_last_step"
+    },
+    "next string value": {
+      "ok": false,
+      "reason": "uncertain_last_step"
+    },
+    "next empty": {
+      "ok": false,
+      "reason": "uncertain_last_step"
+    },
+    "next submit visible": {
+      "ok": false,
+      "reason": "uncertain_last_step"
+    },
+    "review": {
+      "ok": true,
+      "reason": "review_button"
+    },
+    "review submit visible": {
+      "ok": false,
+      "reason": "uncertain_last_step"
+    },
+    "raw name": {
+      "ok": false,
+      "reason": "uncertain_last_step"
+    },
+    "null kind": {
+      "ok": false,
+      "reason": "uncertain_last_step"
+    },
+    "null input": {
+      "ok": false,
+      "reason": "uncertain_last_step"
+    }
+  },
+  "classifyStep": {
+    "429": {
+      "kind": "challenge"
+    },
+    "form": {
+      "kind": "form"
+    },
+    "review": {
+      "kind": "review"
+    },
+    "review header only": {
+      "kind": "form"
+    },
+    "submit visible": {
+      "kind": "submit_visible"
+    },
+    "submit visible truthy non-boolean": {
+      "kind": "form"
+    },
+    "sent dialog": {
+      "kind": "sent"
+    },
+    "submitted page": {
+      "kind": "sent"
+    },
+    "checkpoint url": {
+      "kind": "challenge"
+    },
+    "authwall url": {
+      "kind": "challenge"
+    },
+    "login url": {
+      "kind": "challenge"
+    },
+    "captcha query": {
+      "kind": "challenge"
+    },
+    "unusual activity": {
+      "kind": "challenge"
+    },
+    "sign in to continue in dialog": {
+      "kind": "challenge"
+    },
+    "verify human": {
+      "kind": "challenge"
+    },
+    "no dialog": {
+      "kind": "no_dialog"
+    },
+    "precedence": {
+      "kind": "sent"
+    },
+    "non-string fields": {
+      "kind": "submit_visible"
+    },
+    "null": {
+      "kind": "no_dialog"
+    }
+  },
+  "verifyResumeCards": {
+    "one selected match": {
+      "ok": true,
+      "reason": null
+    },
+    "not selected": {
+      "ok": false,
+      "reason": "uploaded_not_selected"
+    },
+    "two selected": {
+      "ok": false,
+      "reason": "multiple_selected"
+    },
+    "none": {
+      "ok": false,
+      "reason": "uploaded_not_found"
+    },
+    "renamed": {
+      "ok": false,
+      "reason": "uploaded_not_found"
+    },
+    "whitespace collapse": {
+      "ok": true,
+      "reason": null
+    },
+    "empty expected": {
+      "ok": false,
+      "reason": "uploaded_not_found"
+    },
+    "non-array": {
+      "ok": false,
+      "reason": "uploaded_not_found"
+    }
+  },
+  "resolveFieldAnswer": {
+    "first name": {
+      "action": "fill",
+      "value": "Damian",
+      "bankKey": "first_name",
+      "source": "contact"
+    },
+    "first name star": {
+      "action": "park",
+      "reason": "no_exact_match",
+      "bankKey": null
+    },
+    "last name": {
+      "action": "fill",
+      "value": "Mobley",
+      "bankKey": "last_name",
+      "source": "contact"
+    },
+    "email select account": {
+      "action": "fill",
+      "value": "owner@example.com",
+      "bankKey": "email",
+      "source": "contact"
+    },
+    "email text account": {
+      "action": "fill",
+      "value": "owner@example.com",
+      "bankKey": "email",
+      "source": "contact"
+    },
+    "email no account": {
+      "action": "park",
+      "reason": "no_bank_fact",
+      "bankKey": "email"
+    },
+    "email optional no account": {
+      "action": "skip_optional",
+      "reason": "no_bank_fact"
+    },
+    "mobile phone": {
+      "action": "fill",
+      "value": "7135550100",
+      "bankKey": "phone",
+      "source": "contact"
+    },
+    "phone number": {
+      "action": "fill",
+      "value": "7135550100",
+      "bankKey": "phone",
+      "source": "contact"
+    },
+    "phone": {
+      "action": "fill",
+      "value": "7135550100",
+      "bankKey": "phone",
+      "source": "contact"
+    },
+    "phone country code ok": {
+      "action": "fill",
+      "value": "United States (+1)",
+      "bankKey": "phone_country_code",
+      "source": "contact"
+    },
+    "phone country code miss": {
+      "action": "park",
+      "reason": "no_exact_option",
+      "bankKey": "phone_country_code"
+    },
+    "location city": {
+      "action": "fill",
+      "value": "Houston, Texas, United States",
+      "bankKey": "city",
+      "source": "contact"
+    },
+    "city": {
+      "action": "fill",
+      "value": "Houston, Texas, United States",
+      "bankKey": "city",
+      "source": "contact"
+    },
+    "city empty bank": {
+      "action": "skip_optional",
+      "reason": "no_bank_fact"
+    },
+    "first name empty bank": {
+      "action": "park",
+      "reason": "no_bank_fact",
+      "bankKey": "first_name"
+    },
+    "legal name (not a linkedin contact label)": {
+      "action": "park",
+      "reason": "no_exact_match",
+      "bankKey": null
+    },
+    "postal code (not a linkedin contact label)": {
+      "action": "skip_optional",
+      "reason": "no_exact_match"
+    },
+    "sponsorship radio": {
+      "action": "fill",
+      "value": "No",
+      "bankKey": "sponsorship_needed",
+      "source": "learned"
+    },
+    "sponsorship alias": {
+      "action": "park",
+      "reason": "not_exact_learned",
+      "bankKey": "sponsorship_needed"
+    },
+    "sponsorship alias optional": {
+      "action": "skip_optional",
+      "reason": "not_exact_learned"
+    },
+    "sponsorship near miss": {
+      "action": "park",
+      "reason": "no_exact_match",
+      "bankKey": null
+    },
+    "sponsorship checkbox": {
+      "action": "fill",
+      "value": false,
+      "bankKey": "sponsorship_needed",
+      "source": "learned"
+    },
+    "sponsorship text": {
+      "action": "fill",
+      "value": "No",
+      "bankKey": "sponsorship_needed",
+      "source": "learned"
+    },
+    "work auth select": {
+      "action": "fill",
+      "value": "Yes",
+      "bankKey": "work_authorization",
+      "source": "learned"
+    },
+    "work auth select miss": {
+      "action": "park",
+      "reason": "no_exact_option",
+      "bankKey": "work_authorization"
+    },
+    "work auth select dup": {
+      "action": "park",
+      "reason": "no_exact_option",
+      "bankKey": "work_authorization"
+    },
+    "work auth no options": {
+      "action": "park",
+      "reason": "no_options",
+      "bankKey": "work_authorization"
+    },
+    "years text": {
+      "action": "fill",
+      "value": "20",
+      "bankKey": "years_leadership",
+      "source": "learned"
+    },
+    "years textarea": {
+      "action": "fill",
+      "value": "20",
+      "bankKey": "years_leadership",
+      "source": "learned"
+    },
+    "years checkbox": {
+      "action": "park",
+      "reason": "checkbox_needs_boolean_fact",
+      "bankKey": "years_leadership"
+    },
+    "website optional": {
+      "action": "skip_optional",
+      "reason": "no_exact_match"
+    },
+    "website required": {
+      "action": "park",
+      "reason": "no_exact_match",
+      "bankKey": null
+    },
+    "salary": {
+      "action": "park",
+      "reason": "compensation_question",
+      "bankKey": null
+    },
+    "hourly": {
+      "action": "park",
+      "reason": "compensation_question",
+      "bankKey": null
+    },
+    "follow company": {
+      "action": "leave",
+      "reason": "follow_company"
+    },
+    "file": {
+      "action": "park",
+      "reason": "unsupported_field_kind",
+      "bankKey": null
+    },
+    "weird kind": {
+      "action": "park",
+      "reason": "unsupported_field_kind",
+      "bankKey": null
+    },
+    "empty question": {
+      "action": "park",
+      "reason": "empty_question",
+      "bankKey": null
+    },
+    "non-string options filtered": {
+      "action": "fill",
+      "value": "United States (+1)",
+      "bankKey": "phone_country_code",
+      "source": "contact"
+    },
+    "null field": {
+      "action": "park",
+      "reason": "empty_question",
+      "bankKey": null
+    }
+  },
+  "contactLabels": {
+    "first name": "first_name",
+    "last name": "last_name",
+    "email address": "email",
+    "email": "email",
+    "mobile phone number": "phone",
+    "phone number": "phone",
+    "phone": "phone",
+    "phone country code": "phone_country_code",
+    "location (city)": "city",
+    "city": "city"
+  }
+}
