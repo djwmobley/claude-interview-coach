@@ -22,7 +22,8 @@
  * unit-tested here, same split as components/background-banner.js's
  * dismissKeyFor()/visibleBackgroundItems()).
  */
-import { h, setChildren } from '../lib/dom.js';
+import { h, hLink, setChildren } from '../lib/dom.js';
+import { openableConsentUrl } from '../lib/consent-url.js';
 import { getJson, postJson } from '../lib/api.js';
 import { handleOutcome } from '../lib/outcome.js';
 import { showToast } from '../lib/toast.js';
@@ -47,6 +48,7 @@ import { buildScanRequestBody } from '../lib/scan-options.js';
  *   reauthButtonEnabled: boolean,
  *   runningLine: string|null,
  *   lastAttemptLine: string|null,
+ *   consentUrl: string|null,
  * }}
  */
 export function computeGoogleAuthBadgeState(body) {
@@ -84,7 +86,64 @@ export function computeGoogleAuthBadgeState(body) {
     ? `Last attempt: ${reauth.lastOutcome} at ${hhmm(reauth.lastOutcomeAt)}`
     : null;
 
-  return { tone, message, showReauthButton, reauthButtonEnabled: showReauthButton && !running, runningLine, lastAttemptLine };
+  // Persistent "Open Google sign-in" link (2026-10-04, spec S6): whenever a helper is waiting and the
+  // server handed back a consent URL that ALSO classifies OPEN here, so lock_held and scan-spawned
+  // helpers complete with one click.
+  const consentUrl = running ? consentLinkFrom(reauth) : null;
+
+  return { tone, message, showReauthButton, reauthButtonEnabled: showReauthButton && !running, runningLine, lastAttemptLine, consentUrl };
+}
+
+export const CONSENT_UNAVAILABLE_MESSAGE = 'Consent link unavailable; check logs/google-reauth-helper.out.log';
+export const POPUP_BLOCKED_MESSAGE = 'Popup blocked: use the Open Google sign-in link';
+
+/**
+ * The consent URL carried on an API body (`consentUrl` + `consentExpect`), only when it classifies OPEN
+ * (lib/consent-url.js, the same total classification the server ran). Anything else -> null.
+ * @param {any} obj
+ * @returns {string|null}
+ */
+export function consentLinkFrom(obj) {
+  if (!obj || typeof obj !== 'object') return null;
+  return openableConsentUrl(obj.consentUrl, obj.consentExpect);
+}
+
+/**
+ * Total decision for the blank tab the click opened synchronously (spec S6).
+ *   no helper waiting (not started, not lock_held)  -> close it; the existing inline text explains why
+ *   popup blocked (window.open returned null)        -> no tab handling; point at the persistent link
+ *   an OPEN consent URL                               -> navigate the tab to it
+ *   anything else (REJECT, or polling timed out)      -> close it with the unavailable message
+ * @param {{ popupOpened: boolean, consentUrl: string|null, helperWaiting: boolean }} o
+ * @returns {{ action: 'navigate'|'close'|'none', inline: string|null }}
+ */
+export function decideConsentTab(o) {
+  if (!o.helperWaiting) return { action: 'close', inline: null };
+  if (!o.popupOpened) return { action: 'none', inline: POPUP_BLOCKED_MESSAGE };
+  if (o.consentUrl) return { action: 'navigate', inline: null };
+  return { action: 'close', inline: CONSENT_UNAVAILABLE_MESSAGE };
+}
+
+/** Spec S6: when POST returns no link yet, keep polling GET /api/google/auth every 1 s for up to 30 s. */
+const CONSENT_POLL_INTERVAL_MS = 1000;
+const CONSENT_POLL_MAX_MS = 30000;
+
+/** @returns {Promise<string|null>} */
+async function pollForConsentUrl() {
+  const deadline = Date.now() + CONSENT_POLL_MAX_MS;
+  let notRunningStreak = 0;
+  while (Date.now() < deadline) {
+    await new Promise((r) => setTimeout(r, CONSENT_POLL_INTERVAL_MS));
+    const o = await getJson('/api/google/auth');
+    if (o.kind !== 'ok') continue;
+    const reauth = /** @type {any} */ (o.body)?.reauth;
+    const url = reauth && reauth.running ? consentLinkFrom(reauth) : null;
+    if (url) return url;
+    // Three consecutive "no helper running" answers: the helper exited, nothing more will appear.
+    notRunningStreak = reauth && reauth.running === false ? notRunningStreak + 1 : 0;
+    if (notRunningStreak >= 3) return null;
+  }
+  return null;
 }
 
 /**
@@ -118,8 +177,9 @@ export function nextGoogleReauthClickState(outcome) {
  * Renders the auth row into `host` (replacing its children) from a GET /api/google/auth outcome.
  * @param {HTMLElement} host
  * @param {import('../lib/api.js').ApiOutcome} authOutcome
+ * @param {string|null} [inlineText] message carried over a re-render (e.g. after a Re-authorize click)
  */
-function renderGoogleAuthRow(host, authOutcome) {
+function renderGoogleAuthRow(host, authOutcome, inlineText = null) {
   const body = authOutcome.kind === 'ok' ? /** @type {any} */ (authOutcome.body) : null;
   const s = computeGoogleAuthBadgeState(body);
 
@@ -157,6 +217,16 @@ function renderGoogleAuthRow(host, authOutcome) {
       on: {
         click: async () => {
           if (reauthInFlight || recheckInFlight) return; // client-side double-submit guard
+          // Spec S6 (2026-10-04): open the tab SYNCHRONOUSLY inside the click (the only moment a popup
+          // blocker allows it), before any await. No noopener here: this page needs the handle to
+          // navigate it once the consent URL is known; opener is cleared right after navigating.
+          /** @type {Window|null} */
+          let w = null;
+          try {
+            w = window.open('about:blank');
+          } catch {
+            w = null;
+          }
           reauthInFlight = true;
           /** @type {any} */ (reauthBtn).disabled = true;
           reauthBtn.textContent = 'Opening Google...';
@@ -166,11 +236,40 @@ function renderGoogleAuthRow(host, authOutcome) {
           // outcome.kind is normally 'ok' here; handleOutcome() still runs for the
           // network_error/unparsable/etc. branches nextGoogleReauthClickState() treats as "just re-enable".
           if (outcome.kind !== 'ok') handleOutcome(outcome);
+          const body = outcome.kind === 'ok' ? /** @type {any} */ (outcome.body) : null;
+          const helperWaiting = Boolean(body && (body.started || body.reason === 'lock_held'));
+          let consentUrl = body ? consentLinkFrom(body) : null;
+          if (!consentUrl && helperWaiting) {
+            reauthBtn.textContent = 'Waiting for Google link...';
+            consentUrl = await pollForConsentUrl();
+          }
+          const tab = decideConsentTab({ popupOpened: Boolean(w), consentUrl, helperWaiting });
+          if (tab.action === 'navigate' && w && consentUrl) {
+            try {
+              w.location.href = consentUrl;
+              w.opener = null;
+            } catch {
+              /* the tab was closed by the operator meanwhile; the persistent link below still works */
+            }
+          } else if (tab.action === 'close' && w) {
+            try {
+              w.close();
+            } catch {
+              /* already closed */
+            }
+          }
           reauthInFlight = false;
           /** @type {any} */ (reauthBtn).disabled = !next.reenable;
           reauthBtn.textContent = 'Re-authorize Google';
-          if (next.toast) showToast({ message: next.toast, tone: 'info' });
-          if (next.inline) inlineEl.textContent = next.inline;
+          if (next.toast && tab.action === 'navigate') showToast({ message: next.toast, tone: 'info' });
+          const inline = tab.inline ?? next.inline;
+          // Re-render from a fresh GET so the persistent "Open Google sign-in" link appears when a
+          // helper is waiting, carrying this click's message over.
+          if (helperWaiting) {
+            renderGoogleAuthRow(host, await getJson('/api/google/auth'), inline);
+          } else if (inline) {
+            inlineEl.textContent = inline;
+          }
         },
       },
     });
@@ -178,8 +277,12 @@ function renderGoogleAuthRow(host, authOutcome) {
   }
 
   if (s.runningLine) rowChildren.push(h('p', { className: 'drawer__hint', text: s.runningLine }));
+  if (s.consentUrl) {
+    // consentUrl already classified OPEN (computeGoogleAuthBadgeState); hLink re-validates the scheme.
+    rowChildren.push(h('p', { className: 'drawer__hint' }, [hLink({ url: s.consentUrl, urlOk: true, text: 'Open Google sign-in', target: '_blank' })]));
+  }
   if (s.lastAttemptLine) rowChildren.push(h('p', { className: 'drawer__hint', text: s.lastAttemptLine }));
-  inlineEl = h('p', { className: 'drawer__hint' });
+  inlineEl = h('p', { className: 'drawer__hint', text: inlineText ?? '' });
   rowChildren.push(inlineEl);
 
   setChildren(host, rowChildren);

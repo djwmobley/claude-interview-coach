@@ -30,7 +30,7 @@
  * writes logs/google-reauth.last.json (atomically, tmp then rename) -- readLastReauthOutcome() reads it
  * back. readReauthLock() reports the current lock's holder/staleness so a caller (the dashboard's POST
  * /api/google/reauth route) can tell "another run is genuinely in flight" apart from "a lock file is
- * lying around from a process that is gone or long past its own wait window" -- acquireLock() itself now
+ * lying around from a process that is gone or long past its own wait window" -- acquireReauthLock() itself now
  * uses the exact same staleness classification, so a stale lock is free real estate for a new run too.
  */
 import fs from 'node:fs';
@@ -40,6 +40,7 @@ import http from 'node:http';
 import { OAuth2Client } from 'google-auth-library';
 import { packageRoot } from './config.js';
 import { SCOPE_GMAIL_READONLY } from './google.js';
+import { consentFileFor, writeConsentFile, deleteOwnConsentFile, unlinkConsentFile } from './reauth-consent.js';
 
 /** Registered redirect URIs (the Google MCP client itself usually holds 8000; this reauth flow only
  * needs ONE of these five free at any given moment -- it never invents a port outside this set. */
@@ -221,7 +222,7 @@ function isPidAlive(pid) {
  * LOCK_STALE_FALLBACK_WAIT_MS when the lock record predates waitMs being written at all.
  * @param {string} [lockFile] defaults to the same path reauthorizeGoogle itself resolves to.
  * @param {Date} [nowDate]
- * @returns {{ held: boolean, pid: number|null, startedAt: string|null, waitMs: number|null, stale: boolean, raw: any }}
+ * @returns {{ held: boolean, pid: number|null, startedAt: string|null, waitMs: number|null, nonce: string|null, stale: boolean, raw: any }}
  */
 export function readReauthLock(lockFile = defaultLockFile(), nowDate = new Date()) {
   /** @type {string} */
@@ -229,12 +230,13 @@ export function readReauthLock(lockFile = defaultLockFile(), nowDate = new Date(
   try {
     text = fs.readFileSync(lockFile, 'utf8');
   } catch {
-    return { held: false, pid: null, startedAt: null, waitMs: null, stale: false, raw: null };
+    return { held: false, pid: null, startedAt: null, waitMs: null, nonce: null, stale: false, raw: null };
   }
   const raw = parseJsonSafe(text);
   if (!raw || typeof raw !== 'object') {
-    return { held: true, pid: null, startedAt: null, waitMs: null, stale: true, raw: text };
+    return { held: true, pid: null, startedAt: null, waitMs: null, nonce: null, stale: true, raw: text };
   }
+  const nonce = typeof (/** @type {any} */ (raw).nonce) === 'string' && /** @type {any} */ (raw).nonce ? /** @type {any} */ (raw).nonce : null;
   const pidNum = Number(/** @type {any} */ (raw).pid);
   const pid = Number.isInteger(pidNum) && pidNum > 0 ? pidNum : null;
   const startedAt = typeof (/** @type {any} */ (raw).started_at) === 'string' ? /** @type {any} */ (raw).started_at : null;
@@ -246,7 +248,7 @@ export function readReauthLock(lockFile = defaultLockFile(), nowDate = new Date(
   const boundMs = (waitMs ?? LOCK_STALE_FALLBACK_WAIT_MS) + LOCK_STALE_GRACE_MS;
   const staleByAge = !Number.isFinite(startedMs) || (nowDate.getTime() - startedMs) > boundMs;
 
-  return { held: true, pid, startedAt, waitMs, stale: staleByPid || staleByAge, raw };
+  return { held: true, pid, startedAt, waitMs, nonce, stale: staleByPid || staleByAge, raw };
 }
 
 /**
@@ -254,16 +256,54 @@ export function readReauthLock(lockFile = defaultLockFile(), nowDate = new Date(
  * @param {Date} nowDate
  * @param {number|null|undefined} waitMs recorded on the lock so a later readReauthLock (or another
  *   process's acquireLock) can judge staleness without guessing this run's own timeout.
+ * @param {string} nonce per-run identity (2026-10-04 consent-link fix): the consent file carries the
+ *   same value, so a reader can tell this run's consent link apart from a stale one.
  * @returns {{ ok: boolean }}
  */
-function acquireLock(lockFile, nowDate, waitMs) {
-  // A stale lock (dead pid, or past its own waitMs + grace) is free real estate (spec B1): reuses
-  // readReauthLock's own classification so the two never drift apart on what counts as stale.
-  const existing = readReauthLock(lockFile, nowDate);
-  if (existing.held && !existing.stale) return { ok: false };
+export function acquireReauthLock(lockFile, nowDate, waitMs, nonce) {
+  // Atomic acquire (PR #72 follow-up; the old read-then-write let two simultaneous helpers both win):
+  // the full record is written to a private tmp file first, then hard-linked into place. link() is an
+  // exclusive create (EEXIST if the lock exists) AND the lock is never visible empty or half-written,
+  // so a concurrent reader can never mistake a just-created lock for an unparseable (stale) one.
+  // On EEXIST: a stale lock (dead pid, or past its own waitMs + grace; readReauthLock's own
+  // classification, spec B1) is removed and the exclusive create retried ONCE; a live lock -> held.
   fs.mkdirSync(path.dirname(lockFile), { recursive: true });
-  fs.writeFileSync(lockFile, JSON.stringify({ pid: process.pid, port: null, started_at: nowDate.toISOString(), waitMs: Number.isFinite(waitMs) ? waitMs : null }));
-  return { ok: true };
+  const tmp = `${lockFile}.${process.pid}.${nonce}.tmp`;
+  fs.writeFileSync(tmp, JSON.stringify({ pid: process.pid, port: null, started_at: nowDate.toISOString(), waitMs: Number.isFinite(waitMs) ? waitMs : null, nonce }));
+  try {
+    for (let attempt = 0; attempt < 2; attempt++) {
+      try {
+        fs.linkSync(tmp, lockFile);
+        return { ok: true };
+      } catch (err) {
+        if (/** @type {any} */ (err)?.code !== 'EEXIST') throw err;
+      }
+      if (attempt === 1) break;
+      /** @type {string} */
+      let seenText;
+      try {
+        seenText = fs.readFileSync(lockFile, 'utf8');
+      } catch {
+        continue; // vanished between link and read: just retry the exclusive create
+      }
+      const existing = readReauthLock(lockFile, nowDate);
+      if (existing.held && !existing.stale) return { ok: false };
+      // Remove only the exact stale record judged above: if another reclaimer already replaced it with
+      // a live lock, the content differs and that lock is left alone (the retry then hits EEXIST).
+      try {
+        if (fs.readFileSync(lockFile, 'utf8') === seenText) fs.unlinkSync(lockFile);
+      } catch {
+        /* already gone */
+      }
+    }
+    return { ok: false };
+  } finally {
+    try {
+      fs.unlinkSync(tmp);
+    } catch {
+      /* already gone */
+    }
+  }
 }
 
 /**
@@ -302,12 +342,16 @@ export function readLastReauthOutcome(lastFile = defaultLastOutcomeFile()) {
 }
 
 /**
+ * Delete the lock only when it carries this run's nonce (PR #72 follow-up): a pid match alone could
+ * delete a lock another run wrote after this one's was reclaimed.
  * @param {string} lockFile
+ * @param {string} nonce
  */
-function releaseOwnLock(lockFile) {
+export function releaseOwnLock(lockFile, nonce) {
+  if (typeof nonce !== 'string' || !nonce) return;
   try {
     const cur = parseJsonSafe(fs.readFileSync(lockFile, 'utf8'));
-    if (cur && Number(cur.pid) === process.pid) fs.unlinkSync(lockFile);
+    if (cur && cur.nonce === nonce) fs.unlinkSync(lockFile);
   } catch {
     /* already gone, or never ours */
   }
@@ -343,6 +387,8 @@ function bindServer(port) {
  *   log?: (fields: Record<string, string|number|boolean|null>) => void,
  *   now?: Date,
  *   lockFile?: string,
+ *   consentFile?: string,
+ *   nonce?: string,
  *   deps?: {
  *     makeOAuthClient?: (clientId: string, clientSecret: string, redirectUri: string) => any,
  *     exchangeCode?: (client: any, code: string, redirectUri: string) => Promise<any>,
@@ -363,6 +409,8 @@ async function reauthorizeGoogleCore(opts, portRef) {
   const log = typeof o.log === 'function' ? o.log : () => {};
   const nowDate = o.now instanceof Date ? o.now : new Date();
   const lockFile = o.lockFile || path.join(packageRoot(), 'logs', 'google-reauth.lock');
+  const consentFile = typeof o.consentFile === 'string' && o.consentFile ? o.consentFile : consentFileFor(o.lockFile || undefined);
+  const nonce = typeof o.nonce === 'string' && /^[A-Za-z0-9_-]{16,128}$/.test(o.nonce) ? o.nonce : crypto.randomBytes(16).toString('hex');
   const uris = Array.isArray(o.redirectUris) && o.redirectUris.length ? o.redirectUris : resolveRedirectUris(process.env.GOOGLE_OAUTH_REDIRECT_URIS);
   const deps = o.deps || {};
   const makeOAuthClient = deps.makeOAuthClient || ((/** @type {string} */ clientId, /** @type {string} */ clientSecret, /** @type {string} */ redirectUri) => new OAuth2Client({ clientId, clientSecret, redirectUri }));
@@ -403,12 +451,15 @@ async function reauthorizeGoogleCore(opts, portRef) {
     } catch {
       /* already closed */
     }
-    releaseOwnLock(lockFile);
+    deleteOwnConsentFile(consentFile, nonce);
+    releaseOwnLock(lockFile, nonce);
   };
 
   try {
-    const lock = acquireLock(lockFile, nowDate, timeoutMs);
+    const lock = acquireReauthLock(lockFile, nowDate, timeoutMs, nonce);
     if (!lock.ok) return { outcome: 'lock_held', reason: 'another google-reauth process holds logs/google-reauth.lock' };
+    // This run now holds the lock, so any consent file on disk belongs to a run that no longer does.
+    unlinkConsentFile(consentFile);
 
     if (signal.aborted) {
       cleanup();
@@ -439,7 +490,13 @@ async function reauthorizeGoogleCore(opts, portRef) {
     // Best-effort: record the actual bound port on the lock file (never fatal if this fails).
     try {
       const cur = parseJsonSafe(fs.readFileSync(lockFile, 'utf8'));
-      if (cur && Number(cur.pid) === process.pid) fs.writeFileSync(lockFile, JSON.stringify({ ...cur, port: Number(new URL(chosenUri).port) }));
+      // tmp + rename (never an in-place truncate-then-write): a concurrent reader must never see the
+      // lock empty, which would classify it unparseable -> stale -> reclaimable.
+      if (cur && cur.nonce === nonce) {
+        const portTmp = `${lockFile}.${process.pid}.${nonce}.port.tmp`;
+        fs.writeFileSync(portTmp, JSON.stringify({ ...cur, port: Number(new URL(chosenUri).port) }));
+        fs.renameSync(portTmp, lockFile);
+      }
     } catch {
       /* non-fatal */
     }
@@ -465,6 +522,20 @@ async function reauthorizeGoogleCore(opts, portRef) {
     // full URL had been mangled -- url_length makes that truncation visible instead of silently hiding it.
     log({ evt: 'google_reauth_consent_url', url: authUrl, url_length: authUrl.length, port: Number(new URL(chosenUri).port) });
 
+    // Consent-link handoff (2026-10-04): the full URL goes to a file the dashboard can read, since the
+    // OS-level launch was never observed to open a tab. A failed write is logged inside
+    // writeConsentFile and never aborts this run (the stdout fallback still carries the URL).
+    const createdAt = new Date();
+    writeConsentFile(consentFile, {
+      pid: process.pid,
+      nonce,
+      port: Number(new URL(chosenUri).port),
+      state,
+      url: authUrl,
+      created_at: createdAt.toISOString(),
+      expires_at: new Date(createdAt.getTime() + timeoutMs).toISOString(),
+    }, { log });
+
     let expired = false;
     /** @type {{ done: boolean }} */
     const handledRef = { done: false };
@@ -481,6 +552,8 @@ async function reauthorizeGoogleCore(opts, portRef) {
         clearTimeout(mainTimer);
         signal.removeEventListener('abort', onAbort);
         if (flags.deferCleanup) {
+          // The consent link is dead the moment the run times out, even though the socket lingers.
+          deleteOwnConsentFile(consentFile, nonce);
           // The caller already has its answer ('timeout') by the time this fires; the extra 30s the
           // socket stays bound (spec A3) is a courtesy to a straggling browser tab, never something
           // worth keeping THIS process alive on its own -- unref both the server and the grace timer so
@@ -607,6 +680,8 @@ async function reauthorizeGoogleCore(opts, portRef) {
  *   now?: Date,
  *   finishNow?: Date,
  *   lockFile?: string,
+ *   consentFile?: string,
+ *   nonce?: string,
  *   lastOutcomeFile?: string,
  *   deps?: {
  *     makeOAuthClient?: (clientId: string, clientSecret: string, redirectUri: string) => any,

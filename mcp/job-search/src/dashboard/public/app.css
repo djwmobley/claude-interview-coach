@@ -95,6 +95,7 @@ table { border-collapse: collapse; width: 100%; }
 .banner--error { background: var(--red-dim); border-bottom: 1px solid var(--red); color: var(--text); }
 .banner--warn { background: var(--yellow-dim); border-bottom: 1px solid var(--yellow); color: var(--text); }
 .banner__dismiss { background: none; border: none; color: var(--muted); cursor: pointer; }
+.banner__link { margin-left: 8px; margin-right: auto; font-weight: 600; }
 
 .toast-root { position: fixed; right: 16px; bottom: 16px; display: flex; flex-direction: column; gap: 8px; z-index: 1000; }
 .toast { display: flex; align-items: center; gap: 8px; padding: 8px 12px; border-radius: 6px; background: var(--surface2); border: 1px solid var(--border); min-width: 220px; }

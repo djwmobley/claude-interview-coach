@@ -159,7 +159,7 @@ describe('readReauthLock', () => {
   test('no lock file on disk -> held:false, stale:false', () => {
     const lockFile = freshLockFile();
     const r = readReauthLock(lockFile, new Date());
-    assert.deepEqual(r, { held: false, pid: null, startedAt: null, waitMs: null, stale: false, raw: null });
+    assert.deepEqual(r, { held: false, pid: null, startedAt: null, waitMs: null, nonce: null, stale: false, raw: null });
   });
 
   test('unparseable JSON -> held:true, stale:true, raw carries the unparsed text', () => {
@@ -177,7 +177,7 @@ describe('readReauthLock', () => {
     const now = new Date('2026-09-17T15:00:00.000Z');
     fs.writeFileSync(lockFile, JSON.stringify({ pid: process.pid, port: null, started_at: now.toISOString(), waitMs: 600000 }));
     const r = readReauthLock(lockFile, new Date(now.getTime() + 60000)); // 1 minute later, well within 10-minute waitMs
-    assert.deepEqual(r, { held: true, pid: process.pid, startedAt: now.toISOString(), waitMs: 600000, stale: false, raw: r.raw });
+    assert.deepEqual(r, { held: true, pid: process.pid, startedAt: now.toISOString(), waitMs: 600000, nonce: null, stale: false, raw: r.raw });
   });
 
   test('dead pid -> stale:true regardless of age', () => {

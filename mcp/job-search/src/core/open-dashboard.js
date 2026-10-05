@@ -239,6 +239,68 @@ export function launchOsBrowser({ dashboardUrl, spawnImpl, platform }) {
 }
 
 /**
+ * Diagnosed variant of launchOsBrowser (2026-10-04 reauth consent-link fix): instead of a detached,
+ * stdio-ignored fire-and-forget spawn (which reports success the moment powershell.exe starts, even if
+ * Start-Process itself then fails), this waits for the launcher to exit and captures its exit code and
+ * stderr so a failed launch leaves evidence in the log. Never rejects; every failure is a field on the
+ * resolved result. The launcher (powershell / open / xdg-open) returns as soon as it has handed the URL
+ * to the shell, so waiting on it is cheap; `timeoutMs` bounds the wait and kills a hung launcher.
+ * @param {{ url: string, spawnImpl: typeof import('node:child_process').spawn, platform: NodeJS.Platform, timeoutMs?: number }} o
+ * @returns {Promise<{ spawned: boolean, exitCode: number|null, signal: string|null, stderr: string, error: string|null, timedOut: boolean }>}
+ */
+export function launchOsBrowserDiagnosed({ url, spawnImpl, platform, timeoutMs = 15000 }) {
+  return new Promise((resolve) => {
+    const result = { spawned: false, exitCode: /** @type {number|null} */ (null), signal: /** @type {string|null} */ (null), stderr: '', error: /** @type {string|null} */ (null), timedOut: false };
+    try {
+      assertLaunchableUrl(url);
+    } catch (err) {
+      resolve({ ...result, error: String(err instanceof Error ? err.message : err).slice(0, 300) });
+      return;
+    }
+    const [cmd, cmdArgs] = platform === 'win32'
+      ? buildWin32LaunchArgv(url)
+      : platform === 'darwin'
+        ? ['open', [url]]
+        : ['xdg-open', [url]];
+    /** @type {any} */
+    let child;
+    try {
+      child = spawnImpl(cmd, cmdArgs, { stdio: ['ignore', 'ignore', 'pipe'], windowsHide: true, shell: false });
+    } catch (err) {
+      resolve({ ...result, error: String(err instanceof Error ? err.message : err).slice(0, 300) });
+      return;
+    }
+    let settled = false;
+    const finish = () => {
+      if (settled) return;
+      settled = true;
+      clearTimeout(timer);
+      resolve({ ...result, stderr: result.stderr.slice(0, 2000) });
+    };
+    const timer = setTimeout(() => {
+      result.timedOut = true;
+      try { child.kill(); } catch { /* already gone */ }
+      finish();
+    }, timeoutMs);
+    child.stderr?.setEncoding?.('utf8');
+    child.stderr?.on('data', (/** @type {any} */ d) => {
+      if (result.stderr.length < 4000) result.stderr += String(d);
+    });
+    child.once('spawn', () => { result.spawned = true; });
+    child.once('error', (/** @type {unknown} */ err) => {
+      result.error = String(err instanceof Error ? err.message : err).slice(0, 300);
+      finish();
+    });
+    child.once('exit', (/** @type {number|null} */ code, /** @type {string|null} */ sig) => {
+      result.exitCode = code;
+      result.signal = sig;
+      // Give a trailing stderr chunk one turn to arrive before resolving.
+      setImmediate(finish);
+    });
+  });
+}
+
+/**
  * @param {{
  *   dashboardUrl: string,
  *   cdpUrl: string,

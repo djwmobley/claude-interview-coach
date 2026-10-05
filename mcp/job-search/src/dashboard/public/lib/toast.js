@@ -6,7 +6,7 @@
  * live in a separate stacked strip under the top bar, each keyed so a repeat call updates in place
  * instead of duplicating.
  */
-import { h, setChildren } from './dom.js';
+import { h, hLink, setChildren } from './dom.js';
 
 let toastRoot = null;
 let bannerRoot = null;
@@ -84,10 +84,22 @@ export function setBanner(key, opts) {
     if (prior) prior.remove();
     return;
   }
-  const el = h('div', { className: `banner banner--${opts.tone ?? 'warn'}`, dataset: { bannerKey: key }, attrs: { role: 'alert', id: existingId } }, [
-    h('span', { className: 'banner__message', text: opts.message }),
-    h('button', { className: 'banner__dismiss', attrs: { 'aria-label': 'Dismiss banner' }, text: 'Dismiss', on: { click: () => el.remove() } }),
-  ]);
+  // Optional external link (2026-10-04 Google consent banner): goes through hLink's guarded path only,
+  // so a caller must have validated the URL (urlOk: true) and hLink still re-checks the scheme.
+  const children = [h('span', { className: 'banner__message', text: opts.message })];
+  if (opts.link) children.push(hLink({ url: opts.link.url, urlOk: opts.link.urlOk === true, text: opts.link.text, className: 'banner__link', target: '_blank' }));
+  children.push(h('button', {
+    className: 'banner__dismiss',
+    attrs: { 'aria-label': 'Dismiss banner' },
+    text: 'Dismiss',
+    on: {
+      click: () => {
+        el.remove();
+        if (typeof opts.onDismiss === 'function') opts.onDismiss();
+      },
+    },
+  }));
+  const el = h('div', { className: `banner banner--${opts.tone ?? 'warn'}`, dataset: { bannerKey: key }, attrs: { role: 'alert', id: existingId } }, children);
   if (prior) prior.replaceWith(el);
   else bannerRoot.appendChild(el);
 }

@@ -18,6 +18,7 @@ import { createSseClient } from './lib/sse.js';
 import { initialKbState, reduceKeyboard, CHORD_WINDOW_MS } from './lib/shortcuts.js';
 import { activityPill } from './components/activity-pill.js';
 import { renderBackgroundBanner } from './components/background-banner.js';
+import { reauthBannerState, REAUTH_BANNER_KEY } from './lib/reauth-banner.js';
 import { railIcon } from './components/rail-icons.js';
 import { emit } from './lib/bus.js';
 
@@ -193,6 +194,29 @@ async function pollHealth() {
   }
 }
 
+/** Link (or '' for the linkless variant) the operator dismissed in this tab; null = nothing dismissed. */
+let dismissedReauthBannerUrl = /** @type {string|null} */ (null);
+
+/** Every-page Google consent banner (2026-10-04, spec S6): GET /api/google/reauth is lock + consent file
+ * only (never a token classification), so polling it is cheap. */
+async function pollGoogleReauth() {
+  const outcome = await getJson('/api/google/reauth');
+  const state = reauthBannerState(outcome.kind === 'ok' ? /** @type {any} */ (outcome.body) : null, dismissedReauthBannerUrl);
+  if (!state) {
+    setBanner(REAUTH_BANNER_KEY, null);
+    return;
+  }
+  const dismissKey = state.url ?? '';
+  setBanner(REAUTH_BANNER_KEY, {
+    tone: 'warn',
+    message: state.message,
+    link: state.url ? { url: state.url, urlOk: true, text: 'Open Google sign-in' } : undefined,
+    onDismiss: () => {
+      dismissedReauthBannerUrl = dismissKey;
+    },
+  });
+}
+
 /** Route table entry -> "Home plus toast" fallback text (section 3 rule 6). */
 function navigateHomeWithToast(message) {
   import('./lib/toast.js').then(({ showToast }) => showToast({ message, tone: 'error' }));
@@ -324,6 +348,8 @@ pollHealth();
 pollActivity();
 pollReviewBadge();
 setInterval(pollHealth, 30000);
+pollGoogleReauth();
+setInterval(pollGoogleReauth, 10000);
 setInterval(pollActivity, 5000);
 setInterval(pollReviewBadge, 30000);
 if (layoutBucket() !== 'narrow') renderRoute(location.hash || '#/');

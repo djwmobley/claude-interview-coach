@@ -76,6 +76,12 @@ import { register as registerGoogleReauth } from './routes/google-reauth.js';
  *   omits this and gets that module's own default (logs/google-reauth.lock under packageRoot()).
  * @property {string} [reauthLastOutcomeFile] test seam only: same idea as reauthLockFile, for
  *   readLastReauthOutcome()'s default path (logs/google-reauth.last.json).
+ * @property {string} [reauthConsentFile] test seam only: consent-link file path (default: derived from
+ *   the lock path, logs/google-reauth.consent.json in production).
+ * @property {string} [reauthHelperOutLog] test seam only: where a dashboard-spawned helper's
+ *   stdout/stderr go (default logs/google-reauth-helper.out.log).
+ * @property {number} [reauthConsentWaitMs] test seam only: how long POST /api/google/reauth waits for
+ *   the spawned helper's consent file (default 5000).
  * @property {typeof import('../core/google.js').classifyGoogleTokenState} [classifyGoogleTokenState]
  *   test seam only, same pattern src/core/scan-run.js already uses for this exact function: production
  *   always omits this and falls through to the real classifier.

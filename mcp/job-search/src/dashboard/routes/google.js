@@ -16,6 +16,7 @@
 import { sendJson } from '../http.js';
 import { classifyGoogleTokenState, GOOGLE_TOKEN_STATE_HINTS } from '../../core/google.js';
 import { readReauthLock, readLastReauthOutcome } from '../../core/google-reauth.js';
+import { consentFileFor, readConfiguredClientId, resolveLiveConsent } from '../../core/reauth-consent.js';
 
 /** Every branch classifyGoogleTokenState can ever return, derived from its own hint map so this set
  * never drifts out of sync with google.js's own total classification of broken_* states. */
@@ -61,6 +62,7 @@ export async function buildGoogleAuthStatus(deps) {
     ? new Date(new Date(lock.startedAt).getTime() + lock.waitMs).toISOString()
     : null;
   const last = readLastReauthOutcome(/** @type {any} */ (deps).reauthLastOutcomeFile);
+  const consent = running ? consentForLock(deps, lock) : null;
 
   return {
     tokenFile: tokenFile || null,
@@ -74,8 +76,28 @@ export async function buildGoogleAuthStatus(deps) {
       waitsUntil,
       lastOutcome: last ? last.outcome : null,
       lastOutcomeAt: last ? last.at : null,
+      consentUrl: consent ? consent.consentUrl : null,
+      consentExpect: consent ? consent.consentExpect : null,
     },
   };
+}
+
+/** Consent file path the dashboard reads (test seam: deps.reauthConsentFile, else next to the lock).
+ * @param {import('../server.js').DashboardDeps} deps */
+export function consentFileForDeps(deps) {
+  const d = /** @type {any} */ (deps);
+  return typeof d.reauthConsentFile === 'string' && d.reauthConsentFile ? d.reauthConsentFile : consentFileFor(d.reauthLockFile);
+}
+
+/**
+ * The live helper's consent link (2026-10-04 consent-link fix, spec S4): non-null only when `lock` is
+ * live, the consent file's nonce and pid equal the lock's, it has not expired, and the URL classifies
+ * OPEN against the configured client id (src/core/reauth-consent.js resolveLiveConsent).
+ * @param {import('../server.js').DashboardDeps} deps
+ * @param {ReturnType<typeof readReauthLock>} lock
+ */
+export function consentForLock(deps, lock) {
+  return resolveLiveConsent({ lock, consentFile: consentFileForDeps(deps), clientId: readConfiguredClientId(deps.env?.GOOGLE_TOKEN_FILE) });
 }
 
 /**

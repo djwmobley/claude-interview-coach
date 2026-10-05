@@ -9,6 +9,8 @@
  */
 import { test, describe, before, after } from 'node:test';
 import assert from 'node:assert/strict';
+import os from 'node:os';
+import path from 'node:path';
 import { newClient, upsertTestProfile, cleanupScan, offlineDeps, runScanWaiting, makeFixtureFetch, DEFAULT_MAP, FIXTURE_NOW } from './helpers/scan-fixtures.js';
 import { getEnv } from '../src/core/config.js';
 
@@ -57,6 +59,8 @@ describe('unattended Google re-auth policy (scan-run.js, spec A6)', () => {
       env: { ...getEnv(), GOOGLE_TOKEN_FILE: TOKEN_FILE },
       classifyGoogleTokenState: fakeClassify('broken', classifyCalls),
       spawn: spawnImpl,
+      // Never the real logs/google-reauth.lock: a live helper on this machine must not change the line.
+      reauthLockFile: path.join(os.tmpdir(), `zz-no-such-reauth-${process.pid}.lock`),
     });
     const r = await runScanWaiting(
       { profile: PROFILE, sources: ['gmail', 'greenhouse'], dryRun: false, wait: true },
@@ -84,7 +88,8 @@ describe('unattended Google re-auth policy (scan-run.js, spec A6)', () => {
     assert.ok(pending, JSON.stringify(r.errors));
     assert.equal(pending.source, 'gmail');
     assert.equal(pending.severity, 'warning');
-    assert.match(pending.message, /consent tab is open/);
+    // No live helper in this test (spawn is faked): the line points at the dashboard control (spec S7).
+    assert.match(pending.message, /Google consent is waiting for approval; open the dashboard/);
 
     // Ordering (spec A6): gmail's own log line must come AFTER every greenhouse log line -- proof gmail
     // ran (or, here, was skipped) at the END of the source loop, not at its original list position.
