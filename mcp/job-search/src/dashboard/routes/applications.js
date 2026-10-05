@@ -15,6 +15,7 @@ import { JobSearchError } from '../../core/errors.js';
 import {
   createApplication, approve, getApplication, getApplicationForListing, retry, markAppliedByHand, resume,
   listApplicationEvents, recordApplicationEvent, transition, APPLICATION_STATES, checkApplicationBlockers,
+  withdrawApplication,
 } from '../../core/applications.js';
 import { classifyApplyUrl } from '../../apply/ats-detect.js';
 import { resolveLatestApplicationScreenshot } from '../../apply/screenshot.js';
@@ -423,6 +424,7 @@ export function register(router, deps, streamHub) {
           review_findings: row.review_findings, resume_doc_id: row.resume_doc_id, coverletter_doc_id: row.coverletter_doc_id,
           resume_rel_path: row.resume_rel_path ?? null, coverletter_rel_path: row.coverletter_rel_path ?? null,
           parked_reason: row.pending_question && typeof row.pending_question.label === 'string' ? row.pending_question.label : null,
+          pending_kind: row.pending_question && typeof row.pending_question.kind === 'string' ? row.pending_question.kind : null,
           created_at: row.created_at, updated_at: row.updated_at,
           blocked: blockers.blocked, blocked_reason: blockers.blockedReason, sibling_active: blockers.siblingActive,
         });
@@ -463,6 +465,27 @@ export function register(router, deps, streamHub) {
     streamHub?.notifyChanged('events');
     kickApplyRunner(deps, id, row);
     sendJson(ctx.res, 200, { ok: true, row });
+  }, { allowEmptyBody: true });
+
+  // Withdraw from the dashboard: closes an application parked, failed, or stuck in drafting (any state
+  // where no submission can be in flight; see core/applications.js classifyWithdraw()). Body { note? }.
+  // A refusal is 409 WITHDRAW_REFUSED with a closed `reason`; an already-withdrawn row is a 200 noop.
+  router.register('POST', '/api/applications/:id/withdraw', async (ctx) => {
+    const id = Number(ctx.params.id);
+    if (!Number.isInteger(id) || id <= 0) throw new JobSearchError('VALIDATION', 'id must be a positive integer');
+    const b = /** @type {any} */ (ctx.body) ?? {};
+    if (b.note !== undefined && b.note !== null && typeof b.note !== 'string') throw new JobSearchError('VALIDATION', 'note must be a string');
+    const note = typeof b.note === 'string' ? b.note.slice(0, 500) : null;
+    const runnerStatus = typeof deps.applyRunner?.status === 'function' ? deps.applyRunner.status() : null;
+    const applyRunning = Boolean(runnerStatus && runnerStatus.running && runnerStatus.applicationId === id);
+    const out = await deps.withClient((c) => withdrawApplication(c, id, {
+      actor: 'dashboard', note, applyRunning, chainRunning: runningChains.has(id),
+    }));
+    if (out.outcome === 'refused') {
+      return sendJson(ctx.res, 409, { ok: false, code: 'WITHDRAW_REFUSED', reason: out.reason, state: out.state, message: out.message });
+    }
+    if (out.outcome === 'withdrawn') streamHub?.notifyChanged('events');
+    sendJson(ctx.res, 200, { ok: true, outcome: out.outcome, row: out.row });
   }, { allowEmptyBody: true });
 
   // Apply pipeline slice 5: needs_human -> submitted ("I applied by hand"), no attempt increment, no

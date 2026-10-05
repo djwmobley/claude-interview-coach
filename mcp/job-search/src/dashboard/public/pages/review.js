@@ -68,7 +68,8 @@ export async function render(container, params, app) {
       // as two separate state calls (each with its own accurate 200-cap and total), not one combined
       // call, alongside the existing dedup-review queue -- a failure here degrades to an empty approval
       // section (via handleOutcome's own generic toast) rather than blocking the rest of the page.
-      getJson('/api/applications', { state: 'docs_ready' }), getJson('/api/applications', { state: 'needs_human' }),
+      // The second call also carries failed and drafting rows so each can be withdrawn from here.
+      getJson('/api/applications', { state: 'docs_ready' }), getJson('/api/applications', { state: 'needs_human,failed,drafting' }),
     ]);
     const outcome = handleOutcome(reviewOutcome);
     if (outcome.kind !== 'ok') {

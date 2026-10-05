@@ -4,7 +4,8 @@
  * could previously only Approve a docs_ready application from the Job detail page's application-card.js,
  * and had no single place to find every docs_ready application across all listings. This renders that
  * list as its own section card (existing section-card style, thin cyan accent, dashboard UI restraint --
- * minimal color beyond that one accent), plus a read-only "Parked (needs human)" group underneath.
+ * minimal color beyond that one accent), plus a "Parked, failed, or drafting" group underneath whose rows
+ * carry a Withdraw control (two-click confirm, optional note).
  *
  * Kept out of application-card.js deliberately: this is a cross-listing LIST view (GET /api/applications),
  * not a single listing's own application panel, and its Approve handler has its own explicit
@@ -17,8 +18,9 @@ import { postJson } from '../lib/api.js';
 import { handleOutcome } from '../lib/outcome.js';
 import { showToast } from '../lib/toast.js';
 import { emptyState } from './empty-state.js';
-import { chipClassName, atsChip, reviewVerdictChip } from './chips.js';
-import { relativeTime, approvalRowFindingsState, approvalRowApproveState } from '../lib/format.js';
+import { withdrawControl } from './withdraw-control.js';
+import { chipClassName, atsChip, reviewVerdictChip, applicationStateChip } from './chips.js';
+import { relativeTime, approvalRowFindingsState, approvalRowApproveState, withdrawButtonVisible } from '../lib/format.js';
 
 /** @param {{ severity?: string, text?: string }} f */
 function findingText(f) {
@@ -90,12 +92,19 @@ function approvalRow(row, rowState, opts) {
   ]);
 }
 
-/** @param {any} row */
-function parkedRow(row) {
+/** @param {any} row @param {() => void} onChanged */
+function parkedRow(row, onChanged) {
+  const stateChip = applicationStateChip(row.state);
+  const reason = row.parked_reason ?? (row.state === 'failed' ? 'Failed.' : row.state === 'drafting' ? 'Still drafting.' : 'Needs your attention.');
   return h('div', { className: 'approval-row approval-row--parked' }, [
-    h('a', { className: 'approval-row__title', hashHref: buildHash('job-detail', { id: row.listing_id }), text: row.title ?? 'untitled' }),
-    h('span', { className: 'approval-row__company', text: row.company ?? 'unknown company' }),
-    h('p', { className: 'approval-row__parked-reason', text: row.parked_reason ?? 'Needs your attention.' }),
+    h('div', { className: 'approval-row__main' }, [
+      h('a', { className: 'approval-row__title', hashHref: buildHash('job-detail', { id: row.listing_id }), text: row.title ?? 'untitled' }),
+      h('span', { className: 'approval-row__company', text: row.company ?? 'unknown company' }),
+      h('span', { className: chipClassName(stateChip), text: stateChip.label }),
+      h('span', { className: 'approval-row__age', text: `Updated ${relativeTime(row.updated_at)}` }),
+    ]),
+    h('p', { className: 'approval-row__parked-reason', text: reason }),
+    withdrawButtonVisible(row) ? withdrawControl(row.application_id, onChanged) : null,
   ]);
 }
 
@@ -164,7 +173,7 @@ export function renderApprovalSection(container, opts) {
 
     const parkedBody = opts.parkedRows.length === 0
       ? emptyState({ message: 'Nothing parked' })
-      : h('div', { className: 'approval-list' }, opts.parkedRows.map((row) => parkedRow(row)));
+      : h('div', { className: 'approval-list' }, opts.parkedRows.map((row) => parkedRow(row, opts.onChanged)));
 
     setChildren(container, [
       h('div', { className: 'approval-section' }, [
@@ -173,7 +182,7 @@ export function renderApprovalSection(container, opts) {
         docsReadyBody,
       ]),
       h('div', { className: 'approval-section approval-section--parked' }, [
-        h('h2', { className: 'approval-section__title', text: 'Parked (needs human)' }),
+        h('h2', { className: 'approval-section__title', text: 'Parked, failed, or drafting' }),
         parkedBody,
       ]),
     ]);

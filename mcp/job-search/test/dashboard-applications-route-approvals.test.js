@@ -281,6 +281,16 @@ describe('GET /api/applications: row shape, blocked/sibling_active flags, cap an
     assert.equal(row.parked_reason, 'Resume drafting failed: no_docs_ready');
   });
 
+  test('pending_kind surfaces pending_question.kind (null when there is none) so the Review page can gate Withdraw', async () => {
+    const listingId = await seedListing();
+    const appId = await seedApplication(listingId, { state: 'needs_human', pendingQuestion: { kind: 'awaiting_submit', label: 'x' } });
+    const otherListing = await seedListing();
+    const failedId = await seedApplication(otherListing, { state: 'failed' });
+    const r = await get('/api/applications?state=needs_human,failed');
+    assert.equal(r.json.rows.find((x) => x.application_id === appId).pending_kind, 'awaiting_submit');
+    assert.equal(r.json.rows.find((x) => x.application_id === failedId).pending_kind, null);
+  });
+
   test('total reflects the full matching count, independent of the 200-row cap', async () => {
     const listingId = await seedListing();
     await seedApplication(listingId, { state: 'docs_ready' });

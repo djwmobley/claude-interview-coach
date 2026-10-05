@@ -63,6 +63,9 @@ export function handleOutcome(outcome, opts = {}) {
     case 'easy_apply_conflict':
       showToast({ message: outcome.message ? String(outcome.message) : 'That Easy Apply action no longer applies.', tone: 'error' });
       break;
+    case 'withdraw_refused':
+      showToast({ message: outcome.message ? String(outcome.message) : 'This application cannot be withdrawn right now.', tone: 'error' });
+      break;
     case 'db_unavailable':
       setBanner('db-unavailable', { tone: 'error', message: 'The database is unavailable right now. This view will recover automatically.' });
       break;

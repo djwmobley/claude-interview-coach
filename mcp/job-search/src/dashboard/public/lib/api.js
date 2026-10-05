@@ -43,6 +43,9 @@ export function classify(status, body) {
   // Assisted LinkedIn Easy Apply card conflicts (routes/easy-apply.js, routes/applications.js): the server
   // message is shown as-is.
   if (status === 409 && (code === 'TAB_GONE' || code === 'NOT_AWAITING_SUBMIT' || code === 'USE_EASY_APPLY_SUBMITTED')) return { kind: 'easy_apply_conflict', code, message: b.message };
+  // Withdraw refused (routes/applications.js POST /api/applications/:id/withdraw): `reason` is one of
+  // core/applications.js WITHDRAW_REFUSAL_REASONS; the server message is shown as-is.
+  if (status === 409 && code === 'WITHDRAW_REFUSED') return { kind: 'withdraw_refused', reason: b.reason ?? null, message: b.message };
   if (status === 413 && code === 'PAYLOAD_TOO_LARGE') return { kind: 'payload_too_large', message: b.message };
   if (status === 415 && code === 'UNSUPPORTED_MEDIA_TYPE') return { kind: 'client_bug', code, message: b.message };
   if (status === 503 && code === 'DB_UNAVAILABLE') return { kind: 'db_unavailable', message: b.message };
