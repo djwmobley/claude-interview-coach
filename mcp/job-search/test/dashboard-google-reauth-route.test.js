@@ -102,8 +102,42 @@ function baseDeps(overrides = {}) {
     env: { GOOGLE_TOKEN_FILE: 'C:\\fake\\token.json' },
     reauthLockFile: freshPath('lock'),
     reauthLastOutcomeFile: freshPath('last'),
+    reauthHelperOutLog: freshPath('helper-out'),
+    reauthConsentWaitMs: 60,
     ...overrides,
   };
+}
+
+const CLIENT_ID = 'zz-route-cid.apps.googleusercontent.com';
+
+/** A real token file carrying the configured client id (the consent URL's client_id must equal it). */
+function writeTokenFile() {
+  const file = freshPath('token');
+  fs.writeFileSync(file, JSON.stringify({ client_id: CLIENT_ID, client_secret: 's', refresh_token: 'r' }));
+  return file;
+}
+
+/** @param {number} port @param {string} state */
+function googleUrl(port, state) {
+  const qs = new URLSearchParams({ response_type: 'code', client_id: CLIENT_ID, redirect_uri: `http://localhost:${port}/oauth2callback`, state });
+  return `https://accounts.google.com/o/oauth2/v2/auth?${qs.toString()}`;
+}
+
+/**
+ * Write a live lock (this process's pid) and a consent file next to it.
+ * @param {string} lockFile
+ * @param {{ nonce?: string, fileNonce?: string, filePid?: number, expiresAt?: string }} [o]
+ */
+function writeLockAndConsent(lockFile, o = {}) {
+  const nonce = o.nonce ?? 'n'.repeat(32);
+  const state = 's'.repeat(64);
+  fs.writeFileSync(lockFile, JSON.stringify({ pid: process.pid, port: 8003, started_at: new Date().toISOString(), waitMs: 3600000, nonce }));
+  const url = googleUrl(8003, state);
+  fs.writeFileSync(`${lockFile}.consent.json`, JSON.stringify({
+    pid: o.filePid ?? process.pid, nonce: o.fileNonce ?? nonce, port: 8003, state, url,
+    created_at: new Date().toISOString(), expires_at: o.expiresAt ?? new Date(Date.now() + 3600000).toISOString(),
+  }));
+  return { url, state, nonce };
 }
 
 describe('categoryForState (total classification)', () => {
@@ -148,7 +182,7 @@ describe('GET /api/google/auth', () => {
   test('reauth surface: no lock, no last outcome -> running false, everything else null', async () => {
     const deps = baseDeps({ classifyGoogleTokenState: async () => ({ state: 'broken_invalid_grant' }) });
     const res = await makeCaller(deps)('GET', '/api/google/auth');
-    assert.deepEqual(res.body.reauth, { running: false, pid: null, startedAt: null, waitsUntil: null, lastOutcome: null, lastOutcomeAt: null });
+    assert.deepEqual(res.body.reauth, { running: false, pid: null, startedAt: null, waitsUntil: null, lastOutcome: null, lastOutcomeAt: null, consentUrl: null, consentExpect: null });
   });
 
   test('reauth surface: a live (non-stale) lock reports running:true with pid/startedAt/waitsUntil', async () => {
@@ -239,10 +273,20 @@ describe('POST /api/google/reauth', () => {
     assert.equal(c.args[3], '--token-file');
     // The path-with-spaces token file must arrive as ONE argv element, not split on the space.
     assert.equal(c.args[4], tokenFile);
-    assert.equal(c.args.length, 5);
+    // Dashboard-initiated: the operator's own tab is the channel, so the OS-level launch is skipped,
+    // and the per-run nonce lets this route match the lock + consent file it just caused.
+    assert.equal(c.args[5], '--no-launch');
+    assert.equal(c.args[6], '--nonce');
+    assert.match(c.args[7], /^[0-9a-f]{32}$/);
+    assert.equal(c.args.length, 8);
     assert.equal(c.opts.detached, true);
     assert.equal(c.opts.windowsHide, true);
-    assert.equal(c.opts.stdio, 'ignore');
+    // stdout/stderr go to logs/google-reauth-helper.out.log via an fd opened for append.
+    assert.equal(c.opts.stdio[0], 'ignore');
+    assert.equal(typeof c.opts.stdio[1], 'number');
+    assert.equal(c.opts.stdio[2], c.opts.stdio[1]);
+    // POST timed out waiting for a consent file (the fake child never writes one).
+    assert.equal(res.body.consentUrl, null);
     // cwd is deliberately pinned to packageRoot() (unlike scan-run.js's own spawn, which sets no cwd at
     // all) -- see the route's own comment for why: this asserts against the same packageRoot() the
     // config module itself computes, i.e. the injected package root, not a hardcoded path.
@@ -292,5 +336,129 @@ describe('POST /api/google/reauth', () => {
       assert.equal(res.statusCode, 200, label);
       assert.ok([null, 'not_configured', 'already_ok', 'lock_held', 'already_starting', 'spawn_failed'].includes(res.body.reason), label);
     }
+  });
+});
+
+describe('consent link (2026-10-04 fix, spec S3/S4)', () => {
+  const broken = async () => ({ state: 'broken_invalid_grant' });
+
+  test('GET: reauth.consentUrl appears when the lock is live and the file matches its nonce + pid', async () => {
+    const lockFile = freshPath('lock');
+    const { url, state } = writeLockAndConsent(lockFile);
+    const deps = baseDeps({ env: { GOOGLE_TOKEN_FILE: writeTokenFile() }, reauthLockFile: lockFile, classifyGoogleTokenState: broken });
+    const res = await makeCaller(deps)('GET', '/api/google/auth');
+    assert.equal(res.body.reauth.running, true);
+    assert.equal(res.body.reauth.consentUrl, url);
+    assert.deepEqual(res.body.reauth.consentExpect, { clientId: CLIENT_ID, state, port: 8003 });
+  });
+
+  for (const [label, opts] of /** @type {Array<[string, any]>} */ ([
+    ['nonce mismatch', { fileNonce: 'x'.repeat(32) }],
+    ['pid mismatch', { filePid: process.pid + 1 }],
+    ['expired', { expiresAt: new Date(Date.now() - 1000).toISOString() }],
+  ])) {
+    test(`GET: a stale consent file (${label}) is ignored`, async () => {
+      const lockFile = freshPath('lock');
+      writeLockAndConsent(lockFile, opts);
+      const deps = baseDeps({ env: { GOOGLE_TOKEN_FILE: writeTokenFile() }, reauthLockFile: lockFile, classifyGoogleTokenState: broken });
+      const res = await makeCaller(deps)('GET', '/api/google/auth');
+      assert.equal(res.body.reauth.running, true);
+      assert.equal(res.body.reauth.consentUrl, null);
+    });
+
+    test(`POST lock_held: a stale consent file (${label}) is ignored`, async () => {
+      const lockFile = freshPath('lock');
+      writeLockAndConsent(lockFile, opts);
+      const deps = baseDeps({ env: { GOOGLE_TOKEN_FILE: writeTokenFile() }, reauthLockFile: lockFile, classifyGoogleTokenState: broken });
+      const res = await makeCaller(deps)('POST', '/api/google/reauth');
+      assert.equal(res.body.reason, 'lock_held');
+      assert.equal(res.body.consentUrl, null);
+    });
+  }
+
+  test('GET: consent URL with a client_id other than the configured one is REJECTED (null)', async () => {
+    const lockFile = freshPath('lock');
+    writeLockAndConsent(lockFile);
+    const other = freshPath('token-other');
+    fs.writeFileSync(other, JSON.stringify({ client_id: 'someone-else', client_secret: 's' }));
+    const deps = baseDeps({ env: { GOOGLE_TOKEN_FILE: other }, reauthLockFile: lockFile, classifyGoogleTokenState: broken });
+    const res = await makeCaller(deps)('GET', '/api/google/auth');
+    assert.equal(res.body.reauth.consentUrl, null);
+  });
+
+  test('POST lock_held returns the existing helper\'s consent URL', async () => {
+    const lockFile = freshPath('lock');
+    const { url } = writeLockAndConsent(lockFile);
+    const { fn: spawnImpl, calls } = fakeSpawn();
+    const deps = baseDeps({ env: { GOOGLE_TOKEN_FILE: writeTokenFile() }, reauthLockFile: lockFile, spawn: spawnImpl, classifyGoogleTokenState: broken });
+    const res = await makeCaller(deps)('POST', '/api/google/reauth');
+    assert.equal(res.body.reason, 'lock_held');
+    assert.equal(res.body.consentUrl, url);
+    assert.equal(calls.length, 0);
+  });
+
+  test('POST started: waits for the helper it spawned and returns its consent URL', async () => {
+    const lockFile = freshPath('lock');
+    const state = 'w'.repeat(64);
+    const url = googleUrl(8004, state);
+    const spawnImpl = (/** @type {string} */ _cmd, /** @type {string[]} */ args) => {
+      const nonce = args[args.indexOf('--nonce') + 1];
+      const child = /** @type {any} */ (new EventEmitter());
+      child.pid = process.pid;
+      child.unref = () => {};
+      setTimeout(() => {
+        fs.writeFileSync(lockFile, JSON.stringify({ pid: process.pid, port: 8004, started_at: new Date().toISOString(), waitMs: 3600000, nonce }));
+        fs.writeFileSync(`${lockFile}.consent.json`, JSON.stringify({ pid: process.pid, nonce, port: 8004, state, url, created_at: new Date().toISOString(), expires_at: new Date(Date.now() + 3600000).toISOString() }));
+      }, 80);
+      return child;
+    };
+    const deps = baseDeps({ env: { GOOGLE_TOKEN_FILE: writeTokenFile() }, reauthLockFile: lockFile, reauthConsentWaitMs: 3000, spawn: spawnImpl, classifyGoogleTokenState: broken });
+    const res = await makeCaller(deps)('POST', '/api/google/reauth');
+    assert.equal(res.body.started, true);
+    assert.equal(res.body.pid, process.pid);
+    assert.equal(res.body.consentUrl, url);
+    assert.deepEqual(res.body.consentExpect, { clientId: CLIENT_ID, state, port: 8004 });
+  });
+
+  test('POST started: a consent file from a different nonce is never returned; times out to null', async () => {
+    const lockFile = freshPath('lock');
+    const spawnImpl = () => {
+      const child = /** @type {any} */ (new EventEmitter());
+      child.pid = process.pid;
+      child.unref = () => {};
+      // Simulates a different helper winning the lock with its own nonce.
+      setTimeout(() => writeLockAndConsent(lockFile, { nonce: 'z'.repeat(32) }), 20);
+      return child;
+    };
+    const deps = baseDeps({ env: { GOOGLE_TOKEN_FILE: writeTokenFile() }, reauthLockFile: lockFile, reauthConsentWaitMs: 200, spawn: spawnImpl, classifyGoogleTokenState: broken });
+    const res = await makeCaller(deps)('POST', '/api/google/reauth');
+    assert.equal(res.body.started, true);
+    assert.equal(res.body.consentUrl, null);
+  });
+
+  test('helper out log over 1 MB is truncated at spawn; under 1 MB it is kept', async () => {
+    const big = freshPath('helper-out-big');
+    fs.writeFileSync(big, 'x'.repeat(1024 * 1024 + 10));
+    const { fn: spawnImpl } = fakeSpawn();
+    await makeCaller(baseDeps({ reauthHelperOutLog: big, spawn: spawnImpl, classifyGoogleTokenState: broken }))('POST', '/api/google/reauth');
+    assert.equal(fs.statSync(big).size, 0);
+
+    const small = freshPath('helper-out-small');
+    fs.writeFileSync(small, 'keep me');
+    const s2 = fakeSpawn();
+    await makeCaller(baseDeps({ reauthHelperOutLog: small, spawn: s2.fn, classifyGoogleTokenState: broken }))('POST', '/api/google/reauth');
+    assert.equal(fs.readFileSync(small, 'utf8'), 'keep me');
+  });
+
+  test('GET /api/google/reauth (lightweight banner poll): running + consentUrl without classifying the token', async () => {
+    const lockFile = freshPath('lock');
+    const { url } = writeLockAndConsent(lockFile);
+    let classified = 0;
+    const deps = baseDeps({ env: { GOOGLE_TOKEN_FILE: writeTokenFile() }, reauthLockFile: lockFile, classifyGoogleTokenState: async () => { classified++; return { state: 'broken_invalid_grant' }; } });
+    const res = await makeCaller(deps)('GET', '/api/google/reauth');
+    assert.equal(res.statusCode, 200);
+    assert.equal(res.body.running, true);
+    assert.equal(res.body.consentUrl, url);
+    assert.equal(classified, 0);
   });
 });

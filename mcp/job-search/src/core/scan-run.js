@@ -34,6 +34,7 @@ import { spawn as defaultSpawn } from 'node:child_process';
 import { loadConfig, getEnv, packageRoot } from './config.js';
 import { classifyGoogleTokenState } from './google.js';
 import { reauthorizeGoogle, resolveRedirectUris } from './google-reauth.js';
+import { reauthPendingMessage } from './reauth-consent.js';
 import { launchOsBrowser } from './open-dashboard.js';
 import { connectDedicated as defaultConnectDedicated, withTransaction } from './db.js';
 import { JobSearchError, errFields } from './errors.js';
@@ -96,6 +97,9 @@ export const CLOSE_ALL_TIMEOUT_MS = 10000;
  * @property {(url: string) => (void|Promise<void>)} [openUrl] interactive Google re-auth (spec A5): passed
  *   through to reauthorizeGoogle() as its own openUrl. Tests inject a no-op so no real browser opens.
  * @property {typeof reauthorizeGoogle} [reauthorizeGoogle] test seam over the real function.
+ * @property {string} [reauthLockFile] test seam: reauth lock path read for the AUTH_REAUTH_PENDING
+ *   report line's consent link (default logs/google-reauth.lock).
+ * @property {string} [reauthConsentFile] test seam: consent file path (default derived from the lock).
  * @property {typeof classifyGoogleTokenState} [classifyGoogleTokenState] test seam over the real function.
  * @property {Function} [execFile] slice 3 auto-triage's model step (src/core/triage.js's runModelTriage)
  *   seam for a fake `claude` CLI script in tests, mirroring render.js's `opts.execFile` pattern. The
@@ -1346,7 +1350,9 @@ async function executeRun(p) {
         if (stillBroken) {
           errors.push(unattendedGmailReauthSpawnFailedReason
             ? { source: 'gmail', code: 'AUTH_REAUTH_FAILED', severity: 'warning', message: `could not start the background Google re-authorization: ${unattendedGmailReauthSpawnFailedReason}` }
-            : { source: 'gmail', code: 'AUTH_REAUTH_PENDING', severity: 'warning', message: 'Google consent tab is open; approve it and Gmail resumes next run' });
+            // Spec S7 (2026-10-04): the helper's OS-level tab may never appear, so the report line carries
+            // the live consent link itself when one validates, else points at the dashboard control.
+            : { source: 'gmail', code: 'AUTH_REAUTH_PENDING', severity: 'warning', message: reauthPendingMessage({ lockFile: deps.reauthLockFile, consentFile: deps.reauthConsentFile, tokenFile: env.GOOGLE_TOKEN_FILE }) });
           log({ evt: 'adapter_warning', source: 'gmail', code: 'AUTH_UNAVAILABLE', message: 'gmail: reauth pending, skipped for this run' });
           continue;
         }
