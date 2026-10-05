@@ -22,10 +22,31 @@
 import { detectRecaptchaV3Script } from '../../browser/wall.js';
 import { classifyCompensationLabel } from '../answers.js';
 
+// Entry into the apply flow. The apply URL is the job-description page (apply-target.js requires a /job/
+// path); the auth gate only appears after Apply -> Apply Manually. Verified READ-ONLY on 2026-10-05
+// against two live tenants (talentmanagementsolution.wd3 and att.wd1): the Apply control is an <a> with
+// adventureButton, and the modal offers autofillWithResume / applyManually / useMyLastApplication (one
+// tenant also applyWithLinkedIn). Only applyManually is ever clicked.
+const APPLY_BUTTON = '[data-automation-id="adventureButton"]';
+// signInContent / form signInFormo are the live ids (att.wd1, default panel = create account); the
+// signInFormContainer / createAccountForm ids are this build's original, unverified guesses, kept as a fallback.
+const AUTH_GATE = '[data-automation-id="signInContent"], form[data-automation-id="signInFormo"], [data-automation-id="signInFormContainer"], [data-automation-id="createAccountForm"], form[data-automation-id="signInFormContainer"], form[data-automation-id="createAccountForm"]';
+// A tenant that allows guest applications (talentmanagementsolution.wd3) goes from Apply Manually straight to
+// the My Information step with no auth gate. applyFlowPage is deliberately NOT here: it also wraps the auth
+// gate page, so it cannot tell the two apart.
+const GUEST_WIZARD = '[data-automation-id="applyFlowMyInfoPage"], [data-automation-id="pageFooterNextButton"]';
+
 /** Selector contract this adapter targets. Grouped here (not inlined) so a future selector fix touches one place. */
 export const SELECTORS = Object.freeze({
+  applyButton: APPLY_BUTTON,
+  applyManually: '[data-automation-id="applyManually"]',
+  guestWizard: GUEST_WIZARD,
+  // Union probes: the first answers "job page or already at the auth gate?", the second "where did Apply
+  // Manually land?". Each is followed by a short authGate-only probe to tell the members apart.
+  entryProbe: `${AUTH_GATE}, ${APPLY_BUTTON}`,
+  postManualProbe: `${AUTH_GATE}, ${GUEST_WIZARD}`,
   // The auth gate: either a sign-in panel or a create-account panel, sometimes both behind one toggle.
-  authGate: '[data-automation-id="signInFormContainer"], [data-automation-id="createAccountForm"], form[data-automation-id="signInFormContainer"], form[data-automation-id="createAccountForm"]',
+  authGate: AUTH_GATE,
   createAccountToggle: '[data-automation-id="createAccountLink"], a[data-automation-id="createAccountLink"]',
   authError: '[data-automation-id="errorMessage"], [role="alert"]',
   signInEmail: '[data-automation-id="email"]',
@@ -35,7 +56,9 @@ export const SELECTORS = Object.freeze({
   createPassword: '[data-automation-id="password"]',
   createVerifyPassword: '[data-automation-id="verifyPassword"]',
   createAccountCheckbox: '[data-automation-id="createAccountCheckbox"]',
-  createAccountSubmit: '[data-automation-id="createAccountSubmitButton"]',
+  // Live (att.wd1): createAccountSubmitButton is aria-hidden with a click_filter overlay on top that takes
+  // the pointer; the overlay precedes the button in DOM order, so page.click resolves to it first.
+  createAccountSubmit: '[data-automation-id="noCaptchaWrapper"] [data-automation-id="click_filter"], [data-automation-id="createAccountSubmitButton"]',
   verifyCodeInput: '[data-automation-id="verificationCode"], input[name="verificationCode"]',
   verifySubmit: '[data-automation-id="verifyButton"]',
   captcha: '.g-recaptcha, iframe[title*="recaptcha" i], [data-sitekey]',
@@ -342,6 +365,37 @@ async function verifyEmailIfRequired(cap, ctx, createdAt) {
   };
 }
 
+/**
+ * Get from the job-description page to the auth gate (or a guest wizard): Apply, then Apply Manually. Skipped
+ * when the page already shows the auth gate. Never clicks the Autofill / Use My Last Application / LinkedIn
+ * options. Every step that cannot find what it expects parks as 'unrecognized_page' naming that step.
+ * @param {import('../apply-capability.js').ApplyCapability} cap
+ * @param {any} ctx
+ * @returns {Promise<{ outcome: 'ok', gate: any } | { outcome: 'needs_human', pendingQuestion: any }>} gate is
+ *   null for a guest wizard (this tenant asks for no account)
+ */
+async function enterApplyFlow(cap, ctx) {
+  const park = (/** @type {string} */ label) => ({ outcome: /** @type {const} */ ('needs_human'), pendingQuestion: { kind: 'unrecognized_page', label, page_url: ctx.applyUrl } });
+
+  const entry = await cap.waitFor(SELECTORS.entryProbe, { optional: true, timeoutMs: 15000 });
+  if (entry) {
+    const gateNow = await cap.waitFor(SELECTORS.authGate, { optional: true, timeoutMs: 1000 });
+    if (gateNow) return { outcome: 'ok', gate: gateNow };
+  }
+  const applyButton = entry ? await cap.waitFor(SELECTORS.applyButton, { optional: true, timeoutMs: 1000 }) : null;
+  if (!applyButton) return park('Apply button not found: no Workday Apply control or sign-in/create-account form on this page.');
+  await cap.click(SELECTORS.applyButton);
+
+  const manual = await cap.waitFor(SELECTORS.applyManually, { optional: true, timeoutMs: 10000 });
+  if (!manual) return park('Apply Manually option not found after clicking Apply.');
+  await cap.click(SELECTORS.applyManually);
+
+  const landed = await cap.waitFor(SELECTORS.postManualProbe, { optional: true, timeoutMs: 15000 });
+  if (!landed) return park('Workday auth form not found after Apply Manually (no sign-in/create-account form and no application wizard).');
+  const gate = await cap.waitFor(SELECTORS.authGate, { optional: true, timeoutMs: 1500 });
+  return { outcome: 'ok', gate };
+}
+
 export const workday = {
   ats: 'workday',
   requires: ['credential'],
@@ -355,20 +409,23 @@ export const workday = {
    * @param {any} ctx
    */
   async run(cap, ctx) {
-    const gate = await cap.waitFor(SELECTORS.authGate, { optional: true, timeoutMs: 15000 });
-    if (!gate) {
-      return { outcome: 'needs_human', pendingQuestion: { kind: 'unrecognized_page', label: 'Could not find a Workday sign-in or create-account form on this page.', page_url: ctx.applyUrl } };
-    }
-    const captchaAtGate = await checkCaptcha(cap, ctx, gate);
-    if (captchaAtGate) return captchaAtGate;
+    const entered = await enterApplyFlow(cap, ctx);
+    if (entered.outcome === 'needs_human') return entered;
+    const gate = entered.gate;
 
-    const authedAt = new Date();
-    const authResult = await authenticate(cap, ctx);
-    if (authResult.outcome === 'needs_human') return authResult;
+    // A null gate is a guest wizard: this tenant asks for no account, so no credential is read or written.
+    if (gate) {
+      const captchaAtGate = await checkCaptcha(cap, ctx, gate);
+      if (captchaAtGate) return captchaAtGate;
 
-    if (authResult.createdAccount) {
-      const verifyResult = await verifyEmailIfRequired(cap, ctx, authedAt);
-      if (verifyResult) return verifyResult;
+      const authedAt = new Date();
+      const authResult = await authenticate(cap, ctx);
+      if (authResult.outcome === 'needs_human') return authResult;
+
+      if (authResult.createdAccount) {
+        const verifyResult = await verifyEmailIfRequired(cap, ctx, authedAt);
+        if (verifyResult) return verifyResult;
+      }
     }
 
     // Multi-page wizard: My Information / My Experience / Application Questions / Voluntary Disclosures /
