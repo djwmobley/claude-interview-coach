@@ -22,33 +22,66 @@
 import { detectRecaptchaV3Script } from '../../browser/wall.js';
 import { classifyCompensationLabel } from '../answers.js';
 
+// Entry into the apply flow. The apply URL is the job-description page (apply-target.js requires a /job/
+// path); the auth gate only appears after Apply -> Apply Manually. Verified READ-ONLY on 2026-10-05
+// against two live tenants (talentmanagementsolution.wd3 and att.wd1): the Apply control is an <a> with
+// adventureButton, and the modal offers autofillWithResume / applyManually / useMyLastApplication (one
+// tenant also applyWithLinkedIn). Only applyManually is ever clicked.
+const APPLY_BUTTON = '[data-automation-id="adventureButton"]';
+// signInContent / form signInFormo are the live ids (att.wd1, default panel = create account); the
+// signInFormContainer / createAccountForm ids are this build's original, unverified guesses, kept as a fallback.
+const AUTH_GATE = '[data-automation-id="signInContent"], form[data-automation-id="signInFormo"], [data-automation-id="signInFormContainer"], [data-automation-id="createAccountForm"], form[data-automation-id="signInFormContainer"], form[data-automation-id="createAccountForm"]';
+// A tenant that allows guest applications (talentmanagementsolution.wd3) goes from Apply Manually straight to
+// the My Information step with no auth gate. applyFlowPage is deliberately NOT here: it also wraps the auth
+// gate page, so it cannot tell the two apart.
+const GUEST_WIZARD = '[data-automation-id="applyFlowMyInfoPage"], [data-automation-id="pageFooterNextButton"]';
+
 /** Selector contract this adapter targets. Grouped here (not inlined) so a future selector fix touches one place. */
 export const SELECTORS = Object.freeze({
+  applyButton: APPLY_BUTTON,
+  applyManually: '[data-automation-id="applyManually"]',
+  guestWizard: GUEST_WIZARD,
+  // Union probes: the first answers "job page or already at the auth gate?", the second "where did Apply
+  // Manually land?". Each is followed by a short authGate-only probe to tell the members apart.
+  entryProbe: `${AUTH_GATE}, ${APPLY_BUTTON}`,
+  postManualProbe: `${AUTH_GATE}, ${GUEST_WIZARD}`,
   // The auth gate: either a sign-in panel or a create-account panel, sometimes both behind one toggle.
-  authGate: '[data-automation-id="signInFormContainer"], [data-automation-id="createAccountForm"], form[data-automation-id="signInFormContainer"], form[data-automation-id="createAccountForm"]',
+  authGate: AUTH_GATE,
   createAccountToggle: '[data-automation-id="createAccountLink"], a[data-automation-id="createAccountLink"]',
   authError: '[data-automation-id="errorMessage"], [role="alert"]',
   signInEmail: '[data-automation-id="email"]',
   signInPassword: '[data-automation-id="password"]',
-  signInSubmit: '[data-automation-id="signInSubmitButton"]',
+  // Live (att.wd1): the gate opens on Create Account; signInLink switches to the Sign In panel, whose
+  // aria-hidden signInSubmitButton exists only on that panel (attached probe), behind the same click_filter
+  // overlay as Create Account. Only one panel is rendered at a time, so the overlay is unambiguous.
+  signInToggle: '[data-automation-id="signInLink"]',
+  signInFormReady: '[data-automation-id="signInSubmitButton"]',
+  signInSubmit: '[data-automation-id="noCaptchaWrapper"] [data-automation-id="click_filter"], [data-automation-id="signInSubmitButton"]',
   createEmail: '[data-automation-id="email"]',
   createPassword: '[data-automation-id="password"]',
   createVerifyPassword: '[data-automation-id="verifyPassword"]',
   createAccountCheckbox: '[data-automation-id="createAccountCheckbox"]',
-  createAccountSubmit: '[data-automation-id="createAccountSubmitButton"]',
+  // Live (att.wd1): createAccountSubmitButton is aria-hidden with a click_filter overlay on top that takes
+  // the pointer; the overlay precedes the button in DOM order, so page.click resolves to it first.
+  createAccountSubmit: '[data-automation-id="noCaptchaWrapper"] [data-automation-id="click_filter"], [data-automation-id="createAccountSubmitButton"]',
   verifyCodeInput: '[data-automation-id="verificationCode"], input[name="verificationCode"]',
   verifySubmit: '[data-automation-id="verifyButton"]',
   captcha: '.g-recaptcha, iframe[title*="recaptcha" i], [data-sitekey]',
   // Each wizard step (My Information / My Experience / Application Questions / Voluntary Disclosures /
   // Review) renders inside this same page-body container in Workday's CX shell.
   stepProbe: '[data-automation-id="pageBodyContainer"], [data-automation-id="applyFlowPage"]',
-  firstName: '[data-automation-id="legalNameSection_firstName"], input[name="firstName"]',
-  lastName: '[data-automation-id="legalNameSection_lastName"], input[name="lastName"]',
+  // Live My Information ids (talentmanagementsolution.wd3): inputs named legalName--firstName /
+  // legalName--lastName inside formField-legalName--* containers; phone is input[name="phoneNumber"].
+  firstName: '[data-automation-id="legalNameSection_firstName"], input[name="firstName"], input[name="legalName--firstName"]',
+  lastName: '[data-automation-id="legalNameSection_lastName"], input[name="lastName"], input[name="legalName--lastName"]',
   phone: '[data-automation-id="phone-number"], input[name="phoneNumber"]',
-  resumeUpload: '[data-automation-id="resumeUpload"] input[type="file"], input[name="resume"]',
+  // file-upload-input-ref is Workday's common My Experience upload input; NOT observed live (it is past Next).
+  resumeUpload: '[data-automation-id="resumeUpload"] input[type="file"], input[name="resume"], input[data-automation-id="file-upload-input-ref"]',
   coverLetterUpload: '[data-automation-id="coverLetterUpload"] input[type="file"], input[name="coverLetter"]',
   customFields: '[data-automation-id="formField"], [data-automation-id$="Question"]',
-  next: '[data-automation-id="bottom-navigation-next-button"], button[data-automation-id="next"]',
+  // Live: pageFooterNextButton. On the final step the same button is expected to read Submit, so the
+  // wizard loop checks its label and routes a Submit label through the submit path (see run()).
+  next: '[data-automation-id="bottom-navigation-next-button"], button[data-automation-id="next"], [data-automation-id="pageFooterNextButton"]',
   submit: '[data-automation-id="bottom-navigation-next-button"][data-automation-id-submit="true"], button[data-automation-id="submit"]',
   confirmationHeading: '[data-automation-id="applicationConfirmationHeader"], h1, h2',
 });
@@ -237,6 +270,15 @@ async function checkCaptcha(cap, ctx, probeResult) {
 async function authenticate(cap, ctx) {
   const existing = await ctx.credentials.read();
   if (existing) {
+    // The gate may open on Create Account (live att.wd1); switch to the Sign In panel first.
+    const toSignIn = await cap.waitFor(SELECTORS.signInToggle, { optional: true, timeoutMs: 2000 });
+    if (toSignIn) {
+      await cap.click(SELECTORS.signInToggle);
+      const ready = await cap.waitFor(SELECTORS.signInFormReady, { optional: true, state: 'attached', timeoutMs: 5000 });
+      if (!ready) {
+        return { outcome: 'needs_human', pendingQuestion: { kind: 'unrecognized_page', label: 'Workday Sign In form not found after clicking the Sign In link.', page_url: ctx.applyUrl } };
+      }
+    }
     await cap.fill(SELECTORS.signInEmail, existing.username);
     await cap.fill(SELECTORS.signInPassword, existing.password);
     await cap.click(SELECTORS.signInSubmit);
@@ -342,6 +384,37 @@ async function verifyEmailIfRequired(cap, ctx, createdAt) {
   };
 }
 
+/**
+ * Get from the job-description page to the auth gate (or a guest wizard): Apply, then Apply Manually. Skipped
+ * when the page already shows the auth gate. Never clicks the Autofill / Use My Last Application / LinkedIn
+ * options. Every step that cannot find what it expects parks as 'unrecognized_page' naming that step.
+ * @param {import('../apply-capability.js').ApplyCapability} cap
+ * @param {any} ctx
+ * @returns {Promise<{ outcome: 'ok', gate: any } | { outcome: 'needs_human', pendingQuestion: any }>} gate is
+ *   null for a guest wizard (this tenant asks for no account)
+ */
+async function enterApplyFlow(cap, ctx) {
+  const park = (/** @type {string} */ label) => ({ outcome: /** @type {const} */ ('needs_human'), pendingQuestion: { kind: 'unrecognized_page', label, page_url: ctx.applyUrl } });
+
+  const entry = await cap.waitFor(SELECTORS.entryProbe, { optional: true, timeoutMs: 15000 });
+  if (entry) {
+    const gateNow = await cap.waitFor(SELECTORS.authGate, { optional: true, timeoutMs: 1000 });
+    if (gateNow) return { outcome: 'ok', gate: gateNow };
+  }
+  const applyButton = entry ? await cap.waitFor(SELECTORS.applyButton, { optional: true, timeoutMs: 1000 }) : null;
+  if (!applyButton) return park('Apply button not found: no Workday Apply control or sign-in/create-account form on this page.');
+  await cap.click(SELECTORS.applyButton);
+
+  const manual = await cap.waitFor(SELECTORS.applyManually, { optional: true, timeoutMs: 10000 });
+  if (!manual) return park('Apply Manually option not found after clicking Apply.');
+  await cap.click(SELECTORS.applyManually);
+
+  const landed = await cap.waitFor(SELECTORS.postManualProbe, { optional: true, timeoutMs: 15000 });
+  if (!landed) return park('Workday auth form not found after Apply Manually (no sign-in/create-account form and no application wizard).');
+  const gate = await cap.waitFor(SELECTORS.authGate, { optional: true, timeoutMs: 1500 });
+  return { outcome: 'ok', gate };
+}
+
 export const workday = {
   ats: 'workday',
   requires: ['credential'],
@@ -355,20 +428,23 @@ export const workday = {
    * @param {any} ctx
    */
   async run(cap, ctx) {
-    const gate = await cap.waitFor(SELECTORS.authGate, { optional: true, timeoutMs: 15000 });
-    if (!gate) {
-      return { outcome: 'needs_human', pendingQuestion: { kind: 'unrecognized_page', label: 'Could not find a Workday sign-in or create-account form on this page.', page_url: ctx.applyUrl } };
-    }
-    const captchaAtGate = await checkCaptcha(cap, ctx, gate);
-    if (captchaAtGate) return captchaAtGate;
+    const entered = await enterApplyFlow(cap, ctx);
+    if (entered.outcome === 'needs_human') return entered;
+    const gate = entered.gate;
 
-    const authedAt = new Date();
-    const authResult = await authenticate(cap, ctx);
-    if (authResult.outcome === 'needs_human') return authResult;
+    // A null gate is a guest wizard: this tenant asks for no account, so no credential is read or written.
+    if (gate) {
+      const captchaAtGate = await checkCaptcha(cap, ctx, gate);
+      if (captchaAtGate) return captchaAtGate;
 
-    if (authResult.createdAccount) {
-      const verifyResult = await verifyEmailIfRequired(cap, ctx, authedAt);
-      if (verifyResult) return verifyResult;
+      const authedAt = new Date();
+      const authResult = await authenticate(cap, ctx);
+      if (authResult.outcome === 'needs_human') return authResult;
+
+      if (authResult.createdAccount) {
+        const verifyResult = await verifyEmailIfRequired(cap, ctx, authedAt);
+        if (verifyResult) return verifyResult;
+      }
     }
 
     // Multi-page wizard: My Information / My Experience / Application Questions / Voluntary Disclosures /
@@ -400,9 +476,17 @@ export const workday = {
         submittedThisRun = true;
         break;
       }
-      const nextButton = await cap.waitFor(SELECTORS.next, { optional: true, timeoutMs: 3000 });
+      const nextButton = /** @type {any} */ (await cap.waitFor(SELECTORS.next, { optional: true, timeoutMs: 3000 }));
       if (!nextButton) {
         return { outcome: 'needs_human', pendingQuestion: { kind: 'unrecognized_page', label: 'Neither a Next nor a Submit control was found on this wizard step.', page_url: ctx.applyUrl } };
+      }
+      // The live footer button doubles as Submit on the last step: a Submit label MUST go through the
+      // submit path so submit_request_sent is recorded before the click (duplicate-application guard).
+      if (/^\s*submit\b/i.test(String(nextButton.text ?? ''))) {
+        await ctx.recordSubmitRequestSent();
+        await cap.click(SELECTORS.next);
+        submittedThisRun = true;
+        break;
       }
       await cap.click(SELECTORS.next);
     }

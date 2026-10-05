@@ -14,13 +14,19 @@ import { test, describe } from 'node:test';
 import assert from 'node:assert/strict';
 import { workday, SELECTORS, MAX_STEPS } from '../src/apply/adapters/workday.js';
 
+/** The adapter's two union probes, mapped to their member selectors for the fake capability. */
+const UNIONS = {
+  [SELECTORS.entryProbe]: [SELECTORS.authGate, SELECTORS.applyButton],
+  [SELECTORS.postManualProbe]: [SELECTORS.authGate, SELECTORS.guestWizard],
+};
+
 /**
- * @param {{ waitFor?: Record<string, any>, uploadResult?: string|null }} responses
+ * @param {{ waitFor?: Record<string, any> | ((cap: any) => Record<string, any>), uploadResult?: string|null }} responses
  */
 function makeFakeCap(responses = {}) {
   /** @type {any[]} */
   const calls = [];
-  return {
+  const fake = {
     calls,
     async fill(sel, val) { calls.push(['fill', sel, val]); },
     async select(sel, val) { calls.push(['select', sel, val]); },
@@ -29,11 +35,24 @@ function makeFakeCap(responses = {}) {
     async screenshot() { calls.push(['screenshot']); return { relPath: 'applications/1/shot.png', absPath: '/x/applications/1/shot.png' }; },
     async waitFor(sel, o = {}) {
       calls.push(['waitFor', sel, o]);
-      const entry = (responses.waitFor ?? {})[sel];
+      // A factory form lets a scripted page react to earlier clicks recorded on this same fake.
+      const table = typeof responses.waitFor === 'function' ? responses.waitFor(fake) : (responses.waitFor ?? {});
+      // CSS-union probes resolve to the first scripted member that is present, like a real comma selector.
+      const unionMembers = UNIONS[sel];
+      if (unionMembers && table[sel] === undefined) {
+        for (const member of unionMembers) {
+          const e = table[member];
+          const v = e === undefined ? null : (typeof e === 'function' ? e(o) : e);
+          if (v) return v;
+        }
+        return null;
+      }
+      const entry = table[sel];
       if (entry === undefined) return o.all ? [] : null;
       return typeof entry === 'function' ? entry(o) : entry;
     },
   };
+  return fake;
 }
 
 /**
@@ -367,6 +386,195 @@ describe('workday adapter', () => {
     assert.equal(result.outcome, 'needs_human');
     assert.equal(result.pendingQuestion.kind, 'post_submit_uncertain');
     assert.ok(ctx._events.some((e) => e.evt === 'submit_request_sent'));
+  });
+
+  describe('entering the apply flow from the job-description page', () => {
+    /**
+     * A job-description page: the Apply button is present until clicked, the Apply Manually option appears
+     * only after Apply is clicked, and the auth gate (or guest wizard) appears only after Apply Manually.
+     * @param {any} cap
+     * @param {{ manualOption?: boolean, after?: 'auth'|'guest'|'nothing' }} o
+     */
+    function jobPage(cap, o = {}) {
+      const clicked = (sel) => cap.calls.some((c) => c[0] === 'click' && c[1] === sel);
+      return {
+        [SELECTORS.applyButton]: () => (clicked(SELECTORS.applyButton) ? null : { tagName: 'a', text: 'Apply' }),
+        [SELECTORS.applyManually]: () => (o.manualOption !== false && clicked(SELECTORS.applyButton) ? { tagName: 'a', text: 'Apply Manually' } : null),
+        [SELECTORS.authGate]: () => ((o.after ?? 'auth') === 'auth' && clicked(SELECTORS.applyManually) ? EL : null),
+        [SELECTORS.guestWizard]: () => (o.after === 'guest' && clicked(SELECTORS.applyManually) ? EL : null),
+      };
+    }
+
+    test('already on the auth gate: never clicks Apply or Apply Manually', async () => {
+      const cap = makeFakeCap({ waitFor: { [SELECTORS.authGate]: EL, [SELECTORS.authError]: { tagName: 'div', text: 'Invalid' } } });
+      const ctx = makeCtx({ credential: { username: 'jordan@example.com', password: 'pw' } });
+      const result = await workday.run(cap, ctx);
+      assert.equal(result.pendingQuestion.kind, 'credential', 'reached authenticate()');
+      assert.equal(cap.calls.some((c) => c[0] === 'click' && (c[1] === SELECTORS.applyButton || c[1] === SELECTORS.applyManually)), false);
+    });
+
+    test('Apply, then Apply Manually, then the auth gate: proceeds to account creation in that order', async () => {
+      const shared = makeFakeCap({
+        waitFor: (c) => ({
+          ...jobPage(c),
+          [SELECTORS.stepProbe]: EL,
+          [SELECTORS.submit]: { tagName: 'button', text: 'Submit' },
+          [SELECTORS.confirmationHeading]: { tagName: 'h1', text: 'Thank you for applying!' },
+        }),
+      });
+      const ctx = makeCtx({ credential: null, sharedCalls: shared.calls });
+      const result = await workday.run(shared, ctx);
+      assert.equal(result.outcome, 'submitted');
+      const applyIdx = shared.calls.findIndex((c) => c[0] === 'click' && c[1] === SELECTORS.applyButton);
+      const manualIdx = shared.calls.findIndex((c) => c[0] === 'click' && c[1] === SELECTORS.applyManually);
+      const writeIdx = shared.calls.findIndex((c) => c[0] === 'write');
+      const createIdx = shared.calls.findIndex((c) => c[0] === 'fill' && c[1] === SELECTORS.createEmail);
+      assert.ok(applyIdx >= 0 && applyIdx < manualIdx, 'Apply is clicked before Apply Manually');
+      assert.ok(manualIdx < writeIdx && writeIdx < createIdx, 'the credential write and account creation happen only after Apply Manually');
+      assert.equal(shared.calls.some((c) => c[0] === 'click' && /autofillWithResume|useMyLastApplication|applyWithLinkedIn/.test(c[1])), false);
+    });
+
+    test('Apply button not found -> needs_human (unrecognized_page) naming that step, nothing clicked or filled', async () => {
+      const cap = makeFakeCap({});
+      const result = await workday.run(cap, makeCtx({ credential: null }));
+      assert.equal(result.outcome, 'needs_human');
+      assert.equal(result.pendingQuestion.kind, 'unrecognized_page');
+      assert.match(result.pendingQuestion.label, /Apply button not found/);
+      assert.equal(cap.calls.some((c) => c[0] === 'click' || c[0] === 'fill'), false);
+    });
+
+    test('Apply Manually option not found -> needs_human (unrecognized_page) naming that step, no credential written', async () => {
+      const cap = makeFakeCap({ waitFor: (c) => jobPage(c, { manualOption: false }) });
+      const calls = cap.calls;
+      const ctx = makeCtx({ credential: null, sharedCalls: calls });
+      const result = await workday.run(cap, ctx);
+      assert.equal(result.outcome, 'needs_human');
+      assert.equal(result.pendingQuestion.kind, 'unrecognized_page');
+      assert.match(result.pendingQuestion.label, /Apply Manually option not found/);
+      assert.ok(calls.some((c) => c[0] === 'click' && c[1] === SELECTORS.applyButton));
+      assert.equal(calls.some((c) => c[0] === 'write' || c[0] === 'fill'), false);
+    });
+
+    test('auth form not found after Apply Manually -> needs_human (unrecognized_page) naming that step, no credential written', async () => {
+      const cap = makeFakeCap({ waitFor: (c) => jobPage(c, { after: 'nothing' }) });
+      const calls = cap.calls;
+      const ctx = makeCtx({ credential: null, sharedCalls: calls });
+      const result = await workday.run(cap, ctx);
+      assert.equal(result.outcome, 'needs_human');
+      assert.equal(result.pendingQuestion.kind, 'unrecognized_page');
+      assert.match(result.pendingQuestion.label, /auth form not found after Apply Manually/);
+      assert.ok(calls.some((c) => c[0] === 'click' && c[1] === SELECTORS.applyManually));
+      assert.equal(calls.some((c) => c[0] === 'write' || c[0] === 'fill'), false);
+    });
+
+    test('Apply Manually lands directly on a guest wizard (no auth gate on this tenant): skips authentication, never reads or writes a credential', async () => {
+      const cap = makeFakeCap({
+        waitFor: (c) => ({
+          ...jobPage(c, { after: 'guest' }),
+          [SELECTORS.stepProbe]: EL,
+          [SELECTORS.submit]: { tagName: 'button', text: 'Submit' },
+          [SELECTORS.confirmationHeading]: { tagName: 'h1', text: 'Thank you for applying!' },
+        }),
+      });
+      const calls = cap.calls;
+      const ctx = makeCtx({ credential: null, sharedCalls: calls });
+      const result = await workday.run(cap, ctx);
+      assert.equal(result.outcome, 'submitted');
+      assert.equal(calls.some((c) => c[0] === 'read' || c[0] === 'write'), false, 'a guest flow never touches Credential Manager');
+      assert.equal(calls.some((c) => c[0] === 'fill' && c[1] === SELECTORS.createEmail), false);
+    });
+  });
+
+  test('selector contract includes the ids observed on live tenants (2026-10-05 read-only probe)', () => {
+    assert.match(SELECTORS.applyButton, /adventureButton/);
+    assert.match(SELECTORS.applyManually, /applyManually/);
+    assert.match(SELECTORS.authGate, /signInContent/);
+    assert.match(SELECTORS.authGate, /signInFormo/);
+    assert.match(SELECTORS.guestWizard, /applyFlowMyInfoPage/);
+    // The live create-account button is aria-hidden behind a click_filter overlay; the overlay takes the click.
+    assert.match(SELECTORS.createAccountSubmit, /click_filter/);
+    // applyFlowPage also renders on the auth gate page itself, so it must never count as a guest wizard.
+    assert.doesNotMatch(SELECTORS.guestWizard, /applyFlowPage"/);
+  });
+
+  describe('stored-credential sign-in when the gate opens on Create Account (live att.wd1 default)', () => {
+    test('clicks the Sign In link first, then fills and submits the Sign In form; never writes a credential', async () => {
+      const cap = makeFakeCap({
+        waitFor: (c) => {
+          const toggled = c.calls.some((x) => x[0] === 'click' && x[1] === SELECTORS.signInToggle);
+          return {
+            [SELECTORS.authGate]: EL,
+            [SELECTORS.signInToggle]: toggled ? null : { tagName: 'button', text: 'Sign In' },
+            [SELECTORS.signInFormReady]: toggled ? { tagName: 'button', text: 'Sign In' } : null,
+            [SELECTORS.authError]: { tagName: 'div', text: 'stop here' },
+          };
+        },
+      });
+      const ctx = makeCtx({ credential: { username: 'jordan@example.com', password: 'stored-pw' }, sharedCalls: [] });
+      await workday.run(cap, ctx);
+      const toggleIdx = cap.calls.findIndex((c) => c[0] === 'click' && c[1] === SELECTORS.signInToggle);
+      const emailIdx = cap.calls.findIndex((c) => c[0] === 'fill' && c[1] === SELECTORS.signInEmail);
+      const submitIdx = cap.calls.findIndex((c) => c[0] === 'click' && c[1] === SELECTORS.signInSubmit);
+      assert.ok(toggleIdx >= 0 && toggleIdx < emailIdx && emailIdx < submitIdx, 'Sign In link, then email fill, then Sign In submit');
+      assert.equal(ctx._credCalls.some((c) => c[0] === 'write'), false);
+      assert.equal(cap.calls.some((c) => c[0] === 'click' && c[1] === SELECTORS.createAccountSubmit), false);
+    });
+
+    test('Sign In form never appears after clicking the Sign In link -> needs_human (unrecognized_page), nothing filled', async () => {
+      const cap = makeFakeCap({ waitFor: { [SELECTORS.authGate]: EL, [SELECTORS.signInToggle]: { tagName: 'button', text: 'Sign In' } } });
+      const ctx = makeCtx({ credential: { username: 'jordan@example.com', password: 'stored-pw' } });
+      const result = await workday.run(cap, ctx);
+      assert.equal(result.outcome, 'needs_human');
+      assert.equal(result.pendingQuestion.kind, 'unrecognized_page');
+      assert.match(result.pendingQuestion.label, /Sign In form not found/);
+      assert.equal(cap.calls.some((c) => c[0] === 'fill'), false);
+    });
+
+    test('no stored credential: the Sign In link is never clicked (account creation stays on the Create Account panel)', async () => {
+      const cap = makeFakeCap({ waitFor: { [SELECTORS.authGate]: EL, [SELECTORS.signInToggle]: { tagName: 'button', text: 'Sign In' }, [SELECTORS.authError]: { tagName: 'div', text: 'x' } } });
+      await workday.run(cap, makeCtx({ credential: null }));
+      assert.equal(cap.calls.some((c) => c[0] === 'click' && c[1] === SELECTORS.signInToggle), false);
+    });
+  });
+
+  describe('live wizard shape (talentmanagementsolution.wd3 My Information page)', () => {
+    test('a footer button labeled Submit is treated as the submit step: submit_request_sent is recorded BEFORE the click', async () => {
+      const cap = makeFakeCap({
+        waitFor: {
+          [SELECTORS.authGate]: EL,
+          [SELECTORS.stepProbe]: EL,
+          [SELECTORS.next]: { tagName: 'button', text: 'Submit' },
+          [SELECTORS.confirmationHeading]: { tagName: 'h1', text: 'Thank you for applying!' },
+        },
+      });
+      const ctx = makeCtx({ credential: { username: 'jordan@example.com', password: 'stored-pw' } });
+      ctx.recordSubmitRequestSent = async () => { cap.calls.push(['submit_request_sent']); };
+      const result = await workday.run(cap, ctx);
+      assert.equal(result.outcome, 'submitted');
+      const recordIdx = cap.calls.findIndex((c) => c[0] === 'submit_request_sent');
+      const clickIdx = cap.calls.findIndex((c) => c[0] === 'click' && c[1] === SELECTORS.next);
+      assert.ok(recordIdx >= 0 && recordIdx < clickIdx, 'the duplicate-application guard must be recorded before the submitting click');
+      assert.equal(cap.calls.filter((c) => c[0] === 'click' && c[1] === SELECTORS.next).length, 1);
+    });
+
+    test('a footer button labeled Next is clicked as Next, never recorded as a submit', async () => {
+      const cap = makeFakeCap({ waitFor: { [SELECTORS.authGate]: EL, [SELECTORS.stepProbe]: EL, [SELECTORS.next]: { tagName: 'button', text: 'Next' } } });
+      const ctx = makeCtx({ credential: { username: 'jordan@example.com', password: 'stored-pw' } });
+      const result = await workday.run(cap, ctx);
+      assert.equal(result.outcome, 'needs_human');
+      assert.equal(ctx._events.some((e) => e.evt === 'submit_request_sent'), false);
+    });
+
+    test('selector contract includes the live wizard and Sign In ids (2026-10-05 read-only probe)', () => {
+      assert.match(SELECTORS.firstName, /input\[name="legalName--firstName"\]/);
+      assert.match(SELECTORS.lastName, /input\[name="legalName--lastName"\]/);
+      assert.match(SELECTORS.phone, /input\[name="phoneNumber"\]/);
+      assert.match(SELECTORS.next, /pageFooterNextButton/);
+      assert.match(SELECTORS.resumeUpload, /file-upload-input-ref/);
+      assert.match(SELECTORS.signInToggle, /signInLink/);
+      assert.match(SELECTORS.signInFormReady, /signInSubmitButton/);
+      assert.match(SELECTORS.signInSubmit, /click_filter/);
+    });
   });
 
   test('uploadHosts is empty (the tenant host itself already covers this ATS, per session.js route policy)', () => {
