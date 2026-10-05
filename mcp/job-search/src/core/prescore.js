@@ -24,7 +24,14 @@ const SENIORITY = [
   [/\bdirector\b/i, 10],
 ];
 
-const JUNIOR = /\b(intern|internship|junior|jr\.?|associate|coordinator|assistant|entry[- ]level|analyst i\b)/i;
+/**
+ * The title seniority patterns above, without their point values. src/core/scope.js's relevance gate
+ * (spec amendment F1) treats ANY of these as an exec-token title, so it reads this list rather than
+ * keeping its own copy that could drift.
+ */
+export const SENIORITY_PATTERNS = Object.freeze(SENIORITY.map(([re]) => /** @type {RegExp} */ (re)));
+
+const JUNIOR =/\b(intern|internship|junior|jr\.?|associate|coordinator|assistant|entry[- ]level|analyst i\b)/i;
 
 /** @param {string} s */
 function words(s) {

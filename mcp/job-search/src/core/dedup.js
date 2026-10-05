@@ -12,6 +12,7 @@
  */
 import { isLocationEligible, titleTokenKey, isStateOnlyLocation, isRemoteLocation } from './normalize.js';
 import { STATUS_PRECEDENCE, REOPEN_REASONS } from './statuses.js';
+import { isExactMatch } from './scope.js';
 
 // STATUS_PRECEDENCE and REOPEN_REASONS now live in statuses.js (single source of truth, dashboard PR 1);
 // STATUS_PRECEDENCE is re-exported here so existing importers of dedup.js keep working unchanged.
@@ -25,6 +26,7 @@ export const BRANCHES = Object.freeze([
   '1b-repost-same-url',
   '2-cross-source-dup',
   '3-repost',
+  '3b-same-source-live-dup',
   '6-state-remote-dup',
   '4-ambiguous',
   '5-new',
@@ -102,6 +104,8 @@ export const OUTCOMES = Object.freeze({ update: 'update', new: 'new', cross_sour
  * @property {string|null} reason queue reason for ambiguous / confidential_no_description
  * @property {number[]} matches ids of the rows that triggered the decision
  * @property {boolean} queue whether a review-queue entry is required
+ * @property {Decision} [fallback] branch 3b only: the queued decision to use instead when the root's
+ *   re-read status (applyDecision) no longer allows a silent merge
  */
 
 const DEFAULTS = Object.freeze({ repostGapDays: 30, titleSimilarity: 0.55, companySimilarity: 0.7, postedAtCorroborationDays: 3 });
@@ -390,7 +394,24 @@ export async function classify(rec, lookups, opts = {}) {
           const inh = inheritStatus(target.status);
           return decide('3-repost', 'repost', { target, repostOf: target.repost_of ?? target.id, inherit: inh, matches: ids(sameSource), queue: Boolean(inh.queueReason), reason: inh.queueReason });
         }
-        return decide('4-ambiguous', 'ambiguous', { reason: 'same_source_hash_within_gap', matches: ids(sameSource), queue: true });
+        const within = decide('4-ambiguous', 'ambiguous', { reason: 'same_source_hash_within_gap', matches: ids(sameSource), queue: true });
+        // Branch 3b (dedup scope-gate spec B2, amendments F4/F6/F10): every same-source row resolves to
+        // ONE root, that root is live and is itself an exact match (scope.js isExactMatch). Merge as a
+        // duplicate of the root instead of asking the operator. applyDecision re-reads the root's status
+        // inside its transaction (F5) and falls back to `within` (still queued) when inheritance from the
+        // root would need a queue row (C3), so this branch never merges into a row that needs review.
+        const rootIds = new Set(sameSource.map((r) => r.duplicate_of ?? r.id));
+        if (rootIds.size === 1) {
+          const rootId = [...rootIds][0];
+          const root = sameSource.find((r) => r.id === rootId);
+          if (root && isLive(root, now, gap) && isExactMatch(rec, root)) {
+            const inh = inheritStatus(root.status);
+            if (!inh.queueReason) {
+              return decide('3b-same-source-live-dup', 'cross_source_dup', { target: root, rootId: root.id, inherit: inh, matches: ids(sameSource), queue: false, reason: null, fallback: within });
+            }
+          }
+        }
+        return within;
       }
       if (ineligibleRows.length) {
         return decide('4-ambiguous', 'ambiguous', { reason: 'hash_location_unknown', matches: ids(ineligibleRows), queue: true });
