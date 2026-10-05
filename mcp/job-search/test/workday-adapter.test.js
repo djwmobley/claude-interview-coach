@@ -497,6 +497,86 @@ describe('workday adapter', () => {
     assert.doesNotMatch(SELECTORS.guestWizard, /applyFlowPage"/);
   });
 
+  describe('stored-credential sign-in when the gate opens on Create Account (live att.wd1 default)', () => {
+    test('clicks the Sign In link first, then fills and submits the Sign In form; never writes a credential', async () => {
+      const cap = makeFakeCap({
+        waitFor: (c) => {
+          const toggled = c.calls.some((x) => x[0] === 'click' && x[1] === SELECTORS.signInToggle);
+          return {
+            [SELECTORS.authGate]: EL,
+            [SELECTORS.signInToggle]: toggled ? null : { tagName: 'button', text: 'Sign In' },
+            [SELECTORS.signInFormReady]: toggled ? { tagName: 'button', text: 'Sign In' } : null,
+            [SELECTORS.authError]: { tagName: 'div', text: 'stop here' },
+          };
+        },
+      });
+      const ctx = makeCtx({ credential: { username: 'jordan@example.com', password: 'stored-pw' }, sharedCalls: [] });
+      await workday.run(cap, ctx);
+      const toggleIdx = cap.calls.findIndex((c) => c[0] === 'click' && c[1] === SELECTORS.signInToggle);
+      const emailIdx = cap.calls.findIndex((c) => c[0] === 'fill' && c[1] === SELECTORS.signInEmail);
+      const submitIdx = cap.calls.findIndex((c) => c[0] === 'click' && c[1] === SELECTORS.signInSubmit);
+      assert.ok(toggleIdx >= 0 && toggleIdx < emailIdx && emailIdx < submitIdx, 'Sign In link, then email fill, then Sign In submit');
+      assert.equal(ctx._credCalls.some((c) => c[0] === 'write'), false);
+      assert.equal(cap.calls.some((c) => c[0] === 'click' && c[1] === SELECTORS.createAccountSubmit), false);
+    });
+
+    test('Sign In form never appears after clicking the Sign In link -> needs_human (unrecognized_page), nothing filled', async () => {
+      const cap = makeFakeCap({ waitFor: { [SELECTORS.authGate]: EL, [SELECTORS.signInToggle]: { tagName: 'button', text: 'Sign In' } } });
+      const ctx = makeCtx({ credential: { username: 'jordan@example.com', password: 'stored-pw' } });
+      const result = await workday.run(cap, ctx);
+      assert.equal(result.outcome, 'needs_human');
+      assert.equal(result.pendingQuestion.kind, 'unrecognized_page');
+      assert.match(result.pendingQuestion.label, /Sign In form not found/);
+      assert.equal(cap.calls.some((c) => c[0] === 'fill'), false);
+    });
+
+    test('no stored credential: the Sign In link is never clicked (account creation stays on the Create Account panel)', async () => {
+      const cap = makeFakeCap({ waitFor: { [SELECTORS.authGate]: EL, [SELECTORS.signInToggle]: { tagName: 'button', text: 'Sign In' }, [SELECTORS.authError]: { tagName: 'div', text: 'x' } } });
+      await workday.run(cap, makeCtx({ credential: null }));
+      assert.equal(cap.calls.some((c) => c[0] === 'click' && c[1] === SELECTORS.signInToggle), false);
+    });
+  });
+
+  describe('live wizard shape (talentmanagementsolution.wd3 My Information page)', () => {
+    test('a footer button labeled Submit is treated as the submit step: submit_request_sent is recorded BEFORE the click', async () => {
+      const cap = makeFakeCap({
+        waitFor: {
+          [SELECTORS.authGate]: EL,
+          [SELECTORS.stepProbe]: EL,
+          [SELECTORS.next]: { tagName: 'button', text: 'Submit' },
+          [SELECTORS.confirmationHeading]: { tagName: 'h1', text: 'Thank you for applying!' },
+        },
+      });
+      const ctx = makeCtx({ credential: { username: 'jordan@example.com', password: 'stored-pw' } });
+      ctx.recordSubmitRequestSent = async () => { cap.calls.push(['submit_request_sent']); };
+      const result = await workday.run(cap, ctx);
+      assert.equal(result.outcome, 'submitted');
+      const recordIdx = cap.calls.findIndex((c) => c[0] === 'submit_request_sent');
+      const clickIdx = cap.calls.findIndex((c) => c[0] === 'click' && c[1] === SELECTORS.next);
+      assert.ok(recordIdx >= 0 && recordIdx < clickIdx, 'the duplicate-application guard must be recorded before the submitting click');
+      assert.equal(cap.calls.filter((c) => c[0] === 'click' && c[1] === SELECTORS.next).length, 1);
+    });
+
+    test('a footer button labeled Next is clicked as Next, never recorded as a submit', async () => {
+      const cap = makeFakeCap({ waitFor: { [SELECTORS.authGate]: EL, [SELECTORS.stepProbe]: EL, [SELECTORS.next]: { tagName: 'button', text: 'Next' } } });
+      const ctx = makeCtx({ credential: { username: 'jordan@example.com', password: 'stored-pw' } });
+      const result = await workday.run(cap, ctx);
+      assert.equal(result.outcome, 'needs_human');
+      assert.equal(ctx._events.some((e) => e.evt === 'submit_request_sent'), false);
+    });
+
+    test('selector contract includes the live wizard and Sign In ids (2026-10-05 read-only probe)', () => {
+      assert.match(SELECTORS.firstName, /input\[name="legalName--firstName"\]/);
+      assert.match(SELECTORS.lastName, /input\[name="legalName--lastName"\]/);
+      assert.match(SELECTORS.phone, /input\[name="phoneNumber"\]/);
+      assert.match(SELECTORS.next, /pageFooterNextButton/);
+      assert.match(SELECTORS.resumeUpload, /file-upload-input-ref/);
+      assert.match(SELECTORS.signInToggle, /signInLink/);
+      assert.match(SELECTORS.signInFormReady, /signInSubmitButton/);
+      assert.match(SELECTORS.signInSubmit, /click_filter/);
+    });
+  });
+
   test('uploadHosts is empty (the tenant host itself already covers this ATS, per session.js route policy)', () => {
     assert.deepEqual(workday.uploadHosts, []);
   });

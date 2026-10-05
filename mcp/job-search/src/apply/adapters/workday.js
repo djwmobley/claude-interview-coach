@@ -51,7 +51,12 @@ export const SELECTORS = Object.freeze({
   authError: '[data-automation-id="errorMessage"], [role="alert"]',
   signInEmail: '[data-automation-id="email"]',
   signInPassword: '[data-automation-id="password"]',
-  signInSubmit: '[data-automation-id="signInSubmitButton"]',
+  // Live (att.wd1): the gate opens on Create Account; signInLink switches to the Sign In panel, whose
+  // aria-hidden signInSubmitButton exists only on that panel (attached probe), behind the same click_filter
+  // overlay as Create Account. Only one panel is rendered at a time, so the overlay is unambiguous.
+  signInToggle: '[data-automation-id="signInLink"]',
+  signInFormReady: '[data-automation-id="signInSubmitButton"]',
+  signInSubmit: '[data-automation-id="noCaptchaWrapper"] [data-automation-id="click_filter"], [data-automation-id="signInSubmitButton"]',
   createEmail: '[data-automation-id="email"]',
   createPassword: '[data-automation-id="password"]',
   createVerifyPassword: '[data-automation-id="verifyPassword"]',
@@ -65,13 +70,18 @@ export const SELECTORS = Object.freeze({
   // Each wizard step (My Information / My Experience / Application Questions / Voluntary Disclosures /
   // Review) renders inside this same page-body container in Workday's CX shell.
   stepProbe: '[data-automation-id="pageBodyContainer"], [data-automation-id="applyFlowPage"]',
-  firstName: '[data-automation-id="legalNameSection_firstName"], input[name="firstName"]',
-  lastName: '[data-automation-id="legalNameSection_lastName"], input[name="lastName"]',
+  // Live My Information ids (talentmanagementsolution.wd3): inputs named legalName--firstName /
+  // legalName--lastName inside formField-legalName--* containers; phone is input[name="phoneNumber"].
+  firstName: '[data-automation-id="legalNameSection_firstName"], input[name="firstName"], input[name="legalName--firstName"]',
+  lastName: '[data-automation-id="legalNameSection_lastName"], input[name="lastName"], input[name="legalName--lastName"]',
   phone: '[data-automation-id="phone-number"], input[name="phoneNumber"]',
-  resumeUpload: '[data-automation-id="resumeUpload"] input[type="file"], input[name="resume"]',
+  // file-upload-input-ref is Workday's common My Experience upload input; NOT observed live (it is past Next).
+  resumeUpload: '[data-automation-id="resumeUpload"] input[type="file"], input[name="resume"], input[data-automation-id="file-upload-input-ref"]',
   coverLetterUpload: '[data-automation-id="coverLetterUpload"] input[type="file"], input[name="coverLetter"]',
   customFields: '[data-automation-id="formField"], [data-automation-id$="Question"]',
-  next: '[data-automation-id="bottom-navigation-next-button"], button[data-automation-id="next"]',
+  // Live: pageFooterNextButton. On the final step the same button is expected to read Submit, so the
+  // wizard loop checks its label and routes a Submit label through the submit path (see run()).
+  next: '[data-automation-id="bottom-navigation-next-button"], button[data-automation-id="next"], [data-automation-id="pageFooterNextButton"]',
   submit: '[data-automation-id="bottom-navigation-next-button"][data-automation-id-submit="true"], button[data-automation-id="submit"]',
   confirmationHeading: '[data-automation-id="applicationConfirmationHeader"], h1, h2',
 });
@@ -260,6 +270,15 @@ async function checkCaptcha(cap, ctx, probeResult) {
 async function authenticate(cap, ctx) {
   const existing = await ctx.credentials.read();
   if (existing) {
+    // The gate may open on Create Account (live att.wd1); switch to the Sign In panel first.
+    const toSignIn = await cap.waitFor(SELECTORS.signInToggle, { optional: true, timeoutMs: 2000 });
+    if (toSignIn) {
+      await cap.click(SELECTORS.signInToggle);
+      const ready = await cap.waitFor(SELECTORS.signInFormReady, { optional: true, state: 'attached', timeoutMs: 5000 });
+      if (!ready) {
+        return { outcome: 'needs_human', pendingQuestion: { kind: 'unrecognized_page', label: 'Workday Sign In form not found after clicking the Sign In link.', page_url: ctx.applyUrl } };
+      }
+    }
     await cap.fill(SELECTORS.signInEmail, existing.username);
     await cap.fill(SELECTORS.signInPassword, existing.password);
     await cap.click(SELECTORS.signInSubmit);
@@ -457,9 +476,17 @@ export const workday = {
         submittedThisRun = true;
         break;
       }
-      const nextButton = await cap.waitFor(SELECTORS.next, { optional: true, timeoutMs: 3000 });
+      const nextButton = /** @type {any} */ (await cap.waitFor(SELECTORS.next, { optional: true, timeoutMs: 3000 }));
       if (!nextButton) {
         return { outcome: 'needs_human', pendingQuestion: { kind: 'unrecognized_page', label: 'Neither a Next nor a Submit control was found on this wizard step.', page_url: ctx.applyUrl } };
+      }
+      // The live footer button doubles as Submit on the last step: a Submit label MUST go through the
+      // submit path so submit_request_sent is recorded before the click (duplicate-application guard).
+      if (/^\s*submit\b/i.test(String(nextButton.text ?? ''))) {
+        await ctx.recordSubmitRequestSent();
+        await cap.click(SELECTORS.next);
+        submittedThisRun = true;
+        break;
       }
       await cap.click(SELECTORS.next);
     }
