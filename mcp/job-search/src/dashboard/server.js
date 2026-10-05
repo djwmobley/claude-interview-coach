@@ -5,6 +5,7 @@
  * modules that are already safe for a second, non-MCP process to import.
  */
 import http from 'node:http';
+import crypto from 'node:crypto';
 import fs from 'node:fs';
 import path from 'node:path';
 import { createRouter } from './router.js';
@@ -90,12 +91,13 @@ import { register as registerGoogleReauth } from './routes/google-reauth.js';
 const STATIC_EXTS = Object.freeze({ '.html': 'text/html; charset=utf-8', '.css': 'text/css; charset=utf-8', '.js': 'text/javascript; charset=utf-8', '.svg': 'image/svg+xml' });
 
 /**
+ * @param {import('node:http').IncomingMessage} req
  * @param {import('node:http').ServerResponse} res
  * @param {string} publicRoot
  * @param {string} pathname
  * @param {string} method
  */
-function serveStatic(res, publicRoot, pathname, method) {
+function serveStatic(req, res, publicRoot, pathname, method) {
   if (method !== 'GET' && method !== 'HEAD') {
     res.setHeader('Allow', 'GET, HEAD');
     return sendJson(res, 405, { ok: false, code: 'METHOD_NOT_ALLOWED', message: 'method not allowed; use GET, HEAD', hint: null, details: {} });
@@ -114,10 +116,35 @@ function serveStatic(res, publicRoot, pathname, method) {
     return sendJson(res, 404, { ok: false, code: 'NOT_FOUND', message: 'not found', hint: null, details: {} });
   }
   const contentType = STATIC_EXTS[path.extname(target).toLowerCase()] ?? 'application/octet-stream';
+  // Revalidate on every load (2026-10-05): after a dashboard restart an open tab kept running stale JS
+  // because assets carried no validator. no-cache plus a content-hash ETag makes revalidation a cheap 304.
+  const etag = `"${crypto.createHash('sha256').update(data).digest('hex').slice(0, 32)}"`;
+  res.setHeader('Cache-Control', 'no-cache');
+  res.setHeader('ETag', etag);
+  try {
+    res.setHeader('Last-Modified', fs.statSync(target).mtime.toUTCString());
+  } catch {
+    /* stat raced a delete; ETag alone still validates */
+  }
+  if (etagMatches(req.headers['if-none-match'], etag)) {
+    res.statusCode = 304;
+    return res.end();
+  }
   res.statusCode = 200;
   res.setHeader('Content-Type', contentType);
   if (method === 'HEAD') return res.end();
   res.end(data);
+}
+
+/**
+ * If-None-Match uses weak comparison (RFC 9110 13.1.2): strip any W/ prefix and compare opaque tags.
+ * @param {string|string[]|undefined} header
+ * @param {string} etag
+ */
+function etagMatches(header, etag) {
+  if (typeof header !== 'string' || header.trim() === '') return false;
+  if (header.trim() === '*') return true;
+  return header.split(',').some((t) => t.trim().replace(/^W\//, '') === etag);
 }
 
 /** Send a guard-check failure ({ ok, status, code, message }) as the standard JSON error envelope. */
@@ -144,7 +171,7 @@ async function handleRequest(req, res, router, deps, publicRoot) {
     if (!hostCheck.ok) return sendGuardFailure(res, hostCheck);
 
     if (!pathname.startsWith('/api/')) {
-      return serveStatic(res, publicRoot, pathname, method);
+      return serveStatic(req, res, publicRoot, pathname, method);
     }
 
     const found = router.dispatch(pathname, method);

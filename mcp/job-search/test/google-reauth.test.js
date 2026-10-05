@@ -623,3 +623,62 @@ describe('resolveRedirectUris / loginHintFromFilename', () => {
     assert.equal(loginHintFromFilename('/x/y/credentials.json'), undefined);
   });
 });
+
+describe('reauthorizeGoogle: requested scopes (2026-10-05)', () => {
+  const READ = 'https://www.googleapis.com/auth/gmail.readonly';
+  const SEND = 'https://www.googleapis.com/auth/gmail.send';
+  const CAL = 'https://www.googleapis.com/auth/calendar.events';
+
+  /**
+   * Run one reauth round trip whose exchange grants `grantedScope`; returns the consent request and the
+   * token file as written.
+   * @param {string[]} startScopes
+   * @param {string} grantedScope
+   */
+  async function roundTrip(startScopes, grantedScope) {
+    const file = writeToken({ scopes: startScopes });
+    const port = await freePort();
+    const calls = [];
+    const result = await reauthorizeGoogle({
+      tokenFile: file,
+      redirectUris: [`http://localhost:${port}/oauth2callback`],
+      signal: new AbortController().signal,
+      lockFile: freshLockFile(),
+      timeoutMs: 10000,
+      deps: {
+        makeOAuthClient: fakeMakeOAuthClient(calls),
+        exchangeCode: async () => ({ access_token: 'zz-new-access', scope: grantedScope, expiry_date: Date.UTC(2030, 0, 1) }),
+      },
+      async openUrl() {
+        await tick();
+        const state = calls[0].generateAuthUrlOpts.state;
+        await fetch(`http://127.0.0.1:${port}/oauth2callback?state=${encodeURIComponent(state)}&code=abc123`);
+      },
+    });
+    assert.equal(result.outcome, 'reauthorized');
+    return { requested: calls[0].generateAuthUrlOpts.scope, written: JSON.parse(fs.readFileSync(file, 'utf8')) };
+  }
+
+  test('the consent request names calendar.events, gmail.send and gmail.readonly explicitly, even when the old token had only gmail.readonly', async () => {
+    const { requested } = await roundTrip([READ], `${READ} ${SEND} ${CAL}`);
+    assert.ok(Array.isArray(requested));
+    for (const s of [READ, SEND, CAL]) assert.ok(requested.includes(s), `requested scopes include ${s}`);
+  });
+
+  test('previously granted scopes are still requested alongside the required ones', async () => {
+    const { requested } = await roundTrip([READ, 'https://www.googleapis.com/auth/drive.file'], `${READ} ${SEND} ${CAL}`);
+    assert.ok(requested.includes('https://www.googleapis.com/auth/drive.file'));
+  });
+
+  test('a newly requested scope the user did NOT grant is not recorded in the token file', async () => {
+    const { written } = await roundTrip([READ], READ);
+    assert.ok(!written.scopes.includes(CAL), 'calendar.events was requested but not granted, so it must not be recorded');
+    assert.ok(!written.scopes.includes(SEND));
+    assert.ok(written.scopes.includes(READ));
+  });
+
+  test('a granted calendar scope is recorded', async () => {
+    const { written } = await roundTrip([READ], `${READ} ${SEND} ${CAL}`);
+    for (const s of [READ, SEND, CAL]) assert.ok(written.scopes.includes(s));
+  });
+});
