@@ -9,7 +9,7 @@
 import crypto from 'node:crypto';
 import { withTransaction } from './db.js';
 import { JobSearchError } from './errors.js';
-import { reserveBudget } from './budget.js';
+import { reserveBudget, budgetDay } from './budget.js';
 import { transitionUnwrapped } from './applications.js';
 import { AWAITING_SUBMIT_KIND } from './easy-apply-tabs.js';
 
@@ -17,6 +17,11 @@ export { listAwaitingTargets, demoteAbandonedTabs, markStaleAwaiting, AWAITING_S
 
 /** Environment variable the runner sets in the generated MCP config: "<applicationId>.<nonce hex>". */
 export const LEASE_ENV = 'JOBSEARCH_EASY_APPLY_LEASE';
+/**
+ * Canonical lease env for the assisted_apply tool (src/tools/assisted_apply.js). LEASE_ENV above stays as
+ * the easy_apply alias's env for one release (spec v2 A14); the same lease token format and table back both.
+ */
+export const ASSISTED_LEASE_ENV = 'JOBSEARCH_ASSISTED_APPLY_LEASE';
 /** ic_scan_budget source name for the Easy Apply daily cap. */
 export const EASY_APPLY_BUDGET_SOURCE = 'linkedin_easy_apply';
 
@@ -183,6 +188,21 @@ export async function reserveEasyApplyAttempt(client, o) {
     if (err instanceof LinkedInBudgetRefused) return { ok: false, reason: 'linkedin_budget' };
     throw err;
   }
+}
+
+/**
+ * Undo one reserveEasyApplyAttempt for the same day (the worker calls this when the claim that follows the
+ * reservation is refused, so no attempt ran). One transaction: the linkedin_easy_apply page and the
+ * LinkedIn detail are returned together. Never takes a counter below zero.
+ * @param {import('pg').ClientBase} client
+ * @param {{ linkedinSource?: string, now: Date }} o `now` must be the reservation's own clock reading
+ */
+export async function refundEasyApplyAttempt(client, o) {
+  const day = budgetDay(o.now);
+  await withTransaction(client, async (c) => {
+    await c.query('UPDATE ic_scan_budget SET pages = GREATEST(pages - 1, 0) WHERE source = $1 AND day = $2', [EASY_APPLY_BUDGET_SOURCE, day]);
+    await c.query('UPDATE ic_scan_budget SET details = GREATEST(details - 1, 0) WHERE source = $1 AND day = $2', [o.linkedinSource ?? 'linkedin', day]);
+  });
 }
 
 /** @param {import('pg').ClientBase} client */

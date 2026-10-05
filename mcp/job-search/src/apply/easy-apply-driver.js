@@ -1,7 +1,14 @@
 // @ts-check
 /**
- * Assisted LinkedIn Easy Apply driver: the ONLY module that clicks, types, selects, uploads, or navigates
- * on the page for this flow (test/easy-apply-lint.test.js enforces that structurally).
+ * Assisted apply driver (ATS-agnostic; LinkedIn Easy Apply is the only profile today): the ONLY module that
+ * clicks, types, selects, uploads, or navigates on the page for this flow (test/easy-apply-lint.test.js
+ * enforces that structurally, which is also why the implementation stays at this path;
+ * src/apply/assisted/driver.js re-exports it under the assisted name).
+ *
+ * The ATS profile (src/apply/assisted/profiles/) supplies the page rules as plain data: every page call
+ * carries them as req.rules, and the one page function evaluates the injected guard functions
+ * (src/apply/assisted/guard.js) against them, so a single page function serves every profile (spec v1
+ * clause 1). createEasyApplyDriver is the LinkedIn-bound entry point existing callers use.
  *
  * It speaks raw CDP to exactly one tab (src/browser/cdp-target.js): no Playwright, no CDP domain enables,
  * no page listeners, no request interception (spec G4: nothing may survive a detach that could block
@@ -16,19 +23,30 @@
  * `button, input, select, textarea` list plus a hash of (tag, type, id, name, label/name text). A ref whose
  * fingerprint no longer matches is refused as stale, never re-resolved by position alone.
  */
-import { PAGE_GUARD_FUNCTIONS } from './easy-apply-guard.js';
+import { PAGE_GUARD_FUNCTIONS } from './assisted/guard.js';
 import { actionDelayMs, charDelayMs } from './easy-apply-policy.js';
-import { sanitizeValue } from './easy-apply-answers.js';
+import { sanitizeValue } from './assisted/answers.js';
+import { LINKEDIN_PROFILE } from './assisted/profiles/linkedin.js';
 
 /**
- * In-page main. Runs inside the tab; `G` carries the injected guard functions. Must stay
- * self-contained (no references to anything outside its own body except `G` and DOM globals).
- * @param {{ op: string, ref?: string, value?: unknown, optionText?: string, checked?: boolean }} req
+ * In-page main. Runs inside the tab; `G` carries the injected guard functions and req.rules the profile's
+ * rules (plain data). Must stay self-contained (no references to anything outside its own body except
+ * `G`, `req`, and DOM globals). Unusable rules find no form scope and refuse every guard verdict.
+ * @param {{ op: string, ref?: string, value?: unknown, optionText?: string, checked?: boolean, rules?: any }} req
  * @param {any} G
  * @returns {any}
  */
 function pageMain(req, G) {
   const ELEMENT_SELECTOR = 'button, input, select, textarea';
+  const R = req.rules && typeof req.rules === 'object' ? req.rules : null;
+  const toRe = (/** @type {any} */ spec) => {
+    if (!spec || typeof spec !== 'object' || typeof spec.source !== 'string' || !spec.source) return null;
+    try {
+      return new RegExp(spec.source, typeof spec.flags === 'string' ? spec.flags : '');
+    } catch {
+      return null;
+    }
+  };
   // Native accessors, read through the prototypes so a page-defined instance property cannot answer for
   // them (amended A4: the label that is checked is the label that is clicked).
   const innerTextOf = (/** @type {Element} */ el) => {
@@ -55,8 +73,12 @@ function pageMain(req, G) {
     return Boolean(el.parentElement && isVisible(el.parentElement));
   }
   function findDialog() {
-    const all = Array.from(document.querySelectorAll('[role="dialog"], dialog')).filter(isVisible);
-    const easy = all.filter((d) => /easy-apply/i.test(d.className) || /^\s*apply to\b/i.test(headerOf(d)));
+    const sc = R && R.scope && typeof R.scope === 'object' ? R.scope : null;
+    const classRe = sc ? toRe(sc.classPattern) : null;
+    const headerRe = sc ? toRe(sc.headerPattern) : null;
+    if (!sc || typeof sc.containerSelector !== 'string' || !sc.containerSelector || !classRe || !headerRe) return null;
+    const all = Array.from(document.querySelectorAll(sc.containerSelector)).filter(isVisible);
+    const easy = all.filter((d) => classRe.test(d.className) || headerRe.test(headerOf(d)));
     return easy.length === 1 ? easy[0] : (easy.length === 0 ? null : easy[0]);
   }
   function headerOf(/** @type {Element} */ d) {
@@ -227,8 +249,8 @@ function pageMain(req, G) {
       if (el.tagName === 'BUTTON') {
         if (!isVisible(el)) continue;
         const desc = buttonDesc(el, dialog);
-        const verdict = G.classifyAdvanceButton(desc);
-        buttons.push({ ref: refOf(el, i), name: buttonName(el), allowed: verdict.ok, kind: verdict.kind, submitMarked: G.isSubmitMarked(desc) });
+        const verdict = G.classifyAdvanceButton(desc, R);
+        buttons.push({ ref: refOf(el, i), name: buttonName(el), allowed: verdict.ok, kind: verdict.kind, submitMarked: G.isSubmitMarked(desc, R) });
         continue;
       }
       const kind = fieldKind(el);
@@ -247,12 +269,12 @@ function pageMain(req, G) {
     const buttonNames = buttons.map((b) => b.name);
     // A3b: a Submit control is visible when any visible dialog button is submit-marked (A2 + A3), or any
     // visible dialog element carries a submit-marked data-* attribute.
-    const markedElement = dialog ? Array.from(dialog.querySelectorAll('*')).some((x) => G.isSubmitMarked({ dataAttrs: dataAttrsOf(x) }) && isVisible(x)) : false;
+    const markedElement = dialog ? Array.from(dialog.querySelectorAll('*')).some((x) => G.isSubmitMarked({ dataAttrs: dataAttrsOf(x) }, R) && isVisible(x)) : false;
     const submitVisible = buttons.some((b) => b.submitMarked) || markedElement;
     const dialogText = dialog ? clip(/** @type {HTMLElement} */ (dialog).innerText, 4000) : '';
     const pageText = clip(document.body ? document.body.innerText : '', 5000);
     const headerTexts = dialog ? Array.from(dialog.querySelectorAll('h1, h2, h3')).filter(isVisible).map((h) => clip(h.textContent, 200)) : [];
-    const step = G.classifyStep({ dialogPresent: Boolean(dialog), headerTexts, submitVisible, dialogText, pageText, url: location.href });
+    const step = G.classifyStep({ dialogPresent: Boolean(dialog), headerTexts, submitVisible, dialogText, pageText, url: location.href }, R);
     return {
       url: location.href, dialogPresent: Boolean(dialog), header: dialog ? headerOf(dialog) : '', headerTexts, step, submitVisible,
       progressValues: progressValues(dialog), buttons, fields, alerts: alerts(dialog), resumeCards: resumeCards(dialog), dialogText,
@@ -287,7 +309,7 @@ function pageMain(req, G) {
       if (!r.el) return { clicked: false, reason: r.reason };
       if (!isVisible(r.el)) return { clicked: false, reason: 'not_visible' };
       const firstDesc = JSON.stringify(buttonDesc(r.el, dialog));
-      const verdict = G.classifyAdvanceButton(JSON.parse(firstDesc));
+      const verdict = G.classifyAdvanceButton(JSON.parse(firstDesc), R);
       if (!verdict.ok) return { clicked: false, reason: verdict.reason, name: verdict.name };
       const snap = describe();
       if (snap.step.kind !== 'form') return { clicked: false, reason: `step_${snap.step.kind}` };
@@ -358,9 +380,13 @@ function pageMain(req, G) {
       return files.length === 1 ? files[0] : null;
     }
     case 'applied_badge': {
+      const ae = R && R.appliedEvidence && typeof R.appliedEvidence === 'object' ? R.appliedEvidence : null;
+      const matchRe = ae ? toRe(ae.match) : null;
+      const extractRe = ae ? toRe(ae.extract) : null;
+      if (!ae || !matchRe || !extractRe || typeof ae.pageSelector !== 'string' || !ae.pageSelector) return { state: 'unknown', evidence: null };
       const text = clip(document.body ? document.body.innerText : '', 20000);
-      if (/\bapplied\s+\d+\s+(?:second|minute|hour|day|week|month)s?\s+ago\b|\bapplication (?:was )?sent\b|\bapplication submitted\b/i.test(text)) return { state: 'applied', evidence: (/\bapplied\s+\d+\s+\w+\s+ago\b|\bapplication (?:was )?sent\b|\bapplication submitted\b/i.exec(text) || [''])[0] };
-      if (document.querySelector('[class*="jobs-unified-top-card"], [class*="job-details"], [data-job-id]') || findDialog()) return { state: 'not_applied', evidence: null };
+      if (matchRe.test(text)) return { state: 'applied', evidence: (extractRe.exec(text) || [''])[0] };
+      if (document.querySelector(ae.pageSelector) || findDialog()) return { state: 'not_applied', evidence: null };
       return { state: 'unknown', evidence: null };
     }
     case 'ready_state':
@@ -384,12 +410,26 @@ return (${pageMain.toString()})(req, G);
  * @property {(ms: number) => Promise<void>} [sleep]
  * @property {() => number} [rand]
  * @property {boolean} [pacing] false only in tests; production always paces
+ * @property {{ rules: any }} [profile] the ATS profile (createEasyApplyDriver defaults to LinkedIn)
  */
 
 /**
+ * LinkedIn-bound driver (the pre-refactor entry point): the LinkedIn profile unless one is given.
  * @param {EasyApplyDriverDeps} deps
  */
 export function createEasyApplyDriver(deps) {
+  return createAssistedDriver({ ...deps, profile: deps.profile ?? LINKEDIN_PROFILE });
+}
+
+/**
+ * ATS-agnostic assisted driver. A profile is required: there is no default rule set.
+ * @param {EasyApplyDriverDeps & { profile: { rules: any } }} deps
+ */
+export function createAssistedDriver(deps) {
+  if (!deps || !deps.profile || typeof deps.profile !== 'object' || !deps.profile.rules || typeof deps.profile.rules !== 'object') {
+    throw new Error('assisted driver: a profile with rules is required');
+  }
+  const rules = JSON.parse(JSON.stringify(deps.profile.rules));
   const sleep = deps.sleep ?? ((ms) => new Promise((r) => { setTimeout(r, ms); }));
   const rand = deps.rand ?? Math.random;
   const pacing = deps.pacing !== false;
@@ -411,7 +451,7 @@ export function createEasyApplyDriver(deps) {
     const g = await deps.cdp.send('Runtime.evaluate', { expression: 'globalThis', objectGroup: group }, sessionId);
     try {
       const r = await deps.cdp.send('Runtime.callFunctionOn', {
-        functionDeclaration: PAGE_FUNCTION, objectId: g.result.objectId, arguments: [{ value: req }],
+        functionDeclaration: PAGE_FUNCTION, objectId: g.result.objectId, arguments: [{ value: { ...req, rules } }],
         returnByValue: o.byValue !== false, awaitPromise: false, objectGroup: group,
       }, sessionId);
       if (r.exceptionDetails) throw new Error(`page function threw: ${String(r.exceptionDetails.exception?.description ?? r.exceptionDetails.text).slice(0, 300)}`);

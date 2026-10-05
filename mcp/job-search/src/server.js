@@ -26,8 +26,9 @@ import { tool as review } from './tools/review.js';
 import { tool as renderDoc } from './tools/render_doc.js';
 import { tool as followups } from './tools/followups.js';
 import { tool as scanReport } from './tools/scan_report.js';
+import { tool as assistedApply } from './tools/assisted_apply.js';
 import { tool as easyApply } from './tools/easy_apply.js';
-import { LEASE_ENV } from './core/easy-apply-state.js';
+import { LEASE_ENV, ASSISTED_LEASE_ENV } from './core/easy-apply-state.js';
 
 export const SERVER_INFO = Object.freeze({ name: 'job-search', version: '0.1.0' });
 
@@ -35,12 +36,15 @@ export const SERVER_INFO = Object.freeze({ name: 'job-search', version: '0.1.0' 
 export const TOOLS = Object.freeze([searchJobs, queryJobs, getJob, markJobs, profiles, scans, review, renderDoc, followups, scanReport]);
 
 /**
- * Assisted LinkedIn Easy Apply lease mode (src/apply/easy-apply-runner.js): when the server is started
- * with a lease token in JOBSEARCH_EASY_APPLY_LEASE, easy_apply is the ONLY tool it exposes; without one,
- * easy_apply is not registered at all (an ordinary interactive session can never reach it).
+ * Assisted apply lease mode (src/apply/assisted/runner.js). Total, first match wins:
+ *   - a lease token in JOBSEARCH_ASSISTED_APPLY_LEASE -> assisted_apply is the ONLY tool exposed;
+ *   - a lease token in JOBSEARCH_EASY_APPLY_LEASE -> the easy_apply alias (same handler; spec v2 A14,
+ *     kept one release) is the ONLY tool exposed;
+ *   - otherwise neither is registered at all (an ordinary interactive session can never reach them).
  * @param {NodeJS.ProcessEnv} [env]
  */
 export function toolsForEnv(env = process.env) {
+  if (typeof env[ASSISTED_LEASE_ENV] === 'string' && env[ASSISTED_LEASE_ENV]) return Object.freeze([assistedApply]);
   return typeof env[LEASE_ENV] === 'string' && env[LEASE_ENV] ? Object.freeze([easyApply]) : TOOLS;
 }
 

@@ -22,7 +22,7 @@
  * and unexpected_submit closes the tab it opened. The tab id is never written to the apply target marker
  * file, so no later reconcile can close it.
  */
-import { breakerStatus, tripBreaker, lastAttemptAt, hasEasyApplyInFlight, reserveEasyApplyAttempt, issueLease, getLease, closeLease, demoteAbandonedTabs } from '../core/easy-apply-state.js';
+import { breakerStatus, tripBreaker, lastAttemptAt, hasEasyApplyInFlight, reserveEasyApplyAttempt, refundEasyApplyAttempt, issueLease, getLease, closeLease, demoteAbandonedTabs } from '../core/easy-apply-state.js';
 import { recordApplicationEvent } from '../core/applications.js';
 import { buildRegistry, guardUrl } from '../core/urlguard.js';
 import { checkStartGate, EASY_APPLY_DEFAULTS } from './easy-apply-policy.js';
@@ -49,11 +49,17 @@ export function easyApplyConfig(config) {
 }
 
 /**
+ * @typedef {{ now: Date, linkedinSource: string }} EasyApplyCharge what a successful gate reserved, so a
+ *   refused claim can refund exactly that (refundEasyApplyCharge)
+ */
+
+/**
  * Start gate, total, first refusal wins: breaker, window/spacing (by trigger), in-flight slot, daily cap
- * (the cap reservation is the last step and the only one that consumes anything).
+ * (the cap reservation is the last step and the only one that consumes anything). On success it returns
+ * the charge it made; the worker refunds it when the claim that follows is refused (no attempt ran).
  * @param {import('pg').ClientBase} client
  * @param {{ config: any, easyApply: EasyApplyDeps }} o
- * @returns {Promise<{ ok: true } | { ok: false, reason: string }>}
+ * @returns {Promise<{ ok: true, charge: EasyApplyCharge } | { ok: false, reason: string }>}
  */
 export async function easyApplyStartGate(client, o) {
   const cfg = easyApplyConfig(o.config);
@@ -68,7 +74,16 @@ export async function easyApplyStartGate(client, o) {
   const linkedinCaps = o.easyApply.linkedinCaps ?? { source: 'linkedin', dailyPages: li?.dailyPages ?? 0, dailyDetails: li?.dailyDetails ?? 0 };
   const reserved = await reserveEasyApplyAttempt(client, { easyApplyDaily: cfg.easyApplyDaily, linkedinCaps, now });
   if (!reserved.ok) return reserved;
-  return { ok: true };
+  return { ok: true, charge: { now, linkedinSource: linkedinCaps.source ?? 'linkedin' } };
+}
+
+/**
+ * Refund what easyApplyStartGate reserved. Called only when the claim after the gate is refused.
+ * @param {import('pg').ClientBase} client
+ * @param {EasyApplyCharge} charge
+ */
+export async function refundEasyApplyCharge(client, charge) {
+  await refundEasyApplyAttempt(client, { linkedinSource: charge.linkedinSource, now: charge.now });
 }
 
 /**

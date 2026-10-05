@@ -38,7 +38,7 @@ import { makeApplyCapability } from './apply-capability.js';
 import { ADAPTERS } from './adapters/index.js';
 import { credentialTarget, readCredential, writeCredential, generatePassword } from '../core/credentials.js';
 import { findVerificationMessage } from './gmail-verify.js';
-import { easyApplyStartGate, runAssistedEasyApply, easyApplyConfig } from './easy-apply-flow.js';
+import { easyApplyStartGate, runAssistedEasyApply, easyApplyConfig, refundEasyApplyCharge } from './easy-apply-flow.js';
 import { createEasyApplyRunner } from './easy-apply-runner.js';
 import { parkAwaitingSubmit } from '../core/easy-apply-state.js';
 import { spawn as nodeSpawn } from 'node:child_process';
@@ -259,17 +259,34 @@ export async function runApplyWorker(applicationId, deps = {}) {
 
     // Assisted LinkedIn Easy Apply (operator decision 2026-10-04): breaker, window/spacing, the single
     // in-flight slot, and the daily cap are all checked BEFORE the claim, so a refusal leaves the
-    // application 'approved' for a later run. The cap reservation (last) is consumed at attempt start.
+    // application 'approved' for a later run. The cap reservation (last) is made here and kept only when
+    // the claim below succeeds with an eligible verdict: a refused claim (the row changed state between
+    // read and claim, the in-flight index refused it, or the recheck found it ineligible) refunds it,
+    // because no attempt ran.
     const assisted = Boolean(adapters[app.ats_type] && adapters[app.ats_type].assisted);
     /** @type {import('./easy-apply-flow.js').EasyApplyDeps} */
     const easyApplyDeps = deps.easyApply ?? {};
+    /** @type {import('./easy-apply-flow.js').EasyApplyCharge|null} */
+    let easyApplyCharge = null;
     if (assisted) {
       const gate = await easyApplyStartGate(client, { config, easyApply: easyApplyDeps });
       if (!gate.ok) {
         log({ evt: 'easy_apply_deferred', application_id: applicationId, reason: gate.reason });
         return { ok: true, status: 'deferred', reason: gate.reason, state: 'approved' };
       }
+      easyApplyCharge = gate.charge;
     }
+    const refundCharge = async () => {
+      if (!easyApplyCharge) return;
+      const charge = easyApplyCharge;
+      easyApplyCharge = null;
+      try {
+        await refundEasyApplyCharge(client, charge);
+        log({ evt: 'easy_apply_charge_refunded', application_id: applicationId });
+      } catch (err) {
+        log({ evt: 'easy_apply_charge_refund_failed', application_id: applicationId, ...errFields(err) });
+      }
+    };
 
     // Apply exclusion gate, pre-submit recheck (spec item 4): the FULL classifyExclusion runs again here,
     // inside the same transaction that moves approved -> submitting, under an advisory lock on the
@@ -281,6 +298,7 @@ export async function runApplyWorker(applicationId, deps = {}) {
     try {
       preSubmitVerdict = await runPreSubmitExclusionRecheck(client, app, exclusionConfig, { actor: 'apply' });
     } catch (err) {
+      await refundCharge();
       // G9: the unique partial index refused a second linkedin_easy row in submitting/awaiting_submit.
       if (assisted && isUniqueViolationLike(err)) {
         log({ evt: 'easy_apply_deferred', application_id: applicationId, reason: 'easy_apply_in_flight' });
@@ -297,6 +315,7 @@ export async function runApplyWorker(applicationId, deps = {}) {
       throw err;
     }
     if (preSubmitVerdict.branch !== 'eligible') {
+      await refundCharge();
       log({ evt: 'apply_presubmit_exclusion_blocked', application_id: applicationId, branch: preSubmitVerdict.branch });
       progress({ applicationId, message: 'needs_human' });
       return { ok: true, status: 'needs_human' };
