@@ -123,11 +123,9 @@ describe('Easy Apply daily attempt: charged only when the claim succeeds', () =>
       await transition(client, app.id, 'submitting', { actor: 'apply', note: 'worker started' });
       return { branch: 'eligible', reason: 'unreachable', evidence: {} };
     };
-    try {
-      await runApplyWorker(id, /** @type {any} */ (deps(recheck)));
-    } catch {
-      /* a refused claim may surface as a throw or a skip; either way nothing may stay charged */
-    }
+    // #78: a refused claim on a row that moved on is a skip (apply_skip_state_changed), never a throw.
+    const r = await runApplyWorker(id, /** @type {any} */ (deps(recheck)));
+    assert.deepEqual([r.status, r.state], ['skipped', 'withdrawn']);
     assert.equal((await getApplication(c, id)).state, 'withdrawn');
     assert.deepEqual(await charged(), [0, 0]);
   });
