@@ -398,6 +398,14 @@ export async function withdrawApplication(client, id, opts = {}) {
     if (verdict.action === 'noop') return { outcome: /** @type {const} */ ('already_withdrawn'), row };
     if (verdict.action === 'refuse') return { outcome: /** @type {const} */ ('refused'), reason: verdict.reason, message: verdict.message, state: row.state };
     const updated = await transitionUnwrapped(c, id, 'withdrawn', { actor, note }, { expectedFromState: row.state, helperName: 'withdrawApplication' });
+    // A submitted application carries the 5-day "no confirmation yet" nudge (markSubmittedUnwrapped);
+    // once withdrawn it must not fire. Cancelled in the same transaction; done/cancelled rows are left
+    // alone. A linked calendar event is not deleted here (no calendar client in this path), the same
+    // posture mail-confirm.js's completeNudge takes.
+    await c.query(
+      `UPDATE ic_followups SET status = 'cancelled', updated_at = now() WHERE created_from = $1 AND status IN ('open', 'snoozed')`,
+      [`${APPLY_NUDGE_PREFIX}${id}`],
+    );
     return { outcome: /** @type {const} */ ('withdrawn'), row: updated };
   });
 }

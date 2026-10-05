@@ -20,7 +20,7 @@ import { createDashboardServer } from '../src/dashboard/server.js';
 import { createCalendarCache } from '../src/dashboard/calendar-cache.js';
 import {
   createApplication, getApplication, listApplicationEvents, classifyWithdraw, withdrawApplication,
-  APPLICATION_STATES, TRANSITIONS, WITHDRAW_REFUSAL_REASONS,
+  APPLICATION_STATES, TRANSITIONS, WITHDRAW_REFUSAL_REASONS, markAppliedByHand, APPLY_NUDGE_PREFIX,
 } from '../src/core/applications.js';
 import { issueLease, closeLease } from '../src/core/easy-apply-state.js';
 
@@ -155,6 +155,36 @@ describe('POST /api/applications/:id/withdraw', () => {
       assert.match(ev[0].note, /posting gone, tenant 404/);
     });
   }
+
+  test('withdrawing a submitted application cancels its open 5-day nudge; other follow-ups are untouched', async () => {
+    const id = await seed('needs_human', { kind: 'question', label: 'q' });
+    await markAppliedByHand(c, id, { actor: 'dashboard' });
+    const nudge = await c.query('SELECT id, status, listing_id FROM ic_followups WHERE created_from = $1', [`${APPLY_NUDGE_PREFIX}${id}`]);
+    assert.equal(nudge.rowCount, 1);
+    assert.equal(nudge.rows[0].status, 'open');
+    const other = await c.query(
+      `INSERT INTO ic_followups (contact, listing_id, due_at, channel, action, status) VALUES ('x', $1, now() + interval '3 days', 'other', 'unrelated', 'open') RETURNING id`,
+      [nudge.rows[0].listing_id],
+    );
+    const r = await postWithdraw(id, { note: 'withdrew with the employer' });
+    assert.equal(r.status, 200);
+    assert.equal((await c.query('SELECT status FROM ic_followups WHERE id = $1', [nudge.rows[0].id])).rows[0].status, 'cancelled');
+    assert.equal((await c.query('SELECT status FROM ic_followups WHERE id = $1', [other.rows[0].id])).rows[0].status, 'open');
+  });
+
+  test('a snoozed nudge is cancelled; a done nudge stays done', async () => {
+    const id = await seed('needs_human', { kind: 'question', label: 'q' });
+    await markAppliedByHand(c, id, { actor: 'dashboard' });
+    await c.query(`UPDATE ic_followups SET status = 'snoozed', snoozed_until = now() + interval '1 day' WHERE created_from = $1`, [`${APPLY_NUDGE_PREFIX}${id}`]);
+    assert.equal((await postWithdraw(id)).status, 200);
+    assert.equal((await c.query('SELECT status FROM ic_followups WHERE created_from = $1', [`${APPLY_NUDGE_PREFIX}${id}`])).rows[0].status, 'cancelled');
+
+    const id2 = await seed('needs_human', { kind: 'question', label: 'q' });
+    await markAppliedByHand(c, id2, { actor: 'dashboard' });
+    await c.query(`UPDATE ic_followups SET status = 'done' WHERE created_from = $1`, [`${APPLY_NUDGE_PREFIX}${id2}`]);
+    assert.equal((await postWithdraw(id2)).status, 200);
+    assert.equal((await c.query('SELECT status FROM ic_followups WHERE created_from = $1', [`${APPLY_NUDGE_PREFIX}${id2}`])).rows[0].status, 'done');
+  });
 
   test('no note falls back to a default note', async () => {
     const id = await seed('failed');

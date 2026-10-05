@@ -286,6 +286,14 @@ export async function runApplyWorker(applicationId, deps = {}) {
         log({ evt: 'easy_apply_deferred', application_id: applicationId, reason: 'easy_apply_in_flight' });
         return { ok: true, status: 'deferred', reason: 'easy_apply_in_flight', state: 'approved' };
       }
+      // The row moved on between the read above and the claim (the dashboard withdrew it, say): the
+      // claim transaction rolled back, nothing was submitted, and the row keeps whatever state the other
+      // writer gave it. A skip, never a throw, so a scheduled caller does not count it as a crash.
+      const now = await getApplication(client, applicationId).catch(() => null);
+      if (now && now.state !== 'approved') {
+        log({ evt: 'apply_skip_state_changed', application_id: applicationId, state: now.state, ...errFields(err) });
+        return { ok: true, status: 'skipped', state: now.state };
+      }
       throw err;
     }
     if (preSubmitVerdict.branch !== 'eligible') {

@@ -14,7 +14,7 @@ import assert from 'node:assert/strict';
 import pg from 'pg';
 import { pgConnectionConfig, loadConfig } from '../src/core/config.js';
 import { ensureAuxSchema } from '../src/core/schema.js';
-import { createApplication, transition, getApplication, approve } from '../src/core/applications.js';
+import { createApplication, transition, getApplication, approve, withdrawApplication } from '../src/core/applications.js';
 import { LOCK_KEY as SCAN_LOCK_KEY } from '../src/core/scan-run.js';
 import { runApplyWorker, preSubmitExclusionRecheck, LOCK_KEY as APPLY_LOCK_KEY } from '../src/apply/worker.js';
 import { ADAPTERS } from '../src/apply/adapters/index.js';
@@ -473,6 +473,40 @@ describe('apply exclusion gate: pre-submit recheck (worker.js\'s own transition 
     const row = await getApplication(verifyClient, id);
     assert.equal(row.state, 'needs_human');
     assert.equal(row.pending_question.kind, 'apply_exclusion');
+  });
+
+  test('race: the dashboard withdraws after the worker read "approved" -> skipped cleanly, no submission, no overwrite, logged, rerun is a plain skip', async () => {
+    const id = await seedApprovedApplicationUnique();
+    let adapterRan = false;
+    const fakeAdapters = { greenhouse: { ats: 'greenhouse', requires: [], classifyOnly: false, uploadHosts: [], async run() { adapterRan = true; return { outcome: 'submitted', confirmationRef: 'should-never-happen' }; } } };
+    /** @type {any[]} */
+    const logs = [];
+    // The worker has already read the row as approved; the withdraw lands (separate connection, as the
+    // dashboard process would) before the claim, then the REAL recheck runs.
+    const racingRecheck = async (/** @type {any} */ client, /** @type {any} */ app, /** @type {any} */ cfg, /** @type {any} */ opts) => {
+      const dash = await freshClient();
+      try {
+        const out = await withdrawApplication(dash, app.id, { actor: 'dashboard', note: 'race test' });
+        assert.equal(out.outcome, 'withdrawn');
+      } finally {
+        await dash.end();
+      }
+      return preSubmitExclusionRecheck(client, app, cfg, opts);
+    };
+    const result = await runApplyWorker(id, baseDeps({ adapters: fakeAdapters, exclusionConfig: EXCL_CFG, preSubmitExclusionRecheck: racingRecheck, log: (/** @type {any} */ f) => logs.push(f) }));
+    assert.equal(result.ok, true);
+    assert.equal(result.status, 'skipped');
+    assert.equal(result.state, 'withdrawn');
+    assert.equal(adapterRan, false);
+    const row = await getApplication(verifyClient, id);
+    assert.equal(row.state, 'withdrawn');
+    const ev = await verifyClient.query(`SELECT to_state FROM ic_job_application_events WHERE application_id = $1 AND kind = 'state' ORDER BY id`, [id]);
+    assert.ok(!ev.rows.some((e) => e.to_state === 'submitting'), 'no submitting event may be recorded');
+    assert.equal(ev.rows[ev.rows.length - 1].to_state, 'withdrawn');
+    assert.ok(logs.some((f) => f.evt === 'apply_skip_state_changed' && f.application_id === id && f.state === 'withdrawn'), JSON.stringify(logs));
+    const again = await runApplyWorker(id, baseDeps({ adapters: fakeAdapters, exclusionConfig: EXCL_CFG, preSubmitExclusionRecheck }));
+    assert.equal(again.status, 'skipped');
+    assert.equal(adapterRan, false);
   });
 
   test('runApplyWorker end to end: the pre-submit recheck blocks BEFORE the adapter ever runs', async () => {
