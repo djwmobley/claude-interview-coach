@@ -60,6 +60,9 @@ export function handleOutcome(outcome, opts = {}) {
         showToast({ message: 'Not found.', tone: 'error' });
       }
       break;
+    case 'easy_apply_conflict':
+      showToast({ message: outcome.message ? String(outcome.message) : 'That Easy Apply action no longer applies.', tone: 'error' });
+      break;
     case 'db_unavailable':
       setBanner('db-unavailable', { tone: 'error', message: 'The database is unavailable right now. This view will recover automatically.' });
       break;

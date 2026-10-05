@@ -1,0 +1,148 @@
+<!doctype html>
+<!--
+  SYNTHETIC fixture (not recorded from linkedin.com): a hand-written approximation of a LinkedIn job page
+  plus a four-step Easy Apply dialog (contact, resume, screening questions, review), used by
+  test/easy-apply-driver.test.js through a throwaway headless Chrome. Class names and structure imitate
+  LinkedIn's public markup shape from memory; real LinkedIn DOM differs and changes over time. The Submit
+  button records any click in window.__submitClicked so the tests can prove nothing in the flow ever
+  clicks it.
+-->
+<html>
+<head>
+<meta charset="utf-8">
+<title>Director of Technology | Acme Corp | LinkedIn</title>
+<style>
+  body { font-family: sans-serif; }
+  .hidden { display: none; }
+  .artdeco-modal { border: 1px solid #999; padding: 12px; margin: 12px; }
+  .visually-hidden { position: absolute; width: 1px; height: 1px; overflow: hidden; clip: rect(0 0 0 0); }
+</style>
+</head>
+<body>
+<main>
+  <div class="jobs-unified-top-card" data-job-id="4100000001">
+    <h1>Director of Technology</h1>
+    <div>Acme Corp - Houston, TX (Remote)</div>
+    <button id="ea-open" class="jobs-apply-button" aria-label="Easy Apply to Director of Technology at Acme Corp"><span>Easy Apply</span></button>
+    <button aria-label="Save Director of Technology at Acme Corp"><span>Save</span></button>
+  </div>
+</main>
+
+<div id="ea-modal" class="jobs-easy-apply-modal artdeco-modal hidden" role="dialog" aria-labelledby="jobs-apply-header">
+  <h2 id="jobs-apply-header">Apply to Acme Corp</h2>
+  <button aria-label="Dismiss" class="artdeco-modal__dismiss"><span class="visually-hidden">Dismiss</span>X</button>
+  <progress id="ea-progress" max="100" value="0"></progress>
+  <span class="visually-hidden" id="ea-progress-text">Your application progress is 0 percent</span>
+
+  <section data-step="0">
+    <h3>Contact info</h3>
+    <div><label for="first">First name</label><input id="first" type="text" required value="Damian"></div>
+    <div><label for="last">Last name</label><input id="last" type="text" required value=""></div>
+    <div><label for="cc">Phone country code</label>
+      <select id="cc" required><option value="">Select an option</option><option value="us">United States (+1)</option><option value="ca">Canada (+1)</option></select></div>
+    <div><label for="phone">Mobile phone number</label><input id="phone" type="tel" required value=""></div>
+    <div><label for="email">Email address</label>
+      <select id="email" required><option value="">Select an option</option><option value="e1">owner@example.com</option></select></div>
+    <footer><button class="ea-next" type="button"><span>Next</span></button></footer>
+  </section>
+
+  <section data-step="1" class="hidden">
+    <h3>Resume</h3>
+    <div class="jobs-document-upload-redesign-card__container jobs-document-upload-redesign-card__container--selected" data-resume-card>
+      <h3 class="jobs-document-upload-redesign-card__file-name">Old Resume 2024.pdf</h3>
+    </div>
+    <label class="upload-label"><span>Upload resume</span><input id="resume-file" type="file" accept=".pdf,.doc,.docx" class="hidden-input" style="display:none"></label>
+    <footer><button class="ea-back" type="button" aria-label="Back to previous step"><span>Back</span></button><button class="ea-next" type="button"><span>Next</span></button></footer>
+  </section>
+
+  <section data-step="2" class="hidden">
+    <h3>Additional Questions</h3>
+    <fieldset aria-required="true"><legend>Will you now or in the future require sponsorship for employment visa status?</legend>
+      <label><input type="radio" name="spons" value="Yes" required> Yes</label>
+      <label><input type="radio" name="spons" value="No" required> No</label>
+    </fieldset>
+    <div><label for="years">How many years of technology leadership experience do you have?</label><input id="years" type="text" required></div>
+    <div><label for="auth">Are you legally authorized to work in the United States?</label>
+      <select id="auth" required><option value="">Select an option</option><option value="y">Yes</option><option value="n">No</option></select></div>
+    <div><label for="site">Website</label><input id="site" type="text"></div>
+    <footer><button class="ea-back" type="button" aria-label="Back to previous step"><span>Back</span></button><button class="ea-review" type="button" aria-label="Review your application"><span>Review</span></button></footer>
+  </section>
+
+  <section data-step="3" class="hidden">
+    <h3>Review your application</h3>
+    <div id="review-summary"></div>
+    <label><input type="checkbox" id="follow" checked> Follow Acme Corp to stay up to date with their page.</label>
+    <footer><button class="ea-back" type="button" aria-label="Back to previous step"><span>Back</span></button>
+      <button id="ea-submit" type="button" aria-label="Submit application" data-live-test-easy-apply-submit-button><span>Submit application</span></button></footer>
+  </section>
+
+  <section data-step="sent" class="hidden"><h3>Your application was sent to Acme Corp</h3><button type="button"><span>Done</span></button></section>
+</div>
+
+<script>
+  window.__submitClicked = false;
+  window.__keyEvents = 0;
+  ['keydown', 'keypress', 'keyup'].forEach((t) => document.addEventListener(t, () => { window.__keyEvents++; }, true));
+  const modal = document.getElementById('ea-modal');
+  const steps = Array.from(modal.querySelectorAll('section[data-step]'));
+  let step = 0;
+  const pct = [0, 33, 66, 100];
+  function show(n) {
+    step = n;
+    steps.forEach((s) => s.classList.toggle('hidden', s.dataset.step !== String(n)));
+    if (typeof n === 'number') {
+      document.getElementById('ea-progress').value = pct[n];
+      document.getElementById('ea-progress-text').textContent = `Your application progress is ${pct[n]} percent`;
+    }
+    if (n === 3) {
+      const vals = Array.from(modal.querySelectorAll('section[data-step="0"] input, section[data-step="0"] select, section[data-step="2"] input[type=text], section[data-step="2"] select'))
+        .map((el) => el.tagName === 'SELECT' ? (el.selectedOptions[0] ? el.selectedOptions[0].text : '') : el.value);
+      const spons = modal.querySelector('input[name=spons]:checked');
+      const resume = modal.querySelector('.jobs-document-upload-redesign-card__container--selected .jobs-document-upload-redesign-card__file-name');
+      document.getElementById('review-summary').textContent = vals.concat(spons ? spons.value : '', resume ? resume.textContent : '').join(' | ');
+    }
+  }
+  function clearAlerts(section) { section.querySelectorAll('[role=alert]').forEach((a) => a.remove()); }
+  function validate(section) {
+    clearAlerts(section);
+    let ok = true;
+    section.querySelectorAll('input[required], select[required]').forEach((el) => {
+      const empty = el.type === 'radio' ? !section.querySelector(`input[name="${el.name}"]:checked`) : !el.value;
+      if (empty) {
+        ok = false;
+        const a = document.createElement('div');
+        a.setAttribute('role', 'alert');
+        a.textContent = 'Please enter a valid answer';
+        el.parentElement.appendChild(a);
+      }
+    });
+    return ok;
+  }
+  document.getElementById('ea-open').addEventListener('click', () => { modal.classList.remove('hidden'); show(0); });
+  modal.addEventListener('click', (ev) => {
+    const b = ev.target.closest('button');
+    if (!b) return;
+    const section = b.closest('section');
+    if (b.classList.contains('ea-next') || b.classList.contains('ea-review')) {
+      if (validate(section)) show(step + 1);
+    } else if (b.classList.contains('ea-back')) {
+      show(step - 1);
+    } else if (b.id === 'ea-submit') {
+      window.__submitClicked = true;
+      show('sent');
+    }
+  });
+  document.getElementById('resume-file').addEventListener('change', (ev) => {
+    const f = ev.target.files[0];
+    if (!f) return;
+    modal.querySelectorAll('[data-resume-card]').forEach((c) => c.classList.remove('jobs-document-upload-redesign-card__container--selected'));
+    const card = document.createElement('div');
+    card.className = 'jobs-document-upload-redesign-card__container jobs-document-upload-redesign-card__container--selected';
+    card.setAttribute('data-resume-card', '');
+    card.innerHTML = '<h3 class="jobs-document-upload-redesign-card__file-name"></h3>';
+    card.querySelector('h3').textContent = f.name;
+    ev.target.closest('section').insertBefore(card, ev.target.closest('label'));
+  });
+</script>
+</body>
+</html>

@@ -1,0 +1,15 @@
+<!doctype html>
+<!--
+  SYNTHETIC fixture (not recorded from linkedin.com): an Easy Apply step with a Next button and NO
+  progress indicator at all. Spec G2: with no positive not-last-step signal the step is treated as
+  terminal and Next is never clicked (uncertain_last_step).
+-->
+<html><head><meta charset="utf-8"><title>No progress</title></head>
+<body>
+<div class="jobs-easy-apply-modal artdeco-modal" role="dialog" aria-labelledby="h">
+  <h2 id="h">Apply to Acme Corp</h2>
+  <div><label for="c">City</label><input id="c" type="text" value="Houston"></div>
+  <button id="next" type="button"><span>Next</span></button>
+</div>
+<script>window.__clicked = false; document.getElementById('next').addEventListener('click', () => { window.__clicked = true; });</script>
+</body></html>

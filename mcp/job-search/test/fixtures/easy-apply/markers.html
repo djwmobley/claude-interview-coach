@@ -1,0 +1,44 @@
+<!doctype html>
+<!--
+  SYNTHETIC fixture (not recorded from linkedin.com): one Easy Apply step per ?case= value, each probing an
+  amended G1/A3b rule. child: submit marker on a child span. ancestor: submit marker on an ancestor div.
+  icon: an icon-only, localized Submit ("Postular") carrying a submit data marker next to a plain Next.
+  mismatch: aria-label and text map to different kinds. mutation: the page's own getComputedStyle relabels
+  the Next button to "Submit application" partway through the driver's single call. Every click is recorded
+  in window.__clicked.
+-->
+<html><head><meta charset="utf-8"><title>Marker cases</title></head>
+<body>
+<div class="jobs-easy-apply-modal artdeco-modal" role="dialog" aria-labelledby="h">
+  <h2 id="h">Apply to Acme Corp</h2>
+  <progress max="100" value="50"></progress>
+  <div id="slot"></div>
+</div>
+<script>
+  window.__clicked = {};
+  const kase = new URLSearchParams(location.search).get('case');
+  const slot = document.getElementById('slot');
+  const html = {
+    child: '<button id="b" type="button"><span data-test-icon="submit-icon"></span>Next</button>',
+    ancestor: '<div data-control-name="submit_footer"><button id="b" type="button">Next</button></div>',
+    icon: '<button id="b" type="button">Next</button><button id="icon" type="button" aria-label="Postular" data-live-test-easy-apply-submit-button><svg width="16" height="16"><rect width="16" height="16"></rect></svg></button>',
+    mismatch: '<button id="b" type="button" aria-label="Review your application">Next</button>',
+    mutation: '<button id="b" type="button">Next</button>',
+  }[kase] || '';
+  const tpl = document.createElement('template');
+  tpl.content.append(document.createRange().createContextualFragment(html));
+  slot.append(tpl.content);
+  document.addEventListener('click', (ev) => { const t = ev.target.closest('[id]'); if (t) window.__clicked[t.id] = true; }, true);
+  if (kase === 'mutation') {
+    const orig = window.getComputedStyle;
+    let calls = 0;
+    window.getComputedStyle = function (el, pseudo) {
+      if (el && el.id === 'b') {
+        calls++;
+        if (calls === 2) el.setAttribute('aria-label', 'Submit application');
+      }
+      return orig.call(window, el, pseudo);
+    };
+  }
+</script>
+</body></html>

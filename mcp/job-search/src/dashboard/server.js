@@ -28,6 +28,7 @@ import { register as registerAnalytics } from './routes/analytics.js';
 import { register as registerSources } from './routes/sources.js';
 import { register as registerGoogle } from './routes/google.js';
 import { register as registerGoogleReauth } from './routes/google-reauth.js';
+import { register as registerEasyApply } from './routes/easy-apply.js';
 
 /**
  * @typedef {Object} RouteContext
@@ -52,7 +53,9 @@ import { register as registerGoogleReauth } from './routes/google-reauth.js';
  * @property {{ read: (target: string) => Promise<{username:string,password:string}|null>, write: (target: string, username: string, password: string) => Promise<void>, delete: (target: string) => Promise<boolean>, list: () => Promise<string[]> }} [credentials]
  *   apply pipeline slice 4 (src/core/credentials.js's createCredentials()). bin/dashboard.js always wires
  *   a real one; route/tick tests inject a fake the same way deps.scanRunner/deps.calendar are stubbed.
- * @property {{ start: (applicationId: number) => Promise<{applicationId: number, pid: number|null}>, status: () => any, armCancelBackstop: (applicationId: number) => {forced_kill_available: boolean} }} [applyRunner]
+ * @property {{ start: (applicationId: number, opts?: { hardTimeoutMs?: number }) => Promise<{applicationId: number, pid: number|null}>, status: () => any, armCancelBackstop: (applicationId: number) => {forced_kill_available: boolean} }} [applyRunner]
+ * @property {{ connect?: () => Promise<any>, createDriver?: (cdp: any, targetId: string) => any }} [easyApplyTab] test seam only:
+ *   routes/easy-apply.js's CDP connector and read-only driver (production: raw CDP to SCAN_CDP_URL)
  *   apply pipeline slice 5 (src/dashboard/apply-runner.js's createApplyRunner()). bin/dashboard.js always
  *   wires a real one; route tests inject a fake the same way deps.scanRunner is stubbed. Every route that
  *   lands an application in 'approved' calls `.start(id)` right after (routes/applications.js's
@@ -284,6 +287,7 @@ export function createDashboardServer(deps, opts = {}) {
   registerCalendar(router, deps);
   registerDocuments(router, deps);
   registerApplications(router, deps, streamHub);
+  registerEasyApply(router, deps, streamHub);
   registerCredentials(router, deps, streamHub);
   registerMemory(router, deps);
   registerAnalytics(router, deps);

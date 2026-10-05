@@ -20,7 +20,8 @@ exported functions directly. No relaxation of `src/core/urlguard.js`'s registry 
 `src/apply/probe-registry.js` is a separate, narrower guard, never a loosening of the scan/apply guard). No
 change to `ATS_TYPES`, `TRANSITIONS`, or any existing migration. No new browser click automation for
 "button-only Apply" affordances (documented blind spot, section 6) -- this PR observes the DOM for an
-existing Apply anchor/button but never clicks one.
+existing Apply anchor/button but never clicks one. (Superseded for LinkedIn Easy Apply only by section 14,
+operator decision 2026-10-04: an assisted fill that stops at LinkedIn's Review screen, never a submit.)
 
 ## 2. Schema (`sql/015_listing_apply_target.sql`)
 
@@ -82,9 +83,12 @@ non-US.
 
 ```
 not_scored, below_fit, human_fit_override, duplicate_of, not_us, salary_below_floor,
-active_application, no_description, apply_target_unresolved, easy_apply_only, ats_not_allowed,
-confidence_not_exact, hourly_pay, daily_cap, eligible
+active_application, no_description, apply_target_unresolved, easy_apply_only, easy_apply_assisted,
+ats_not_allowed, confidence_not_exact, hourly_pay, daily_cap, eligible
 ```
+
+`easy_apply_assisted` (section 14) routes a LinkedIn easy-apply-only listing to the assisted Easy Apply
+path instead of the ordinary submit funnel.
 
 `hourly_pay` (added by the hourly-disqualifier ruling, section 13 below) is checked immediately before the
 final `eligible` return -- after every other closed reason, before the daily cap is ever applied.
@@ -298,3 +302,81 @@ direction. A listing carrying neither signal is unaffected -- `CandidateRow` gai
 **D. Answer-bank documentation.** `data/apply-answers.md` (gitignored, personal data) may still describe
 the old floor/2080 hourly-fill behavior in its own comments; this PR does not edit that file (it is never
 tracked in git). If Damian's own copy documents the superseded behavior, it should be updated by hand.
+
+## 14. Assisted LinkedIn Easy Apply (operator decision 2026-10-04)
+
+This reverses the plan's section 8 "Deliberately not automated" for LinkedIn Easy Apply in ASSISTED form
+only. A headless `claude -p` session fills the Easy Apply form in the real, logged-in scan Chrome and STOPS
+at LinkedIn's own Review screen. Damian reviews it there and clicks Submit himself. Nothing in this path
+can click Submit. Indeed Easy Apply stays classify-only.
+
+**Routing.** `classifyCandidate` returns `easy_apply_assisted` (a new closed reason, counted in the
+`easy_apply_only` funnel gate) for a LinkedIn listing with `apply_easy_only`; any other source stays
+`easy_apply_only`; hourly pay still excludes it. `selectCandidates` returns those rows as
+`easyApplyEligible`, deduplicated by source URL, never in `eligible` and never against `dailyCap`.
+`bin/auto-apply.js` runs them after the ordinary apply phase through `src/apply/easy-apply-morning.js`
+(approve actor `apply`, so the ordinary cap is untouched). Dashboard clicks reach the same worker branch
+through Approve/Retry (the apply runner gets a 17-minute hard kill for `linkedin_easy`).
+
+**Flow.** `src/apply/worker.js` sees `adapter.assisted` (src/apply/adapters/linkedin-easy.js) and, BEFORE
+the claim, runs `easyApplyStartGate`: breaker, window/spacing, the single in-flight slot, then the daily cap
+reservation. A refusal returns `deferred` and leaves the application `approved`. The claim
+(approved -> submitting) runs under LOCK_KEY; the unique partial index
+`ic_job_applications_easy_apply_inflight_uq` turns a lost race into `deferred`. `src/apply/easy-apply-flow.js`
+opens one tab over raw CDP (`src/browser/cdp-target.js`; no Playwright, no domain enables, no listeners, no
+interception), navigates to the guardUrl-checked job URL, stops on a challenge page (breaker) or an existing
+Applied badge (`applied_badge_present`), opens the dialog, issues a lease (application id, sha256 of a random
+nonce, 15-minute expiry), detaches, and runs `src/apply/easy-apply-runner.js`:
+
+```
+claude -p <prompt> --model sonnet --strict-mcp-config --mcp-config <job-search only; lease in its env>
+  --allowedTools mcp__job-search__easy_apply --permission-mode dontAsk --max-turns 60 --max-budget-usd 1
+  --output-format json
+```
+
+Never `bypassPermissions`. In lease mode the job-search server registers `easy_apply` and nothing else.
+Only the lease's verified finish result moves state:
+
+| lease outcome | application |
+| --- | --- |
+| `finished` with `finish_result.ok` | needs_human `awaiting_submit` (tab id, ledger, screenshot); tab left open |
+| `uncertain_last_step` with every field verified | needs_human `awaiting_submit`; tab left open |
+| `parked` | needs_human `question` (the field's text; alias hits carry the bank key as suggestion) |
+| `unexpected_submit` | needs_human `easy_apply_unexpected_submit`, error event, breaker; tab left open |
+| `challenge` | needs_human `easy_apply_challenge`, breaker |
+| anything else | needs_human `easy_apply_stopped`; tab closed |
+
+**The easy_apply tool** (`src/tools/easy_apply.js`): snapshot / answer(ref) / upload_resume / advance(ref) /
+park(ref) / finish, every call lease-validated. The model never supplies a value (`src/apply/easy-apply-
+answers.js`: exact normalized match against contact facts and the bank's learned tier only; anything else
+parks or, when optional, stays blank; select/radio need exactly one matching option; Follow company is never
+touched). `src/apply/easy-apply-driver.js` is the only module that acts on the page; every action is one
+`Runtime.callFunctionOn`, and advance re-verifies the ref's identity and applies G1 as amended after the
+spec-adversary pass (A1: canonical kinds next = {next, continue, continue to next step} and review =
+{review, review your application}, every name source mapping to the same kind; A2: deny
+`submit|send|done|\bapply\b` on every name source; A3: deny `submit|send|done` on data-* names and values of
+the button, its descendants, and its ancestors up to the dialog), G2 (positive not-last-step signal on the
+canonical kind, or terminal), and G3 (A3b: any visible submit-marked dialog button or data-* marker means no
+clicks) inside that same call, then re-reads the descriptor and clicks through
+`HTMLElement.prototype.click` only if nothing changed. Text goes in through
+the native value setter one character at a time; no key events.
+
+**Caps and pacing.** `autoApply.linkedin` in `src/core/config.js` (defaults; `config/auto-apply.json` was
+left unchanged to avoid a config-lock churn): easyApplyDaily 5 (also charged to LinkedIn's own detail
+budget), morning window 09:00-19:00 America/Chicago, 20-40 minute jittered spacing, 5-minute dashboard
+spacing, 1.5-4 s per action, 60-160 ms per character, 24-hour breaker.
+
+**Tabs.** `src/browser/session.js` never closes an `awaiting_submit` target (reconcile, reconcileTargets),
+closes nothing when that set cannot be read, arms every new page not created through attachPage with the
+scan policy except an awaiting_submit target (armed anyway if the set cannot be read), and on connect demotes awaiting rows whose tab is gone to `abandoned_tab`; `bin/scan.js`'s
+`launchChrome` demotes them all after any relaunch. Awaiting rows older than 24 hours are flagged `stale`,
+never closed. `reconcileStale` leaves a `linkedin_easy` submitting row alone for 20 minutes.
+
+**Dashboard.** The awaiting_submit card shows the screenshot, the Q/A ledger, Focus tab, I submitted (checks
+LinkedIn's Applied badge; absent -> stays needs_human with a confirm-anyway button), and Abandon (withdraws
+and closes the tab). The generic "I applied by hand" refuses that card. `GET /api/easy-apply/status` exposes
+the breaker.
+
+**Blind spots.** Every fixture under `test/fixtures/easy-apply/` is synthetic; real LinkedIn markup was not
+recorded; the "real-shaped" fixtures follow LinkedIn's markup as remembered, not as observed. Playwright sessions that are connected over CDP while the Easy Apply tab exists still
+auto-attach to it at the protocol level (no route, no close). LinkedIn's detection behavior is untested.

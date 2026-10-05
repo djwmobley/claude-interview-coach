@@ -47,6 +47,19 @@
  * See the PR body's "WebSocket route-policy gap" section for the full
  * write-up; the ship/no-ship call on this gap is the operator's, not this
  * code's.
+ *
+ * Assisted LinkedIn Easy Apply (operator decision 2026-10-04, spec B5): a tab parked at LinkedIn's Review
+ * screen (application needs_human, pending_question.kind 'awaiting_submit') belongs to Damian until he
+ * submits. Every session therefore loads that exempt target-id set (`awaitingTabs`, DB-backed by default
+ * via src/core/easy-apply-tabs.js -- a core module, so the scan side still never imports src/apply/) and:
+ * reconcile()/reconcileTargets() never close an exempt id, and close NOTHING when the set cannot be read;
+ * every new page not created through attachPage is still armed with the scan policy (or its tracked
+ * opener's policy) and closed by closeAll() -- EXCEPT a page whose CDP target id is in the awaiting_submit
+ * set, which is never armed and never closed; when that set cannot be read the page is armed (fail
+ * closed); and on connect, awaiting
+ * rows whose tab no longer exists (the scan Chrome restarted or self-healed) are demoted to needs_human
+ * kind 'abandoned_tab' against the live Target.getTargets list -- an unreadable list demotes nothing.
+ * detachLeaveOpen() unroutes and forgets every tracked page without closing any of them.
  */
 import fs from 'node:fs';
 import path from 'node:path';
@@ -54,6 +67,8 @@ import { getEnv } from '../core/config.js';
 import { JobSearchError } from '../core/errors.js';
 import { log } from '../core/logger.js';
 import { POST_ALLOWED, hostMatches } from '../core/urlguard.js';
+import { connectDedicated } from '../core/db.js';
+import { listAwaitingTargets, demoteAbandonedTabs } from '../core/easy-apply-tabs.js';
 
 const BLOCKED_RESOURCE_TYPES = new Set(['image', 'font', 'media', 'stylesheet']);
 
@@ -155,9 +170,42 @@ export function routeDecision(req, policy = { mode: 'scan', blockedCount: 0 }) {
  * @property {(markerFile: string) => Promise<void>} writeTargetMarker overwrite markerFile with this run's tracked pages' CDP target ids
  * @property {(markerFile: string) => Promise<{ attempted: number, closed: number }>} reconcileTargets close every target id recorded in markerFile from a prior run, by CDP target id (apply pipeline slice 5: SPA-navigation-safe, unlike the URL-fragment reconcile above)
  * @property {() => Promise<void>} closeAll close every page this session created, then disconnect
+ * @property {() => Promise<void>} detachLeaveOpen unroute and forget every tracked page WITHOUT closing it, then disconnect
  * @property {() => number} openPages
  * @property {(page: import('playwright-core').Page) => PagePolicy|undefined} policyFor test/worker seam: read back a tracked page's policy (e.g. blockedCount)
  */
+
+/**
+ * @typedef {Object} AwaitingTabs
+ * @property {() => Promise<Set<string>|null>} exemptTargetIds awaiting_submit target ids (null = unknown)
+ * @property {(alive: Set<string>, reason: string) => Promise<number[]>} demoteMissing demote awaiting rows whose tab is not in `alive`
+ */
+
+/**
+ * Default, database-backed awaiting_submit tab set. Uses a short-lived dedicated connection per call so a
+ * session never leaves a pool open behind it.
+ * @returns {AwaitingTabs}
+ */
+export function dbAwaitingTabs() {
+  return {
+    async exemptTargetIds() {
+      const c = await connectDedicated();
+      try {
+        return new Set((await listAwaitingTargets(c)).map((r) => r.targetId).filter((x) => typeof x === 'string'));
+      } finally {
+        await c.end().catch(() => {});
+      }
+    },
+    async demoteMissing(alive, reason) {
+      const c = await connectDedicated();
+      try {
+        return await demoteAbandonedTabs(c, { aliveTargetIds: alive, reason });
+      } finally {
+        await c.end().catch(() => {});
+      }
+    },
+  };
+}
 
 /** Marker appended to navigations so a later run can recognize our leftovers without reading page content. */
 export const PAGE_MARKER = 'ic-job-search';
@@ -178,7 +226,7 @@ export function applyTargetMarkerPath(logDir) {
 /**
  * Connect to the scan Chrome. Throws BROWSER_UNAVAILABLE when the CDP
  * endpoint is down so the run degrades to `partial`.
- * @param {{ cdpUrl?: string, timeoutMs?: number, chromium?: { connectOverCDP: (url: string, opts?: any) => Promise<any> } }} [opts]
+ * @param {{ cdpUrl?: string, timeoutMs?: number, chromium?: { connectOverCDP: (url: string, opts?: any) => Promise<any> }, awaitingTabs?: AwaitingTabs }} [opts]
  *   `chromium` is a test seam (apply pipeline slice 5): a fake object shaped like playwright-core's own
  *   `chromium` export, so session.js's internal arm/policy/popup-inheritance logic can be unit tested with
  *   in-memory fakes instead of a real CDP connection. Production callers never pass it; the default lazily
@@ -216,6 +264,36 @@ export async function connectSession(opts = {}) {
   /** @type {Map<import('playwright-core').Page, string>} CDP targetId per tracked page, best-effort. */
   const targetIds = new Map();
   let disconnected = false;
+  const awaitingTabs = opts.awaitingTabs ?? dbAwaitingTabs();
+  /** @type {Set<string>|null} null = unknown (lookup failed): close nothing */
+  let exempt = null;
+  async function refreshExempt() {
+    try {
+      exempt = await awaitingTabs.exemptTargetIds();
+    } catch (err) {
+      exempt = null;
+      log.warn({ evt: 'awaiting_tabs_lookup_failed', ...(err instanceof Error ? { err_message: err.message.slice(0, 300) } : {}) });
+    }
+    return exempt;
+  }
+  /** Live page target ids, or null when the list cannot be read. @returns {Promise<Set<string>|null>} */
+  async function liveTargetIds() {
+    let cdp;
+    try {
+      cdp = await browser.newBrowserCDPSession();
+      const r = await cdp.send('Target.getTargets');
+      if (!r || !Array.isArray(r.targetInfos)) return null;
+      return new Set(r.targetInfos.filter((t) => t && t.type === 'page' && typeof t.targetId === 'string').map((t) => t.targetId));
+    } catch {
+      return null;
+    } finally {
+      try {
+        await cdp?.detach();
+      } catch {
+        /* ignore */
+      }
+    }
+  }
 
   /**
    * CDP target id for a page (apply pipeline slice 5's marker-file mechanism, below). Best-effort: any
@@ -244,14 +322,42 @@ export async function connectSession(opts = {}) {
    * @param {import('playwright-core').Page} page
    * @param {PagePolicy} policy
    */
-  async function arm(page, policy) {
+  /** Pages whose 'close' listener is already installed (arm() may run twice for one page). */
+  const closeHooked = new WeakSet();
+
+  /**
+   * Arm a page with `policy`. Race-safe (PR #74 approver fix): real Playwright fires the context 'page'
+   * event for pages attachPage itself creates, so the event handler below and attachPage can both reach
+   * here for the same page. Rules:
+   *   - without opts.override, a page that is already tracked is left alone (whoever claimed it first wins);
+   *   - with opts.override (attachPage only), this policy replaces any earlier one: the old route is
+   *     removed before the new one is registered, so exactly one route handler remains;
+   *   - after every await, a call whose policy is no longer the page's current policy stops without
+   *     registering anything, so a superseded scan arm can never land after an apply arm.
+   * @param {import('playwright-core').Page} page
+   * @param {PagePolicy} policy
+   * @param {{ override?: boolean }} [opts]
+   */
+  async function arm(page, policy, opts = {}) {
+    const already = pages.has(page);
+    if (already && !opts.override) return;
     pages.set(page, policy);
     const id = await lookupTargetId(page);
+    if (pages.get(page) !== policy) return;
     if (id) targetIds.set(page, id);
-    page.on('close', () => {
-      pages.delete(page);
-      targetIds.delete(page);
-    });
+    if (!closeHooked.has(page)) {
+      closeHooked.add(page);
+      page.on('close', () => {
+        pages.delete(page);
+        targetIds.delete(page);
+      });
+    }
+    try {
+      await page.unroute('**/*');
+    } catch {
+      /* nothing registered yet, or the page is gone */
+    }
+    if (pages.get(page) !== policy) return;
     await page.route('**/*', (route) => {
       const r = route.request();
       const d = routeDecision({ method: r.method(), resourceType: r.resourceType(), url: r.url() }, policy);
@@ -269,6 +375,12 @@ export async function connectSession(opts = {}) {
   // supply a plain property for the same purpose, so both shapes are tolerated. An opener that cannot be
   // resolved, or is not itself a tracked page, falls back to the 'scan' policy -- the safe default, never
   // 'apply' by inference.
+  //
+  // Assisted Easy Apply (spec B5, approver fix): every new page keeps the default above -- armed with the
+  // tracked opener's policy, or the scan policy, and tracked for closeAll() -- EXCEPT a page whose CDP
+  // target id is in the awaiting_submit exempt set, which is left untouched (no route, never closed). If
+  // the exempt set cannot be read (null, a DB error, a timeout) or the target id cannot be resolved, the
+  // page is armed: fail closed.
   context.on('page', (p) => {
     if (pages.has(p)) return;
     (async () => {
@@ -279,9 +391,42 @@ export async function connectSession(opts = {}) {
         opener = null;
       }
       const inherited = opener && pages.has(opener) ? /** @type {PagePolicy} */ (pages.get(opener)) : { mode: /** @type {'scan'} */ ('scan'), blockedCount: 0 };
+      const id = await lookupTargetId(p);
+      /** @type {Set<string>|null} */
+      let ex = null;
+      try {
+        ex = await Promise.race([
+          awaitingTabs.exemptTargetIds(),
+          new Promise((resolve) => { setTimeout(() => resolve(null), 5000).unref?.(); }),
+        ]);
+      } catch {
+        ex = null;
+      }
+      if (id && ex && ex.has(id)) return;
+      // Re-check AFTER every await above: attachPage may have claimed this page (with its own policy) while
+      // this handler was waiting on opener(), the target id, or the exempt set. arm() re-checks again.
+      if (pages.has(p)) return;
       await arm(p, inherited);
     })().catch(() => {});
   });
+
+  // Chrome restart / self-heal detection (spec B5): any awaiting_submit row whose tab is not in the live
+  // target list is demoted to abandoned_tab. An unreadable list demotes nothing.
+  const initialExempt = await refreshExempt();
+  if (initialExempt && initialExempt.size > 0) {
+    const alive = await liveTargetIds();
+    if (alive) {
+      try {
+        const demoted = await awaitingTabs.demoteMissing(alive, 'tab_missing_on_session_connect');
+        if (demoted.length > 0) {
+          log.warn({ evt: 'awaiting_tabs_demoted', count: demoted.length });
+          await refreshExempt();
+        }
+      } catch (err) {
+        log.warn({ evt: 'awaiting_tabs_demote_failed', ...(err instanceof Error ? { err_message: err.message.slice(0, 300) } : {}) });
+      }
+    }
+  }
 
   /** @type {Session} */
   const session = {
@@ -290,13 +435,19 @@ export async function connectSession(opts = {}) {
       if (o.signal && o.signal.aborted) throw new JobSearchError('INTERNAL', 'run aborted');
       const policy = buildPolicy(o);
       const page = await context.newPage();
-      await arm(page, policy);
+      // override: the context 'page' handler may already have armed this page with the scan policy.
+      await arm(page, policy, { override: true });
       if (o.signal) o.signal.addEventListener('abort', () => { page.close().catch(() => {}); }, { once: true });
       log.info({ evt: 'page_attached', mode: policy.mode, open_pages: pages.size });
       return page;
     },
     async reconcile() {
       let closed = 0;
+      const ex = await refreshExempt();
+      if (!ex) {
+        log.warn({ evt: 'pages_reconcile_skipped', reason: 'awaiting_tabs_unknown' });
+        return 0;
+      }
       for (const p of context.pages()) {
         let u = '';
         try {
@@ -305,6 +456,8 @@ export async function connectSession(opts = {}) {
           continue;
         }
         if (u.includes('#' + PAGE_MARKER)) {
+          const id = await lookupTargetId(p);
+          if (!id || ex.has(id)) continue;
           try {
             await p.close();
             closed++;
@@ -352,6 +505,12 @@ export async function connectSession(opts = {}) {
         return { attempted: 0, closed: 0 };
       }
       if (ids.length === 0) return { attempted: 0, closed: 0 };
+      const ex = await refreshExempt();
+      if (!ex) {
+        log.warn({ evt: 'target_reconcile_skipped', reason: 'awaiting_tabs_unknown' });
+        return { attempted: ids.length, closed: 0 };
+      }
+      ids = ids.filter((id) => !ex.has(id));
       let cdpSession;
       try {
         cdpSession = await browser.newBrowserCDPSession();
@@ -400,6 +559,28 @@ export async function connectSession(opts = {}) {
         }
       }
       log.info({ evt: 'session_closed' });
+    },
+    async detachLeaveOpen() {
+      for (const p of [...pages.keys()]) {
+        try {
+          await p.unroute('**/*');
+        } catch {
+          /* page already gone */
+        }
+      }
+      pages.clear();
+      targetIds.clear();
+      if (!disconnected) {
+        disconnected = true;
+        try {
+          // Playwright exposes no "disconnect without closing" on a CDP-connected Browser in this version;
+          // the connection ends with this process. Never browser.close() here: the tabs must stay open.
+          if (typeof browser.disconnect === 'function') await browser.disconnect();
+        } catch {
+          /* ignore */
+        }
+      }
+      log.info({ evt: 'session_detached_leave_open' });
     },
     openPages() {
       return pages.size;

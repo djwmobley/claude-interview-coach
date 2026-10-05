@@ -90,11 +90,14 @@ export function decodeLinkedInSafetyGo(href) {
   return decoded;
 }
 
-/** ATSs that are classify-only (src/apply/adapters/linkedin-easy.js, indeed-easy.js -- worker.js checks
- * `adapter.classifyOnly` and never automates them). ats-detect.js's own classifyApplyUrl() still reports
- * 'exact' confidence for these (it is certain about the ATS itself, just not about automatability -- see
- * that module's own doc comment), so isExactTarget below excludes them explicitly: an "exact" target for
- * auto-apply purposes must mean "automatable", never merely "identifiable". */
+/** ATSs that are never an ordinary auto-submit target. indeed_easy is classify-only (src/apply/adapters/
+ * indeed-easy.js). linkedin_easy is ASSISTED (operator decision 2026-10-04, src/apply/adapters/
+ * linkedin-easy.js): the form is filled in the scan Chrome and Damian submits it himself, and those
+ * candidates reach that path through the listing's apply_easy_only flag (src/core/auto-apply-select.js's
+ * 'easy_apply_assisted' reason), never through this resolved-ATS-target gate. ats-detect.js's own
+ * classifyApplyUrl() still reports 'exact' confidence for both (it is certain about the ATS itself, just
+ * not about ordinary automatability), so isExactTarget below excludes them explicitly: an "exact" target
+ * for the ordinary auto-submit funnel must mean "the worker submits it", never merely "identifiable". */
 const CLASSIFY_ONLY_ATS = Object.freeze(['linkedin_easy', 'indeed_easy']);
 
 /**
