@@ -292,7 +292,7 @@ Before writing, state:
 - [Role] at [Company] (2019–2021): [1 sentence: how it maps to this role]
 ...
 
-**Order:** [explain if not strictly chronological, relevance-based reordering]
+**Order:** Experience roles strictly reverse chronological (newest first); show relevance through bullet count and emphasis, never by reordering
 
 **Roles NOT included:**
 - [Role] at [Company]: REASON: [explicit reason]: NEED APPROVAL
