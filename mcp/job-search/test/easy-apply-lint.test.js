@@ -68,12 +68,14 @@ describe('easy apply lint: only the driver acts on the page', () => {
   test('the in-page function has no key events, listeners, timers, observers, or network hooks (G4)', () => {
     assert.doesNotMatch(PAGE_FUNCTION, /KeyboardEvent|keydown|keypress|keyup|\bEnter\b|addEventListener|setInterval|setTimeout|MutationObserver|XMLHttpRequest|fetch\(|\.submit\(|requestSubmit/);
   });
-  test('the advance branch evaluates G1 and G2 before its click', () => {
+  test('the advance branch evaluates G1, G2, then an in-call re-verification, before its only click', () => {
     const block = PAGE_FUNCTION.slice(PAGE_FUNCTION.indexOf("case 'advance':"), PAGE_FUNCTION.indexOf("case 'fill_text':"));
     const g1 = block.indexOf('G.classifyAdvanceButton(');
     const g2 = block.indexOf('G.checkNotLastStep(');
-    const click = block.indexOf('.click()');
-    assert.ok(g1 > 0 && g2 > g1 && click > g2, `g1=${g1} g2=${g2} click=${click}`);
+    const reverify = block.indexOf("'changed_before_click'");
+    const click = block.indexOf('HTMLElement.prototype.click.call(');
+    assert.ok(g1 > 0 && g2 > g1 && reverify > g2 && click > reverify, `g1=${g1} g2=${g2} reverify=${reverify} click=${click}`);
+    assert.doesNotMatch(block, /\.click\(\)/, 'the advance branch clicks only through the prototype after re-verification');
   });
   test('nothing in the flow uses network interception or bypassPermissions', () => {
     const files = [...FLOW_FILES, DRIVER];

@@ -29,6 +29,17 @@ import { sanitizeValue } from './easy-apply-answers.js';
  */
 function pageMain(req, G) {
   const ELEMENT_SELECTOR = 'button, input, select, textarea';
+  // Native accessors, read through the prototypes so a page-defined instance property cannot answer for
+  // them (amended A4: the label that is checked is the label that is clicked).
+  const innerTextOf = (/** @type {Element} */ el) => {
+    const d = Object.getOwnPropertyDescriptor(HTMLElement.prototype, 'innerText');
+    return d && d.get ? String(d.get.call(el) ?? '') : String(/** @type {any} */ (el).innerText ?? '');
+  };
+  const textContentOf = (/** @type {Element} */ el) => {
+    const d = Object.getOwnPropertyDescriptor(Node.prototype, 'textContent');
+    return d && d.get ? String(d.get.call(el) ?? '') : String(el.textContent ?? '');
+  };
+  const dataAttrsOf = (/** @type {Element} */ el) => Array.from(el.attributes).filter((a) => /^data-/i.test(a.name)).map((a) => [a.name, a.value]);
   const clip = (/** @type {unknown} */ s, /** @type {number} */ n) => String(s ?? '').replace(/\s+/g, ' ').trim().slice(0, n);
   const isVisible = (/** @type {Element} */ el) => {
     if (!(el instanceof HTMLElement)) return false;
@@ -90,18 +101,22 @@ function pageMain(req, G) {
     return wrap ? clip(wrap.textContent, 300) : clip(radio.value, 300);
   }
   function buttonDesc(/** @type {Element} */ el, /** @type {Element|null} */ dialog) {
-    const html = /** @type {HTMLElement} */ (el);
+    // A3: data-* on the button, every descendant, and every ancestor up to (not including) the dialog.
+    /** @type {Array<string[]>} */
+    const dataAttrs = [...dataAttrsOf(el)];
+    for (const d of Array.from(el.querySelectorAll('*'))) dataAttrs.push(...dataAttrsOf(d));
+    for (let a = el.parentElement; a && a !== dialog; a = a.parentElement) dataAttrs.push(...dataAttrsOf(a));
     return {
       tag: el.tagName.toLowerCase(),
       inDialog: Boolean(dialog && dialog.contains(el)),
       disabled: Boolean(/** @type {any} */ (el).disabled) || el.getAttribute('aria-disabled') === 'true',
       ariaLabel: el.getAttribute('aria-label') || '',
       labelledByText: labelledBy(el),
-      visibleText: html.innerText || '',
-      textContent: el.textContent || '',
+      visibleText: innerTextOf(el),
+      textContent: textContentOf(el),
       title: el.getAttribute('title') || '',
       value: el.getAttribute('value') || '',
-      dataAttrs: Array.from(el.attributes).filter((a) => /^data-/i.test(a.name)).map((a) => [a.name, a.value]),
+      dataAttrs,
     };
   }
   function buttonName(/** @type {Element} */ el) {
@@ -211,7 +226,9 @@ function pageMain(req, G) {
       const el = els[i];
       if (el.tagName === 'BUTTON') {
         if (!isVisible(el)) continue;
-        buttons.push({ ref: refOf(el, i), name: buttonName(el), allowed: G.classifyAdvanceButton(buttonDesc(el, dialog)).ok });
+        const desc = buttonDesc(el, dialog);
+        const verdict = G.classifyAdvanceButton(desc);
+        buttons.push({ ref: refOf(el, i), name: buttonName(el), allowed: verdict.ok, kind: verdict.kind, submitMarked: G.isSubmitMarked(desc) });
         continue;
       }
       const kind = fieldKind(el);
@@ -228,12 +245,16 @@ function pageMain(req, G) {
       fields.push({ ref: refOf(el, i), kind, question: fieldLabel(el), required: isRequired(el), options, value, filled: value !== '' });
     }
     const buttonNames = buttons.map((b) => b.name);
+    // A3b: a Submit control is visible when any visible dialog button is submit-marked (A2 + A3), or any
+    // visible dialog element carries a submit-marked data-* attribute.
+    const markedElement = dialog ? Array.from(dialog.querySelectorAll('*')).some((x) => G.isSubmitMarked({ dataAttrs: dataAttrsOf(x) }) && isVisible(x)) : false;
+    const submitVisible = buttons.some((b) => b.submitMarked) || markedElement;
     const dialogText = dialog ? clip(/** @type {HTMLElement} */ (dialog).innerText, 4000) : '';
     const pageText = clip(document.body ? document.body.innerText : '', 5000);
     const headerTexts = dialog ? Array.from(dialog.querySelectorAll('h1, h2, h3')).filter(isVisible).map((h) => clip(h.textContent, 200)) : [];
-    const step = G.classifyStep({ dialogPresent: Boolean(dialog), headerTexts, buttonNames, dialogText, pageText, url: location.href });
+    const step = G.classifyStep({ dialogPresent: Boolean(dialog), headerTexts, submitVisible, dialogText, pageText, url: location.href });
     return {
-      url: location.href, dialogPresent: Boolean(dialog), header: dialog ? headerOf(dialog) : '', headerTexts, step,
+      url: location.href, dialogPresent: Boolean(dialog), header: dialog ? headerOf(dialog) : '', headerTexts, step, submitVisible,
       progressValues: progressValues(dialog), buttons, fields, alerts: alerts(dialog), resumeCards: resumeCards(dialog), dialogText,
       stepKey: hash([headerTexts.join('|'), fields.map((f) => f.question).join('|'), buttonNames.join('|')].join('#')),
     };
@@ -265,18 +286,24 @@ function pageMain(req, G) {
       const r = resolveRef(dialog, req.ref);
       if (!r.el) return { clicked: false, reason: r.reason };
       if (!isVisible(r.el)) return { clicked: false, reason: 'not_visible' };
-      const verdict = G.classifyAdvanceButton(buttonDesc(r.el, dialog));
+      const firstDesc = JSON.stringify(buttonDesc(r.el, dialog));
+      const verdict = G.classifyAdvanceButton(JSON.parse(firstDesc));
       if (!verdict.ok) return { clicked: false, reason: verdict.reason, name: verdict.name };
       const snap = describe();
       if (snap.step.kind !== 'form') return { clicked: false, reason: `step_${snap.step.kind}` };
-      const submitVisible = snap.buttons.some((b) => /submit/i.test(b.name));
-      const terminal = G.checkNotLastStep({ buttonName: verdict.name, progressValues: snap.progressValues, submitVisible });
+      const terminal = G.checkNotLastStep({ buttonKind: verdict.kind, progressValues: snap.progressValues, submitVisible: snap.submitVisible });
       if (!terminal.ok) return { clicked: false, reason: terminal.reason, name: verdict.name };
       if (snap.alerts.length > 0) return { clicked: false, reason: 'validation_alert', alerts: snap.alerts };
       const missing = snap.fields.filter((f) => f.required && !f.filled && f.kind !== 'file').map((f) => f.question);
       if (missing.length > 0) return { clicked: false, reason: 'required_empty', missing };
-      /** @type {HTMLButtonElement} */ (r.el).click();
-      return { clicked: true, reason: null, name: verdict.name };
+      // A4: re-verify immediately before the click, still inside this one call: same node, same
+      // fingerprint, identical descriptor (labels, text, data-* scan), still connected and visible.
+      const again = resolveRef(findDialog(), req.ref);
+      if (again.el !== r.el || !r.el.isConnected || !isVisible(r.el) || JSON.stringify(buttonDesc(r.el, findDialog())) !== firstDesc) {
+        return { clicked: false, reason: 'changed_before_click' };
+      }
+      HTMLElement.prototype.click.call(r.el);
+      return { clicked: true, reason: null, name: verdict.name, kind: verdict.kind };
     }
     case 'fill_text': {
       const r = resolveRef(dialog, req.ref);

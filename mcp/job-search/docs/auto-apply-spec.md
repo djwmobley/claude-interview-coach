@@ -351,9 +351,14 @@ park(ref) / finish, every call lease-validated. The model never supplies a value
 answers.js`: exact normalized match against contact facts and the bank's learned tier only; anything else
 parks or, when optional, stays blank; select/radio need exactly one matching option; Follow company is never
 touched). `src/apply/easy-apply-driver.js` is the only module that acts on the page; every action is one
-`Runtime.callFunctionOn`, and advance re-verifies the ref's identity and applies the G1 (exact allowed name,
-deny `submit|send|done|apply` anywhere including data-* names and values), G2 (positive not-last-step signal
-or terminal), and G3 (Review/Submit visible: no clicks) rules inside that same call. Text goes in through
+`Runtime.callFunctionOn`, and advance re-verifies the ref's identity and applies G1 as amended after the
+spec-adversary pass (A1: canonical kinds next = {next, continue, continue to next step} and review =
+{review, review your application}, every name source mapping to the same kind; A2: deny
+`submit|send|done|\bapply\b` on every name source; A3: deny `submit|send|done` on data-* names and values of
+the button, its descendants, and its ancestors up to the dialog), G2 (positive not-last-step signal on the
+canonical kind, or terminal), and G3 (A3b: any visible submit-marked dialog button or data-* marker means no
+clicks) inside that same call, then re-reads the descriptor and clicks through
+`HTMLElement.prototype.click` only if nothing changed. Text goes in through
 the native value setter one character at a time; no key events.
 
 **Caps and pacing.** `autoApply.linkedin` in `src/core/config.js` (defaults; `config/auto-apply.json` was
@@ -373,8 +378,5 @@ and closes the tab). The generic "I applied by hand" refuses that card. `GET /ap
 the breaker.
 
 **Blind spots.** Every fixture under `test/fixtures/easy-apply/` is synthetic; real LinkedIn markup was not
-recorded. In particular the literal G1 rules refuse a button whose aria-label is "Continue to next step" or
-that carries a `data-easy-apply-*` attribute, which is believed (not verified) to be how LinkedIn's real Next
-button is marked up, so a real run may stop at the first step with `unknown_button` until the operator
-decides on that rule. Playwright sessions that are connected over CDP while the Easy Apply tab exists still
+recorded; the "real-shaped" fixtures follow LinkedIn's markup as remembered, not as observed. Playwright sessions that are connected over CDP while the Easy Apply tab exists still
 auto-attach to it at the protocol level (no route, no close). LinkedIn's detection behavior is untested.

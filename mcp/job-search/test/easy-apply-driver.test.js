@@ -148,7 +148,7 @@ describe('easy apply driver against synthetic fixtures', { skip: SKIP }, () => {
     assert.equal(snap.buttons.length, ids.length, JSON.stringify(snap.buttons));
     const expected = {
       'hidden-span': 'denied_term', 'sr-span': 'denied_term', 'aria-mismatch': 'unknown_button', 'aria-submit': 'denied_term',
-      'data-value': 'denied_term', 'data-name': 'denied_term', empty: 'unknown_button', 'linkedin-like': 'denied_term',
+      'data-value': 'denied_term', 'data-name': 'denied_term', empty: 'unknown_button', 'linkedin-like': 'step_submit_visible',
     };
     for (let i = 0; i < ids.length - 1; i++) {
       const r = await driver.advance(snap.buttons[i].ref);
@@ -197,6 +197,58 @@ describe('easy apply driver against synthetic fixtures', { skip: SKIP }, () => {
     const { driver } = await openTab('applied.html');
     const r = await driver.appliedBadge();
     assert.equal(r.state, 'applied');
+    await driver.detach();
+  });
+
+  test('real-shaped Next (Continue to next step + data-easy-apply-next-button) advances; real-shaped Submit is refused and detected', async () => {
+    const { targetId, driver } = await openTab('linkedin-shaped.html');
+    let snap = await driver.snapshot();
+    assert.equal(snap.step.kind, 'form');
+    const next = snap.buttons.find((/** @type {any} */ b) => b.name === 'continue to next step');
+    assert.ok(next && next.allowed, JSON.stringify(snap.buttons));
+    const r = await driver.advance(next.ref);
+    assert.equal(r.clicked, true, JSON.stringify(r));
+    snap = await driver.snapshot();
+    assert.equal(snap.step.kind, 'review');
+    const submit = snap.buttons.find((/** @type {any} */ b) => b.name === 'submit application');
+    assert.equal(submit.allowed, false);
+    assert.equal((await driver.advance(submit.ref)).reason, 'denied_term');
+    assert.deepEqual(JSON.parse(await pageEval(driver, targetId, 'JSON.stringify(window.__clicked)')), { next: true });
+    await driver.detach();
+  });
+
+  for (const [kase, reason] of [['child', 'denied_term'], ['ancestor', 'denied_term'], ['mismatch', 'unknown_button']]) {
+    test(`markers: ${kase} is refused (${reason}) without a click`, async () => {
+      const { targetId, driver } = await openTab(`markers.html?case=${kase}`);
+      const snap = await driver.snapshot();
+      const r = await driver.advance(snap.buttons[0].ref);
+      assert.deepEqual([r.clicked, r.reason], [false, reason]);
+      assert.deepEqual(JSON.parse(await pageEval(driver, targetId, 'JSON.stringify(window.__clicked)')), {});
+      if (kase === 'ancestor') assert.equal(snap.step.kind, 'submit_visible', 'an ancestor submit marker is a visible Submit control (A3b)');
+      await driver.detach();
+    });
+  }
+
+  test('markers: icon-only localized Submit with a data marker makes the step submit_visible; Next is not clicked', async () => {
+    const { targetId, driver } = await openTab('markers.html?case=icon');
+    const snap = await driver.snapshot();
+    assert.equal(snap.step.kind, 'submit_visible');
+    const next = snap.buttons.find((/** @type {any} */ b) => b.name === 'next');
+    const r = await driver.advance(next.ref);
+    assert.deepEqual([r.clicked, r.reason], [false, 'step_submit_visible']);
+    assert.deepEqual(JSON.parse(await pageEval(driver, targetId, 'JSON.stringify(window.__clicked)')), {});
+    await driver.detach();
+  });
+
+  test('markers: a relabel to Submit between read and click inside the same call never clicks', async () => {
+    const { targetId, driver } = await openTab('markers.html?case=mutation');
+    const snap = await driver.snapshot();
+    const b = snap.buttons.find((/** @type {any} */ x) => x.name === 'next');
+    await pageEval(driver, targetId, 'void 0');
+    const r = await driver.advance(b.ref);
+    assert.equal(r.clicked, false, JSON.stringify(r));
+    assert.deepEqual(JSON.parse(await pageEval(driver, targetId, 'JSON.stringify(window.__clicked)')), {});
+    assert.equal(await pageEval(driver, targetId, 'document.getElementById("b").getAttribute("aria-label")'), 'Submit application', 'the fixture really did relabel mid-call');
     await driver.detach();
   });
 

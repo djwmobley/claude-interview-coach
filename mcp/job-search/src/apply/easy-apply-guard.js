@@ -51,33 +51,68 @@ export function normalizeName(s) {
     .trim();
 }
 
-/** G1 allow set: the normalized accessible name must be EXACTLY one of these. Frozen. */
-export const ADVANCE_ALLOWED_NAMES = Object.freeze(['next', 'continue', 'review', 'review your application']);
+/**
+ * G1 canonical kinds (amended rule A1, post spec-adversary): every non-empty name source must normalize to
+ * a member of ONE kind's set, and all sources must agree on that kind. Frozen.
+ */
+export const ADVANCE_KINDS = Object.freeze({
+  next: Object.freeze(['next', 'continue', 'continue to next step']),
+  review: Object.freeze(['review', 'review your application']),
+});
 
-/** G1 deny rule, checked against every name source and every data-* attribute name and value. Deny
- * overrides allow. */
-export const DENY_RE = /submit|send|done|apply/i;
+/** Every name accepted by some kind (derived from ADVANCE_KINDS). */
+export const ADVANCE_ALLOWED_NAMES = Object.freeze([...ADVANCE_KINDS.next, ...ADVANCE_KINDS.review]);
+
+/** A2: deny on every name source (name, aria-label, labelledby text, innerText, textContent, title, value). */
+export const DENY_NAME_RE = /submit|send|done|\bapply\b/i;
+
+/** A3: deny on data-* attribute names AND values of the button, its descendants, and its ancestors up to
+ * (not including) the dialog. The bare "easy-apply"/"apply" token no longer denies here. */
+export const DENY_DATA_RE = /submit|send|done/i;
 
 /**
- * G1: may this element be clicked as an "advance" button? Total: every input maps to ok:true or a closed
- * refusal reason. Every refusal reason is a stop for the session (the caller never retries a refused
- * click). Rules, in order:
- *   1. not a descriptor -> 'not_button'; tag other than 'button' -> 'not_button' (an <input type=submit>,
- *      a link, a div with role=button are all refused).
+ * A2 + A3: is this element submit-marked? Used both to refuse an advance click and (A3b) to decide whether
+ * a Submit control is visible in the dialog. Total; a non-object is not marked (callers that need a click
+ * verdict use classifyAdvanceButton, which refuses non-objects separately).
+ * @param {{ ariaLabel?: string, labelledByText?: string, visibleText?: string, textContent?: string, title?: string, value?: string, dataAttrs?: Array<[string, string]> }|null|undefined} d
+ * @returns {boolean}
+ */
+export function isSubmitMarked(d) {
+  const nameDeny = /submit|send|done|\bapply\b/i;
+  const dataDeny = /submit|send|done/i;
+  const strip = (/** @type {string} */ s) => s.replace(/[​-‍⁠﻿]/g, '').normalize('NFKC');
+  if (!d || typeof d !== 'object') return false;
+  for (const s of [d.ariaLabel, d.labelledByText, d.visibleText, d.textContent, d.title, d.value]) {
+    if (typeof s === 'string' && s && (nameDeny.test(s) || nameDeny.test(strip(s)))) return true;
+  }
+  const attrs = Array.isArray(d.dataAttrs) ? d.dataAttrs : [];
+  for (const pair of attrs) {
+    if (!Array.isArray(pair)) continue;
+    for (const s of [String(pair[0] ?? ''), String(pair[1] ?? '')]) {
+      if (s && (dataDeny.test(s) || dataDeny.test(strip(s)))) return true;
+    }
+  }
+  return false;
+}
+
+/**
+ * G1 (amended A1-A3): may this element be clicked as an "advance" button? Total; every refusal stops the
+ * session. Rules, in order:
+ *   1. not a descriptor or tag other than 'button' -> 'not_button'.
  *   2. not inside the Easy Apply dialog -> 'outside_dialog'.
  *   3. disabled -> 'disabled'.
- *   4. any of name, aria-label, aria-labelledby text, innerText, textContent (hidden spans included),
- *      title, value, or any data-* attribute name or value matches DENY_RE -> 'denied_term'. This runs
- *      BEFORE the allow check: deny overrides allow.
- *   5. every non-empty name source (aria-labelledby text, aria-label, visible text) must normalize to a
- *      member of ADVANCE_ALLOWED_NAMES; no non-empty source at all, or any source outside the set (which
- *      covers an aria-label vs text mismatch) -> 'unknown_button'.
+ *   4. submit-marked (A2 on every name source, A3 on data-* names/values of the button, descendants, and
+ *      ancestors up to the dialog) -> 'denied_term'. Deny overrides allow.
+ *   5. every non-empty source among aria-labelledby text, aria-label, visible text must map to the SAME
+ *      canonical kind (ADVANCE_KINDS); no source, an unmapped source, or a kind mismatch -> 'unknown_button'.
  * @param {ButtonDescriptor|null|undefined} d
- * @returns {{ ok: true, reason: null, name: string } | { ok: false, reason: 'not_button'|'outside_dialog'|'disabled'|'denied_term'|'unknown_button', name: string }}
+ * @returns {{ ok: true, reason: null, name: string, kind: 'next'|'review' } | { ok: false, reason: 'not_button'|'outside_dialog'|'disabled'|'denied_term'|'unknown_button', name: string, kind: null }}
  */
 export function classifyAdvanceButton(d) {
-  const allowed = ['next', 'continue', 'review', 'review your application'];
-  const deny = /submit|send|done|apply/i;
+  const kinds = { next: ['next', 'continue', 'continue to next step'], review: ['review', 'review your application'] };
+  const nameDeny = /submit|send|done|\bapply\b/i;
+  const dataDeny = /submit|send|done/i;
+  const strip = (/** @type {string} */ s) => s.replace(/[​-‍⁠﻿]/g, '').normalize('NFKC');
   const norm = (/** @type {unknown} */ s) => (typeof s !== 'string' ? '' : s.normalize('NFKC')
     .replace(/[​-‍⁠﻿]/g, '')
     .replace(/\s+/g, ' ')
@@ -85,49 +120,48 @@ export function classifyAdvanceButton(d) {
     .trim()
     .replace(/[\s.,;:!?…>›→»]+$/g, '')
     .trim());
-  if (!d || typeof d !== 'object') return { ok: false, reason: 'not_button', name: '' };
-  if (d.tag !== 'button') return { ok: false, reason: 'not_button', name: '' };
-  if (!d.inDialog) return { ok: false, reason: 'outside_dialog', name: '' };
-  if (d.disabled) return { ok: false, reason: 'disabled', name: '' };
-  const strings = [d.ariaLabel, d.labelledByText, d.visibleText, d.textContent, d.title, d.value];
-  const dataAttrs = Array.isArray(d.dataAttrs) ? d.dataAttrs : [];
-  for (const pair of dataAttrs) {
-    if (Array.isArray(pair)) {
-      strings.push(String(pair[0] ?? ''));
-      strings.push(String(pair[1] ?? ''));
+  if (!d || typeof d !== 'object') return { ok: false, reason: 'not_button', name: '', kind: null };
+  if (d.tag !== 'button') return { ok: false, reason: 'not_button', name: '', kind: null };
+  if (!d.inDialog) return { ok: false, reason: 'outside_dialog', name: '', kind: null };
+  if (d.disabled) return { ok: false, reason: 'disabled', name: '', kind: null };
+  for (const s of [d.ariaLabel, d.labelledByText, d.visibleText, d.textContent, d.title, d.value]) {
+    if (typeof s === 'string' && s && (nameDeny.test(s) || nameDeny.test(strip(s)))) return { ok: false, reason: 'denied_term', name: norm(s), kind: null };
+  }
+  for (const pair of Array.isArray(d.dataAttrs) ? d.dataAttrs : []) {
+    if (!Array.isArray(pair)) continue;
+    for (const s of [String(pair[0] ?? ''), String(pair[1] ?? '')]) {
+      if (s && (dataDeny.test(s) || dataDeny.test(strip(s)))) return { ok: false, reason: 'denied_term', name: norm(s), kind: null };
     }
   }
-  for (const s of strings) {
-    if (typeof s !== 'string' || !s) continue;
-    const stripped = s.replace(/[​-‍⁠﻿]/g, '');
-    if (deny.test(s) || deny.test(stripped) || deny.test(norm(s))) return { ok: false, reason: 'denied_term', name: norm(s) };
-  }
   const sources = [d.labelledByText, d.ariaLabel, d.visibleText].map(norm).filter((s) => s.length > 0);
-  if (sources.length === 0) return { ok: false, reason: 'unknown_button', name: '' };
+  if (sources.length === 0) return { ok: false, reason: 'unknown_button', name: '', kind: null };
+  /** @type {'next'|'review'|null} */
+  let kind = null;
   for (const s of sources) {
-    if (!allowed.includes(s)) return { ok: false, reason: 'unknown_button', name: s };
+    const k = kinds.next.includes(s) ? 'next' : kinds.review.includes(s) ? 'review' : null;
+    if (!k || (kind && k !== kind)) return { ok: false, reason: 'unknown_button', name: s, kind: null };
+    kind = k;
   }
-  return { ok: true, reason: null, name: sources[0] };
+  return { ok: true, reason: null, name: sources[0], kind: /** @type {'next'|'review'} */ (kind) };
 }
 
 /**
- * G2 terminal-step rule: advance is allowed only with a POSITIVE not-last-step signal. Total:
- *   - a visible Submit-shaped button anywhere in the dialog -> terminal (G3 territory, never click);
- *   - 'review' / 'review your application' -> ok (it leads to LinkedIn's distinct Review screen);
- *   - 'next' / 'continue' -> ok ONLY when every progress value read from the dialog is a finite number,
- *     they all agree (spread of at most 1 point), and the value is below 100;
- *   - anything else (no progress signal, progress at or above 100, disagreeing or NaN values, an unknown
- *     button name) -> terminal.
- * A terminal verdict never clicks; the caller stops with uncertain_last_step.
- * @param {{ buttonName: string, progressValues: number[], submitVisible: boolean }} input
+ * G2 terminal-step rule (consumes the CANONICAL kind from classifyAdvanceButton, amended A1): advance is
+ * allowed only with a POSITIVE not-last-step signal. Total:
+ *   - a Submit control visible anywhere in the dialog -> terminal (G3 territory, never click);
+ *   - kind 'review' -> ok (it leads to LinkedIn's distinct Review screen);
+ *   - kind 'next' -> ok ONLY when every progress value read from the dialog is a finite number, they all
+ *     agree (spread of at most 1 point), and the value is below 100;
+ *   - anything else (no progress signal, progress at or above 100, disagreeing or NaN values, no kind) ->
+ *     terminal. A terminal verdict never clicks; the caller stops with uncertain_last_step.
+ * @param {{ buttonKind: 'next'|'review'|null|string, progressValues: number[], submitVisible: boolean }} input
  * @returns {{ ok: true, reason: 'progress_below_100'|'review_button' } | { ok: false, reason: 'uncertain_last_step' }}
  */
 export function checkNotLastStep(input) {
   if (!input || typeof input !== 'object') return { ok: false, reason: 'uncertain_last_step' };
   if (input.submitVisible) return { ok: false, reason: 'uncertain_last_step' };
-  const name = typeof input.buttonName === 'string' ? input.buttonName : '';
-  if (name === 'review' || name === 'review your application') return { ok: true, reason: 'review_button' };
-  if (name !== 'next' && name !== 'continue') return { ok: false, reason: 'uncertain_last_step' };
+  if (input.buttonKind === 'review') return { ok: true, reason: 'review_button' };
+  if (input.buttonKind !== 'next') return { ok: false, reason: 'uncertain_last_step' };
   const values = Array.isArray(input.progressValues) ? input.progressValues : [];
   if (values.length === 0) return { ok: false, reason: 'uncertain_last_step' };
   for (const v of values) {
@@ -146,17 +180,19 @@ export function checkNotLastStep(input) {
  *   2. 'challenge' -- a CAPTCHA/security check, "unusual activity", a login/authwall/checkpoint URL, or a
  *                     429 / too-many-requests page (G11: the circuit breaker trips).
  *   3. 'no_dialog' -- no Easy Apply dialog on the page.
- *   4. 'review'    -- a "Review your application" header AND a Submit-shaped button (G3: no further clicks).
- *   5. 'submit_visible' -- a Submit-shaped button without the header (treated as terminal: no clicks).
+ *   4. 'review'    -- a "Review your application" header AND a visible Submit control (G3: no clicks).
+ *   5. 'submit_visible' -- a visible Submit control without the header (terminal: no clicks).
  *   6. 'form'      -- anything else inside the dialog.
- * @param {{ dialogPresent: boolean, headerTexts: string[], buttonNames: string[], dialogText: string, pageText: string, url: string }} s
+ * `submitVisible` is computed by the caller with the A2+A3 scans (isSubmitMarked) over every visible dialog
+ * button plus any visible dialog element carrying a submit-marked data-* attribute (amended A3b), never
+ * from button names alone.
+ * @param {{ dialogPresent: boolean, headerTexts: string[], submitVisible: boolean, dialogText: string, pageText: string, url: string }} s
  * @returns {{ kind: 'sent'|'challenge'|'no_dialog'|'review'|'submit_visible'|'form' }}
  */
 export function classifyStep(s) {
   const sentRe = /application (?:was )?sent|application submitted|your application was submitted/i;
   const challengeTextRe = /unusual activity|security (?:check|verification)|captcha|verify (?:you(?:'re| are) (?:a )?human|your identity)|too many requests|\b429\b|sign in to continue|please sign in/i;
   const challengeUrlRe = /\/(?:checkpoint|authwall|uas\/login|login)(?:[/?#]|$)|[?&]captcha/i;
-  const submitRe = /submit/i;
   const reviewHeaderRe = /review your application/i;
   if (!s || typeof s !== 'object') return { kind: 'no_dialog' };
   const dialogText = typeof s.dialogText === 'string' ? s.dialogText : '';
@@ -165,8 +201,7 @@ export function classifyStep(s) {
   if (sentRe.test(dialogText) || sentRe.test(pageText)) return { kind: 'sent' };
   if (challengeUrlRe.test(url) || challengeTextRe.test(pageText) || challengeTextRe.test(dialogText)) return { kind: 'challenge' };
   if (!s.dialogPresent) return { kind: 'no_dialog' };
-  const names = Array.isArray(s.buttonNames) ? s.buttonNames : [];
-  const submitVisible = names.some((n) => typeof n === 'string' && submitRe.test(n));
+  const submitVisible = s.submitVisible === true;
   const headers = Array.isArray(s.headerTexts) ? s.headerTexts : [];
   const reviewHeader = headers.some((h) => typeof h === 'string' && reviewHeaderRe.test(h));
   if (reviewHeader && submitVisible) return { kind: 'review' };
@@ -195,4 +230,4 @@ export function verifyResumeCards(cards, expectedName) {
 }
 
 /** The functions the driver injects into the page by source text (see the module doc comment). */
-export const PAGE_GUARD_FUNCTIONS = Object.freeze([normalizeName, classifyAdvanceButton, checkNotLastStep, classifyStep, verifyResumeCards]);
+export const PAGE_GUARD_FUNCTIONS = Object.freeze([normalizeName, isSubmitMarked, classifyAdvanceButton, checkNotLastStep, classifyStep, verifyResumeCards]);

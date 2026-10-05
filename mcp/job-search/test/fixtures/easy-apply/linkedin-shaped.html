@@ -1,0 +1,33 @@
+<!doctype html>
+<!--
+  SYNTHETIC fixture (not recorded from linkedin.com): button markup shaped like LinkedIn's Easy Apply
+  controls as remembered, not verified. Next carries aria-label "Continue to next step" plus
+  data-easy-apply-next-button / data-live-test-easy-apply-next-button; Submit carries aria-label
+  "Submit application" plus data-live-test-easy-apply-submit-button. Clicks are recorded in window.__clicked.
+-->
+<html><head><meta charset="utf-8"><title>Shaped step</title>
+<style>.hidden { display: none; }</style></head>
+<body>
+<div class="jobs-easy-apply-modal artdeco-modal" role="dialog" aria-labelledby="h">
+  <h2 id="h">Apply to Acme Corp</h2>
+  <progress id="p" max="100" value="50"></progress>
+  <section id="s0">
+    <div><label for="c">City</label><input id="c" type="text" value="Houston"></div>
+    <footer><button id="next" type="button" aria-label="Continue to next step" data-easy-apply-next-button data-live-test-easy-apply-next-button><span class="artdeco-button__text">Next</span></button></footer>
+  </section>
+  <section id="s1" class="hidden">
+    <h3>Review your application</h3>
+    <footer><button id="submit" type="button" aria-label="Submit application" data-live-test-easy-apply-submit-button><span class="artdeco-button__text">Submit application</span></button></footer>
+  </section>
+</div>
+<script>
+  window.__clicked = {};
+  document.getElementById('next').addEventListener('click', () => {
+    window.__clicked.next = true;
+    document.getElementById('s0').classList.add('hidden');
+    document.getElementById('s1').classList.remove('hidden');
+    document.getElementById('p').value = 100;
+  });
+  document.getElementById('submit').addEventListener('click', () => { window.__clicked.submit = true; });
+</script>
+</body></html>
