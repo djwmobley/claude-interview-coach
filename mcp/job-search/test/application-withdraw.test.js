@@ -21,7 +21,9 @@ import { createCalendarCache } from '../src/dashboard/calendar-cache.js';
 import {
   createApplication, getApplication, listApplicationEvents, classifyWithdraw, withdrawApplication,
   APPLICATION_STATES, TRANSITIONS, WITHDRAW_REFUSAL_REASONS, markAppliedByHand, APPLY_NUDGE_PREFIX,
+  cleanupWithdrawnNudgeCalendar,
 } from '../src/core/applications.js';
+import { runRemind } from '../src/core/remind.js';
 import { issueLease, closeLease } from '../src/core/easy-apply-state.js';
 
 const CO = `ZZ-TEST-WITHDRAW-${process.pid}`;
@@ -35,6 +37,26 @@ let port;
 const listingIds = [];
 /** @type {{ running: boolean, applicationId: number|null }} */
 const runner = { running: false, applicationId: null };
+/**
+ * Fake calendar client behind deps.calendar (never a real Google call). `current` null models a
+ * calendar that is unavailable (not configured, or the Google token needs re-authorizing).
+ * @type {{ current: any, getterCalls: number }}
+ */
+const cal = { current: null, getterCalls: 0 };
+
+/** @param {{ fail?: boolean }} [o] */
+function fakeCalendar(o = {}) {
+  /** @type {string[]} */
+  const deleted = [];
+  return {
+    deleted,
+    async insertEvent() { throw new Error('insertEvent not expected'); },
+    async deleteEvent(/** @type {string} */ eventId) {
+      if (o.fail) throw new Error('calendar delete failed (503): backend error');
+      deleted.push(eventId);
+    },
+  };
+}
 
 /** @param {string} state @param {any} [pq] @param {string} [ats] */
 async function seed(state, pq = null, ats = 'greenhouse') {
@@ -69,7 +91,7 @@ before(async () => {
   app = createDashboardServer(/** @type {any} */ ({
     withClient, config: loadConfig(),
     env: { OLLAMA_URL: 'http://127.0.0.1:1', OLLAMA_MODEL: 'm', GOOGLE_TOKEN_FILE: '', REMINDER_TO: '', SCAN_CDP_URL: 'http://127.0.0.1:1', SCAN_PROFILE_DIR: outputRoot, CHROME_EXECUTABLE: null, JOBSEARCH_LOG_DIR: outputRoot, JOBSEARCH_CONFIG_DIR: outputRoot, LOG_LEVEL: 'silent', PG_DSN: null },
-    calendar: async () => null, calendarCache: createCalendarCache(),
+    calendar: async () => { cal.getterCalls++; return cal.current; }, calendarCache: createCalendarCache(),
     scanRunner: { async start() { return { runId: 1, pid: 1 }; }, status() { return { running: false }; }, armCancelBackstop() { return { forced_kill_available: false }; } },
     applyRunner: {
       async start(/** @type {number} */ id) { return { applicationId: id, pid: 1 }; },
@@ -92,6 +114,8 @@ beforeEach(async () => {
   await cleanup();
   runner.running = false;
   runner.applicationId = null;
+  cal.current = null;
+  cal.getterCalls = 0;
 });
 
 /** @param {number} id @param {unknown} [body] */
@@ -275,5 +299,154 @@ describe('POST /api/applications/:id/withdraw', () => {
     const id = await seed('failed');
     assert.equal((await postWithdraw(id, { note: 42 })).status, 400);
     assert.equal((await getApplication(c, id)).state, 'failed');
+  });
+});
+
+describe('withdraw: calendar event on the cancelled nudge', () => {
+  /**
+   * A submitted application whose 5-day nudge carries a calendar event id (attached through
+   * POST /api/followups/:id/calendar). Returns the application id and the nudge id.
+   * @param {string} eventId
+   */
+  async function seedNudgeWithEvent(eventId) {
+    const id = await seed('needs_human', { kind: 'question', label: 'q' });
+    await markAppliedByHand(c, id, { actor: 'dashboard' });
+    const n = await c.query('UPDATE ic_followups SET calendar_event_id = $2 WHERE created_from = $1 RETURNING id', [`${APPLY_NUDGE_PREFIX}${id}`, eventId]);
+    assert.equal(n.rowCount, 1);
+    return { id, nudgeId: Number(n.rows[0].id) };
+  }
+  /** @param {number} nudgeId */
+  async function nudgeRow(nudgeId) {
+    return (await c.query('SELECT status, calendar_event_id FROM ic_followups WHERE id = $1', [nudgeId])).rows[0];
+  }
+
+  test('a linked event is deleted after the withdraw commits; no warnings', async () => {
+    const { id, nudgeId } = await seedNudgeWithEvent('evt-withdraw-ok');
+    const fake = fakeCalendar();
+    cal.current = fake;
+    const r = await postWithdraw(id);
+    assert.equal(r.status, 200, JSON.stringify(r.body));
+    assert.equal(r.body.outcome, 'withdrawn');
+    assert.deepEqual(r.body.warnings, []);
+    assert.deepEqual(fake.deleted, ['evt-withdraw-ok']);
+    const n = await nudgeRow(nudgeId);
+    assert.equal(n.status, 'cancelled');
+    assert.equal(n.calendar_event_id, null);
+  });
+
+  test('no linked event: the calendar client is never requested', async () => {
+    const id = await seed('needs_human', { kind: 'question', label: 'q' });
+    await markAppliedByHand(c, id, { actor: 'dashboard' });
+    const fake = fakeCalendar();
+    cal.current = fake;
+    const r = await postWithdraw(id);
+    assert.equal(r.status, 200);
+    assert.deepEqual(r.body.warnings, []);
+    assert.equal(cal.getterCalls, 0);
+    assert.deepEqual(fake.deleted, []);
+  });
+
+  test('a calendar error never blocks the withdraw: warning returned, event id kept for retry', async () => {
+    const { id, nudgeId } = await seedNudgeWithEvent('evt-withdraw-fail');
+    cal.current = fakeCalendar({ fail: true });
+    const r = await postWithdraw(id);
+    assert.equal(r.status, 200, JSON.stringify(r.body));
+    assert.equal(r.body.outcome, 'withdrawn');
+    assert.equal((await getApplication(c, id)).state, 'withdrawn');
+    assert.equal(r.body.warnings.length, 1);
+    assert.match(r.body.warnings[0], /evt-withdraw-fail/);
+    assert.match(r.body.warnings[0], /retr/);
+    const n = await nudgeRow(nudgeId);
+    assert.equal(n.status, 'cancelled');
+    assert.equal(n.calendar_event_id, 'evt-withdraw-fail');
+  });
+
+  test('an unavailable calendar (expired Google auth) warns and proceeds; event id kept for retry', async () => {
+    const { id, nudgeId } = await seedNudgeWithEvent('evt-withdraw-noauth');
+    cal.current = null;
+    const r = await postWithdraw(id);
+    assert.equal(r.status, 200, JSON.stringify(r.body));
+    assert.equal(r.body.outcome, 'withdrawn');
+    assert.equal(r.body.warnings.length, 1);
+    assert.match(r.body.warnings[0], /calendar unavailable/);
+    assert.equal((await nudgeRow(nudgeId)).calendar_event_id, 'evt-withdraw-noauth');
+  });
+
+  test('an auth failure mid-delete (invalid_grant) is a warning, not a failed withdraw', async () => {
+    const { id, nudgeId } = await seedNudgeWithEvent('evt-withdraw-throw');
+    cal.current = { async deleteEvent() { throw Object.assign(new Error('invalid_grant'), { tokenState: { state: 'broken_invalid_grant' } }); } };
+    const r = await postWithdraw(id);
+    assert.equal(r.status, 200);
+    assert.equal(r.body.outcome, 'withdrawn');
+    assert.match(r.body.warnings[0], /invalid_grant/);
+    assert.equal((await nudgeRow(nudgeId)).calendar_event_id, 'evt-withdraw-throw');
+  });
+
+  test('a second withdraw (already withdrawn) retries a pending cleanup', async () => {
+    const { id, nudgeId } = await seedNudgeWithEvent('evt-withdraw-again');
+    cal.current = fakeCalendar({ fail: true });
+    assert.equal((await postWithdraw(id)).status, 200);
+    const fake = fakeCalendar();
+    cal.current = fake;
+    const r = await postWithdraw(id);
+    assert.equal(r.body.outcome, 'already_withdrawn');
+    assert.deepEqual(r.body.warnings, []);
+    assert.deepEqual(fake.deleted, ['evt-withdraw-again']);
+    assert.equal((await nudgeRow(nudgeId)).calendar_event_id, null);
+  });
+
+  test('retry pass (cleanupWithdrawnNudgeCalendar) deletes a pending event and leaves unrelated rows alone', async () => {
+    const { id, nudgeId } = await seedNudgeWithEvent('evt-retry-1');
+    cal.current = fakeCalendar({ fail: true });
+    assert.equal((await postWithdraw(id)).status, 200);
+
+    // A cancelled nudge whose application is NOT withdrawn, and a cancelled non-nudge follow-up, both
+    // with event ids: neither is a withdraw cleanup and neither may be touched.
+    const other = await seedNudgeWithEvent('evt-retry-not-withdrawn');
+    await c.query(`UPDATE ic_followups SET status = 'cancelled' WHERE id = $1`, [other.nudgeId]);
+    const listingId = listingIds[listingIds.length - 1];
+    const plain = await c.query(
+      `INSERT INTO ic_followups (contact, listing_id, due_at, channel, action, status, calendar_event_id, created_from)
+       VALUES ('x', $1, now() + interval '3 days', 'other', 'unrelated', 'cancelled', 'evt-retry-plain', 'dashboard') RETURNING id`,
+      [listingId],
+    );
+
+    const fake = fakeCalendar();
+    const out = await cleanupWithdrawnNudgeCalendar(c, async () => fake);
+    assert.ok(fake.deleted.includes('evt-retry-1'));
+    assert.ok(!fake.deleted.includes('evt-retry-not-withdrawn'));
+    assert.ok(!fake.deleted.includes('evt-retry-plain'));
+    assert.ok(out.deleted.some((d) => d.followup_id === nudgeId));
+    assert.equal((await nudgeRow(nudgeId)).calendar_event_id, null);
+    assert.equal((await nudgeRow(other.nudgeId)).calendar_event_id, 'evt-retry-not-withdrawn');
+    assert.equal((await nudgeRow(Number(plain.rows[0].id))).calendar_event_id, 'evt-retry-plain');
+  });
+
+  test('retry pass with the calendar still unavailable keeps the record and warns', async () => {
+    const { id, nudgeId } = await seedNudgeWithEvent('evt-retry-unavail');
+    cal.current = null;
+    assert.equal((await postWithdraw(id)).status, 200);
+    const out = await cleanupWithdrawnNudgeCalendar(c, async () => null, { applicationId: id });
+    assert.equal(out.pending, 1);
+    assert.deepEqual(out.deleted, []);
+    assert.match(out.warnings[0], /calendar unavailable/);
+    assert.equal((await nudgeRow(nudgeId)).calendar_event_id, 'evt-retry-unavail');
+  });
+
+  test('the daily follow-ups pass (runRemind) retries the pending cleanup before anything else', async () => {
+    const { id, nudgeId } = await seedNudgeWithEvent('evt-remind-retry');
+    cal.current = fakeCalendar({ fail: true });
+    assert.equal((await postWithdraw(id)).status, 200);
+    const fake = fakeCalendar();
+    /** @type {any[]} */
+    const logged = [];
+    await runRemind({
+      client: c, tokenFile: 'unused', to: 'x@example.com', dryRun: true, skipReportFile: true,
+      googleHttp: /** @type {any} */ (async () => { throw new Error('no google in tests'); }),
+      calendar: async () => fake, log: (x) => logged.push(x),
+    });
+    assert.ok(fake.deleted.includes('evt-remind-retry'));
+    assert.equal((await nudgeRow(nudgeId)).calendar_event_id, null);
+    assert.ok(logged.some((x) => x.evt === 'remind_withdraw_calendar_cleanup'));
   });
 });
