@@ -39,8 +39,12 @@ import crypto from 'node:crypto';
 import http from 'node:http';
 import { OAuth2Client } from 'google-auth-library';
 import { packageRoot } from './config.js';
-import { SCOPE_GMAIL_READONLY } from './google.js';
+import { SCOPE_GMAIL_READONLY, SCOPE_GMAIL_SEND, SCOPE_CALENDAR_EVENTS } from './google.js';
 import { consentFileFor, writeConsentFile, deleteOwnConsentFile, unlinkConsentFile } from './reauth-consent.js';
+
+/** Scopes every reauth consent request names explicitly: Gmail read (scan alerts), Gmail send (reports,
+ * reminders) and calendar events (the dashboard calendar provider, assertScopes need.calendar). */
+export const REAUTH_REQUIRED_SCOPES = Object.freeze([SCOPE_GMAIL_READONLY, SCOPE_GMAIL_SEND, SCOPE_CALENDAR_EVENTS]);
 
 /** Registered redirect URIs (the Google MCP client itself usually holds 8000; this reauth flow only
  * needs ONE of these five free at any given moment -- it never invents a port outside this set. */
@@ -148,7 +152,8 @@ export function naiveUtcExpiry(epochMs) {
  * shape for a field this run did not need to touch.
  * @param {any} base parsed existing JSON (or {} if unreadable/missing)
  * @param {{ access_token?: string|null, refresh_token?: string|null, scope?: string|null, expiry_date?: number|null }} tokens google-auth-library's Credentials
- * @param {string[]} requestScopes the scopes this run's consent URL asked for
+ * @param {string[]} requestScopes scopes to record even when the exchange response does not echo them
+ *   (the caller passes the pre-2026-10-05 request set, not every scope the consent URL asked for)
  * @returns {any}
  */
 export function mergeToken(base, tokens, requestScopes) {
@@ -505,7 +510,13 @@ async function reauthorizeGoogleCore(opts, portRef) {
     const state = crypto.randomBytes(32).toString('hex');
     const loginHint = loginHintFromFilename(tokenFile);
     const oldScopes = Array.isArray(/** @type {any} */ (startBase).scopes) ? /** @type {any} */ (startBase).scopes.map(String) : (typeof (/** @type {any} */ (startBase).scope) === 'string' ? /** @type {any} */ (startBase).scope.split(/\s+/).filter(Boolean) : []);
-    const requestScopes = Array.from(new Set([...oldScopes, SCOPE_GMAIL_READONLY, ...extraScopes]));
+    // Request every scope the pipeline needs explicitly (2026-10-05) instead of relying on
+    // include_granted_scopes to carry calendar forward, so a fresh grant never lands without it.
+    const requestScopes = Array.from(new Set([...oldScopes, ...REAUTH_REQUIRED_SCOPES, ...extraScopes]));
+    // Scopes recorded in the token file without Google echoing them back: unchanged from before this
+    // change. The newly required scopes are recorded only when the exchange response grants them, so a
+    // user who unchecks calendar on the consent screen still classifies as broken_missing_scopes.
+    const recordScopes = Array.from(new Set([...oldScopes, SCOPE_GMAIL_READONLY, ...extraScopes]));
     const client = makeOAuthClient(clientId, clientSecret, chosenUri);
     const authUrl = client.generateAuthUrl({
       access_type: 'offline',
@@ -626,7 +637,7 @@ async function reauthorizeGoogleCore(opts, portRef) {
           }
 
           try {
-            writeMergedToken(tokenFile, tokens, requestScopes, startHash, startBase);
+            writeMergedToken(tokenFile, tokens, recordScopes, startHash, startBase);
           } catch (err) {
             res.writeHead(200, { 'content-type': 'text/html' }).end(WRITE_FAILED_HTML);
             finish({ outcome: 'write_failed', reason: String(err instanceof Error ? err.message : err).slice(0, 200) });

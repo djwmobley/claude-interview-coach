@@ -12,12 +12,15 @@
  *     `opts.brokenCooldownMs` for tests) during which repeated calls return the cached broken result
  *     WITHOUT re-attempting a live refresh -- a dead grant should not be hammered with a refresh attempt
  *     on every dashboard poll.
+ *   - either cache is dropped as soon as the token file's mtime or size changes (one fs.stat per call),
+ *     so a successful re-consent is picked up on the next call instead of after the cooldown.
  * Returns null (with a logged warning) when the token file is missing, lacks the calendar scope, or the
  * live refresh fails, so callers (followups, the dashboard calendar routes) still work without it. The
  * last classification (success or broken) is exposed via the returned function's `.lastState()`
  * accessor so callers that need the REASON for a null result (the dashboard calendar route) can read it
  * without a second classification attempt of their own.
  */
+import fs from 'node:fs';
 import { classifyAndConnect, calendarInsertEvent, calendarDeleteEvent, calendarListEvents } from './google.js';
 import { log } from './logger.js';
 
@@ -55,11 +58,23 @@ export function makeCalendarProvider(env, opts = {}) {
   /** @type {import('./google.js').GoogleTokenState|null} */
   let lastClassification = null;
 
+  /** Token file signature recorded when the current cache entry was set (null when none is set). */
+  /** @type {string|null} */
+  let cachedSig = null;
+
   /** @type {CalendarProviderFn} */
   const provider = /** @type {any} */ (async () => {
     const now = Date.now();
+    // A rewritten token file (re-consent, rotation) invalidates both caches (2026-10-05): without this a
+    // successful reauth left the dashboard banner up for the rest of the broken cooldown.
+    const sig = tokenFileSignature(env.GOOGLE_TOKEN_FILE);
+    if (cachedSig !== sig) {
+      cachedOk = null;
+      cachedBroken = null;
+    }
     if (cachedOk && cachedOk.until > now) return wrap(cachedOk.deps);
     if (cachedBroken && cachedBroken.until > now) return null;
+    cachedSig = sig;
     if (!env.GOOGLE_TOKEN_FILE) {
       lastClassification = { state: 'broken_missing_file' };
       cachedBroken = { until: now + brokenCooldownMs };
@@ -89,6 +104,21 @@ export function makeCalendarProvider(env, opts = {}) {
   });
   provider.lastState = () => lastClassification;
   return provider;
+
+  /**
+   * mtime + size of the token file, or a fixed marker when it is unset or cannot be stat'd.
+   * @param {string|undefined|null} file
+   * @returns {string}
+   */
+  function tokenFileSignature(file) {
+    if (!file) return 'unset';
+    try {
+      const st = fs.statSync(file);
+      return `${st.mtimeMs}:${st.size}`;
+    } catch {
+      return 'missing';
+    }
+  }
 
   /**
    * @param {import('./google.js').HttpDeps} deps
