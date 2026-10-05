@@ -292,7 +292,7 @@ Before writing, state:
 - [Role] at [Company] (2019–2021): [1 sentence: how it maps to this role]
 ...
 
-**Order:** [explain if not strictly chronological, relevance-based reordering]
+**Order:** Experience roles strictly reverse chronological (newest first); show relevance through bullet count and emphasis, never by reordering
 
 **Roles NOT included:**
 - [Role] at [Company]: REASON: [explicit reason]: NEED APPROVAL
@@ -338,7 +338,7 @@ Follow the format spec in the NON-NEGOTIABLE RULES section exactly.
 - Plain text with `·` separators: no bullets, no categories, no headers
 
 **Experience bullets:**
-- Order roles by relevance to this role (not necessarily chronological)
+- Order roles strictly reverse chronological (newest first). Never reorder by relevance; show relevance through bullet count instead
 - Write 3–6 bullets per role: more for recent/flagship, fewer for older/shorter
 - Lead each bullet with the action and outcome, not the task
 - Connect every major bullet to something in the top 10 keyword list

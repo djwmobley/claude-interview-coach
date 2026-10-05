@@ -23,9 +23,9 @@ Then apply these universal principles:
 
 For international roles, direct applications, or when no regional format matches:
 - Professional summary at the top (tailored)
-- If the candidate has an anchor project (type: `flagship`), highlight it prominently. Otherwise, lead with the 2-3 most relevant projects for the target role
+- If the candidate has an anchor project (type: `flagship`), give it the most bullets and detail. Otherwise, give the 2-3 most relevant roles the most bullets and detail, while keeping strict reverse chronological order
 - Skills grouped thematically, not just listed
-- Projects can be reordered by relevance rather than strictly chronological
+- Experience roles strictly reverse chronological (newest first); show relevance through bullet count and emphasis, never by reordering
 - Education and certifications can be positioned for maximum impact
 
 ### US Resume Format

@@ -49,7 +49,7 @@ An 11-step workflow ([resume-workflow.md](../framework/resume-workflow.md)) take
 3. **Read project details**: pull in the 3–6 most relevant projects
 4. **Consult professional-identity**: use narrative framing and reframes to inform tone
 5. **Tailor the summary**: rewrite the professional summary for this specific role
-6. **Order by relevance**: most relevant projects first, not just chronological
+6. **Order reverse chronologically**: experience roles strictly reverse chronological (newest first); show relevance through bullet count and emphasis, never by reordering
 7. **Adjust skill emphasis**: highlight what matches, de-emphasise what doesn't
 8. **Choose language**: match the language of the job posting (or the candidate's preferred language from `data/profile.md`)
 9. **Choose format**: select the appropriate market format (see [style-guidelines.md](../framework/style-guidelines.md))
