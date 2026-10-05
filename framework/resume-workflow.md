@@ -10,7 +10,7 @@ When asked to create a targeted resume for a specific role:
 3. **Read relevant project details**: read the full project files only for the 3-6 most relevant matches. If any project is marked type: `flagship`, consider including it for depth and longevity, but only if it's relevant to the target role. Also read `data/skills.md` and `data/certifications.md`
 4. **Consult professional identity**: read `data/professional-identity.md` for narrative framing, reframes, and values. Use this to inform tone and angle: especially the narrative patterns table (how the candidate defaults vs. how they should frame things). Also read `data/voice.md` if non-empty: apply writing preferences, characteristic phrases, and avoidance list when drafting bullets and summaries. Voice profile takes precedence over Claude's default phrasing patterns.
 5. **Tailor the summary**: rewrite the professional summary to speak directly to the role's needs, informed by the professional identity reframes and the candidate's actual project data
-6. **Order by relevance**: put the most relevant projects first, not just chronologically
+6. **Order reverse chronologically**: newest role first, always. Show relevance through bullet count and emphasis, never by moving roles out of date order
 7. **Adjust skill emphasis**: highlight skills that match the job description, de-emphasise irrelevant ones
 8. **Choose language**: match the language of the job posting (or the candidate's preferred language from `data/profile.md`)
 9. **Choose format**: select the appropriate market format (see `framework/style-guidelines.md`)
