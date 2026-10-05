@@ -9,6 +9,18 @@
 import { test, describe } from 'node:test';
 import assert from 'node:assert/strict';
 import { autoApplySchema } from '../src/core/config.js';
+import fs from 'node:fs';
+import path from 'node:path';
+import { fileURLToPath } from 'node:url';
+
+describe('shipped config/auto-apply.json fit floors (operator decision 2026-10-04)', () => {
+  test('fitFloor and probeFitFloor are both 60 and match each other', () => {
+    const shippedPath = path.join(path.dirname(fileURLToPath(import.meta.url)), '..', 'config', 'auto-apply.json');
+    const shipped = autoApplySchema.parse(JSON.parse(fs.readFileSync(shippedPath, 'utf8')));
+    assert.equal(shipped.fitFloor, 60);
+    assert.equal(shipped.probeFitFloor, 60);
+  });
+});
 
 const BASE = {
   fitFloor: 70,
