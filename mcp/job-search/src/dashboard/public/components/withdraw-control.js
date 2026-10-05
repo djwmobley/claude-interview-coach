@@ -27,6 +27,10 @@ export function withdrawControl(applicationId, onChanged) {
       const out = handleOutcome(await postJson(`/api/applications/${applicationId}/withdraw`, note ? { note } : {}));
       if (out.kind === 'ok') {
         showToast({ message: out.body && out.body.outcome === 'already_withdrawn' ? 'Already withdrawn.' : 'Application withdrawn.' });
+        // Non-fatal calendar cleanup warning (the withdraw itself succeeded): the follow-up's calendar
+        // event is still on the calendar and the server retries it on the next follow-ups pass.
+        const warnings = out.body && Array.isArray(out.body.warnings) ? out.body.warnings : [];
+        if (warnings.length > 0) showToast({ message: `Calendar event not removed yet; it will be retried. ${String(warnings[0])}`, tone: 'error' });
         onChanged();
       }
     },

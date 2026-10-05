@@ -19,6 +19,7 @@ import {
 } from './report.js';
 import { readWatchdogState, ackWatchdogRestarts } from './watchdog-state.js';
 import { readAutoApplySummary } from './auto-apply-state.js';
+import { cleanupWithdrawnNudgeCalendar } from './applications.js';
 
 /**
  * One line per item, plain text.
@@ -68,7 +69,10 @@ export function buildDigestHtml(rows, now) {
  *   config?: import('./config.js').LoadedConfig, reportProfile?: string,
  *   reportSinceOverride?: Date|null, writeReportFileRoot?: string, skipReportFile?: boolean,
  *   watchdogStateFile?: string|null, autoApplySummaryFile?: string|null,
- * }} opts reportSinceOverride, when the key is present (including explicitly `null`), bypasses the
+ *   calendar?: (() => Promise<import('./followups.js').CalendarDeps|null>)|null,
+ * }} opts calendar (withdraw calendar cleanup): the lazy calendar client getter bin/remind.js wires to
+ *   makeCalendarProvider(env); when present, the retry pass for withdrawn nudges' calendar events runs
+ *   first (applications.js cleanupWithdrawnNudgeCalendar). Omitted means no retry pass. reportSinceOverride, when the key is present (including explicitly `null`), bypasses the
  *   ic_report_state marker read (test seam; see report.js's buildScanReport). logError defaults to `log`
  *   when omitted; bin/remind.js wires it to logger.error so the auth-health broken-grant line (see
  *   below) is distinguishable from the ordinary info-level events. watchdogStateFile (self-healing
@@ -103,6 +107,19 @@ export async function runRemind(opts) {
   const homeMinPrescore = config?.adapters.run.reportHomeMinPrescore ?? DEFAULT_REPORT_HOME_MIN_PRESCORE;
   const registry = config ? buildRegistry(config) : { entries: [], httpAllowedHosts: new Set() };
   const reportProfile = opts.reportProfile ?? 'exec-default';
+
+  // Retry pass for withdraw calendar cleanup: a calendar event that could not be deleted when its
+  // application was withdrawn (Google down, token expired) is still linked to the cancelled nudge;
+  // try again here, before the nothing-to-report early return so it runs every day. Non-fatal: a
+  // failure is logged and the record stays for tomorrow.
+  if (opts.calendar) {
+    try {
+      const cc = await cleanupWithdrawnNudgeCalendar(opts.client, opts.calendar);
+      if (cc.pending > 0) say({ evt: 'remind_withdraw_calendar_cleanup', pending: cc.pending, deleted: cc.deleted.length, failed: cc.failed.length, warning: cc.warnings[0] ?? null });
+    } catch (err) {
+      say({ evt: 'remind_withdraw_calendar_cleanup_failed', ...errFields(err) });
+    }
+  }
 
   const flippedIds = await unsnoozeDue(opts.client, now);
   const rows = await selectDue(opts.client, now);

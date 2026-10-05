@@ -16,6 +16,7 @@ import {
   createApplication, approve, getApplication, getApplicationForListing, retry, markAppliedByHand, resume,
   listApplicationEvents, recordApplicationEvent, transition, APPLICATION_STATES, checkApplicationBlockers,
   withdrawApplication,
+  cleanupWithdrawnNudgeCalendar,
 } from '../../core/applications.js';
 import { classifyApplyUrl } from '../../apply/ats-detect.js';
 import { resolveLatestApplicationScreenshot } from '../../apply/screenshot.js';
@@ -485,7 +486,25 @@ export function register(router, deps, streamHub) {
       return sendJson(ctx.res, 409, { ok: false, code: 'WITHDRAW_REFUSED', reason: out.reason, state: out.state, message: out.message });
     }
     if (out.outcome === 'withdrawn') streamHub?.notifyChanged('events');
-    sendJson(ctx.res, 200, { ok: true, outcome: out.outcome, row: out.row });
+    // After the commit: delete any calendar event still linked to this application's cancelled nudge.
+    // Non-fatal by design: a calendar failure (or an expired Google token) is a warning in the response
+    // and the event id stays on the row for the next follow-ups pass (bin/remind.js) or a repeat
+    // withdraw to retry. Never turns a committed withdraw into an error response.
+    /** @type {string[]} */
+    let warnings = [];
+    try {
+      const cleanup = await deps.withClient((c) => cleanupWithdrawnNudgeCalendar(c, deps.calendar, { applicationId: id }));
+      warnings = cleanup.warnings;
+      if (cleanup.deleted.length > 0) deps.calendarCache?.invalidateAll();
+      if (cleanup.failed.length > 0) {
+        deps.log?.({ evt: 'withdraw_calendar_cleanup_pending', application_id: id, pending: cleanup.failed.length, err_message: cleanup.failed[0].message });
+      }
+    } catch (err) {
+      const msg = err instanceof Error ? err.message.slice(0, 200) : String(err).slice(0, 200);
+      warnings = [`calendar cleanup skipped: ${msg}; will retry on the next follow-ups pass`];
+      deps.log?.({ evt: 'withdraw_calendar_cleanup_failed', application_id: id, err_message: msg });
+    }
+    sendJson(ctx.res, 200, { ok: true, outcome: out.outcome, row: out.row, warnings });
   }, { allowEmptyBody: true });
 
   // Apply pipeline slice 5: needs_human -> submitted ("I applied by hand"), no attempt increment, no

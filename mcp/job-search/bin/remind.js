@@ -30,6 +30,7 @@ import { getEnv } from '../src/core/config.js';
 import { connectDedicated } from '../src/core/db.js';
 import { createLogger, dailyLogPath, pruneLogs } from '../src/core/logger.js';
 import { runRemind } from '../src/core/remind.js';
+import { makeCalendarProvider } from '../src/core/calendar-provider.js';
 import { errFields } from '../src/core/errors.js';
 import { openDashboard } from '../src/core/open-dashboard.js';
 import { defaultWatchdogStateFile } from '../src/core/watchdog-state.js';
@@ -88,6 +89,9 @@ async function main() {
       // run (dry run included). Missing/corrupt just means "no auto-apply run to report" (readAutoApplySummary
       // already handles that), safe on a machine where auto-apply has never run.
       autoApplySummaryFile: defaultAutoApplySummaryFile(env.JOBSEARCH_LOG_DIR),
+      // Withdraw calendar cleanup retry: lazy, so Google is only contacted when a withdrawn nudge still
+      // has a linked calendar event. A broken token makes the provider return null (warn and proceed).
+      calendar: makeCalendarProvider(env),
     });
     code = r.code;
     googleAuthState = r.google_auth_state;
