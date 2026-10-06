@@ -17,11 +17,12 @@
  *   6. the bank's LEARNED tier, exact normalized label match -> that fact's value. An alias-tier or
  *      synonym-tier hit is NOT exact for this purpose and parks (when required) with 'not_exact_learned'.
  *   7. no exact match -> park when required, 'skip_optional' (left blank) when optional.
- * For select/radio, the resolved value must equal exactly one option after answers.js's pinned
- * normalizeText (EEO keys use answers.js's own EEO_TAXONOMY exact spelling table); zero or two-plus
- * candidates park with no_exact_option.
+ * For select/radio, answers.js's shared matchCandidates (answer-fallback spec F2) places the value: the
+ * fact's value, then its ranked fallbacks (FALLBACK_KEYS enum keys only), each by exact match after the
+ * pinned normalizeText (EEO keys use EEO_TAXONOMY's exact spellings). Two-plus options for a candidate, or
+ * zero for every candidate, park with no_exact_option. A fill picked by a fallback carries fallbackRank.
  */
-import { normalizeText, taxonomyOptionsFor, SALARY_LABEL_RE, HOURLY_RE } from '../answers.js';
+import { normalizeText, matchCandidates, answerCandidates, SALARY_LABEL_RE, HOURLY_RE } from '../answers.js';
 
 const FIELD_KINDS = Object.freeze(['text', 'textarea', 'select', 'radio', 'checkbox']);
 
@@ -36,19 +37,7 @@ export function sanitizeValue(v) {
 }
 
 /**
- * @param {string} token canonical value token
- * @param {string[]} options site option texts
- * @param {string} key fact key (taxonomy lookup)
- * @returns {string|null} the single matching option, or null for zero or two-plus candidates
- */
-function exactOption(token, options, key) {
-  const acceptable = new Set(taxonomyOptionsFor(key, token) ?? [normalizeText(token)]);
-  const hits = [...new Set(options.filter((o) => acceptable.has(normalizeText(o))))];
-  return hits.length === 1 ? hits[0] : null;
-}
-
-/**
- * @typedef {{ action: 'fill', value: string|boolean, bankKey: string, source: 'contact'|'learned' }
+ * @typedef {{ action: 'fill', value: string|boolean, bankKey: string, source: 'contact'|'learned', fallbackRank?: number }
  *   | { action: 'park', reason: string, bankKey: string|null }
  *   | { action: 'skip_optional', reason: string }
  *   | { action: 'leave', reason: 'follow_company' }} FieldAnswer
@@ -79,7 +68,7 @@ export function resolveFieldAnswer(field, ctx) {
     let value = fact && typeof fact.value === 'string' && fact.value.trim() ? fact.value.trim() : null;
     if (!value && contactKey === 'email' && typeof ctx.accountEmail === 'string' && ctx.accountEmail.trim()) value = ctx.accountEmail.trim();
     if (!value) return required ? { action: 'park', reason: 'no_bank_fact', bankKey: contactKey } : { action: 'skip_optional', reason: 'no_bank_fact' };
-    return finishValue(contactKey, value, kind, options, 'contact', null);
+    return finishValue(contactKey, value, kind, options, 'contact', null, null);
   }
 
   const label = ctx.bank.labels.get(norm);
@@ -89,7 +78,7 @@ export function resolveFieldAnswer(field, ctx) {
   if (!fact || fact.value === undefined) return required ? { action: 'park', reason: 'no_bank_fact', bankKey: label.key } : { action: 'skip_optional', reason: 'no_bank_fact' };
   if (fact.type === 'multiselect') return { action: 'park', reason: 'unsupported_fact_type', bankKey: label.key };
   const resolved = fact.type === 'boolean' && label.polarity === 'invert' ? !fact.value : fact.value;
-  return finishValue(label.key, resolved, kind, options, 'learned', fact.type);
+  return finishValue(label.key, resolved, kind, options, 'learned', fact.type, fact);
 }
 
 /**
@@ -99,9 +88,10 @@ export function resolveFieldAnswer(field, ctx) {
  * @param {string[]} options
  * @param {'contact'|'learned'} source
  * @param {string|null} factType
+ * @param {import('../answers.js').FactEntry|null} fact the bank fact (ranked fallbacks), null for contact values
  * @returns {FieldAnswer}
  */
-function finishValue(key, value, kind, options, source, factType) {
+function finishValue(key, value, kind, options, source, factType, fact) {
   const isBool = factType === 'boolean' || typeof value === 'boolean';
   if (kind === 'checkbox') {
     if (!isBool) return { action: 'park', reason: 'checkbox_needs_boolean_fact', bankKey: key };
@@ -110,9 +100,10 @@ function finishValue(key, value, kind, options, source, factType) {
   const token = isBool ? (value ? 'yes' : 'no') : String(value);
   if (kind === 'select' || kind === 'radio') {
     if (options.length === 0) return { action: 'park', reason: 'no_options', bankKey: key };
-    const picked = exactOption(token, options, key);
-    if (picked === null) return { action: 'park', reason: 'no_exact_option', bankKey: key };
-    return { action: 'fill', value: picked, bankKey: key, source };
+    const candidates = isBool || !fact ? [{ value: token, rank: 1 }] : answerCandidates(fact, value);
+    const m = matchCandidates(candidates, options, key);
+    if (!m.ok) return { action: 'park', reason: 'no_exact_option', bankKey: key };
+    return m.rank > 1 ? { action: 'fill', value: m.selectedOption, bankKey: key, source, fallbackRank: m.rank } : { action: 'fill', value: m.selectedOption, bankKey: key, source };
   }
   const text = isBool ? (value ? 'Yes' : 'No') : sanitizeValue(value);
   if (!text.trim()) return { action: 'park', reason: 'no_bank_fact', bankKey: key };

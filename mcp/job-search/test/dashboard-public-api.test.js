@@ -97,6 +97,17 @@ describe('classify(): withdraw refusals', () => {
   });
 });
 
+describe('classify(): answer refusals (answer-fallback F6/F7)', () => {
+  for (const code of ['not_an_offered_option', 'bank_write_failed', 'bank_changed_retry']) {
+    test(`409 ${code} maps to answer_refused with the server message`, () => {
+      const r = /** @type {any} */ (classify(409, { ok: false, code, message: 'm' }));
+      assert.equal(r.kind, 'answer_refused');
+      assert.equal(r.code, code);
+      assert.equal(r.message, 'm');
+    });
+  }
+});
+
 describe('classify(): resume refusals (resume gate R1)', () => {
   test('409 RESUME_REFUSED maps to resume_refused with the reason and server message', () => {
     const r = /** @type {any} */ (classify(409, { ok: false, code: 'RESUME_REFUSED', reason: 'unknown_kind', message: 'm' }));

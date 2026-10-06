@@ -40,7 +40,7 @@ import {
 import { recordAssistedNextClick } from '../core/applications.js';
 import { parseAnswerBank } from '../apply/answers.js';
 import { resolveFieldAnswer, sanitizeValue } from '../apply/assisted/answers.js';
-import { preResolvePolicy, sensitivePrefillPolicy, FILLABLE_KINDS } from '../apply/assisted/field-policy.js';
+import { preResolvePolicy, sensitivePrefillPolicy, sanitizeOptions, FILLABLE_KINDS } from '../apply/assisted/field-policy.js';
 import { verifyResumeCards } from '../apply/assisted/guard.js';
 import { createAssistedDriver } from '../apply/assisted/driver.js';
 import { profileForAts } from '../apply/assisted/profiles/index.js';
@@ -52,6 +52,12 @@ const REF_RE = /^e\d{1,4}-[0-9a-z]{1,16}$/;
 const FORM_KINDS = FILLABLE_KINDS;
 /** Page kinds that end the session without tripping a breaker (v2 A7, A10, A11). */
 const QUIET_STOP_KINDS = Object.freeze(['already_applied', 'session_timeout', 'auth_lost', 'password_field']);
+/**
+ * Park reasons that mean "the bank has no usable answer" (answer-fallback F4): only these capture the
+ * field's options before parking. Every other reason (compensation, unsupported kind or fact type, a
+ * checkbox, an empty question) parks without options, and a listbox is never opened for it.
+ */
+const CAPTURE_REASONS = Object.freeze(['no_exact_match', 'not_exact_learned', 'no_bank_fact', 'no_exact_option', 'no_options']);
 
 export const schema = {
   action: z.enum(['snapshot', 'answer', 'upload_resume', 'advance', 'park', 'finish']),
@@ -195,6 +201,15 @@ export function makeAssistedApplyTool(seams = {}) {
         };
       }
 
+      /**
+       * Park a choice field with its sanitized options (answer-fallback F4, F5).
+       * @param {any} f @param {string} reason @param {string|null} bankKey @param {unknown} rawOptions
+       */
+      function parkWithOptions(f, reason, bankKey, rawOptions) {
+        const so = sanitizeOptions(rawOptions, sess.profile);
+        return stop('parked', { park: { question: f.question, reason, bank_key: bankKey, kind: f.kind, options: so.options, ...(so.dropped > 0 ? { options_dropped: so.dropped } : {}) } });
+      }
+
       const fresh = await freshSnapshot();
       if (fresh.stopped) return fresh.stopped;
       const snap = fresh.snap;
@@ -238,7 +253,17 @@ export function makeAssistedApplyTool(seams = {}) {
             await persist();
             return { ok: true, result: 'leave', reason: 'prefilled_by_site' };
           }
-          return stop('parked', { park: { question: f.question, reason: decision.reason, bank_key: decision.bankKey, kind: f.kind, options: f.options } });
+          // Answer-fallback F4: a choice field parking for want of an answer has its options captured first
+          // (a listbox is opened and read, never picked) so the dashboard can offer them.
+          if (!CAPTURE_REASONS.includes(decision.reason)) return stop('parked', { park: { question: f.question, reason: decision.reason, bank_key: decision.bankKey, kind: f.kind } });
+          /** @type {unknown} */
+          let captured = f.options;
+          if (f.kind === 'listbox') {
+            const op = await sess.driver.openListbox(f.ref);
+            const lo = op.ok ? await sess.driver.listOptions() : { ok: false };
+            captured = lo.ok ? lo.options : [];
+          }
+          return parkWithOptions(f, decision.reason, decision.bankKey, captured);
         }
         let listboxOpen = false;
         if (f.kind === 'listbox') {
@@ -252,11 +277,11 @@ export function makeAssistedApplyTool(seams = {}) {
             if (!lo.ok) return stop('fill_refused', { park: { question: f.question, reason: lo.reason, bank_key: decision.bankKey, kind: f.kind } });
             decision = resolveFieldAnswer({ question: pol.question, kind: 'select', required: f.required, options: lo.options }, answerCtx);
             if (decision.action !== 'fill') {
-              return stop('parked', { park: { question: f.question, reason: decision.reason, bank_key: decision.action === 'park' ? decision.bankKey : null, kind: f.kind, options: lo.options } });
+              return parkWithOptions(f, decision.reason, decision.action === 'park' ? decision.bankKey : null, lo.options);
             }
           }
         }
-        const fillDecision = /** @type {{ action: 'fill', value: string|boolean, bankKey: string, source: 'contact'|'learned' }} */ (decision);
+        const fillDecision = /** @type {{ action: 'fill', value: string|boolean, bankKey: string, source: 'contact'|'learned', fallbackRank?: number }} */ (decision);
         const want = typeof fillDecision.value === 'boolean' ? (fillDecision.value ? 'checked' : '') : sanitizeValue(fillDecision.value);
         const matches = (/** @type {string} */ v) => (f.kind === 'text' || f.kind === 'textarea' ? v === want : collapse(v) === collapse(want));
         let readBack = f.value;
@@ -278,7 +303,11 @@ export function makeAssistedApplyTool(seams = {}) {
           return stop('parked', { park: { question: f.question, reason: 'readback_mismatch_after_two_attempts', bank_key: fillDecision.bankKey, kind: f.kind } });
         }
         sess.ledger = sess.ledger.filter((/** @type {any} */ e) => !(e.step === snap.stepKey && e.ref === f.ref));
-        sess.ledger.push({ step: snap.stepKey, ref: f.ref, question: f.question, bank_key: fillDecision.bankKey, value: want, kind: f.kind, source: fillDecision.source, verified: false });
+        sess.ledger.push({
+          step: snap.stepKey, ref: f.ref, question: f.question, bank_key: fillDecision.bankKey, value: want, kind: f.kind, source: fillDecision.source, verified: false,
+          // Answer-fallback F3: a ranked fallback (not the value) was the option picked.
+          ...(fillDecision.fallbackRank ? { fallback_used: true, fallback_rank: fillDecision.fallbackRank } : {}),
+        });
         sess.visited.add(f.ref);
         await persist();
         return { ok: true, result: 'filled', bank_key: fillDecision.bankKey };

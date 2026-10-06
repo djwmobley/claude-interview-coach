@@ -36,7 +36,7 @@
  *
  * The bank file (data/apply-answers.md under this package, gitignored -- see data/apply-answers.example.md
  * for the tracked, de-identified format reference) is a human-edited markdown-like file. Every line inside
- * a "## key" section is matched by its own regex prefix (type:/value:/aliases:/learned:), independent of
+ * a "## key" section is matched by its own regex prefix (type:/value:/aliases:/learned:/fallback:), independent of
  * position -- a human reordering, inserting, or deleting lines never breaks parsing, per the house rule
  * against positional/contiguity assumptions on a human-edited file (see also src/core/config.js's own
  * CRLF-normalization precedent, mirrored here: `\r\n` is normalized to `\n` before anything else runs).
@@ -79,6 +79,8 @@ export function normalizeText(s) {
  * @property {string} key
  * @property {'enum'|'boolean'|'text'|'multiselect'|null} type
  * @property {string|boolean|string[]|undefined} value
+ * @property {Array<{ rank: number, value: string }>} [fallbacks] present only on a FALLBACK_KEYS enum key
+ *   that declares `fallback:` lines; sorted by rank ascending (rank 2 first)
  */
 
 /**
@@ -103,6 +105,16 @@ const VALUE_RE = /^value:\s*(.+)$/;
 const ALIASES_RE = /^aliases:\s*(.+?)(?:\s*::\s*(\S+))?\s*$/;
 const LEARNED_RE = /^learned:\s*(.+)$/;
 const SALARY_FLOOR_RE = /^salary_floor:\s*(\d+(?:\.\d+)?)\s*$/;
+/** Any line starting with `fallback:`; the strict shape is FALLBACK_BODY_RE, anything else is fatal. */
+const FALLBACK_RE = /^fallback:(.*)$/;
+const FALLBACK_BODY_RE = /^\s*(\d+)\s*\|\s*(\S.*?)\s*$/;
+
+/**
+ * Keys allowed to carry `fallback: <rank> | <value>` lines (answer-fallback spec F1). A code-level opt-in,
+ * not a bank-file setting: a fallback line on any other key is a fatal parse error, so a hand edit can
+ * never quietly widen where ranked fallbacks apply.
+ */
+export const FALLBACK_KEYS = Object.freeze(['how_did_you_hear']);
 
 /**
  * @param {Map<string, LabelEntry>} labels
@@ -137,10 +149,17 @@ function registerLabel(labels, label, key, tier, polarity, lineNo) {
  * a section is matched by its own regex against the trimmed line, independent of the OTHER lines' order
  * or position -- a human inserting a new alias between two existing ones, or moving `type:` below
  * `aliases:`, parses identically to the original order.
+ *
+ * Ranked fallbacks (answer-fallback spec F1): `fallback: <rank> | <value>`, integer rank >= 2 (the value:
+ * line is rank 1). Fatal on: a key not in FALLBACK_KEYS, a key with an EEO_TAXONOMY table, any type other
+ * than enum, a malformed line, a rank below 2, a duplicate rank, or a fallback equal (normalizeText) to the
+ * value or to another fallback. Priority is by rank number, never by line order.
  * @param {unknown} rawText
+ * @param {{ fallbackKeys?: readonly string[] }} [opts] test seam only; production always uses FALLBACK_KEYS
  * @returns {AnswerBank}
  */
-export function parseAnswerBank(rawText) {
+export function parseAnswerBank(rawText, opts = {}) {
+  const fallbackKeys = opts.fallbackKeys ?? FALLBACK_KEYS;
   if (typeof rawText !== 'string') throw new JobSearchError('VALIDATION', 'apply-answers.md: content must be a string');
   const text = rawText.replace(/\r\n/g, '\n');
   const lines = text.split('\n');
@@ -223,6 +242,24 @@ export function parseAnswerBank(rawText) {
       continue;
     }
 
+    const fallbackMatch = FALLBACK_RE.exec(line);
+    if (fallbackMatch) {
+      const body = FALLBACK_BODY_RE.exec(fallbackMatch[1]);
+      if (!body) {
+        throw new JobSearchError('VALIDATION', `apply-answers.md: malformed "fallback:" under key "${currentKey}" (line ${lineNo}); expected "fallback: <rank> | <value>"`, { details: { key: currentKey, line: lineNo } });
+      }
+      const rank = Number(body[1]);
+      if (!Number.isInteger(rank) || rank < 2) {
+        throw new JobSearchError('VALIDATION', `apply-answers.md: fallback rank must be an integer >= 2 under key "${currentKey}" (line ${lineNo}); the value: line is rank 1`, { details: { key: currentKey, line: lineNo } });
+      }
+      const list = fact.fallbacks ?? (fact.fallbacks = []);
+      if (list.some((f) => f.rank === rank)) {
+        throw new JobSearchError('VALIDATION', `apply-answers.md: duplicate fallback rank ${rank} under key "${currentKey}" (line ${lineNo})`, { details: { key: currentKey, line: lineNo } });
+      }
+      list.push({ rank, value: body[2] });
+      continue;
+    }
+
     throw new JobSearchError('VALIDATION', `apply-answers.md: unrecognized line under key "${currentKey}" (line ${lineNo}): "${rawLine.slice(0, 120)}"`, { details: { key: currentKey, line: lineNo } });
   }
 
@@ -240,6 +277,26 @@ export function parseAnswerBank(rawText) {
     }
     if (fact.type === 'multiselect' && typeof fact.value === 'string') {
       fact.value = fact.value.split(',').map((s) => s.trim()).filter(Boolean);
+    }
+    if (fact.fallbacks) {
+      if (!fallbackKeys.includes(key)) {
+        throw new JobSearchError('VALIDATION', `apply-answers.md: key "${key}" has "fallback:" lines but is not in FALLBACK_KEYS (${FALLBACK_KEYS.join(', ')})`, { details: { key } });
+      }
+      if (Object.prototype.hasOwnProperty.call(EEO_TAXONOMY, key)) {
+        throw new JobSearchError('VALIDATION', `apply-answers.md: key "${key}" has an EEO_TAXONOMY table; "fallback:" lines are not allowed on it`, { details: { key } });
+      }
+      if (fact.type !== 'enum') {
+        throw new JobSearchError('VALIDATION', `apply-answers.md: key "${key}" is type ${fact.type}; "fallback:" lines are only allowed on type enum`, { details: { key } });
+      }
+      const seen = new Set([normalizeText(fact.value)]);
+      for (const fb of fact.fallbacks) {
+        const n = normalizeText(fb.value);
+        if (seen.has(n)) {
+          throw new JobSearchError('VALIDATION', `apply-answers.md: key "${key}" fallback rank ${fb.rank} equals the value or another fallback ("${fb.value}")`, { details: { key, rank: fb.rank } });
+        }
+        seen.add(n);
+      }
+      fact.fallbacks.sort((a, b) => a.rank - b.rank);
     }
   }
 
@@ -402,20 +459,59 @@ export function taxonomyCanonicalFor(key, optionText) {
 // ---------------------------------------------------------------------------------------------------
 
 /**
- * @param {unknown} rawValue canonical value to place (a taxonomy key's canonical token, or a plain
- *   string/boolean-derived 'yes'/'no' token)
- * @param {string[]} siteOptions the control's own option texts, exactly as the page shows them
- * @param {FactEntry} fact the fact this value came from (used to look up a taxonomy by fact.key)
- * @returns {{ ok: true, selectedOption: string } | { ok: false, reason: 'zero_candidates'|'multiple_candidates' }}
+ * A fact's ordered answer candidates: the value: line (rank 1), then its fallbacks by rank.
+ * @param {FactEntry} fact
+ * @returns {Array<{ value: unknown, rank: number }>}
  */
-function matchSingleOption(rawValue, siteOptions, fact) {
-  const acceptable = taxonomyOptionsFor(fact.key, rawValue) ?? [normalizeText(String(rawValue))];
-  const acceptableSet = new Set(acceptable);
-  const candidates = siteOptions.filter((o) => acceptableSet.has(normalizeText(o)));
-  const uniqueCandidates = [...new Set(candidates)];
-  if (uniqueCandidates.length === 0) return { ok: false, reason: 'zero_candidates' };
-  if (uniqueCandidates.length >= 2) return { ok: false, reason: 'multiple_candidates' };
-  return { ok: true, selectedOption: uniqueCandidates[0] };
+export function candidateValues(fact) {
+  return [{ value: fact.value, rank: 1 }, ...(fact.fallbacks ?? []).map((f) => ({ value: f.value, rank: f.rank }))];
+}
+
+/**
+ * Candidates for placing `value` (already polarity-resolved) from `fact`: the ranked list when `value` is
+ * the enum fact's own value, otherwise `value` alone (a boolean's 'yes'/'no' token, a multiselect token).
+ * @param {FactEntry|null|undefined} fact
+ * @param {unknown} value
+ * @returns {Array<{ value: unknown, rank: number }>}
+ */
+export function answerCandidates(fact, value) {
+  if (fact && fact.type === 'enum' && Array.isArray(fact.fallbacks) && fact.fallbacks.length > 0 && value === fact.value) return candidateValues(fact);
+  return [{ value, rank: 1 }];
+}
+
+/**
+ * THE option matcher (answer-fallback spec F2), shared by match time (assisted/answers.js, resolveControl)
+ * and save time (validateAnswerAgainstOptions). For each candidate in order: exact match after
+ * normalizeText (or the key's EEO_TAXONOMY spellings); exactly one option -> pick it and stop; two or more
+ * -> stop with 'multiple_candidates' WITHOUT trying later candidates; zero -> the next candidate. All zero
+ * -> 'zero_candidates'.
+ * @param {Array<{ value: unknown, rank: number }>} candidates
+ * @param {string[]} siteOptions the control's own option texts, exactly as the page shows them
+ * @param {string} key fact key (taxonomy lookup)
+ * @returns {{ ok: true, selectedOption: string, rank: number } | { ok: false, reason: 'zero_candidates' } | { ok: false, reason: 'multiple_candidates', rank: number }}
+ */
+export function matchCandidates(candidates, siteOptions, key) {
+  for (const c of candidates) {
+    const acceptable = new Set(taxonomyOptionsFor(key, c.value) ?? [normalizeText(String(c.value))]);
+    const hits = [...new Set(siteOptions.filter((o) => acceptable.has(normalizeText(o))))];
+    if (hits.length >= 2) return { ok: false, reason: 'multiple_candidates', rank: c.rank };
+    if (hits.length === 1) return { ok: true, selectedOption: hits[0], rank: c.rank };
+  }
+  return { ok: false, reason: 'zero_candidates' };
+}
+
+/**
+ * resolveControl's adapter over matchCandidates: the ControlResult shape, with `fallbackRank` only when a
+ * fallback (rank >= 2) was picked.
+ * @param {unknown} rawValue
+ * @param {string[]} siteOptions
+ * @param {FactEntry} fact
+ * @returns {ControlResult}
+ */
+function matchControlOption(rawValue, siteOptions, fact) {
+  const m = matchCandidates(answerCandidates(fact, rawValue), siteOptions, fact.key);
+  if (!m.ok) return { ok: false, reason: m.reason };
+  return m.rank > 1 ? { ok: true, selectedOption: m.selectedOption, fallbackRank: m.rank } : { ok: true, selectedOption: m.selectedOption };
 }
 
 /**
@@ -425,6 +521,7 @@ function matchSingleOption(rawValue, siteOptions, fact) {
  * @property {string|string[]|null} [selectedOption]
  * @property {string} [text] present for a 'text' control
  * @property {boolean} [checked] present for a 'boolean' control with no options list
+ * @property {number} [fallbackRank] present only when a ranked fallback (rank >= 2) was selected
  */
 
 /**
@@ -447,12 +544,12 @@ export function resolveControl({ controlType, fact, value, options }) {
       if (!Array.isArray(options) || options.length === 0) {
         return { ok: true, selectedOption: null, checked: Boolean(value) };
       }
-      return matchSingleOption(value ? 'yes' : 'no', /** @type {string[]} */ (options), fact);
+      return matchControlOption(value ? 'yes' : 'no', /** @type {string[]} */ (options), fact);
     }
     case 'radio':
     case 'checkbox-group': {
       if (!Array.isArray(options) || options.length === 0) return { ok: false, reason: 'no_options_provided' };
-      return matchSingleOption(value, /** @type {string[]} */ (options), fact);
+      return matchControlOption(value, /** @type {string[]} */ (options), fact);
     }
     case 'multiselect': {
       // Full-set semantics: every token in `value` must independently resolve to exactly one site
@@ -463,9 +560,9 @@ export function resolveControl({ controlType, fact, value, options }) {
       /** @type {string[]} */
       const selected = [];
       for (const token of value) {
-        const m = matchSingleOption(token, /** @type {string[]} */ (options), fact);
+        const m = matchControlOption(token, /** @type {string[]} */ (options), fact);
         if (!m.ok) return { ok: false, reason: `multiselect_${m.reason}` };
-        selected.push(m.selectedOption);
+        selected.push(/** @type {string} */ (m.selectedOption));
       }
       return { ok: true, selectedOption: selected };
     }
@@ -593,17 +690,19 @@ export function isDurableFactType(factType) {
  * Validate a candidate value against a field's own option list before it is ever written to the bank
  * (spec: "Saving an answer validates against the field's option list before writing to the bank"). No
  * options provided (a free-text field) trivially validates -- there is nothing to check a free-text
- * answer against. Reuses the exact same matchSingleOption/taxonomy machinery match-time uses, so "would
- * this save?" and "would this match?" can never silently disagree.
+ * answer against. Reuses the exact same matchCandidates/taxonomy machinery match-time uses (spec F2), ranked
+ * fallbacks included, so "would this save?" and "would this match?" can never silently disagree. `rank` is
+ * present only when a fallback (rank >= 2) is the one that matched.
  * @param {FactEntry} fact
  * @param {unknown} value
  * @param {unknown} options
- * @returns {{ ok: true } | { ok: false, reason: 'zero_candidates'|'multiple_candidates' }}
+ * @returns {{ ok: true, rank?: number } | { ok: false, reason: 'zero_candidates'|'multiple_candidates' }}
  */
 export function validateAnswerAgainstOptions(fact, value, options) {
   if (!Array.isArray(options) || options.length === 0) return { ok: true };
-  const result = matchSingleOption(value, /** @type {string[]} */ (options), fact);
-  return result.ok ? { ok: true } : { ok: false, reason: result.reason };
+  const result = matchCandidates(answerCandidates(fact, value), /** @type {string[]} */ (options), fact.key);
+  if (!result.ok) return { ok: false, reason: result.reason };
+  return result.rank > 1 ? { ok: true, rank: result.rank } : { ok: true };
 }
 
 // ---------------------------------------------------------------------------------------------------

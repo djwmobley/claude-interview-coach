@@ -29,6 +29,8 @@ import { checkStartGate, EASY_APPLY_DEFAULTS } from './easy-apply-policy.js';
 import { createEasyApplyDriver } from './easy-apply-driver.js';
 import { connectCdp } from '../browser/cdp-target.js';
 import { writeApplicationScreenshot } from './screenshot.js';
+import { pendingOptionFields } from './assisted/field-policy.js';
+import { LINKEDIN_PROFILE } from './assisted/profiles/linkedin.js';
 
 /**
  * @typedef {Object} EasyApplyDeps
@@ -182,7 +184,8 @@ export async function runAssistedEasyApply(p) {
     if (row.stop_reason === 'parked') {
       const pk = fr.park ?? {};
       const label = typeof pk.question === 'string' && pk.question.trim() ? pk.question.trim().slice(0, 500) : `Easy Apply needs an answer (${String(pk.reason ?? 'unknown')}).`;
-      return park('question', label, { easy_apply_reason: pk.reason ?? null, ...(typeof pk.bank_key === 'string' ? { suggestion: { key: pk.bank_key, value: null } } : {}) });
+      // Answer-fallback spec F4: a parked choice field's captured options (re-sanitized, F5).
+      return park('question', label, { easy_apply_reason: pk.reason ?? null, ...(typeof pk.bank_key === 'string' ? { suggestion: { key: pk.bank_key, value: null } } : {}), ...pendingOptionFields(pk, LINKEDIN_PROFILE) });
     }
     if (row.stop_reason === 'unexpected_submit') {
       keepTab = true;

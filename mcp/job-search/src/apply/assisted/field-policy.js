@@ -9,6 +9,71 @@
  * unchanged); a profile that HAS a key but carries an unusable regex fails closed (park).
  */
 import { normalizeText } from '../answers.js';
+import { WORKDAY_LABEL_POLICY } from './profiles/workday.js';
+
+/** Most options a parked choice field persists into pending_question.options (answer-fallback spec F5). */
+export const OPTION_CAP = 50;
+
+/**
+ * The label policy options are checked against when a profile has none of its own (LinkedIn): option text
+ * is employer-authored and reaches the dashboard and the bank, so it is never left unchecked.
+ */
+const DEFAULT_OPTION_POLICY = WORKDAY_LABEL_POLICY;
+
+// eslint-disable-next-line no-control-regex
+const CONTROL_CHAR_RE = /[\u0000-\u001f\u007f]/;
+
+/**
+ * Sanitize a parked field's option list (spec F5). Every option passes the SAME injection regex and length
+ * cap as labels (the profile's labelPolicy, else DEFAULT_OPTION_POLICY). Total, per option: not a string,
+ * blank, a control character (a line break could forge a bank line), over the length cap, or
+ * instruction-like -> dropped and counted; an exact duplicate -> dropped silently; otherwise kept, until
+ * OPTION_CAP is reached (the rest are counted as dropped). An unusable policy keeps nothing (fail closed).
+ * @param {unknown} raw
+ * @param {any} profile
+ * @returns {{ options: string[], dropped: number }}
+ */
+export function sanitizeOptions(raw, profile) {
+  const list = Array.isArray(raw) ? raw : [];
+  const lp = profile && profile.labelPolicy !== undefined ? profile.labelPolicy : DEFAULT_OPTION_POLICY;
+  const max = lp && typeof lp === 'object' && Number.isInteger(lp.maxLength) ? lp.maxLength : null;
+  const inj = rx(lp && typeof lp === 'object' ? lp.injection : null);
+  if (max === null || !inj) return { options: [], dropped: list.length };
+  /** @type {string[]} */
+  const options = [];
+  let dropped = 0;
+  for (const o of list) {
+    if (typeof o !== 'string' || !o.trim() || CONTROL_CHAR_RE.test(o) || o.length > max || inj.test(o)) {
+      dropped++;
+      continue;
+    }
+    if (options.includes(o)) continue;
+    if (options.length >= OPTION_CAP) {
+      dropped++;
+      continue;
+    }
+    options.push(o);
+  }
+  return { options, dropped };
+}
+
+/**
+ * The pending_question fields a parked choice field carries (spec F4), from a lease's park record:
+ * `options` (re-sanitized), `field_kind`, and `options_dropped` when any were dropped along the way. An
+ * empty object when no option survives, so a text question's pending_question is unchanged.
+ * @param {any} park
+ * @param {any} profile
+ * @returns {{ options?: string[], field_kind?: string|null, options_dropped?: number }}
+ */
+export function pendingOptionFields(park, profile) {
+  const pk = park && typeof park === 'object' ? park : {};
+  if (!Array.isArray(pk.options) || pk.options.length === 0) return {};
+  const s = sanitizeOptions(pk.options, profile);
+  if (s.options.length === 0) return {};
+  const priorDropped = Number.isInteger(pk.options_dropped) && pk.options_dropped > 0 ? pk.options_dropped : 0;
+  const dropped = priorDropped + s.dropped;
+  return { options: s.options, field_kind: typeof pk.kind === 'string' ? pk.kind : null, ...(dropped > 0 ? { options_dropped: dropped } : {}) };
+}
 
 /** @param {any} spec @returns {RegExp|null|undefined} undefined when absent, null when unusable */
 function rx(spec) {
