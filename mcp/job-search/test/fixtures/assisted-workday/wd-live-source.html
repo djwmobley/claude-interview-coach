@@ -20,9 +20,10 @@
      aria-activedescendant="select-one" mounts in a portal (div > div > ul) at the end of body, holding a
      disabled Select One placeholder and eight flat options (no categories) with their real ids and
      data-values. Its scrollHeight (288) exceeded its clientHeight (200). Neither "Job Board" nor
-     "Internet Search" was offered. Styling classes are dropped. INFERRED, not observed (nothing was
-     selected on the live page): the commit on pick (value attribute set to the option's data-value,
-     aria-expanded="false", popup removed). ?with=jobboard appends one SYNTHETIC "Job Board" option. -->
+     "Internet Search" was offered. Styling classes are dropped. The commit on pick is OBSERVED (a second
+     guest-session probe, 2026-10-06, picked Other once, nothing typed, no Next): value attribute and
+     helper input set to the option's data-value at once, aria-expanded and aria-controls removed and the
+     popup unmounted about 150 ms later. ?with=jobboard appends one SYNTHETIC "Job Board" option. -->
 <div data-automation-id="applyFlowPage">
   <div data-automation-id="applyFlowMyInfoPage">
     <div role="group" aria-labelledby="source-section">
@@ -78,10 +79,12 @@
   ];
   if (withJobBoard) OPTIONS.splice(4, 0, ['synthetic-job-board', 'Job Board']);
   const btn = document.getElementById('source--source');
+  const helper = btn.parentElement.querySelector('input');
   function close() {
     const p = document.getElementById('portal');
     if (p) p.remove();
-    btn.setAttribute('aria-expanded', 'false');
+    btn.removeAttribute('aria-expanded');
+    btn.removeAttribute('aria-controls');
   }
   btn.onclick = () => {
     window.__clicks.push('listbox');
@@ -106,11 +109,17 @@
       d.textContent = text;
       li.appendChild(d);
       li.onclick = () => {
+        // Replays the OBSERVED commit (2026-10-06 guest-session pick of Other): at once the value
+        // attribute, the helper input, the visible text and the aria-label change while aria-expanded
+        // stays "true"; about 150 ms later aria-expanded and aria-controls are REMOVED and the popup is
+        // unmounted (aria-expanded="false" never appears).
         window.__clicks.push('option:' + text);
-        btn.value = id;
+        btn.setAttribute('value', id);
+        helper.value = id;
+        helper.setAttribute('value', id);
         btn.textContent = text;
         btn.setAttribute('aria-label', 'How Did You Hear About Us? ' + text + ' Required');
-        close();
+        setTimeout(close, 150);
       };
       ul.appendChild(li);
     }

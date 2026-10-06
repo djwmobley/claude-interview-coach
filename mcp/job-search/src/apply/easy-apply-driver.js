@@ -673,15 +673,20 @@ function pageMain(req, G) {
       return { ok: true, expanded: cats[0].text };
     }
     case 'listbox_commit': {
-      // P3: the committed value (value attribute, else one hidden input in the field), never the visible
-      // label or aria-label; the popup closed and the trigger aria-expanded="false"; a multiselect's pills
-      // exactly {chosen}.
+      // P3, as OBSERVED on the live tenant (2026-10-06, one guest-session pick of "Other"): within one
+      // frame the trigger's value attribute AND the field's helper text input both become the chosen
+      // option's data-value (visible text and aria-label change too, and are never read); about 150 ms
+      // later the trigger DROPS aria-expanded and aria-controls (it never shows aria-expanded="false") and
+      // the popup leaves the DOM. So: popup gone, aria-expanded absent or "false", value attribute == the
+      // picked option's data-value, and every input in the field wrapper equal to it. A multiselect's pills
+      // must be exactly {chosen}.
       if (!strictPopups()) return { ok: false, reason: 'unknown_op' };
       const r = resolveRef(dialog, req.ref);
       if (!r.el) return { ok: false, reason: r.reason };
       const st = popupState();
       if (!st || st.trigger !== r.el) return { ok: false, reason: 'readback_mismatch', detail: 'state_lost' };
-      if ((st.root && st.root.isConnected && isVisible(st.root)) || r.el.getAttribute('aria-expanded') !== 'false') return { ok: false, reason: 'readback_mismatch', detail: 'popup_open' };
+      const exp = r.el.getAttribute('aria-expanded');
+      if ((st.root && st.root.isConnected && isVisible(st.root)) || (exp !== null && exp !== 'false')) return { ok: false, reason: 'readback_mismatch', detail: 'popup_open' };
       const want = G.normalizeName(String(req.optionText ?? ''));
       if (!want) return { ok: false, reason: 'readback_mismatch', detail: 'no_choice' };
       const ms = multiselectOf(r.el);
@@ -691,18 +696,16 @@ function pageMain(req, G) {
         if (pills.length === 1 && pills[0] === want) return { ok: true, committed: pills[0] };
         return { ok: false, reason: pills.length > 1 ? 'multiselect_extra_pill' : 'readback_mismatch', detail: 'pills' };
       }
-      /** @type {string|null} */
-      let committed = null;
-      if (r.el.hasAttribute('value')) committed = String(r.el.getAttribute('value'));
-      else {
-        const fcSel = lbRules().fieldContainerSelector;
-        const fc = typeof fcSel === 'string' && fcSel ? r.el.closest(fcSel) : null;
-        const hidden = fc ? Array.from(fc.querySelectorAll('input[type="hidden"]')) : [];
-        if (hidden.length === 1) committed = /** @type {HTMLInputElement} */ (hidden[0]).value;
-      }
-      const keys = Array.isArray(req.value) ? req.value.filter((k) => typeof k === 'string' && k) : [];
-      if (committed && (keys.includes(committed) || G.normalizeName(committed) === want)) return { ok: true, committed };
-      return { ok: false, reason: 'readback_mismatch', detail: committed ? 'committed_differs' : 'no_committed_value' };
+      const key = typeof req.value === 'string' ? req.value : '';
+      if (!key) return { ok: false, reason: 'readback_mismatch', detail: 'option_has_no_data_value' };
+      if (!r.el.hasAttribute('value')) return { ok: false, reason: 'readback_mismatch', detail: 'no_committed_value' };
+      const committed = String(r.el.getAttribute('value'));
+      if (committed !== key) return { ok: false, reason: 'readback_mismatch', detail: 'committed_differs' };
+      const fcSel = lbRules().fieldContainerSelector;
+      const fc = typeof fcSel === 'string' && fcSel ? r.el.closest(fcSel) : null;
+      const helpers = fc ? Array.from(fc.querySelectorAll('input')) : [];
+      if (helpers.some((i) => /** @type {HTMLInputElement} */ (i).value !== key)) return { ok: false, reason: 'readback_mismatch', detail: 'helper_input_differs' };
+      return { ok: true, committed };
     }
     case 'pick_option': {
       if (strictPopups()) {
@@ -723,7 +726,7 @@ function pageMain(req, G) {
         const st = popupState();
         st.root = c.root;
         HTMLElement.prototype.click.call(hit.el);
-        return { ok: true, picked: hit.text, keys: [hit.el.getAttribute('data-value') || '', hit.el.id || ''].filter(Boolean) };
+        return { ok: true, picked: hit.text, dataValue: hit.el.getAttribute('data-value') || '' };
       }
       // A4: normalized exact match only; zero or two-plus matches refuse without clicking.
       const p = popupItems();
@@ -1044,7 +1047,7 @@ export function createAssistedDriver(deps) {
       let c = { ok: false, reason: 'readback_mismatch' };
       for (let i = 0; i < POLL_TRIES; i++) {
         await sleep(POLL_MS);
-        c = await call({ op: 'listbox_commit', ref: opened.ref, nonce: opened.nonce, optionText: p.picked, value: p.keys });
+        c = await call({ op: 'listbox_commit', ref: opened.ref, nonce: opened.nonce, optionText: p.picked, value: p.dataValue });
         if (c.ok) break;
       }
       if (!c.ok) return { ok: false, reason: c.reason, ...(c.detail ? { detail: c.detail } : {}) };

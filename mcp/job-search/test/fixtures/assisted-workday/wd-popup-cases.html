@@ -16,8 +16,9 @@
      aria-haspopup="listbox" and a value attribute; opening sets aria-expanded="true" and aria-controls to
      the popup's id; the popup is a ul[role=listbox] mounted in a portal at the end of body; options are
      li[role=option] with an id and a data-value. The commit on pick (value attribute set to the option's
-     data-value, aria-expanded="false", popup removed) is INFERRED, not observed. Modes (?mode=): see the
-     MODES table in the script. -->
+     data-value, helper input set to it, popup removed) follows the 2026-10-06 observed live commit,
+     except that this fixture writes aria-expanded="false" where live removes the attribute (both are
+     accepted). Modes (?mode=) are named in the script. -->
 <div data-automation-id="applyFlowPage" id="flow">
   <h2>My Information</h2>
   <div data-automation-id="formField-country" id="country-field">
@@ -87,6 +88,8 @@
       ul.appendChild(li);
     }
     btn.value = key;
+    const helper = field.querySelector('input.helper');
+    if (helper && mode !== 'helperstale') helper.value = key;
     btn.textContent = mode === 'truncated' && t.length > 20 ? t.slice(0, 20) + '…' : t;
     btn.setAttribute('aria-label', 'How Did You Hear About Us? ' + btn.textContent + ' Required');
     if (mode === 'staysopen') return;

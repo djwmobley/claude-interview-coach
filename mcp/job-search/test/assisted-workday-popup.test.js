@@ -113,6 +113,24 @@ describe('Workday popup association, live-shaped Optimal Blue prompt', { skip: S
   });
 });
 
+describe('Workday popup association, observed live commit (P3)', { skip: SKIP }, () => {
+  test('picking Other replays the observed commit: value and helper input = data-value, aria-expanded and aria-controls removed after a delay', async () => {
+    const { targetId, driver } = await openTab('wd-live-source.html');
+    const ref = await fieldRef(driver, /How Did You Hear/);
+    await driver.openListbox(ref);
+    const r = await driver.pickOption('Other');
+    assert.deepEqual([r.ok, r.verified], [true, true], JSON.stringify(r));
+    const state = await pageEval(targetId, `(() => { const b = document.getElementById('source--source'); return [b.getAttribute('value'), b.parentElement.querySelector('input').value, b.hasAttribute('aria-expanded'), b.hasAttribute('aria-controls'), Boolean(document.getElementById('nehy5'))]; })()`);
+    assert.deepEqual(state, ['d5fdc7782a551001a246697edb2f0000', 'd5fdc7782a551001a246697edb2f0000', false, false, false]);
+    assert.deepEqual(await optionClicks(targetId), ['option:Other']);
+  });
+
+  test('a helper input left behind the value attribute is readback_mismatch', async () => {
+    const { driver } = await openCase('helperstale');
+    assert.equal((await driver.pickOption('Indeed')).reason, 'readback_mismatch');
+  });
+});
+
 describe('Workday popup association, synthetic cases (P1-P5)', { skip: SKIP }, () => {
   test('linked default: options from the aria-controls popup, pick commits and verifies', async () => {
     const { targetId, driver } = await openCase('linked');
