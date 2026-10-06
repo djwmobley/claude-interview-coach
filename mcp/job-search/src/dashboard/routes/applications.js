@@ -17,7 +17,7 @@ import {
   createApplication, approve, getApplication, getApplicationForListing, retry, markAppliedByHand, resume,
   listApplicationEvents, recordApplicationEvent, transitionUnwrapped, APPLICATION_STATES, checkApplicationBlockers,
   withdrawApplication, ASSISTED_ATS_TYPES,
-  cleanupWithdrawnNudgeCalendar, hasAssistedNextClickEver, partialDraftSql, PARTIAL_DRAFT_WARNING, submitMarkerSql,
+  cleanupWithdrawnNudgeCalendar, hasAssistedNextClickEver, partialDraftSql, PARTIAL_DRAFT_WARNING, submitMarkerSql, confirmSubmittedByHuman,
 } from '../../core/applications.js';
 import { collectSubmissions } from '../../core/report.js';
 import { resumeParkedApplication, humanizeParkReason, resumeEligible } from '../../apply/resume-gate.js';
@@ -697,6 +697,17 @@ export function register(router, deps, streamHub) {
     const row = await deps.withClient((c) => markAppliedByHand(c, id, { actor: 'dashboard' }));
     streamHub?.notifyChanged('events');
     sendJson(ctx.res, 200, { ok: true, row });
+  }, { allowEmptyBody: true });
+
+  // Unattended submit: "Confirm submitted" for an unconfirmed submit (needs_human, kind submit_unconfirmed
+  // or post_submit_uncertain, submit marker present). Human-only, idempotent; records what already happened
+  // and nothing else: no cap slot, no marker, no runner kick, no click (core/applications.js).
+  router.register('POST', '/api/applications/:id/confirm-submitted', async (ctx) => {
+    const id = Number(ctx.params.id);
+    if (!Number.isInteger(id) || id <= 0) throw new JobSearchError('VALIDATION', 'id must be a positive integer');
+    const out = await deps.withClient((c) => confirmSubmittedByHuman(c, id));
+    streamHub?.notifyChanged('events');
+    sendJson(ctx.res, 200, { ok: true, outcome: out.outcome, row: out.row });
   }, { allowEmptyBody: true });
 
   // Apply pipeline slice 5: the needs_human answer box (plan section 4's "growing the bank"). `save`

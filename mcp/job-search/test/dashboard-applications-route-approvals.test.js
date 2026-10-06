@@ -37,9 +37,11 @@ function makeStubScanRunner() {
     armCancelBackstop() { return { forced_kill_available: false }; },
   };
 }
+/** Every applicationId the fake apply runner was asked to start (the confirm-submitted test asserts none). */
+const applyRunnerStarts = [];
 function makeFakeApplyRunner() {
   return {
-    async start(applicationId) { return { applicationId, pid: 999 }; },
+    async start(applicationId) { applyRunnerStarts.push(applicationId); return { applicationId, pid: 999 }; },
     status() { return { running: false, applicationId: null, pid: null, startedAt: null }; },
     armCancelBackstop() { return { forced_kill_available: false }; },
   };
@@ -95,6 +97,8 @@ async function seedApplication(listingId, o = {}) {
 
 async function cleanup() {
   if (listingIds.length === 0) return;
+  // "Confirm submitted" goes through markSubmitted, which creates the 5-day nudge follow-up for the listing.
+  await verifyClient.query('DELETE FROM ic_followups WHERE listing_id = ANY($1::int[])', [listingIds]);
   await verifyClient.query('DELETE FROM ic_job_application_events WHERE application_id IN (SELECT id FROM ic_job_applications WHERE listing_id = ANY($1::int[]))', [listingIds]);
   await verifyClient.query('DELETE FROM ic_job_applications WHERE listing_id = ANY($1::int[])', [listingIds]);
   await verifyClient.query('DELETE FROM ic_job_documents WHERE listing_id = ANY($1::int[])', [listingIds]);
@@ -324,6 +328,55 @@ describe('unattended submit on the dashboard (spec item 7, v2 C8)', () => {
     assert.match(String(body.message), /Already submitted \(unconfirmed\)/);
     const row = (await verifyClient.query('SELECT state FROM ic_job_applications WHERE id = $1', [id])).rows[0];
     assert.equal(row.state, 'needs_human');
+  });
+
+  /** @param {number} id */
+  async function confirmSubmitted(id) {
+    const res = await fetch(`http://127.0.0.1:${port}/api/applications/${id}/confirm-submitted`, { method: 'POST', headers: { 'content-type': 'application/json' }, body: '{}' });
+    return { status: res.status, json: await res.json() };
+  }
+  const markersToday = async () => Number((await verifyClient.query(`SELECT count(*)::int AS n FROM ic_job_submit_markers WHERE day = (now() AT TIME ZONE 'UTC')::date`)).rows[0].n);
+
+  test('"Confirm submitted" moves an unconfirmed submit to submitted (actor dashboard), with no cap change, no new marker, no worker; a second call is a no-op', async () => {
+    for (const kind of ['submit_unconfirmed', 'post_submit_uncertain']) {
+      const a = await seedListing();
+      const id = await seedApplication(a, { state: 'needs_human', pendingQuestion: { kind, label: 'x' } });
+      await recordSubmitRequestSent(verifyClient, id);
+      const capBefore = await markersToday();
+      const startsBefore = applyRunnerStarts.length;
+      const first = await confirmSubmitted(id);
+      assert.equal(first.status, 200, JSON.stringify(first.json));
+      assert.equal(first.json.outcome, 'submitted');
+      const row = (await verifyClient.query('SELECT state FROM ic_job_applications WHERE id = $1', [id])).rows[0];
+      assert.equal(row.state, 'submitted');
+      const ev = (await verifyClient.query(`SELECT actor, note, to_state FROM ic_job_application_events WHERE application_id = $1 AND kind = 'state' ORDER BY id DESC LIMIT 1`, [id])).rows[0];
+      assert.deepEqual(ev, { actor: 'dashboard', note: 'confirmed by Damian', to_state: 'submitted' });
+      assert.equal(await markersToday(), capBefore, 'no cap slot reserved');
+      const markers = (await verifyClient.query('SELECT count(*)::int AS n FROM ic_job_application_events WHERE application_id = $1 AND note = $2', [id, 'submit_request_sent'])).rows[0].n;
+      assert.equal(Number(markers), 1, 'no new marker written');
+      const second = await confirmSubmitted(id);
+      assert.equal(second.status, 200);
+      assert.equal(second.json.outcome, 'noop');
+      const stateEvents = (await verifyClient.query(`SELECT count(*)::int AS n FROM ic_job_application_events WHERE application_id = $1 AND kind = 'state'`, [id])).rows[0].n;
+      assert.equal(Number(stateEvents), 1, 'the second call wrote nothing');
+      assert.equal(applyRunnerStarts.length, startsBefore, 'no worker started');
+    }
+  });
+
+  test('"Confirm submitted" is refused on a row with no submit marker, and on a marked row of another kind; nothing moves', async () => {
+    const a = await seedListing();
+    const noMarker = await seedApplication(a, { state: 'needs_human', pendingQuestion: { kind: 'submit_unconfirmed', label: 'x' } });
+    const r1 = await confirmSubmitted(noMarker);
+    assert.equal(r1.status >= 400, true);
+    assert.match(String(r1.json.message), /no submit marker/);
+    const b = await seedListing();
+    const otherKind = await seedApplication(b, { state: 'needs_human', pendingQuestion: { kind: 'captcha', label: 'x' } });
+    await recordSubmitRequestSent(verifyClient, otherKind);
+    const r2 = await confirmSubmitted(otherKind);
+    assert.equal(r2.status >= 400, true);
+    assert.match(String(r2.json.message), /not an unconfirmed submit/);
+    const states = (await verifyClient.query('SELECT state FROM ic_job_applications WHERE id = ANY($1::int[])', [[noMarker, otherKind]])).rows.map((x) => x.state);
+    assert.deepEqual(states, ['needs_human', 'needs_human']);
   });
 
   test('GET /api/submissions reads submissions from the DB (last 24h) and lists unconfirmed submits separately', async () => {

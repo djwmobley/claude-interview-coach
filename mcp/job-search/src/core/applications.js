@@ -1174,6 +1174,39 @@ export async function markAppliedByHand(client, id, opts = {}) {
 }
 
 /**
+ * "Confirm submitted": the HUMAN-only escape hatch for an unconfirmed submit (the dashboard button). Damian
+ * checked the site or his email and the submit really went through, but no confirmation email matched.
+ * One transaction under the row lock. Total:
+ *   needs_human, kind in UNCONFIRMED_SUBMIT_KINDS, submit marker present  -> submitted (actor dashboard,
+ *                                                                           note 'confirmed by Damian')
+ *   already submitted or confirmed, with a submit marker                   -> noop (idempotent)
+ *   anything else (no marker, another kind, another state)                 -> VALIDATION, nothing moves
+ * It never reserves a cap slot, never writes a marker, and never starts a worker or clicks anything: it
+ * only records what already happened. "I applied by hand" (markAppliedByHand) stays refused on marker rows.
+ * @param {import('pg').ClientBase} client
+ * @param {number} id
+ * @returns {Promise<{ outcome: 'submitted'|'noop', row: any }>}
+ */
+export async function confirmSubmittedByHuman(client, id) {
+  return withTransaction(client, async (c) => {
+    const cur = await c.query(`SELECT ${APPLICATION_COLS} FROM ic_job_applications WHERE id = $1 FOR UPDATE`, [id]);
+    if (cur.rowCount === 0) throw new JobSearchError('NOT_FOUND', `application ${id} not found`);
+    const row = cur.rows[0];
+    const marked = await hasSubmitRequestSentEver(c, id);
+    if (!marked) {
+      throw new JobSearchError('VALIDATION', `application ${id} has no submit marker; use "I applied by hand" instead`, { details: { application_id: id, reason: 'no_submit_marker' } });
+    }
+    if (row.state === 'submitted' || row.state === 'confirmed') return { outcome: /** @type {const} */ ('noop'), row };
+    const kind = row.pending_question && typeof row.pending_question === 'object' ? row.pending_question.kind : null;
+    if (row.state !== 'needs_human' || !UNCONFIRMED_SUBMIT_KINDS.includes(kind)) {
+      throw new JobSearchError('VALIDATION', `application ${id} is not an unconfirmed submit (state "${row.state}", kind "${kind}")`, { details: { application_id: id, reason: 'not_unconfirmed_submit' } });
+    }
+    const updated = await markSubmittedUnwrapped(c, id, { actor: 'dashboard', note: 'confirmed by Damian' });
+    return { outcome: /** @type {const} */ ('submitted'), row: updated };
+  });
+}
+
+/**
  * Gmail cross-check of an unconfirmed submit (unattended submit spec item 5, v2 C7): needs_human (kind in
  * UNCONFIRMED_SUBMIT_KINDS, submit marker present) -> submitted -> confirmed, inside the CALLER's already
  * open transaction or savepoint (src/apply/mail-confirm.js's own boundary, like transitionUnwrapped). The
