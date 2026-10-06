@@ -240,6 +240,18 @@ describe('transition(): every TRANSITIONS edge is accepted', () => {
   }
 });
 
+describe('transition(): approved -> needs_human (Easy Apply page-state park, spec v2 B1)', () => {
+  test('an approved application can be parked with kind easy_apply_unverified before any worker run', async () => {
+    assert.ok(TRANSITIONS.approved.includes('needs_human'));
+    const { id } = await seedApplication('approved');
+    const row = await transition(client, id, 'needs_human', {
+      actor: 'apply', pending_question: { kind: 'easy_apply_unverified', label: 'LinkedIn page did not show Easy Apply', branch: 'external' },
+    });
+    assert.equal(row.state, 'needs_human');
+    assert.equal(row.pending_question.kind, 'easy_apply_unverified');
+  });
+});
+
 describe('transition(): a sample of illegal transitions is rejected', () => {
   const illegal = [
     ['drafting', 'approved'],

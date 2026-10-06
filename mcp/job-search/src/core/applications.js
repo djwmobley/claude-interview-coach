@@ -25,6 +25,10 @@
  *   - submitting -> failed: covers both a worker-reported failure AND stale-crash reconciliation
  *     (reconcileStale() below) -- a worker that dies mid-submit leaves a row stuck in 'submitting'
  *     forever unless something notices and moves it on.
+ *   - approved -> needs_human (Easy Apply page-state check, spec v2 B1): the morning Easy Apply phase
+ *     re-checks the LinkedIn page right before the worker runs; when the page does not show exactly one Easy
+ *     Apply control, the approved application is parked visibly (kind easy_apply_unverified) instead of
+ *     being claimed into submitting. No worker ran, so `attempt` is untouched.
  *   - confirmed and withdrawn are terminal: neither has any outgoing edge in TRANSITIONS.
  *
  * Every function here that mutates a row wraps its own transaction (withTransaction) and does a
@@ -75,7 +79,7 @@ export const APPLICATION_STATES = Object.freeze([
 export const TRANSITIONS = Object.freeze({
   drafting: Object.freeze(['docs_ready', 'needs_human', 'withdrawn']),
   docs_ready: Object.freeze(['approved', 'drafting', 'withdrawn']),
-  approved: Object.freeze(['submitting', 'withdrawn']),
+  approved: Object.freeze(['submitting', 'needs_human', 'withdrawn']),
   submitting: Object.freeze(['submitted', 'needs_human', 'failed']),
   submitted: Object.freeze(['confirmed', 'withdrawn']),
   needs_human: Object.freeze(['approved', 'submitted', 'drafting', 'withdrawn']),

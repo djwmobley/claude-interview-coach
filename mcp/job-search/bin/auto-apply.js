@@ -97,22 +97,21 @@ import { LOCK_KEY } from '../src/core/scan-run.js';
 import { buildProbeRegistryFromAtsApply } from '../src/apply/probe-registry.js';
 import { INTERMEDIARY_HOSTS } from '../src/apply/apply-target.js';
 import { persistApplyTargetForListing, LIFETIME_PROBE_ATTEMPTS } from '../src/core/apply-target-persist.js';
-import { prepareLinkedInListing, adaptPlaywrightPage } from '../src/apply/linkedin-button-prepare.js';
+import { prepareLinkedInListing, openLinkedInProbeBrowser, createLinkedInLiveCheck } from '../src/apply/linkedin-button-prepare.js';
+import { reserveBudget, remainingBudget } from '../src/core/budget.js';
 import { selectCandidates, isUsLocation, isHourlyPaySignal, classifyCandidate, countAutoApprovedToday } from '../src/core/auto-apply-select.js';
 import { exclusionConfigPath, loadExclusionConfig, classifyExclusion } from '../src/apply/exclusions.js';
 import { createApplication, approve, getApplication, transition, retry, checkApplicationBlockers, hasAssistedNextClickEver, transitionRefusingPartialDraft } from '../src/core/applications.js';
 import { createResumeRunner } from '../src/dashboard/resume-runner.js';
 import { createReviewRunner } from '../src/dashboard/review-runner.js';
 import { runApplyWorker } from '../src/apply/worker.js';
-import { connectSession as defaultConnectSession, applyTargetMarkerPath } from '../src/browser/session.js';
-import { makeCapability } from '../src/browser/capability.js';
-import { buildRegistry } from '../src/core/urlguard.js';
+import { connectSession as defaultConnectSession } from '../src/browser/session.js';
 import { defaultAutoApplySummaryFile, writeAutoApplySummary } from '../src/core/auto-apply-state.js';
 import { waitForScan, localDeadline, defaultQueryLatestScanRun } from '../src/core/scan-wait.js';
 import { launchChrome } from './scan.js';
 import { runningMarkerPath, writeRunningMarker, deleteRunningMarker } from '../src/core/running-marker.js';
 import { runEasyApplyMorning, defaultMorningDeps } from '../src/apply/easy-apply-morning.js';
-import { markStaleAwaiting } from '../src/core/easy-apply-state.js';
+import { markStaleAwaiting, breakerStatus } from '../src/core/easy-apply-state.js';
 
 const USAGE = 'usage: node bin/auto-apply.js [--dry-run] [--json [out]] [--application <id>]';
 
@@ -349,7 +348,7 @@ export async function acquireLockWithPoll(client, opts) {
 /**
  * The prepare phase: re-probe candidate listings whose apply target is unresolved or due for re-probe.
  * Two independent per-source caps (spec amendment A1): the LinkedIn subset never exceeds
- * `config.autoApply.probeRowCap` (3) regardless of browser availability, while every non-LinkedIn row --
+ * `config.autoApply.probeRowCap` (10) regardless of browser availability, while every non-LinkedIn row --
  * which never needs a browser -- always gets up to `config.autoApply.probeRowCapWithBrowser` (40),
  * unaffected by whether the LinkedIn browser session could be opened this run. Before a row is actually
  * probed it passes two pre-filters (spec amendment A4): the apply exclusion gate
@@ -358,20 +357,40 @@ export async function acquireLockWithPoll(client, opts) {
  * consumes a lifetime probe attempt (ic_job_listings.probe_attempts) or the wall-clock time budget
  * (probeTimeBudgetMs, checked only between rows that reach real probe work, never mid-row and never for a
  * pre-filtered row).
+ *
+ * LinkedIn rows (spec v1 F2.1/F2.2, v2 B8/B9/B10), in this order per row: exclusion gate, hourly pay,
+ * browser available, LinkedIn halted (a challenge/auth wall earlier this run, or the persisted breaker,
+ * checked once), time budget, the LinkedIn detail budget (a read; exhausted -> skipped, no attempt), then ONE
+ * detail reserved BEFORE the page loads (refused -> skipped, no attempt), and only then is the row counted
+ * against the per-run cap. So an excluded, hourly, browserless, or budget-starved row never uses up the cap.
+ * Once the cap is full, every later LinkedIn row is skipped 'linkedin_cap' with no further work at all. Page loads are paced by the linkedin adapter's detailDelayMs between probes. Until today's scan
+ * has finished (`scanRanToday`; the scan runs first in the morning), probes reserve against dailyDetails minus
+ * the scan's maxDetailsPerRun, so the scan detail pass's per-run share is never consumed by probes. Over-fetch
+ * shortfall (B10): when the LinkedIn cap is not reached, a log line records the counts.
  * @param {import('pg').ClientBase} client
  * @param {import('../src/core/config.js').LoadedConfig} config
  * @param {{
  *   now: Date, dryRun: boolean, log: (f: any) => void, fetch?: typeof fetch, lookup?: import('../src/core/urlguard.js').Lookup,
- *   linkedInBrowser?: { cap: { goto: (url: string) => Promise<any>, readJson: (name: string, arg?: unknown) => Promise<unknown> }, probeSession: { page: import('../src/apply/linkedin-button-probe.js').ButtonProbePage, session: import('../src/apply/linkedin-button-probe.js').ButtonProbeSession } } | null,
+ *   linkedInBrowser?: { cap: { goto: (url: string) => Promise<any>, readHtml: () => Promise<string> }, probeSession: { page: import('../src/apply/linkedin-button-probe.js').ButtonProbePage, session: import('../src/apply/linkedin-button-probe.js').ButtonProbeSession } | null } | null,
  *   exclusionConfig?: import('../src/apply/exclusions.js').ExclusionConfig,
  *   classifyExclusion?: (listing: any, ctx: any) => Promise<{ branch: string }>,
  *   clock?: () => number,
+ *   scanRanToday?: boolean,
+ *   prepareLinkedIn?: typeof prepareLinkedInListing,
+ *   reserveBudget?: typeof reserveBudget,
+ *   remainingBudget?: typeof remainingBudget,
+ *   breakerStatus?: (c: import('pg').ClientBase, now?: Date) => Promise<{ tripped: boolean }>,
+ *   sleep?: (ms: number) => Promise<void>,
+ *   rand?: () => number,
  * }} opts
- * @returns {Promise<{ attempted: number, resolved: number, unresolved: number, skipped: number, skippedByReason: Record<string, number>, stoppedBy: string|null, remaining: number }>}
+ * @returns {Promise<{ attempted: number, resolved: number, unresolved: number, skipped: number, skippedByReason: Record<string, number>, stoppedBy: string|null, remaining: number, linkedinTaken: number, linkedinHalt: string|null, linkedinBranches: Record<string, number> }>}
  */
 export async function runPrepare(client, config, opts) {
   const probeRegistry = buildProbeRegistryFromAtsApply(config.atsApply, INTERMEDIARY_HOSTS);
-  const stats = { attempted: 0, resolved: 0, unresolved: 0, skipped: 0, skippedByReason: /** @type {Record<string, number>} */ ({}), stoppedBy: /** @type {string|null} */ (null), remaining: 0 };
+  const stats = {
+    attempted: 0, resolved: 0, unresolved: 0, skipped: 0, skippedByReason: /** @type {Record<string, number>} */ ({}), stoppedBy: /** @type {string|null} */ (null), remaining: 0,
+    linkedinTaken: 0, linkedinHalt: /** @type {string|null} */ (null), linkedinBranches: /** @type {Record<string, number>} */ ({}),
+  };
   const bumpSkip = (/** @type {string} */ reason) => {
     stats.skipped++;
     stats.skippedByReason[reason] = (stats.skippedByReason[reason] ?? 0) + 1;
@@ -401,15 +420,17 @@ export async function runPrepare(client, config, opts) {
     [LIFETIME_PROBE_ATTEMPTS, config.autoApply.reprobeAfterHours, probeFitFloor, fetchLimit],
   );
 
+  // Only the non-LinkedIn subset is capped at selection time. The LinkedIn cap is counted per row below,
+  // AFTER the exclusion, hourly-pay, browser, and budget checks (spec v1 F2.1), so a LinkedIn row that
+  // never reaches a real page load never uses up the cap.
   /** @type {any[]} */
   const selectedRows = [];
-  let linkedinTaken = 0;
   let otherTaken = 0;
+  let linkedinSeen = 0;
   for (const row of cur.rows) {
     if (!isUsLocation(row.location_norm)) continue;
     if (row.source === 'linkedin') {
-      if (linkedinTaken >= linkedinCap) continue;
-      linkedinTaken++;
+      linkedinSeen++;
     } else {
       if (otherTaken >= nonLinkedinCap) continue;
       otherTaken++;
@@ -423,12 +444,31 @@ export async function runPrepare(client, config, opts) {
   const timeBudgetMs = config.autoApply.probeTimeBudgetMs ?? Infinity;
   const startTs = clock();
 
+  const li = config.adapters?.adapters?.linkedin ?? null;
+  const dailyDetails = li?.dailyDetails ?? 0;
+  const scanShare = typeof li?.maxDetailsPerRun === 'number' ? li.maxDetailsPerRun : 0;
+  // B9 floor: until today's scan has run, leave at least the scan detail pass's per-run share untouched.
+  const probeCaps = { dailyPages: li?.dailyPages ?? 0, dailyDetails: opts.scanRanToday === true ? dailyDetails : Math.max(0, dailyDetails - scanShare) };
+  const [delayLo, delayHi] = Array.isArray(li?.detailDelayMs) && li.detailDelayMs.length === 2 ? li.detailDelayMs : [3000, 6000];
+  const sleep = opts.sleep ?? ((ms) => new Promise((resolve) => setTimeout(resolve, ms)));
+  const rand = opts.rand ?? Math.random;
+  const reserve = opts.reserveBudget ?? reserveBudget;
+  const remaining = opts.remainingBudget ?? remainingBudget;
+  const prepareLinkedIn = opts.prepareLinkedIn ?? prepareLinkedInListing;
+  let breakerChecked = false;
+
   for (let i = 0; i < selectedRows.length; i++) {
     const row = selectedRows[i];
+    const isLinkedIn = row.source === 'linkedin';
     const listing = {
       id: Number(row.id), url: row.url, url_normalized: row.url_normalized,
       apply_probed_at: row.apply_probed_at, probe_attempts: Number(row.probe_attempts ?? 0),
     };
+    if (isLinkedIn && stats.linkedinTaken >= linkedinCap) {
+      // Cap already reached by real attempts: no further LinkedIn work (not even the exclusion lookup).
+      bumpSkip('linkedin_cap');
+      continue;
+    }
 
     /** @type {string} */
     let exclBranch;
@@ -456,10 +496,26 @@ export async function runPrepare(client, config, opts) {
       continue;
     }
 
-    if (row.source === 'linkedin' && !opts.linkedInBrowser) {
+    if (isLinkedIn && !opts.linkedInBrowser) {
       // No scan Chrome session available this run: never attempted, retried next run -- and never counted
-      // against the time budget, matching every other pre-filter skip above.
+      // against the time budget or the LinkedIn cap, matching every other pre-filter skip above.
       bumpSkip('no_browser');
+      continue;
+    }
+
+    if (isLinkedIn && !breakerChecked) {
+      // Spec v2 B8: the persisted LinkedIn breaker (tripped by a challenge/auth wall in any earlier run or
+      // check) blocks LinkedIn probes for its 24h window. Read once per run; a failed read fails closed.
+      breakerChecked = true;
+      try {
+        if ((await (opts.breakerStatus ?? breakerStatus)(client, opts.now)).tripped) stats.linkedinHalt = 'breaker';
+      } catch (err) {
+        stats.linkedinHalt = 'breaker_check_failed';
+        opts.log({ evt: 'auto_apply_prepare_breaker_check_failed', ...errFields(err) });
+      }
+    }
+    if (isLinkedIn && stats.linkedinHalt) {
+      bumpSkip(stats.linkedinHalt === 'breaker' ? 'linkedin_breaker' : 'linkedin_halted');
       continue;
     }
 
@@ -469,18 +525,41 @@ export async function runPrepare(client, config, opts) {
       break;
     }
 
+    if (isLinkedIn && !opts.dryRun) {
+      // Spec v2 B9: budget check first (a read), then the cap, then reserve one detail BEFORE the page loads.
+      const rem = await remaining(client, 'linkedin', probeCaps, opts.now);
+      if (rem.details < 1) {
+        bumpSkip('linkedin_budget_exhausted');
+        continue;
+      }
+      const reserved = await reserve(client, 'linkedin', { details: 1 }, probeCaps, opts.now);
+      if (!reserved.ok) {
+        bumpSkip('linkedin_budget_exhausted');
+        continue;
+      }
+      if (stats.linkedinTaken > 0) {
+        // Spec v1 F2.2 pacing: the linkedin adapter's detailDelayMs between consecutive LinkedIn page loads.
+        await sleep(delayLo + Math.floor(rand() * (delayHi - delayLo + 1)));
+      }
+    }
+    if (isLinkedIn) stats.linkedinTaken++;
+
     stats.attempted++;
     try {
-      /** @type {{ outcome: string }} */
+      /** @type {{ outcome: string, branch?: string|null }} */
       let result;
-      if (row.source === 'linkedin') {
-        result = await prepareLinkedInListing(client, listing, {
+      if (isLinkedIn) {
+        result = await prepareLinkedIn(client, listing, {
           cap: /** @type {any} */ (opts.linkedInBrowser).cap,
           probeSession: /** @type {any} */ (opts.linkedInBrowser).probeSession,
-          adapterCfg: { dailyPages: config.adapters.adapters.linkedin?.dailyPages ?? 0, dailyDetails: config.adapters.adapters.linkedin?.dailyDetails ?? 0 },
           probeRegistry, reprobeAfterHours: config.autoApply.reprobeAfterHours, now: opts.now, dryRun: opts.dryRun, fetch: opts.fetch, lookup: opts.lookup,
-          log: opts.log,
+          log: opts.log, sleep: opts.sleep,
         });
+        if (result.branch) stats.linkedinBranches[result.branch] = (stats.linkedinBranches[result.branch] ?? 0) + 1;
+        if (result.outcome === 'halted_challenge' || result.outcome === 'halted_auth_wall') {
+          stats.linkedinHalt = String(result.branch);
+          opts.log({ evt: 'auto_apply_prepare_linkedin_halted', listing_id: listing.id, branch: result.branch });
+        }
       } else {
         result = await persistApplyTargetForListing(client, listing, null, {
           probeRegistry, reprobeAfterHours: config.autoApply.reprobeAfterHours, now: opts.now, dryRun: opts.dryRun, fetch: opts.fetch, lookup: opts.lookup,
@@ -494,46 +573,48 @@ export async function runPrepare(client, config, opts) {
       opts.log({ evt: 'auto_apply_prepare_probe_failed', listing_id: listing.id, ...errFields(err) });
     }
   }
+  if (opts.linkedInBrowser && linkedinSeen > 0 && stats.linkedinTaken < linkedinCap && !stats.linkedinHalt && stats.stoppedBy === null) {
+    // Spec v2 B10: with the cap moved after the per-row checks, the over-fetch can run out of eligible
+    // LinkedIn rows before the cap is reached. Recorded with counts, never an error.
+    opts.log({
+      evt: 'auto_apply_prepare_linkedin_pool_exhausted', linkedin_taken: stats.linkedinTaken, linkedin_cap: linkedinCap,
+      linkedin_seen: linkedinSeen, fetched: cur.rows.length, fetch_limit: fetchLimit, fetch_saturated: cur.rows.length >= fetchLimit,
+    });
+  }
   return stats;
 }
 
 /**
- * Best-effort scan-Chrome session reuse for the prepare phase. Connects, reconciles the shared apply
- * target marker (parity with scan-run.js's own getSession()/reconcileTargets() pattern), attaches ONE page
- * scoped to the 'linkedin' scan source, and returns everything runPrepare's LinkedIn branch needs: the
- * existing safe, read-only Capability (goto/readJson) plus the raw-page adapter GAP 1's click probe uses.
- * Returns null on ANY failure (session unreachable, attach failure) -- never throws, never blocks the run;
- * a null result simply means every LinkedIn row this run is left unresolved for next time (see
- * runPrepare's own doc comment).
+ * Run-report warning for a LinkedIn halt (spec v1 F1.1, v2 B8): challenge -> LINKEDIN_PROBE_CHALLENGE,
+ * auth_wall -> LINKEDIN_AUTH_EXPIRED, a tripped (or unreadable) breaker -> LINKEDIN_PROBE_BREAKER; null when
+ * LinkedIn was not halted. Total over its input: any other non-empty value maps to LINKEDIN_PROBE_HALTED.
+ * @param {string|null|undefined} halt
+ * @returns {{ code: string, severity: 'warning', branch: string } | null}
+ */
+export function linkedInHaltWarning(halt) {
+  if (!halt) return null;
+  const code = halt === 'challenge' ? 'LINKEDIN_PROBE_CHALLENGE'
+    : halt === 'auth_wall' ? 'LINKEDIN_AUTH_EXPIRED'
+      : halt === 'breaker' || halt === 'breaker_check_failed' ? 'LINKEDIN_PROBE_BREAKER'
+        : 'LINKEDIN_PROBE_HALTED';
+  return { code, severity: 'warning', branch: String(halt) };
+}
+
+/**
+ * Best-effort scan-Chrome session reuse for the prepare phase: attaches ONE page scoped to the 'linkedin'
+ * scan source and returns the read-only Capability (goto/readHtml) plus the raw-page adapter the external
+ * Apply click probe uses. Returns null on ANY failure -- never throws, never blocks the run; a null result
+ * means every LinkedIn row this run is skipped 'no_browser' and retried next time. A thin wrapper over
+ * src/apply/linkedin-button-prepare.js's openLinkedInProbeBrowser, keeping this CLI's log event name.
  * @param {typeof defaultConnectSession} connectSession
  * @param {import('../src/core/config.js').Env} env
  * @param {import('../src/core/config.js').LoadedConfig} config
  * @param {(f: any) => void} log
- * @returns {Promise<{ cap: any, probeSession: any, close: () => Promise<void> } | null>}
  */
 export async function openLinkedInBrowser(connectSession, env, config, log) {
-  try {
-    const session = await connectSession({ cdpUrl: env.SCAN_CDP_URL });
-    try {
-      await session.reconcileTargets(applyTargetMarkerPath(env.JOBSEARCH_LOG_DIR));
-      await session.reconcile();
-      const signal = new AbortController().signal;
-      const page = await session.attachPage({ signal });
-      const registry = buildRegistry(config);
-      const cap = makeCapability(page, { registry, source: 'linkedin', signal });
-      const { page: probePage, session: probeSessionAdapter } = adaptPlaywrightPage(page);
-      return {
-        cap, probeSession: { page: probePage, session: probeSessionAdapter },
-        close: async () => { await session.closeAll().catch(() => {}); },
-      };
-    } catch (err) {
-      await session.closeAll().catch(() => {});
-      throw err;
-    }
-  } catch (err) {
-    log({ evt: 'auto_apply_prepare_session_unavailable', ...errFields(err) });
-    return null;
-  }
+  // The shared opener lives in src/apply/linkedin-button-prepare.js so the morning Easy Apply check and the
+  // dashboard's pre-create check (createLinkedInLiveCheck) attach exactly the same way.
+  return openLinkedInProbeBrowser(connectSession, env, config, (f) => log(f.evt === 'linkedin_probe_session_unavailable' ? { ...f, evt: 'auto_apply_prepare_session_unavailable' } : f));
 }
 
 /**
@@ -1208,7 +1289,11 @@ async function main() {
       }
       const linkedInBrowser = await openLinkedInBrowser(defaultConnectSession, env, config, log);
       try {
-        prepareStats = await runPrepare(lockClient, config, { now, dryRun, log, linkedInBrowser, exclusionConfig });
+        prepareStats = await runPrepare(lockClient, config, {
+          now, dryRun, log, linkedInBrowser, exclusionConfig, scanRanToday: scanState.state === 'finished_today',
+        });
+        const haltWarning = linkedInHaltWarning(prepareStats.linkedinHalt);
+        if (haltWarning) warnings.push(haltWarning);
       } finally {
         if (linkedInBrowser) await linkedInBrowser.close();
       }
@@ -1282,8 +1367,14 @@ async function main() {
         const easy = await runEasyApplyMorning(selection.easyApplyEligible ?? [], defaultMorningDeps({
           withClientFn: withClient, resumeRunner: createResumeRunner(runnerDeps), reviewRunner: createReviewRunner(runnerDeps),
           runApplyWorker, outputRoot, env, log, config, timezone,
+          liveCheck: createLinkedInLiveCheck({ env, config, log, withClient }),
         }));
         summary.easy_apply = easy;
+        const easyHalt = easy.stopReason === 'linkedin_challenge' ? 'challenge'
+          : easy.stopReason === 'linkedin_auth_wall' ? 'auth_wall'
+            : easy.stopReason === 'verify_breaker' ? 'breaker' : null;
+        const easyWarning = linkedInHaltWarning(easyHalt);
+        if (easyWarning && !warnings.some((w) => w.code === easyWarning.code)) warnings.push({ ...easyWarning, phase: 'easy_apply' });
         log({ evt: 'auto_apply_easy_apply_done', attempts: easy.results.length, stop_reason: easy.stopReason });
       } catch (err) {
         log({ evt: 'auto_apply_easy_apply_failed', ...errFields(err) });

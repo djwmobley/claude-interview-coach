@@ -1,0 +1,17 @@
+<!doctype html>
+<!--
+  SYNTHETIC fixture (not recorded from linkedin.com): the scan Chrome's LinkedIn session has expired and
+  the job URL rendered LinkedIn's sign-in wall in place (no redirect), still carrying the job title and
+  an Easy Apply button that only opens the sign-in modal. Classifies auth_wall from the page markers.
+-->
+<html lang="en"><head><meta charset="utf-8"><title>Sign in | LinkedIn</title></head>
+<body class="authwall-page">
+<div class="authwall" data-tracking-control-name="public_jobs_authwall">
+  <h1>Chief Technology Officer</h1>
+  <button type="button" aria-label="Easy Apply">Easy Apply</button>
+  <form class="login__form" action="https://www.linkedin.com/uas/login-submit" method="post">
+    <input id="session_key" name="session_key" type="text"><input id="session_password" type="password">
+    <button type="submit">Sign in</button>
+  </form>
+</div>
+</body></html>

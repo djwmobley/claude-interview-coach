@@ -20,6 +20,12 @@ describe('shipped config/auto-apply.json fit floors (operator decision 2026-10-0
     assert.equal(shipped.fitFloor, 60);
     assert.equal(shipped.probeFitFloor, 60);
   });
+
+  test('probeRowCap is 10: the LinkedIn per-run cap now counts only real page loads (spec v1 F2.2)', () => {
+    const shippedPath = path.join(path.dirname(fileURLToPath(import.meta.url)), '..', 'config', 'auto-apply.json');
+    const shipped = autoApplySchema.parse(JSON.parse(fs.readFileSync(shippedPath, 'utf8')));
+    assert.equal(shipped.probeRowCap, 10);
+  });
 });
 
 const BASE = {

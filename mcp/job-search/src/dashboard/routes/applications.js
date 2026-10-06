@@ -329,6 +329,50 @@ async function runApplyNowChain(deps, streamHub, applicationId, listingId) {
 }
 
 /**
+ * Apply-target classification for the dashboard's create routes (spec v1 F1.4, "Extra defect"). A URL
+ * classifyApplyUrl labels linkedin_easy from the HOST alone (every linkedin.com/jobs/view/ URL) is never
+ * trusted: the live page-state check (deps.linkedInApplyCheck, src/apply/linkedin-button-prepare.js's
+ * createLinkedInLiveCheck in production) must report 'easy_apply', and the result is labeled 'inferred',
+ * never 'exact'. Any other branch -- or no check wired, or a check that throws -- refuses with that branch
+ * (interactive path: refuse, never park). Every non-LinkedIn URL keeps classifyApplyUrl's own result.
+ * @param {import('../server.js').DashboardDeps & { linkedInApplyCheck?: (listingId: number) => Promise<{ branch: string, reason?: string }> }} deps
+ * @param {number} listingId
+ * @returns {Promise<{ ok: true, classification: { ats: string, tenant: string|null, confidence: string }, applyUrl: string|null } | { ok: false, branch: string, reason: string|null }>}
+ */
+async function classifyListingApplyTarget(deps, listingId) {
+  const listingRes = await deps.withClient((c) => c.query('SELECT id, url, url_normalized FROM ic_job_listings WHERE id = $1', [listingId]));
+  if (listingRes.rowCount === 0) throw new JobSearchError('NOT_FOUND', `listing ${listingId} not found`);
+  const listing = listingRes.rows[0];
+  const applyUrl = listing.url_normalized ?? listing.url ?? null;
+  const classification = classifyApplyUrl(applyUrl);
+  if (classification.ats !== 'linkedin_easy') return { ok: true, classification, applyUrl };
+  if (typeof deps.linkedInApplyCheck !== 'function') return { ok: false, branch: 'check_unavailable', reason: 'no LinkedIn page-state check is wired' };
+  /** @type {{ branch: string, reason?: string }} */
+  let r;
+  try {
+    r = await deps.linkedInApplyCheck(listingId);
+  } catch (err) {
+    deps.log?.({ evt: 'linkedin_apply_check_failed', listing_id: listingId, ...errFields(err) });
+    return { ok: false, branch: 'check_error', reason: errFields(err).err_code ?? null };
+  }
+  if (!r || r.branch !== 'easy_apply') return { ok: false, branch: r && typeof r.branch === 'string' ? r.branch : 'unknown', reason: r && r.reason ? String(r.reason) : null };
+  return { ok: true, classification: { ...classification, confidence: 'inferred' }, applyUrl };
+}
+
+/**
+ * @param {import('node:http').ServerResponse} res
+ * @param {number} listingId
+ * @param {{ branch: string, reason: string|null }} target
+ */
+function refuseNotEasyApply(res, listingId, target) {
+  return sendJson(res, 409, {
+    ok: false, code: 'LINKEDIN_NOT_EASY_APPLY',
+    message: `The LinkedIn job page did not show exactly one Easy Apply button (page state: ${target.branch}). No application was created.`,
+    details: { listing_id: listingId, branch: target.branch, reason: target.reason },
+  });
+}
+
+/**
  * @param {ReturnType<typeof import('../router.js').createRouter>} router
  * @param {import('../server.js').DashboardDeps} deps
  * @param {ReturnType<typeof import('../stream.js').createStreamHub>} [streamHub]
@@ -337,11 +381,9 @@ export function register(router, deps, streamHub) {
   router.register('POST', '/api/listings/:id/application', async (ctx) => {
     const id = Number(ctx.params.id);
     if (!Number.isInteger(id) || id <= 0) throw new JobSearchError('VALIDATION', 'id must be a positive integer');
-    const listingRes = await deps.withClient((c) => c.query('SELECT id, url, url_normalized FROM ic_job_listings WHERE id = $1', [id]));
-    if (listingRes.rowCount === 0) throw new JobSearchError('NOT_FOUND', `listing ${id} not found`);
-    const listing = listingRes.rows[0];
-    const applyUrl = listing.url_normalized ?? listing.url ?? null;
-    const classification = classifyApplyUrl(applyUrl);
+    const target = await classifyListingApplyTarget(deps, id);
+    if (!target.ok) return refuseNotEasyApply(ctx.res, id, target);
+    const { classification, applyUrl } = target;
     let app;
     try {
       app = await deps.withClient((c) => createApplication(c, {
@@ -406,18 +448,20 @@ export function register(router, deps, streamHub) {
     }
 
     if (app) {
+      if (app.ats_type === 'linkedin_easy') {
+        // A reused drafting Easy Apply row is re-checked against the live page too (spec v1 F1.4).
+        const target = await classifyListingApplyTarget(deps, listingId);
+        if (!target.ok) return refuseNotEasyApply(ctx.res, listingId, target);
+      }
       const ageMs = Date.now() - new Date(app.created_at).getTime();
       if (ageMs > STALE_REUSE_RESET_MS) {
         await deps.withClient((c) => c.query('UPDATE ic_job_applications SET resume_doc_id = NULL, updated_at = now() WHERE id = $1', [app.id]));
         app = await deps.withClient((c) => getApplication(c, app.id));
       }
     } else {
-      const listingRes = await deps.withClient((c) => c.query('SELECT id, url, url_normalized FROM ic_job_listings WHERE id = $1', [listingId]));
-      if (listingRes.rowCount === 0) throw new JobSearchError('NOT_FOUND', `listing ${listingId} not found`);
-      const listing = listingRes.rows[0];
-      const applyUrl = listing.url_normalized ?? listing.url ?? null;
-      const classification = classifyApplyUrl(applyUrl);
-      app = await deps.withClient((c) => createApplication(c, { listingId, atsType: classification.ats, applyUrl, actor: 'dashboard' }));
+      const target = await classifyListingApplyTarget(deps, listingId);
+      if (!target.ok) return refuseNotEasyApply(ctx.res, listingId, target);
+      app = await deps.withClient((c) => createApplication(c, { listingId, atsType: target.classification.ats, applyUrl: target.applyUrl, actor: 'dashboard' }));
     }
 
     streamHub?.notifyChanged('events');

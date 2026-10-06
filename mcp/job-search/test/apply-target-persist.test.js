@@ -89,7 +89,7 @@ describe('persistApplyTargetForListing: real attempts write exactly once', () =>
     assert.equal(params[3], 'exact');
   });
 
-  test('an easy-apply-only hint with no candidate writes apply_easy_only, never apply_ats', async () => {
+  test('an easy-apply-only hint with no candidate writes apply_easy_only and clears stale target fields (spec v2 B6)', async () => {
     const client = fakeClient();
     const listing = { id: 8, url: null, url_normalized: null, apply_probed_at: null, probe_attempts: 0 };
     const applyDetail = { easyApplyOnly: true, externalApplyUrl: null };
@@ -97,7 +97,41 @@ describe('persistApplyTargetForListing: real attempts write exactly once', () =>
     assert.equal(r.outcome, 'resolved');
     assert.equal(client.queries.length, 1);
     assert.match(client.queries[0].text, /apply_easy_only = true/);
-    assert.doesNotMatch(client.queries[0].text, /apply_ats = /);
+    assert.match(client.queries[0].text, /apply_url = NULL/);
+    assert.match(client.queries[0].text, /apply_ats = NULL/);
+    assert.match(client.queries[0].text, /apply_ats_hint = NULL/);
+  });
+
+  test('an easy-apply-only hint on a LinkedIn listing is persisted, never shadowed by the listing-URL fallback (spec v1 F1.3)', async () => {
+    const client = fakeClient();
+    let fetched = false;
+    const listing = { id: 10, url: null, url_normalized: 'https://www.linkedin.com/jobs/view/4100000001/', apply_probed_at: null, probe_attempts: 0 };
+    const r = await persistApplyTargetForListing(client, listing, { easyApplyOnly: true, externalApplyUrl: null }, {
+      probeRegistry: REGISTRY, reprobeAfterHours: 48, now: NOW, dryRun: false, lookup: publicLookup,
+      fetch: /** @type {any} */ (async () => { fetched = true; throw new Error('never fetch'); }),
+    });
+    assert.equal(r.outcome, 'resolved');
+    assert.equal(fetched, false);
+    assert.match(client.queries[0].text, /apply_easy_only = true/);
+  });
+
+  test('a LinkedIn listing URL is never itself the resolution candidate: no detail means no write', async () => {
+    const client = fakeClient();
+    const listing = { id: 11, url: 'https://www.linkedin.com/jobs/view/4100000002/', url_normalized: 'https://www.linkedin.com/jobs/view/4100000002/', apply_probed_at: null, probe_attempts: 0 };
+    const r = await persistApplyTargetForListing(client, listing, null, { probeRegistry: REGISTRY, reprobeAfterHours: 48, now: NOW, dryRun: false });
+    assert.equal(r.outcome, 'skipped_no_candidate');
+    assert.equal(client.queries.length, 0);
+  });
+
+  test('an external apply URL wins over an easy-apply-only flag, and writes apply_easy_only = false', async () => {
+    const client = fakeClient();
+    const listing = { id: 12, url: null, url_normalized: 'https://www.linkedin.com/jobs/view/4100000003/', apply_probed_at: null, probe_attempts: 0 };
+    const r = await persistApplyTargetForListing(client, listing, { easyApplyOnly: true, externalApplyUrl: 'https://boards.greenhouse.io/acme/jobs/55' }, {
+      probeRegistry: REGISTRY, reprobeAfterHours: 48, now: NOW, dryRun: false, lookup: publicLookup,
+    });
+    assert.equal(r.outcome, 'resolved');
+    assert.match(client.queries[0].text, /apply_easy_only = false/);
+    assert.equal(client.queries[0].params[1], 'https://boards.greenhouse.io/acme/jobs/55');
   });
 
   test('an unresolved candidate still writes the probe attempt and any hint, never apply_ats', async () => {

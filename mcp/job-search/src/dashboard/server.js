@@ -67,6 +67,10 @@ import { register as registerEasyApply } from './routes/easy-apply.js';
  * @property {{ run: (applicationId: number, resumeMarkdownPath: string, listingId: number) => Promise<{ok:boolean,verdict?:'PASS'|'FAIL',reason?:string}>, status: () => any }} [reviewRunner]
  *   one-click apply PR A (src/dashboard/review-runner.js's createReviewRunner()). Same wiring pattern as
  *   resumeRunner above.
+ * @property {(listingId: number) => Promise<{ branch: string, reason?: string }>} [linkedInApplyCheck]
+ *   spec v1 F1.4: the live LinkedIn page-state check routes/applications.js's create routes run before a
+ *   linkedin_easy application is created (src/apply/linkedin-button-prepare.js's createLinkedInLiveCheck).
+ *   bin/dashboard.js wires the real one; route tests inject a fake. Absent means a LinkedIn listing is refused.
  * @property {typeof fetch} [fetch]
  * @property {string} [version]
  * @property {string} [startedAt] ISO, set once at process start
