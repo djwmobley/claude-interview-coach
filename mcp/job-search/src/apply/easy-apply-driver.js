@@ -23,7 +23,7 @@
  * `button, input, select, textarea` list plus a hash of (tag, type, id, name, label/name text). A ref whose
  * fingerprint no longer matches is refused as stale, never re-resolved by position alone.
  */
-import { PAGE_GUARD_FUNCTIONS } from './assisted/guard.js';
+import { PAGE_GUARD_FUNCTIONS, normalizeName } from './assisted/guard.js';
 import { actionDelayMs, charDelayMs } from './easy-apply-policy.js';
 import { sanitizeValue } from './assisted/answers.js';
 import { LINKEDIN_PROFILE } from './assisted/profiles/linkedin.js';
@@ -32,7 +32,7 @@ import { LINKEDIN_PROFILE } from './assisted/profiles/linkedin.js';
  * In-page main. Runs inside the tab; `G` carries the injected guard functions and req.rules the profile's
  * rules (plain data). Must stay self-contained (no references to anything outside its own body except
  * `G`, `req`, and DOM globals). Unusable rules find no form scope and refuse every guard verdict.
- * @param {{ op: string, ref?: string, value?: unknown, optionText?: string, checked?: boolean, rules?: any }} req
+ * @param {{ op: string, ref?: string, value?: unknown, optionText?: string, checked?: boolean, nonce?: string, rules?: any }} req
  * @param {any} G
  * @returns {any}
  */
@@ -133,6 +133,139 @@ function pageMain(req, G) {
     const pops = Array.from(document.querySelectorAll(L.popupSelector)).filter(isVisible);
     if (pops.length !== 1) return { ok: false, reason: pops.length === 0 ? 'no_popup' : 'multiple_popups', items: [] };
     return { ok: true, reason: null, items: Array.from(pops[0].querySelectorAll(L.optionSelector)).filter(isVisible) };
+  }
+  // Popup association spec v2 (P1-P5). Used only when the profile sets listbox.strictAssociation (Workday);
+  // every other profile keeps popupItems above, unchanged. Each function below classifies totally: any
+  // conflict or unknown returns a park reason, never a guess.
+  const POPUP_STATE = '__assistedPopupState';
+  const lbRules = () => /** @type {any} */ (R && R.listbox && typeof R.listbox === 'object' ? R.listbox : null);
+  function strictPopups() {
+    const L = lbRules();
+    return Boolean(L && L.strictAssociation === true && typeof L.popupSelector === 'string' && typeof L.optionSelector === 'string' && typeof L.triggerSelector === 'string');
+  }
+  const idList = (/** @type {Element} */ el, /** @type {string} */ attr) => String(el.getAttribute(attr) || '').split(/\s+/).filter(Boolean);
+  const visiblePopups = () => Array.from(document.querySelectorAll(lbRules().popupSelector)).filter(isVisible);
+  const outermost = (/** @type {Element[]} */ nodes) => nodes.filter((n) => !nodes.some((m) => m !== n && m.contains(n)));
+  /** Every aria-labelledby id resolves to the trigger or the trigger's own label element. */
+  function labelledTo(/** @type {Element} */ el, /** @type {Element} */ trigger) {
+    const ids = idList(el, 'aria-labelledby');
+    return ids.length > 0 && ids.every((id) => {
+      const t = document.getElementById(id);
+      return Boolean(t && (t === trigger || (trigger.id && t.tagName === 'LABEL' && t.getAttribute('for') === trigger.id)));
+    });
+  }
+  /**
+   * P1(a) back-reference: aria-labelledby absent or pointing at the trigger; aria-activedescendant absent,
+   * the trigger, or an element inside the popup (live Workday points it at its own Select One option).
+   */
+  function backRefOk(/** @type {Element} */ popup, /** @type {Element} */ trigger) {
+    if (idList(popup, 'aria-labelledby').length > 0 && !labelledTo(popup, trigger)) return false;
+    return idList(popup, 'aria-activedescendant').every((id) => {
+      const t = document.getElementById(id);
+      return Boolean(t && (t === trigger || popup.contains(t)));
+    });
+  }
+  /** P1(b) geometric anchor: same offset parent and within anchorPx of the trigger. */
+  function anchored(/** @type {Element} */ trigger, /** @type {Element} */ pop) {
+    const px = Number(lbRules().anchorPx) > 0 ? Number(lbRules().anchorPx) : 24;
+    if (!(trigger instanceof HTMLElement) || !(pop instanceof HTMLElement) || !trigger.offsetParent || trigger.offsetParent !== pop.offsetParent) return false;
+    const a = trigger.getBoundingClientRect();
+    const b = pop.getBoundingClientRect();
+    const dy = b.top >= a.bottom ? b.top - a.bottom : a.top >= b.bottom ? a.top - b.bottom : 0;
+    return dy <= px && Math.abs(b.left - a.left) <= px;
+  }
+  function popupState() {
+    const st = /** @type {any} */ (window)[POPUP_STATE];
+    return st && typeof st === 'object' && st.nonce === req.nonce ? st : null;
+  }
+  /**
+   * P1: the popup tied to `trigger`, and the listbox its options are read from.
+   * @param {Element} trigger
+   * @returns {{ ok: true, root: Element, list: Element } | { ok: false, reason: string }}
+   */
+  function associate(trigger) {
+    const L = lbRules();
+    const st = popupState();
+    if (!st || st.trigger !== trigger) return { ok: false, reason: 'popup_unlinked' };
+    if (Array.from(document.querySelectorAll(L.triggerSelector)).some((t) => t !== trigger && t.getAttribute('aria-expanded') === 'true')) return { ok: false, reason: 'popup_unlinked' };
+    const fresh = outermost(visiblePopups().filter((p) => !st.baseline.has(p)));
+    const linkIds = Array.from(new Set([...idList(trigger, 'aria-controls'), ...idList(trigger, 'aria-owns')]));
+    /** @type {Element} */
+    let root;
+    if (linkIds.length > 0) {
+      // (a) linked
+      if (trigger.getAttribute('aria-expanded') !== 'true') return { ok: false, reason: 'popup_unlinked' };
+      const els = linkIds.map((id) => document.getElementById(id));
+      if (els.some((e) => !e)) return { ok: false, reason: 'no_popup' };
+      const uniq = Array.from(new Set(els));
+      if (uniq.length !== 1) return { ok: false, reason: 'multiple_popups' };
+      root = /** @type {Element} */ (uniq[0]);
+      if (!isVisible(root)) return { ok: false, reason: 'no_popup' };
+      if (!backRefOk(root, trigger)) return { ok: false, reason: 'popup_unlinked' };
+      if (fresh.some((p) => p !== root && !root.contains(p) && !p.contains(root))) return { ok: false, reason: 'multiple_popups' };
+    } else {
+      // (b) diff fallback against the baseline tagged at open time
+      if (fresh.length === 0) return { ok: false, reason: 'no_popup' };
+      if (fresh.length > 1) return { ok: false, reason: 'multiple_popups' };
+      root = fresh[0];
+      const hasLabel = idList(root, 'aria-labelledby').length > 0;
+      if (hasLabel && !labelledTo(root, trigger)) return { ok: false, reason: 'popup_unlinked' };
+      if (!hasLabel && !anchored(trigger, root)) return { ok: false, reason: 'popup_unlinked' };
+    }
+    // (c) nesting: one listbox, or a strict chain whose innermost is owned by or labelled for the trigger
+    const lists = [...(root.matches(L.popupSelector) ? [root] : []), ...Array.from(root.querySelectorAll(L.popupSelector)).filter(isVisible)];
+    if (lists.length === 0) return { ok: false, reason: 'no_popup' };
+    if (lists.length === 1) return { ok: true, root, list: lists[0] };
+    for (let i = 0; i + 1 < lists.length; i++) if (!lists[i].contains(lists[i + 1])) return { ok: false, reason: 'nesting_ambiguous' };
+    const inner = lists[lists.length - 1];
+    if (!(inner.id && idList(trigger, 'aria-owns').includes(inner.id)) && !labelledTo(inner, trigger)) return { ok: false, reason: 'nesting_ambiguous' };
+    return { ok: true, root, list: inner };
+  }
+  /** A row's own text, without any nested option or group rows. */
+  function rowText(/** @type {Element} */ o) {
+    const sel = `${lbRules().optionSelector}, [role="group"]`;
+    if (!o.querySelector(sel)) return clip(innerTextOf(o), 300);
+    const c = /** @type {Element} */ (o.cloneNode(true));
+    for (const x of Array.from(c.querySelectorAll(sel))) x.remove();
+    return clip(textContentOf(c), 300);
+  }
+  /** P2: every row is disabled, category, leaf, or unknown (conflicting signals). */
+  function rowInfo(/** @type {Element} */ o) {
+    const L = lbRules();
+    const hp = o.getAttribute('aria-haspopup');
+    const neg = hp !== null && hp.trim().toLowerCase() === 'false';
+    const chev = typeof L.categorySignalSelector === 'string' && L.categorySignalSelector ? Boolean(o.querySelector(L.categorySignalSelector)) : false;
+    const exp = o.hasAttribute('aria-expanded');
+    const kind = o.getAttribute('aria-disabled') === 'true' ? 'disabled'
+      : neg && (exp || chev) ? 'unknown'
+        : (hp !== null && !neg) || exp || chev ? 'category' : 'leaf';
+    return { el: o, key: o.id || o.getAttribute('data-value') || o.getAttribute('aria-posinset') || '', text: rowText(o), kind, expanded: o.getAttribute('aria-expanded') === 'true' };
+  }
+  /** The group a category expands into, or null. */
+  function groupOf(/** @type {Element} */ cat) {
+    const ids = [...idList(cat, 'aria-controls'), ...idList(cat, 'aria-owns')];
+    const byId = ids.map((id) => document.getElementById(id)).filter(Boolean);
+    if (byId.length === 1) return byId[0];
+    if (byId.length > 1) return null;
+    const inner = cat.querySelectorAll('[role="group"]');
+    if (inner.length === 1) return inner[0];
+    const sib = cat.nextElementSibling;
+    return sib && sib.getAttribute('role') === 'group' ? sib : null;
+  }
+  /** The scrolling element of a popup: the list, else its root, else the list. */
+  function scrollerOf(/** @type {Element} */ list, /** @type {Element} */ root) {
+    return [list, root].find((e) => e.scrollHeight > e.clientHeight + 1) || list;
+  }
+  /** Resolve req.ref as a listbox trigger, associate its popup, classify its rows. */
+  function strictContext() {
+    const r = resolveRef(dialog, req.ref);
+    if (!r.el) return { ok: false, reason: r.reason };
+    if (!isListbox(r.el)) return { ok: false, reason: 'not_listbox' };
+    const a = associate(r.el);
+    if (!a.ok) return { ok: false, reason: a.reason };
+    const rows = Array.from(a.list.querySelectorAll(lbRules().optionSelector)).filter(isVisible).map(rowInfo);
+    if (rows.some((x) => x.kind === 'unknown')) return { ok: false, reason: 'category_unclassified' };
+    return { ok: true, trigger: r.el, root: a.root, list: a.list, rows };
   }
   function headerOf(/** @type {Element} */ d) {
     const id = d.getAttribute('aria-labelledby');
@@ -490,15 +623,108 @@ function pageMain(req, G) {
       if (!isListbox(r.el)) return { ok: false, reason: 'not_listbox' };
       if (!isVisible(r.el)) return { ok: false, reason: 'not_visible' };
       if (G.isSubmitMarked(buttonDesc(r.el, dialog), R)) return { ok: false, reason: 'denied_term' };
+      if (strictPopups()) {
+        // P1(b): tag the popups already visible (a prior field's stale popup, a multiselect's pill list)
+        // with a per-open nonce before the click; only nodes outside this baseline count as new.
+        const nonce = `${Date.now().toString(36)}${Math.random().toString(36).slice(2)}`;
+        /** @type {any} */ (window)[POPUP_STATE] = { nonce, trigger: r.el, baseline: new WeakSet(visiblePopups()), root: null };
+        HTMLElement.prototype.click.call(r.el);
+        return { ok: true, nonce };
+      }
       HTMLElement.prototype.click.call(r.el);
       return { ok: true };
     }
     case 'list_options': {
+      if (strictPopups()) {
+        const c = strictContext();
+        if (!c.ok) return { ok: false, reason: c.reason };
+        const sc = scrollerOf(c.list, c.root);
+        const sizes = [c.list, ...c.rows.map((x) => x.el)].map((e) => Number(e.getAttribute('aria-setsize'))).filter((n) => Number.isFinite(n) && n > 0);
+        return {
+          ok: true,
+          rows: c.rows.map((x) => ({ key: x.key, text: x.text, kind: x.kind, expanded: x.expanded })),
+          setsize: sizes.length > 0 ? Math.max(...sizes) : 0,
+          scroll: { top: sc.scrollTop, height: sc.scrollHeight, client: sc.clientHeight },
+        };
+      }
       const p = popupItems();
       if (!p.ok) return { ok: false, reason: p.reason };
       return { ok: true, options: p.items.map((o) => clip(innerTextOf(o), 300)) };
     }
+    case 'scroll_popup': {
+      // P4: move the popup's own scroller (no click, no key event) so a virtualized list renders more rows.
+      if (!strictPopups()) return { ok: false, reason: 'unknown_op' };
+      const c = strictContext();
+      if (!c.ok) return { ok: false, reason: c.reason };
+      const sc = scrollerOf(c.list, c.root);
+      sc.scrollTop = Math.max(0, Number(req.value) || 0);
+      return { ok: true, top: sc.scrollTop };
+    }
+    case 'expand_category': {
+      // P2: a category is expanded only by an exact, single match, and only while no category is expanded.
+      if (!strictPopups()) return { ok: false, reason: 'unknown_op' };
+      const c = strictContext();
+      if (!c.ok) return { ok: false, reason: c.reason };
+      const want = G.normalizeName(String(req.optionText ?? ''));
+      const cats = want ? c.rows.filter((x) => x.kind === 'category' && G.normalizeName(x.text) === want) : [];
+      if (cats.length !== 1) return { ok: false, reason: cats.length === 0 ? 'no_exact_category' : 'ambiguous_category' };
+      if (c.rows.some((x) => x.kind === 'category' && x.expanded)) return { ok: false, reason: 'expansion_ambiguous' };
+      HTMLElement.prototype.click.call(cats[0].el);
+      return { ok: true, expanded: cats[0].text };
+    }
+    case 'listbox_commit': {
+      // P3: the committed value (value attribute, else one hidden input in the field), never the visible
+      // label or aria-label; the popup closed and the trigger aria-expanded="false"; a multiselect's pills
+      // exactly {chosen}.
+      if (!strictPopups()) return { ok: false, reason: 'unknown_op' };
+      const r = resolveRef(dialog, req.ref);
+      if (!r.el) return { ok: false, reason: r.reason };
+      const st = popupState();
+      if (!st || st.trigger !== r.el) return { ok: false, reason: 'readback_mismatch', detail: 'state_lost' };
+      if ((st.root && st.root.isConnected && isVisible(st.root)) || r.el.getAttribute('aria-expanded') !== 'false') return { ok: false, reason: 'readback_mismatch', detail: 'popup_open' };
+      const want = G.normalizeName(String(req.optionText ?? ''));
+      if (!want) return { ok: false, reason: 'readback_mismatch', detail: 'no_choice' };
+      const ms = multiselectOf(r.el);
+      if (ms) {
+        const sel = R.multiselect.selectedSelector;
+        const pills = typeof sel === 'string' && sel ? Array.from(ms.querySelectorAll(sel)).filter(isVisible).map((x) => G.normalizeName(textContentOf(x))) : [];
+        if (pills.length === 1 && pills[0] === want) return { ok: true, committed: pills[0] };
+        return { ok: false, reason: pills.length > 1 ? 'multiselect_extra_pill' : 'readback_mismatch', detail: 'pills' };
+      }
+      /** @type {string|null} */
+      let committed = null;
+      if (r.el.hasAttribute('value')) committed = String(r.el.getAttribute('value'));
+      else {
+        const fcSel = lbRules().fieldContainerSelector;
+        const fc = typeof fcSel === 'string' && fcSel ? r.el.closest(fcSel) : null;
+        const hidden = fc ? Array.from(fc.querySelectorAll('input[type="hidden"]')) : [];
+        if (hidden.length === 1) committed = /** @type {HTMLInputElement} */ (hidden[0]).value;
+      }
+      const keys = Array.isArray(req.value) ? req.value.filter((k) => typeof k === 'string' && k) : [];
+      if (committed && (keys.includes(committed) || G.normalizeName(committed) === want)) return { ok: true, committed };
+      return { ok: false, reason: 'readback_mismatch', detail: committed ? 'committed_differs' : 'no_committed_value' };
+    }
     case 'pick_option': {
+      if (strictPopups()) {
+        // P1(d): association re-run inside this call, immediately before the click; P2: leaves only.
+        const c = strictContext();
+        if (!c.ok) return { ok: false, reason: c.reason };
+        const want = G.normalizeName(String(req.optionText ?? ''));
+        const expanded = c.rows.filter((x) => x.kind === 'category' && x.expanded);
+        if (expanded.length > 1) return { ok: false, reason: 'expansion_ambiguous' };
+        const hits = want ? c.rows.filter((x) => x.kind === 'leaf' && G.normalizeName(x.text) === want) : [];
+        if (hits.length !== 1) return { ok: false, reason: hits.length === 0 ? 'no_exact_option' : 'ambiguous_option' };
+        const hit = hits[0];
+        if (typeof req.ref === 'string' && typeof req.value === 'string' && req.value && hit.key !== req.value) return { ok: false, reason: 'ambiguous_option' };
+        if (expanded.length === 1) {
+          const g = groupOf(expanded[0].el);
+          if (!g || !g.contains(hit.el)) return { ok: false, reason: 'expansion_ambiguous' };
+        }
+        const st = popupState();
+        st.root = c.root;
+        HTMLElement.prototype.click.call(hit.el);
+        return { ok: true, picked: hit.text, keys: [hit.el.getAttribute('data-value') || '', hit.el.id || ''].filter(Boolean) };
+      }
       // A4: normalized exact match only; zero or two-plus matches refuse without clicking.
       const p = popupItems();
       if (!p.ok) return { ok: false, reason: p.reason };
@@ -528,6 +754,12 @@ function pageMain(req, G) {
       return { ok: false, reason: 'unknown_op' };
   }
 }
+
+/** Strict popup association polling (spec v2 P1(d), P3, P4): bounded, never a single fixed sleep. */
+const POLL_MS = 100;
+const POLL_TRIES = 15;
+const SCROLL_CAP = 30;
+const SCROLL_SETTLE_MS = 150;
 
 /** The one function declaration sent with every Runtime.callFunctionOn. */
 export const PAGE_FUNCTION = `function (req) {
@@ -592,6 +824,66 @@ export function createAssistedDriver(deps) {
     } finally {
       if (o.byValue !== false) await deps.cdp.send('Runtime.releaseObjectGroup', { objectGroup: group }, sessionId).catch(() => {});
     }
+  }
+
+  // Popup association spec v2 (Workday profile flag). LinkedIn has no listbox rules, so none of this runs.
+  const strict = Boolean(rules.listbox && typeof rules.listbox === 'object' && rules.listbox.strictAssociation === true);
+  /** @type {{ ref: string, nonce: string } | null} */
+  let openPrompt = null;
+  /** Reasons a late-rendering popup can show before it settles; re-checked by the bounded poll (P1(d)). */
+  const TRANSIENT = ['no_popup', 'popup_unlinked'];
+
+  /**
+   * One page op against the open prompt, re-associating its popup each time; transient reasons are
+   * re-checked up to POLL_TRIES times, POLL_MS apart.
+   * @param {string} op @param {Record<string, unknown>} [extra]
+   */
+  async function promptCall(op, extra = {}) {
+    const o = /** @type {{ ref: string, nonce: string }} */ (openPrompt);
+    let r = await call({ op, ref: o.ref, nonce: o.nonce, ...extra });
+    for (let i = 1; i < POLL_TRIES && !r.ok && TRANSIENT.includes(r.reason); i++) {
+      await sleep(POLL_MS);
+      r = await call({ op, ref: o.ref, nonce: o.nonce, ...extra });
+    }
+    return r;
+  }
+
+  /**
+   * P4: every row of the open prompt. A list whose aria-setsize exceeds its rendered rows, or whose
+   * scroller overflows, is enumerated by bounded scrolling, rows merged by their id/data-value/posinset
+   * key; a keyless row while scrolling, a scroller that stops moving, the iteration cap, or fewer rows
+   * than aria-setsize is list_incomplete.
+   * @returns {Promise<{ ok: true, rows: Array<{ key: string, text: string, kind: string, expanded: boolean, top: number }>, scrolled: boolean } | { ok: false, reason: string }>}
+   */
+  async function enumerate() {
+    let cur = await promptCall('list_options');
+    if (!cur.ok) return { ok: false, reason: cur.reason };
+    const needs = cur.setsize > cur.rows.length || cur.scroll.height > cur.scroll.client + 1;
+    if (!needs) return { ok: true, rows: cur.rows.map((/** @type {any} */ x) => ({ ...x, top: cur.scroll.top })), scrolled: false };
+    /** @type {Map<string, any>} */
+    const seen = new Map();
+    let lastTop = -1;
+    for (let i = 0; i < SCROLL_CAP; i++) {
+      for (const row of cur.rows) {
+        if (!row.key) return { ok: false, reason: 'list_incomplete' };
+        if (!seen.has(row.key)) seen.set(row.key, { ...row, top: cur.scroll.top });
+      }
+      if (cur.scroll.top + cur.scroll.client >= cur.scroll.height - 1) {
+        if (cur.setsize > 0 && seen.size < cur.setsize) return { ok: false, reason: 'list_incomplete' };
+        const back = await promptCall('scroll_popup', { value: 0 });
+        if (!back.ok) return { ok: false, reason: back.reason };
+        await sleep(SCROLL_SETTLE_MS);
+        return { ok: true, rows: [...seen.values()], scrolled: true };
+      }
+      if (cur.scroll.top <= lastTop) return { ok: false, reason: 'list_incomplete' };
+      lastTop = cur.scroll.top;
+      const s = await promptCall('scroll_popup', { value: cur.scroll.top + Math.max(1, Math.floor(cur.scroll.client * 0.8)) });
+      if (!s.ok) return { ok: false, reason: s.reason };
+      await sleep(SCROLL_SETTLE_MS);
+      cur = await promptCall('list_options');
+      if (!cur.ok) return { ok: false, reason: cur.reason };
+    }
+    return { ok: false, reason: 'list_incomplete' };
   }
 
   const driver = {
@@ -699,25 +991,75 @@ export function createAssistedDriver(deps) {
     },
     /**
      * Open a listbox prompt (Workday). The popup renders after this returns; listOptions/pickOption are
-     * separate calls, with a short server-side wait between them.
+     * separate calls. Strict association (spec v2 P1) remembers the opened trigger and its baseline nonce
+     * and finds the popup by a bounded poll inside those calls; otherwise a short fixed wait follows.
      * @param {string} ref
      */
     async openListbox(ref) {
       await pace();
       const r = await call({ op: 'open_listbox', ref });
+      if (strict) {
+        openPrompt = r && r.ok && typeof r.nonce === 'string' ? { ref, nonce: r.nonce } : null;
+        return r;
+      }
       await sleep(400);
       return r;
     },
-    /** @returns {Promise<{ ok: boolean, reason?: string, options?: string[] }>} */
-    listOptions() {
-      return call({ op: 'list_options' });
+    /** @returns {Promise<{ ok: boolean, reason?: string, options?: string[], categories?: string[] }>} */
+    async listOptions() {
+      if (!strict) return call({ op: 'list_options' });
+      if (!openPrompt) return { ok: false, reason: 'no_popup' };
+      const e = await enumerate();
+      if (!e.ok) return { ok: false, reason: e.reason };
+      return { ok: true, options: e.rows.filter((x) => x.kind === 'leaf').map((x) => x.text), categories: e.rows.filter((x) => x.kind === 'category').map((x) => x.text) };
     },
-    /** @param {string} optionText */
+    /**
+     * Pick one option by normalized exact text. Strict association: the full (scroll-enumerated) list is
+     * re-read here, never taken from an earlier listOptions; only a unique leaf is clicked, inside a call
+     * that re-associates the popup; then the committed value is verified (P3) by a bounded poll.
+     * @param {string} optionText
+     */
     async pickOption(optionText) {
       await pace();
-      const r = await call({ op: 'pick_option', optionText });
-      await sleep(300);
-      return r;
+      if (!strict) {
+        const r = await call({ op: 'pick_option', optionText });
+        await sleep(300);
+        return r;
+      }
+      if (!openPrompt) return { ok: false, reason: 'no_popup' };
+      const e = await enumerate();
+      if (!e.ok) return { ok: false, reason: e.reason };
+      const want = normalizeName(String(optionText ?? ''));
+      const hits = want ? e.rows.filter((x) => x.kind === 'leaf' && normalizeName(x.text) === want) : [];
+      if (hits.length !== 1) return { ok: false, reason: hits.length === 0 ? 'no_exact_option' : 'ambiguous_option' };
+      if (e.scrolled) {
+        const s = await promptCall('scroll_popup', { value: hits[0].top });
+        if (!s.ok) return { ok: false, reason: s.reason };
+        await sleep(SCROLL_SETTLE_MS);
+      }
+      const p = await promptCall('pick_option', { optionText, value: e.scrolled ? hits[0].key : '' });
+      if (!p.ok) return { ok: false, reason: p.reason };
+      const opened = openPrompt;
+      openPrompt = null;
+      let c = { ok: false, reason: 'readback_mismatch' };
+      for (let i = 0; i < POLL_TRIES; i++) {
+        await sleep(POLL_MS);
+        c = await call({ op: 'listbox_commit', ref: opened.ref, nonce: opened.nonce, optionText: p.picked, value: p.keys });
+        if (c.ok) break;
+      }
+      if (!c.ok) return { ok: false, reason: c.reason, ...(c.detail ? { detail: c.detail } : {}) };
+      return { ok: true, picked: p.picked, verified: true };
+    },
+    /**
+     * Expand one category row of the open prompt (P2): exact, single, classified category only, and only
+     * while no other category is expanded. Strict association only.
+     * @param {string} categoryText
+     */
+    async expandCategory(categoryText) {
+      if (!strict) return { ok: false, reason: 'not_supported' };
+      if (!openPrompt) return { ok: false, reason: 'no_popup' };
+      await pace();
+      return promptCall('expand_category', { optionText: categoryText });
     },
     /**
      * The CDP target id of the tab this driver's session is attached to, read from Chrome (A12), or null.

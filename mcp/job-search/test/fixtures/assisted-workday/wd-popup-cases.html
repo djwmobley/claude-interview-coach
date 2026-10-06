@@ -1,0 +1,286 @@
+<!doctype html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<title>Synthetic Workday listbox popup cases (test fixture)</title>
+<style>
+  body { margin: 0; font: 14px sans-serif; }
+  [role="listbox"].pop { position: absolute; background: #fff; border: 1px solid #999; margin: 0; padding: 0; list-style: none; width: 300px; }
+  .pop li { height: 20px; line-height: 20px; }
+  .scroller { height: 200px; overflow-y: auto; }
+</style>
+</head>
+<body>
+<!-- SYNTHETIC fixture for the listbox popup association rules (P1-P5). Its default shape follows the
+     2026-10-05 read-only probe of a live Workday guest tenant: the prompt is a button with
+     aria-haspopup="listbox" and a value attribute; opening sets aria-expanded="true" and aria-controls to
+     the popup's id; the popup is a ul[role=listbox] mounted in a portal at the end of body; options are
+     li[role=option] with an id and a data-value. The commit on pick (value attribute set to the option's
+     data-value, aria-expanded="false", popup removed) is INFERRED, not observed. Modes (?mode=): see the
+     MODES table in the script. -->
+<div data-automation-id="applyFlowPage" id="flow">
+  <h2>My Information</h2>
+  <div data-automation-id="formField-country" id="country-field">
+    <label for="country-btn">Country*</label>
+    <button id="country-btn" type="button" aria-haspopup="listbox" value="k-usa" aria-label="Country United States of America Required">United States of America</button>
+  </div>
+  <div data-automation-id="formField-source" id="source-field">
+    <label for="source-btn">How Did You Hear About Us?*</label>
+    <button id="source-btn" type="button" aria-haspopup="listbox" value="" name="source" aria-label="How Did You Hear About Us? Select One Required">Select One</button>
+    <input type="text" class="helper" value="" style="position:absolute;left:-9999px">
+  </div>
+</div>
+<script>
+  window.__clicks = [];
+  const mode = new URLSearchParams(location.search).get('mode') || 'linked';
+  const BASE = ['Campus Event', 'Indeed', 'Invited by Company Recruiter', 'LinkedIn', 'Other'];
+  const keyOf = (t) => 'k-' + t.toLowerCase().replace(/[^a-z0-9]+/g, '-');
+  const btn = document.getElementById('source-btn');
+  const field = document.getElementById('source-field');
+
+  if (mode === 'multi') {
+    // The prompt lives inside a multiselect container that already holds one prefilled pill.
+    const ms = document.createElement('div');
+    ms.setAttribute('data-automation-id', 'multiSelectContainer');
+    ms.innerHTML = '<ul role="listbox" data-automation-id="selectedItemList" aria-label="items selected"><li role="presentation"><div role="option" data-automation-id="selectedItem">Other</div></li></ul>';
+    field.insertBefore(ms, btn);
+    ms.appendChild(btn);
+  }
+  if (mode === 'prevlabel' || mode === 'nocommit') {
+    btn.value = keyOf('LinkedIn');
+    btn.textContent = 'LinkedIn';
+    btn.setAttribute('aria-label', 'How Did You Hear About Us? LinkedIn Required');
+  }
+  if (mode === 'stale' || mode === 'stale-nolink') {
+    // A prior field's popup is still mounted and visible before this prompt opens.
+    const prior = document.createElement('ul');
+    prior.className = 'pop';
+    prior.id = 'prior-pop';
+    prior.setAttribute('role', 'listbox');
+    prior.style.top = '400px';
+    prior.style.left = '400px';
+    prior.innerHTML = '<li role="option" id="p1">Indeed</li><li role="option" id="p2">Other</li>';
+    document.body.appendChild(prior);
+  }
+  if (mode === 'shared-expanded') {
+    // Another prompt still claims to be open on the same shared container.
+    document.getElementById('country-btn').setAttribute('aria-expanded', 'true');
+    document.getElementById('country-btn').setAttribute('aria-controls', 'pop-src');
+  }
+
+  function commit(t, key) {
+    window.__clicks.push('option:' + t);
+    if (mode === 'nocommit') {
+      // The visible label and aria-label change, the committed value does not.
+      btn.textContent = t;
+      btn.setAttribute('aria-label', 'How Did You Hear About Us? ' + t + ' Required');
+      btn.setAttribute('aria-expanded', 'false');
+      closePopup();
+      return;
+    }
+    if (mode === 'multi') {
+      const ul = field.querySelector('[data-automation-id="selectedItemList"]');
+      const li = document.createElement('li');
+      li.setAttribute('role', 'presentation');
+      li.innerHTML = '<div role="option" data-automation-id="selectedItem"></div>';
+      li.firstChild.textContent = t;
+      ul.appendChild(li);
+    }
+    btn.value = key;
+    btn.textContent = mode === 'truncated' && t.length > 20 ? t.slice(0, 20) + '…' : t;
+    btn.setAttribute('aria-label', 'How Did You Hear About Us? ' + btn.textContent + ' Required');
+    if (mode === 'staysopen') return;
+    btn.setAttribute('aria-expanded', 'false');
+    closePopup();
+  }
+  function closePopup() {
+    const p = document.getElementById('portal');
+    if (p) p.remove();
+    if (mode.startsWith('shared')) document.getElementById('pop-src').style.display = 'none';
+  }
+  function optionLi(t, extra) {
+    const li = document.createElement('li');
+    li.setAttribute('role', 'option');
+    li.id = keyOf(t) + (extra && extra.suffix ? extra.suffix : '');
+    li.setAttribute('data-value', li.id);
+    li.textContent = t;
+    li.onclick = () => commit(t, li.id);
+    return li;
+  }
+  function portal(child) {
+    const outer = document.createElement('div');
+    outer.id = 'portal';
+    const inner = document.createElement('div');
+    outer.appendChild(inner);
+    inner.appendChild(child);
+    document.body.appendChild(outer);
+  }
+  function placeUnder(pop, gap) {
+    const r = btn.getBoundingClientRect();
+    pop.style.top = (r.bottom + window.scrollY + gap) + 'px';
+    pop.style.left = (r.left + window.scrollX) + 'px';
+  }
+  function flatList(options) {
+    const ul = document.createElement('ul');
+    ul.className = 'pop';
+    ul.id = 'pop-src';
+    ul.setAttribute('role', 'listbox');
+    ul.setAttribute('tabindex', '-1');
+    ul.setAttribute('aria-activedescendant', 'select-one');
+    const ph = document.createElement('li');
+    ph.setAttribute('role', 'option');
+    ph.setAttribute('aria-disabled', 'true');
+    ph.setAttribute('aria-selected', 'true');
+    ph.id = 'select-one';
+    ph.textContent = 'Select One';
+    ul.appendChild(ph);
+    for (const t of options) ul.appendChild(optionLi(t));
+    return ul;
+  }
+  function category(text, expanded, groupItems, id) {
+    const li = document.createElement('li');
+    li.setAttribute('role', 'option');
+    li.setAttribute('aria-haspopup', 'true');
+    li.setAttribute('aria-expanded', expanded ? 'true' : 'false');
+    li.setAttribute('aria-controls', id);
+    li.id = 'cat-' + id;
+    li.innerHTML = '<span></span><span class="wd-icon-chevron-right-small"></span>';
+    li.firstChild.textContent = text;
+    li.onclick = () => { window.__clicks.push('cat:' + text); li.setAttribute('aria-expanded', 'true'); document.getElementById(id).hidden = false; };
+    const grp = document.createElement('ul');
+    grp.setAttribute('role', 'group');
+    grp.id = id;
+    grp.hidden = !expanded;
+    for (const t of groupItems) grp.appendChild(optionLi(t, { suffix: '-' + id }));
+    return [li, grp];
+  }
+  function virtualList(stuck) {
+    const N = 40;
+    const texts = Array.from({ length: N }, (_, i) => (i === 3 || i === 35 ? 'Indeed' : 'Source ' + (i + 1)));
+    const ul = document.createElement('ul');
+    ul.className = 'pop scroller';
+    ul.id = 'pop-src';
+    ul.setAttribute('role', 'listbox');
+    ul.setAttribute('aria-setsize', String(N));
+    const render = () => {
+      const first = stuck ? 0 : Math.floor(ul.scrollTop / 20);
+      ul.innerHTML = '';
+      const top = document.createElement('li');
+      top.style.height = (first * 20) + 'px';
+      top.setAttribute('aria-hidden', 'true');
+      ul.appendChild(top);
+      for (let i = first; i < Math.min(N, first + 11); i++) {
+        const li = document.createElement('li');
+        li.setAttribute('role', 'option');
+        li.id = 'v' + i;
+        li.setAttribute('data-value', 'v' + i);
+        li.setAttribute('aria-posinset', String(i + 1));
+        li.setAttribute('aria-setsize', String(N));
+        li.textContent = texts[i];
+        li.onclick = () => commit(texts[i], 'v' + i);
+        ul.appendChild(li);
+      }
+      const bottom = document.createElement('li');
+      bottom.setAttribute('aria-hidden', 'true');
+      bottom.style.height = ((N - Math.min(N, first + 11)) * 20) + 'px';
+      ul.appendChild(bottom);
+    };
+    render();
+    ul.addEventListener('scroll', () => { if (!stuck) { const st = ul.scrollTop; render(); ul.scrollTop = st; } });
+    return ul;
+  }
+
+  function open() {
+    btn.setAttribute('aria-expanded', 'true');
+    if (mode === 'stale-nolink' || mode === 'nolink-anchored' || mode === 'nolink-far') {
+      btn.removeAttribute('aria-expanded');
+      const ul = flatList(BASE);
+      ul.removeAttribute('aria-activedescendant');
+      if (mode === 'stale-nolink') ul.setAttribute('aria-labelledby', 'source-btn');
+      document.body.appendChild(ul);
+      placeUnder(ul, mode === 'nolink-far' ? 600 : 2);
+      ul.id = 'portal-list';
+      const wrap = document.createElement('div');
+      wrap.id = 'portal';
+      document.body.appendChild(wrap);
+      wrap.appendChild(ul);
+      return;
+    }
+    btn.setAttribute('aria-controls', 'pop-src');
+    if (mode.startsWith('shared')) {
+      let s = document.getElementById('pop-src');
+      if (!s) {
+        s = flatList(BASE);
+        document.body.appendChild(s);
+      }
+      s.style.display = '';
+      if (mode === 'shared-label') s.setAttribute('aria-labelledby', 'country-btn');
+      if (mode === 'shared-ok') s.setAttribute('aria-labelledby', 'source-btn');
+      placeUnder(s, 2);
+      return;
+    }
+    let pop;
+    if (mode === 'nonchain' || mode === 'chain') {
+      pop = document.createElement('div');
+      pop.id = 'pop-src';
+      pop.className = 'pop';
+      pop.style.position = 'absolute';
+      if (mode === 'nonchain') {
+        const a = flatList(['Indeed', 'Other']);
+        a.id = 'list-a';
+        a.style.position = 'static';
+        const b = flatList(['LinkedIn']);
+        b.id = 'list-b';
+        b.style.position = 'static';
+        pop.appendChild(a);
+        pop.appendChild(b);
+      } else {
+        pop.setAttribute('role', 'listbox');
+        const inner = flatList(BASE);
+        inner.id = 'list-inner';
+        inner.style.position = 'static';
+        inner.setAttribute('aria-labelledby', 'source-btn');
+        pop.appendChild(inner);
+      }
+    } else if (mode === 'samecat' || mode === 'twoexp' || mode === 'unclassified') {
+      pop = document.createElement('ul');
+      pop.className = 'pop';
+      pop.id = 'pop-src';
+      pop.setAttribute('role', 'listbox');
+      const [c1, g1] = category('Job Board', true, ['Job Board', 'Indeed'], 'grp-jb');
+      const [c2, g2] = category('Social Media', mode === 'twoexp', ['LinkedIn', 'Facebook'], 'grp-sm');
+      for (const n of [c1, g1, c2, g2]) pop.appendChild(n);
+      pop.appendChild(optionLi('Other'));
+      if (mode === 'unclassified') {
+        const odd = optionLi('Agency');
+        odd.setAttribute('aria-haspopup', 'false');
+        odd.insertAdjacentHTML('beforeend', '<span class="wd-icon-chevron-right-small"></span>');
+        pop.appendChild(odd);
+      }
+    } else if (mode === 'virtual' || mode === 'virtual-stuck') {
+      pop = virtualList(mode === 'virtual-stuck');
+    } else {
+      pop = flatList(BASE);
+    }
+    if (mode === 'late') {
+      setTimeout(() => { portal(pop); placeUnder(pop, 2); }, 300);
+    } else {
+      portal(pop);
+      placeUnder(pop, 2);
+    }
+    if (mode === 'conflict') {
+      const other = flatList(['Something Else']);
+      other.id = 'rogue';
+      other.style.top = '500px';
+      other.style.left = '500px';
+      document.body.appendChild(other);
+    }
+  }
+  btn.onclick = () => {
+    window.__clicks.push('listbox');
+    if (btn.getAttribute('aria-expanded') === 'true') { btn.setAttribute('aria-expanded', 'false'); closePopup(); return; }
+    open();
+  };
+</script>
+</body>
+</html>
