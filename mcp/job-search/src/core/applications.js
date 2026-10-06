@@ -91,6 +91,51 @@ export const TRANSITIONS = Object.freeze({
 /** ic_job_application_events.kind CHECK values (sql/012_applications.sql). */
 export const APPLICATION_EVENT_KINDS = Object.freeze(['state', 'note', 'error', 'progress']);
 
+/**
+ * States that re-arm an application for another submission. transitionUnwrapped refuses a move into any of
+ * them once the durable submit marker exists (unattended submit spec v2 C2).
+ */
+const REARM_STATES = Object.freeze(['approved', 'drafting']);
+
+/** Progress-event note of the durable submit marker (recordSubmitRequestSent / reserveSubmitMarker). */
+export const SUBMIT_REQUEST_SENT_NOTE = 'submit_request_sent';
+
+/**
+ * pending_question.kind for an application whose final Submit control was clicked (or may have been) but
+ * whose confirmation was not seen (unattended submit spec item 3; a kind, not a state: DECIDED). Never
+ * resumed, never retried; the Gmail cross-check (src/apply/mail-confirm.js) or a human resolves it.
+ */
+export const SUBMIT_UNCONFIRMED_KIND = 'submit_unconfirmed';
+
+/**
+ * Every pending_question.kind that means "a submit request may already have reached the site": the new
+ * submit_unconfirmed and the legacy post_submit_uncertain (rows parked before this change).
+ */
+export const UNCONFIRMED_SUBMIT_KINDS = Object.freeze([SUBMIT_UNCONFIRMED_KIND, 'post_submit_uncertain']);
+
+/**
+ * Namespace (first key) of the per-application 2-key advisory lock a worker holds for the whole run of one
+ * application (unattended submit spec v2 C1, C3, C9). reconcileStale() skips a row whose lock is held.
+ * A 2-key advisory lock lives in its own key space, so it never collides with a 1-key LOCK_KEY.
+ */
+export const APPLICATION_LOCK_NAMESPACE = 907010002;
+
+/** Namespace of the transaction-scoped advisory lock that serializes the daily submit-cap count. */
+export const SUBMIT_CAP_LOCK_NAMESPACE = 907010003;
+
+/**
+ * pending_question for a submit whose confirmation was not seen.
+ * @param {string|null} pageUrl
+ * @param {string} why
+ */
+export function submitUnconfirmedQuestion(pageUrl, why) {
+  return {
+    kind: SUBMIT_UNCONFIRMED_KIND,
+    label: `The final Submit was sent but no confirmation was seen (${why}). This application is never resubmitted automatically. Check the site or your email; a matching confirmation email moves it to confirmed.`,
+    page_url: pageUrl,
+  };
+}
+
 const APPLICATION_COLS = [
   'id', 'listing_id', 'ats_type', 'apply_url', 'account_email', 'state', 'resume_doc_id', 'coverletter_doc_id',
   'resume_hash', 'coverletter_hash', 'answers', 'pending_question', 'screenshot_rel_path', 'submitted_at',
@@ -269,6 +314,15 @@ export async function transitionUnwrapped(client, id, toState, opts, extra = {})
   if (!allowed.includes(toState)) {
     throw new JobSearchError('VALIDATION', `cannot transition application ${id} from "${fromState}" to "${toState}"`, {
       details: { from: fromState, to: toState },
+    });
+  }
+  // Unattended submit spec v2 C2: once a final Submit control may have been clicked for this application
+  // (the durable submit marker, ANY attempt), nothing may move it back toward another submission. Resume,
+  // Retry, the automatic credential sweeps, and a re-draft all enter 'approved' or 'drafting', so this one
+  // check under the row lock covers every one of them; the row stays where it is (needs_human or failed).
+  if (REARM_STATES.includes(toState) && await hasSubmitRequestSentEver(client, id)) {
+    throw new JobSearchError('VALIDATION', `application ${id} already had a submit request sent; it is never re-armed for another submission (already submitted, unconfirmed)`, {
+      details: { from: fromState, to: toState, reason: 'submit_request_sent' },
     });
   }
 
@@ -772,10 +826,101 @@ export async function markSubmitted(client, id, opts = {}) {
  * @param {number} applicationId
  */
 export async function recordSubmitRequestSent(client, applicationId) {
+  // One statement (so one implicit transaction): the marker row (sql/020, at most one per application) and
+  // the event commit together. The unattended submit path uses reserveSubmitMarker() below instead, which
+  // also refuses when the marker already exists or the daily submit cap is used up.
   await client.query(
-    `INSERT INTO ic_job_application_events (application_id, kind, actor, note) VALUES ($1, 'progress', 'apply', 'submit_request_sent')`,
+    `WITH m AS (
+       INSERT INTO ic_job_submit_markers (application_id, ats_type, day)
+       SELECT id, ats_type, (now() AT TIME ZONE 'UTC')::date FROM ic_job_applications WHERE id = $1
+       ON CONFLICT (application_id) DO NOTHING
+     )
+     INSERT INTO ic_job_application_events (application_id, kind, actor, note) VALUES ($1, 'progress', 'apply', '${SUBMIT_REQUEST_SENT_NOTE}')`,
     [applicationId],
   );
+}
+
+/**
+ * UTC budget day, the same rule src/core/budget.js budgetDay uses for every other daily cap.
+ * @param {Date} now
+ */
+function utcDay(now) {
+  return now.toISOString().slice(0, 10);
+}
+
+/**
+ * Atomic submit marker and daily-cap slot (unattended submit spec v2 C1 + C3). ONE transaction, committed
+ * before the caller clicks: a transaction-scoped advisory lock serializes the cap count, the count of
+ * today's markers is compared with `dailyCap`, and the marker row is inserted with ON CONFLICT DO NOTHING
+ * (sql/020's primary key on application_id is the statement only one caller can win). The
+ * 'submit_request_sent' event is written in the same transaction. Total: every input maps to one result,
+ * and the caller clicks ONLY on { ok: true }.
+ *   cap_invalid     dailyCap is not a positive integer (fail closed)
+ *   cap_exhausted   today's markers already reach dailyCap (nothing written)
+ *   marker_exists   a marker already exists for this application, from any attempt (nothing written)
+ * @param {import('pg').ClientBase} client
+ * @param {{ applicationId: number, dailyCap: unknown, now?: Date }} o
+ * @returns {Promise<{ ok: true, used: number } | { ok: false, reason: 'cap_invalid'|'cap_exhausted'|'marker_exists', used: number|null }>}
+ */
+export async function reserveSubmitMarker(client, o) {
+  const now = o.now ?? new Date();
+  const cap = o.dailyCap;
+  if (typeof cap !== 'number' || !Number.isInteger(cap) || cap < 1) return { ok: false, reason: 'cap_invalid', used: null };
+  return withTransaction(client, async (c) => {
+    await c.query('SELECT pg_advisory_xact_lock($1::int, $2::int)', [SUBMIT_CAP_LOCK_NAMESPACE, 0]);
+    const day = utcDay(now);
+    const usedRes = await c.query('SELECT count(*)::int AS n FROM ic_job_submit_markers WHERE day = $1::date', [day]);
+    const used = Number(usedRes.rows[0].n);
+    if (used >= cap) return { ok: /** @type {const} */ (false), reason: /** @type {const} */ ('cap_exhausted'), used };
+    const ins = await c.query(
+      `INSERT INTO ic_job_submit_markers (application_id, ats_type, day)
+       SELECT id, ats_type, $2::date FROM ic_job_applications WHERE id = $1
+       ON CONFLICT (application_id) DO NOTHING RETURNING application_id`,
+      [o.applicationId, day],
+    );
+    if ((ins.rowCount ?? 0) === 0) return { ok: /** @type {const} */ (false), reason: /** @type {const} */ ('marker_exists'), used };
+    await c.query(
+      `INSERT INTO ic_job_application_events (application_id, kind, actor, note, meta) VALUES ($1, 'progress', 'apply', $2, $3::jsonb)`,
+      [o.applicationId, SUBMIT_REQUEST_SENT_NOTE, JSON.stringify({ day, cap_used: used + 1, daily_cap: cap })],
+    );
+    return { ok: /** @type {const} */ (true), used: used + 1 };
+  });
+}
+
+/**
+ * How many submit markers (unattended or legacy) were reserved on the UTC day of `now`.
+ * @param {import('pg').ClientBase} client
+ * @param {Date} [now]
+ */
+export async function submitMarkersToday(client, now = new Date()) {
+  const r = await client.query('SELECT count(*)::int AS n FROM ic_job_submit_markers WHERE day = $1::date', [utcDay(now)]);
+  return Number(r.rows[0].n);
+}
+
+/**
+ * The durable submit marker for ANY attempt (unattended submit spec v2 C2): a 'submit_request_sent' event
+ * or a sql/020 marker row. Neither is ever updated or deleted by a production path, so nothing a
+ * transition does can clear it. hasSubmitRequestSentThisAttempt() stays only for per-attempt questions.
+ * @param {import('pg').ClientBase} client
+ * @param {number} applicationId
+ * @returns {Promise<boolean>}
+ */
+export async function hasSubmitRequestSentEver(client, applicationId) {
+  const r = await client.query(
+    `SELECT 1 WHERE EXISTS (SELECT 1 FROM ic_job_application_events WHERE application_id = $1 AND kind = 'progress' AND note = $2)
+        OR EXISTS (SELECT 1 FROM ic_job_submit_markers WHERE application_id = $1)`,
+    [applicationId, SUBMIT_REQUEST_SENT_NOTE],
+  );
+  return (r.rowCount ?? 0) > 0;
+}
+
+/**
+ * SQL predicate (ic_job_applications aliased `alias`) true when the application carries the durable submit
+ * marker from any attempt. For list routes that show "already submitted (unconfirmed)" (C8).
+ * @param {string} alias
+ */
+export function submitMarkerSql(alias) {
+  return `(EXISTS (SELECT 1 FROM ic_job_submit_markers sm WHERE sm.application_id = ${alias}.id) OR EXISTS (SELECT 1 FROM ic_job_application_events sme WHERE sme.application_id = ${alias}.id AND sme.kind = 'progress' AND sme.note = '${SUBMIT_REQUEST_SENT_NOTE}'))`;
 }
 
 /**
@@ -808,6 +953,11 @@ export async function recordApplicationEvent(client, input) {
  * re-enters 'submitting' from scratch) never leaks into this attempt's crash-safety decision. No rows in
  * ic_job_application_events at all for this application -> false (an application that never reached
  * 'submitting' obviously never sent a submit request).
+ *
+ * Unattended submit spec v2 C2: every production decision (classifyPreSubmit, reconcileStale, the resume
+ * gate, the worker's catch block, and the transition guard in transitionUnwrapped) now reads
+ * hasSubmitRequestSentEver() instead. No production caller of this per-attempt variant remains; it is
+ * kept for callers that explicitly need "did THIS attempt send it" (tests and diagnostics).
  * @param {import('pg').ClientBase} client
  * @param {number} applicationId
  * @returns {Promise<boolean>}
@@ -950,13 +1100,23 @@ export async function reconcileStale(client, opts = {}) {
       // Assisted runs (LinkedIn Easy Apply, Workday) legitimately stay in 'submitting' for up to 15 minutes
       // (scripted entry plus the headless fill session), so an assisted row is only stale after 20 minutes
       // (spec v2 A8: the exemption is per ATS, and covers a crash between prepare and lease).
-      `SELECT id, apply_url FROM ic_job_applications WHERE state = 'submitting' AND updated_at < now() - ($1 || ' minutes')::interval
-         AND NOT (ats_type = ANY($2::text[]) AND updated_at >= now() - interval '20 minutes') FOR UPDATE`,
-      [maxAgeMinutes, ASSISTED_ATS_TYPES],
+      // Unattended submit spec v2 C9: a row whose worker still holds the per-application advisory lock
+      // (APPLICATION_LOCK_NAMESPACE, held for the whole run), or whose open lease heartbeated in the last 5
+      // minutes, is alive, not stale, whatever its updated_at says.
+      `SELECT a.id, a.apply_url FROM ic_job_applications a WHERE a.state = 'submitting' AND a.updated_at < now() - ($1 || ' minutes')::interval
+         AND NOT (a.ats_type = ANY($2::text[]) AND a.updated_at >= now() - interval '20 minutes')
+         AND NOT EXISTS (SELECT 1 FROM pg_locks pl WHERE pl.locktype = 'advisory' AND pl.granted AND pl.objsubid = 2
+                           AND pl.classid = $3::int::oid AND pl.objid = a.id::oid)
+         AND NOT EXISTS (SELECT 1 FROM ic_easy_apply_leases l WHERE l.application_id = a.id AND l.closed_at IS NULL
+                           AND coalesce(l.last_action_at, l.issued_at) > now() - interval '5 minutes')
+         FOR UPDATE OF a`,
+      [maxAgeMinutes, ASSISTED_ATS_TYPES, APPLICATION_LOCK_NAMESPACE],
     );
     const results = [];
     for (const staleRow of stale.rows) {
-      const sent = await hasSubmitRequestSentThisAttempt(c, staleRow.id);
+      // C2: the durable marker from ANY attempt (an earlier attempt's submit request is just as able to
+      // have produced an application at the site as this one's).
+      const sent = await hasSubmitRequestSentEver(c, staleRow.id);
       // Resume gate R3: the durable marker (any attempt), not only this attempt's Next clicks.
       if (!sent && await hasAssistedNextClickEver(c, staleRow.id)) {
         results.push(await transitionUnwrapped(c, staleRow.id, 'needs_human', {
@@ -965,13 +1125,11 @@ export async function reconcileStale(client, opts = {}) {
           pending_question: assistedPartialQuestion(staleRow.apply_url ?? null, 'stale reconcile'),
         }, {}));
       } else if (sent) {
+        // Spec item 4: crash recovery after the marker routes to submit_unconfirmed, never a retryable state.
         results.push(await transitionUnwrapped(c, staleRow.id, 'needs_human', {
           actor: 'apply',
-          note: 'stale submitting reconciled after submit request was sent; verify manually before retrying',
-          pending_question: {
-            kind: 'post_submit_uncertain',
-            label: 'The submit request was sent but the run did not confirm completion (crash or timeout). Check the site or your email for a confirmation before retrying, to avoid a duplicate application.',
-          },
+          note: 'stale submitting reconciled after the submit request was sent; submit unconfirmed, never retried',
+          pending_question: submitUnconfirmedQuestion(staleRow.apply_url ?? null, 'the run crashed or timed out after the submit marker'),
         }, {}));
       } else {
         results.push(await transitionUnwrapped(c, staleRow.id, 'failed', {
@@ -1003,8 +1161,42 @@ export async function markAppliedByHand(client, id, opts = {}) {
         details: { from: cur.rows[0].state, expected: 'needs_human' },
       });
     }
+    // Unattended submit spec v2 C8: an application whose final Submit was already sent by the worker is
+    // not "applied by hand"; it is already submitted (unconfirmed), and only a matching confirmation
+    // (the Gmail cross-check) moves it on. Checked under the row lock.
+    if (await hasSubmitRequestSentEver(c, id)) {
+      throw new JobSearchError('VALIDATION', 'Already submitted (unconfirmed): the worker sent this application\'s final Submit. It moves to confirmed when a matching confirmation email arrives; it is not marked applied by hand.', {
+        details: { application_id: id, reason: 'submit_request_sent' },
+      });
+    }
     return markSubmittedUnwrapped(c, id, { ...opts, note: opts.note ?? 'marked applied by hand' });
   });
+}
+
+/**
+ * Gmail cross-check of an unconfirmed submit (unattended submit spec item 5, v2 C7): needs_human (kind in
+ * UNCONFIRMED_SUBMIT_KINDS, submit marker present) -> submitted -> confirmed, inside the CALLER's already
+ * open transaction or savepoint (src/apply/mail-confirm.js's own boundary, like transitionUnwrapped). The
+ * submitted step goes through markSubmittedUnwrapped, so the listing status, the event, and the 5-day nudge
+ * behave exactly as for any other submission; the caller completes the nudge. Refuses (VALIDATION) any row
+ * that is not in that exact shape, so a race with a human action never double-moves it.
+ * @param {import('pg').ClientBase} client already inside a transaction
+ * @param {number} id
+ * @param {{ note?: string|null, meta?: unknown }} [opts]
+ */
+export async function confirmUnconfirmedSubmitUnwrapped(client, id, opts = {}) {
+  const cur = await client.query(`SELECT ${APPLICATION_COLS} FROM ic_job_applications WHERE id = $1 FOR UPDATE`, [id]);
+  if (cur.rowCount === 0) throw new JobSearchError('NOT_FOUND', `application ${id} not found`);
+  const row = cur.rows[0];
+  const kind = row.pending_question && typeof row.pending_question === 'object' ? row.pending_question.kind : null;
+  if (row.state !== 'needs_human' || !UNCONFIRMED_SUBMIT_KINDS.includes(kind)) {
+    throw new JobSearchError('VALIDATION', `application ${id} is not an unconfirmed submit (state "${row.state}", kind "${kind}")`, { details: { application_id: id, reason: 'not_unconfirmed_submit' } });
+  }
+  if (!(await hasSubmitRequestSentEver(client, id))) {
+    throw new JobSearchError('VALIDATION', `application ${id} has no submit marker`, { details: { application_id: id, reason: 'no_submit_marker' } });
+  }
+  await markSubmittedUnwrapped(client, id, { actor: 'apply', note: opts.note ?? 'unconfirmed submit matched a confirmation email', meta: opts.meta });
+  return transitionUnwrapped(client, id, 'confirmed', { actor: 'apply', note: opts.note ?? 'confirmed via mail classifier (unconfirmed submit)', meta: opts.meta }, {});
 }
 
 /**

@@ -32,10 +32,12 @@ function makeFakeCap(responses = {}) {
   };
 }
 
-/** @param {{ match?: Function, salaryFloor?: number|null }} overrides */
+/** @param {{ match?: Function, salaryFloor?: number|null, submitResult?: any }} overrides */
 function makeCtx(overrides = {}) {
   /** @type {any[]} */
   const events = [];
+  /** @type {any[]} */
+  const submits = [];
   /** @type {any[]} */
   const credCalls = [];
   return {
@@ -54,7 +56,9 @@ function makeCtx(overrides = {}) {
       generatePassword: () => { credCalls.push(['generatePassword']); return 'zz-generated'; },
     },
     log: (f) => events.push(f),
-    recordSubmitRequestSent: async () => { events.push({ evt: 'submit_request_sent' }); },
+    // Unattended submit spec items 1-4: the adapter's ONLY path to Submit (src/apply/unattended-submit.js).
+    submit: async (/** @type {any} */ o) => { submits.push(o); return overrides.submitResult ?? { outcome: 'submitted', confirmationRef: null }; },
+    _submits: submits,
     _events: events,
     _credCalls: credCalls,
   };
@@ -63,19 +67,21 @@ function makeCtx(overrides = {}) {
 const EL = { tagName: 'div', text: '' };
 
 describe('icims adapter', () => {
-  test('happy path: fills profile, uploads, no custom fields, submits, confirms by heading -> submitted', async () => {
+  test('happy path: fills profile, uploads, no custom fields, hands Submit to ctx.submit -> submitted', async () => {
     const cap = makeFakeCap({
       waitFor: {
         [SELECTORS.pageProbe]: EL,
         [SELECTORS.submit]: { tagName: 'button', text: 'Submit' },
-        [SELECTORS.confirmationHeading]: { tagName: 'h1', text: 'Thank you for applying!' },
       },
     });
     const ctx = makeCtx();
     const result = await icims.run(cap, ctx);
     assert.equal(result.outcome, 'submitted');
     assert.ok(cap.calls.some((c) => c[0] === 'upload'));
-    assert.ok(ctx._events.some((e) => e.evt === 'submit_request_sent'));
+    assert.equal(ctx._submits.length, 1);
+    assert.equal(ctx._submits[0].submitSelector, SELECTORS.submit);
+    assert.equal(ctx._submits[0].scopeSelector, SELECTORS.pageProbe);
+    assert.equal(cap.calls.some((c) => c[0] === 'click' && c[1] === SELECTORS.submit), false, 'the adapter never clicks Submit itself');
     assert.equal(ctx._credCalls.length, 0, 'this adapter never reads or writes credentials on a happy path');
   });
 
@@ -127,7 +133,6 @@ describe('icims adapter', () => {
       waitFor: {
         [SELECTORS.pageProbe]: EL,
         [SELECTORS.submit]: { tagName: 'button', text: 'Submit' },
-        [SELECTORS.confirmationHeading]: { tagName: 'h1', text: 'Application received' },
       },
     });
     const ctx = makeCtx();
@@ -181,7 +186,6 @@ describe('icims adapter', () => {
         [SELECTORS.pageProbe]: EL,
         [SELECTORS.customFields]: [{ tagName: 'input', type: 'text', id: 'salary', name: 'salary', text: 'Desired annual salary', value: null, required: true, options: null }],
         [SELECTORS.submit]: { tagName: 'button', text: 'Submit' },
-        [SELECTORS.confirmationHeading]: { tagName: 'h1', text: 'Thank you for applying!' },
       },
     });
     const ctx = makeCtx({ salaryFloor: 150000 });
@@ -190,21 +194,21 @@ describe('icims adapter', () => {
     assert.ok(cap.calls.some((c) => c[0] === 'fill' && c[1] === '#salary' && c[2] === '150000'));
   });
 
-  test('submitted but no confirmation heading seen -> needs_human (post_submit_uncertain), after recording submit_request_sent', async () => {
+  test('the gate verdict (an unconfirmed submit) comes back from ctx.submit unchanged', async () => {
     const cap = makeFakeCap({ waitFor: { [SELECTORS.pageProbe]: EL, [SELECTORS.submit]: { tagName: 'button', text: 'Submit' } } });
-    const ctx = makeCtx();
+    const unconfirmed = { outcome: 'needs_human', pendingQuestion: { kind: 'submit_unconfirmed', label: 'x' } };
+    const ctx = makeCtx({ submitResult: unconfirmed });
     const result = await icims.run(cap, ctx);
-    assert.equal(result.outcome, 'needs_human');
-    assert.equal(result.pendingQuestion.kind, 'post_submit_uncertain');
-    assert.ok(ctx._events.some((e) => e.evt === 'submit_request_sent'));
+    assert.deepEqual(result, unconfirmed);
   });
 
-  test('no submit control found -> needs_human (unrecognized_page), never guesses a submit', async () => {
+  test('no submit control: the adapter never clicks or guesses; the gate review check decides (it parks on zero controls)', async () => {
     const cap = makeFakeCap({ waitFor: { [SELECTORS.pageProbe]: EL } });
-    const ctx = makeCtx();
+    const parked = { outcome: 'needs_human', pendingQuestion: { kind: 'submit_gate', label: 'x', gate_reason: 'review_unverified', gate_detail: 'submit_controls_0' } };
+    const ctx = makeCtx({ submitResult: parked });
     const result = await icims.run(cap, ctx);
-    assert.equal(result.outcome, 'needs_human');
-    assert.equal(result.pendingQuestion.kind, 'unrecognized_page');
+    assert.deepEqual(result, parked);
+    assert.equal(cap.calls.some((c) => c[0] === 'click'), false);
   });
 
   test('uploadHosts is empty and requires is empty (no account, no widened upload host)', () => {

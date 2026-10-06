@@ -27,7 +27,7 @@ describe('collectAutoApply: no run today', () => {
     assert.equal(queried, false);
   });
 
-  test('a summary with no results/applied at all still renders zeros; the only query is the needs_human snapshot', async () => {
+  test('a summary with no results/applied at all still renders zeros; the only queries are the DB snapshots', async () => {
     let queryCount = 0;
     const client = { async query() { queryCount++; return { rows: [] }; } };
     const data = await collectAutoApply(client, { select: { results: [] }, applied: [] });
@@ -39,8 +39,11 @@ describe('collectAutoApply: no run today', () => {
     assert.deepEqual(data.needsHuman, []);
     assert.deepEqual(data.failed, []);
     // No unresolved ids -> no listing lookup query; the needs_human and failed itemizations (spec section
-    // 3, single-path-chrome fix) always run regardless, so exactly two queries fire, never zero.
-    assert.equal(queryCount, 2);
+    // 3, single-path-chrome fix) and the unattended-submit DB submissions (submitted in the last 24h, and
+    // unconfirmed submits; spec item 7) always run regardless, so exactly four queries fire, never zero.
+    assert.equal(queryCount, 4);
+    assert.deepEqual(data.submittedDb, []);
+    assert.deepEqual(data.submitUnconfirmed, []);
   });
 });
 

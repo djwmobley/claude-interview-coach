@@ -1,0 +1,17 @@
+<!doctype html>
+<html><head><meta charset="utf-8"><title>Greenhouse pre-existing thank-you fixture</title></head>
+<body>
+<h2>Thank you for applying! We review every application.</h2>
+<form id="application_form" onsubmit="return false;">
+  <label for="first_name">First Name *</label><input id="first_name" name="job_application[first_name]" required>
+  <label for="last_name">Last Name *</label><input id="last_name" name="job_application[last_name]" required>
+  <label for="email">Email *</label><input id="email" type="email" name="job_application[email]" required>
+  <label for="phone">Phone</label><input id="phone" type="tel" name="job_application[phone]">
+  <label for="resume_upload_input">Resume *</label><input id="resume_upload_input" type="file" name="job_application[resume]" required>
+  <button id="submit_app" type="submit">Submit Application</button>
+</form>
+<script>
+  window.__clicks = 0;
+  document.getElementById('submit_app').addEventListener('click', function () { window.__clicks += 1; });
+</script>
+</body></html>

@@ -106,6 +106,8 @@ function parkedRow(row, onChanged) {
       h('span', { className: 'approval-row__age', text: `Updated ${relativeTime(row.updated_at)}` }),
     ]),
     h('p', { className: 'approval-row__parked-reason', text: reason }),
+    // Unattended submit spec v2 C8: the worker already sent this application's final Submit.
+    row.submit_sent === true ? h('p', { className: 'approval-row__parked-reason', text: 'Already submitted (unconfirmed).' }) : null,
     // Resume gate R1: Resume only for kinds the server resumes; it carries the partial-draft warning.
     // A row with the warning but no Resume (e.g. a question) still shows it here.
     resumeButtonVisible(row)

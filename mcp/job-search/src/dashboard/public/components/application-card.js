@@ -409,7 +409,13 @@ export function applicationCard(opts) {
     const resumeEl = resumeButtonVisible(application)
       ? resumeControl(application.id, { partialDraft: application.partial_draft === true, onChanged: opts.onChanged })
       : (application.partial_draft === true ? partialDraftWarning() : null);
-    needsHumanPanel = h('div', { className: 'application-card__needs-human' }, [screenshotEl, kindPanel, resumeEl, appliedByHandButton]);
+    // Unattended submit spec v2 C8: once the worker sent the final Submit (any attempt), "I applied by
+    // hand" is refused by the server; the card says what is true instead.
+    const submitSent = application.submit_sent === true || pq.kind === 'submit_unconfirmed' || pq.kind === 'submit_error';
+    const handEl = submitSent
+      ? h('p', { className: 'application-card__note', text: 'Already submitted (unconfirmed). A matching confirmation email moves it to confirmed.' })
+      : appliedByHandButton;
+    needsHumanPanel = h('div', { className: 'application-card__needs-human' }, [screenshotEl, kindPanel, resumeEl, handEl]);
   }
 
   const failedPanel = application.state === 'failed'

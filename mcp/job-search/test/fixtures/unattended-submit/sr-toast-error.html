@@ -1,0 +1,30 @@
+<!doctype html>
+<html><head><meta charset="utf-8"><title>SmartRecruiters toast then error fixture</title></head>
+<body>
+<form id="apply-form" onsubmit="return false;">
+  <label for="firstName">First name *</label><input id="firstName" name="firstName" required>
+  <label for="lastName">Last name *</label><input id="lastName" name="lastName" required>
+  <label for="email">Email *</label><input id="email" name="email" required>
+  <label for="phoneNumber">Phone</label><input id="phoneNumber" name="phoneNumber">
+  <label for="resume">Resume *</label><input id="resume" type="file" name="resume" required>
+  <button id="apply-button" type="submit">Submit</button>
+</form>
+<div id="toast-host"></div>
+<script>
+  window.__clicks = 0;
+  document.getElementById('apply-button').addEventListener('click', function () {
+    window.__clicks += 1;
+    var host = document.getElementById('toast-host');
+    var toast = document.createElement('div');
+    toast.setAttribute('role', 'status');
+    toast.textContent = 'Application submitted';
+    host.appendChild(toast);
+    setTimeout(function () {
+      var err = document.createElement('div');
+      err.className = 'error-message';
+      err.textContent = 'Upload failed, please try again';
+      host.appendChild(err);
+    }, 120);
+  });
+</script>
+</body></html>

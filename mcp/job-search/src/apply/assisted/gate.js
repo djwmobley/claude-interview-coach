@@ -23,7 +23,9 @@ export function workdayAssistedConfig(config) {
  */
 export async function workdayStartGate(client, o) {
   const cfg = workdayAssistedConfig(o.config);
-  if (cfg.submitMode !== 'assisted') return { ok: false, reason: 'submit_mode_unsupported' };
+  // Total: the two known modes run (the model fills either way; 'unattended' only changes what the worker
+  // does AFTER a verified finish, behind src/apply/submit-gate.js); anything else is refused.
+  if (cfg.submitMode !== 'assisted' && cfg.submitMode !== 'unattended') return { ok: false, reason: 'submit_mode_unsupported' };
   const breaker = await breakerStatus(client, o.now, 'workday');
   if (breaker.tripped) return { ok: false, reason: 'breaker' };
   if (await hasAssistedInFlight(client, 'workday')) return { ok: false, reason: 'assisted_in_flight' };

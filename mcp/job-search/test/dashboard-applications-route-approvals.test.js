@@ -16,7 +16,7 @@ import { ensureAuxSchema } from '../src/core/schema.js';
 import { withClient, closePool } from '../src/core/db.js';
 import { createDashboardServer } from '../src/dashboard/server.js';
 import { createCalendarCache } from '../src/dashboard/calendar-cache.js';
-import { APPLICATION_STATES } from '../src/core/applications.js';
+import { APPLICATION_STATES, recordSubmitRequestSent } from '../src/core/applications.js';
 
 const CO = `ZZ-TEST-APPROVALSROUTE-${process.pid}`;
 /** @type {pg.Client} */
@@ -299,5 +299,46 @@ describe('GET /api/applications: row shape, blocked/sibling_active flags, cap an
     assert.ok(r.json.total >= 1);
     assert.ok(r.json.rows.length <= 200);
     assert.ok(r.json.total >= r.json.rows.length);
+  });
+});
+
+describe('unattended submit on the dashboard (spec item 7, v2 C8)', () => {
+  test('GET /api/applications carries submit_sent: true only for a row with a submit marker', async () => {
+    const a = await seedListing();
+    const sentId = await seedApplication(a, { state: 'needs_human', pendingQuestion: { kind: 'submit_unconfirmed', label: 'x' } });
+    await recordSubmitRequestSent(verifyClient, sentId);
+    const b = await seedListing();
+    const plainId = await seedApplication(b, { state: 'needs_human', pendingQuestion: { kind: 'captcha', label: 'x' } });
+    const r = await get('/api/applications?state=needs_human');
+    assert.equal(r.json.rows.find((x) => x.application_id === sentId).submit_sent, true);
+    assert.equal(r.json.rows.find((x) => x.application_id === plainId).submit_sent, false);
+  });
+
+  test('"I applied by hand" is refused for a row the worker already submitted (already submitted, unconfirmed)', async () => {
+    const a = await seedListing();
+    const id = await seedApplication(a, { state: 'needs_human', pendingQuestion: { kind: 'submit_unconfirmed', label: 'x' } });
+    await recordSubmitRequestSent(verifyClient, id);
+    const res = await fetch(`http://127.0.0.1:${port}/api/applications/${id}/applied-by-hand`, { method: 'POST', headers: { 'content-type': 'application/json' }, body: '{}' });
+    assert.equal(res.status >= 400, true);
+    const body = await res.json();
+    assert.match(String(body.message), /Already submitted \(unconfirmed\)/);
+    const row = (await verifyClient.query('SELECT state FROM ic_job_applications WHERE id = $1', [id])).rows[0];
+    assert.equal(row.state, 'needs_human');
+  });
+
+  test('GET /api/submissions reads submissions from the DB (last 24h) and lists unconfirmed submits separately', async () => {
+    const a = await seedListing();
+    const submittedId = await seedApplication(a, { state: 'submitted' });
+    await verifyClient.query(`UPDATE ic_job_applications SET submitted_at = now() - interval '2 hours' WHERE id = $1`, [submittedId]);
+    const b = await seedListing();
+    const oldId = await seedApplication(b, { state: 'submitted' });
+    await verifyClient.query(`UPDATE ic_job_applications SET submitted_at = now() - interval '3 days' WHERE id = $1`, [oldId]);
+    const c = await seedListing();
+    const unconfirmedId = await seedApplication(c, { state: 'needs_human', pendingQuestion: { kind: 'submit_unconfirmed', label: 'Submitted, unconfirmed.' } });
+    const r = await get('/api/submissions');
+    assert.equal(r.status, 200);
+    assert.ok(r.json.submitted.some((x) => x.applicationId === submittedId));
+    assert.equal(r.json.submitted.some((x) => x.applicationId === oldId), false);
+    assert.ok(r.json.unconfirmed.some((x) => x.applicationId === unconfirmedId));
   });
 });

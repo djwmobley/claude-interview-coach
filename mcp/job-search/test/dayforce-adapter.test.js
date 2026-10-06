@@ -35,11 +35,13 @@ function makeFakeCap(responses = {}) {
 }
 
 /**
- * @param {{ match?: Function, credential?: { username: string, password: string } | null, salaryFloor?: number|null }} overrides
+ * @param {{ match?: Function, credential?: { username: string, password: string } | null, salaryFloor?: number|null, submitResult?: any }} overrides
  */
 function makeCtx(overrides = {}) {
   /** @type {any[]} */
   const events = [];
+  /** @type {any[]} */
+  const submits = [];
   /** @type {any[]} */
   const credCalls = [];
   return {
@@ -52,7 +54,9 @@ function makeCtx(overrides = {}) {
       bank: { meta: { salary_floor: overrides.salaryFloor === undefined ? null : overrides.salaryFloor } },
     },
     log: (f) => events.push(f),
-    recordSubmitRequestSent: async () => { events.push({ evt: 'submit_request_sent' }); },
+    // Unattended submit spec items 1-4: the adapter's ONLY path to Submit (src/apply/unattended-submit.js).
+    submit: async (/** @type {any} */ o) => { submits.push(o); return overrides.submitResult ?? { outcome: 'submitted', confirmationRef: null }; },
+    _submits: submits,
     credentials: {
       target: 'ic-jobsearch/acme.dayforcehcm.com',
       read: async () => { credCalls.push(['read']); return overrides.credential === undefined ? null : overrides.credential; },
@@ -67,14 +71,13 @@ function makeCtx(overrides = {}) {
 const EL = { tagName: 'div', text: '' };
 
 describe('dayforce adapter', () => {
-  test('existing credential: signs in, fills the single-step form, uploads, submits, confirms -> submitted', async () => {
+  test('existing credential: signs in, fills the single-step form, uploads, hands Submit to ctx.submit -> submitted', async () => {
     const cap = makeFakeCap({
       waitFor: {
         [SELECTORS.authGate]: EL,
         [SELECTORS.stepProbe]: EL,
         [SELECTORS.resumeUpload]: { tagName: 'input', text: '' },
         [SELECTORS.submit]: { tagName: 'button', text: 'Submit' },
-        [SELECTORS.confirmationHeading]: { tagName: 'h1', text: 'Thank you for applying!' },
       },
     });
     const ctx = makeCtx({ credential: { username: 'jordan@example.com', password: 'stored-pw' } });
@@ -84,7 +87,10 @@ describe('dayforce adapter', () => {
     assert.ok(cap.calls.some((c) => c[0] === 'fill' && c[1] === SELECTORS.signInEmail && c[2] === 'jordan@example.com'));
     assert.ok(cap.calls.some((c) => c[0] === 'click' && c[1] === SELECTORS.signInSubmit));
     assert.ok(cap.calls.some((c) => c[0] === 'upload'));
-    assert.ok(ctx._events.some((e) => e.evt === 'submit_request_sent'));
+    assert.equal(ctx._submits.length, 1);
+    assert.equal(ctx._submits[0].submitSelector, SELECTORS.submit);
+    assert.equal(ctx._submits[0].scopeSelector, SELECTORS.stepProbe);
+    assert.equal(cap.calls.some((c) => c[0] === 'click' && c[1] === SELECTORS.submit), false, 'the adapter never clicks Submit itself');
   });
 
   test('no stored credential -> needs_human (credential), never registers an account, never calls write or generatePassword', async () => {
@@ -159,7 +165,6 @@ describe('dayforce adapter', () => {
         [SELECTORS.stepProbe]: EL,
         [SELECTORS.customFields]: [{ tagName: 'input', type: 'text', id: 'q1', name: 'q1', text: 'What is your work authorization status?', value: null, required: true, options: null }],
         [SELECTORS.submit]: { tagName: 'button', text: 'Submit' },
-        [SELECTORS.confirmationHeading]: { tagName: 'h1', text: 'Thank you for applying!' },
       },
     });
     const ctx = makeCtx({
@@ -210,7 +215,6 @@ describe('dayforce adapter', () => {
         [SELECTORS.stepProbe]: EL,
         [SELECTORS.customFields]: [{ tagName: 'input', type: 'text', id: 'salary', name: 'salary', text: 'Desired annual salary', value: null, required: true, options: null }],
         [SELECTORS.submit]: { tagName: 'button', text: 'Submit' },
-        [SELECTORS.confirmationHeading]: { tagName: 'h1', text: 'Thank you for applying!' },
       },
     });
     const ctx = makeCtx({ credential: { username: 'jordan@example.com', password: 'stored-pw' }, salaryFloor: 150000 });
@@ -250,13 +254,12 @@ describe('dayforce adapter', () => {
     assert.equal(stepProbeCount, MAX_STEPS, `must probe exactly MAX_STEPS (${MAX_STEPS}) times, never more`);
   });
 
-  test('submitted but no confirmation heading seen -> needs_human (post_submit_uncertain), after recording submit_request_sent', async () => {
+  test('the gate verdict (an unconfirmed submit) comes back from ctx.submit unchanged', async () => {
     const cap = makeFakeCap({ waitFor: { [SELECTORS.authGate]: EL, [SELECTORS.stepProbe]: EL, [SELECTORS.submit]: { tagName: 'button', text: 'Submit' } } });
-    const ctx = makeCtx({ credential: { username: 'jordan@example.com', password: 'stored-pw' } });
+    const unconfirmed = { outcome: 'needs_human', pendingQuestion: { kind: 'submit_unconfirmed', label: 'x' } };
+    const ctx = makeCtx({ credential: { username: 'jordan@example.com', password: 'stored-pw' }, submitResult: unconfirmed });
     const result = await dayforce.run(cap, ctx);
-    assert.equal(result.outcome, 'needs_human');
-    assert.equal(result.pendingQuestion.kind, 'post_submit_uncertain');
-    assert.ok(ctx._events.some((e) => e.evt === 'submit_request_sent'));
+    assert.deepEqual(result, unconfirmed);
   });
 
   test('uploadHosts is empty (the tenant host itself already covers this ATS, per session.js route policy)', () => {

@@ -13,6 +13,12 @@
  * The ONLY constructor callsite for src/apply/apply-capability.js's makeApplyCapability in this whole
  * package (test/apply-lint.test.js's lint test enforces this with a grep-based check across src/).
  *
+ * Unattended submit (spec v1 items 1-4, v2 addendum C1-C9): a form adapter reaches its final Submit only
+ * through ctx.submit, and Workday only through the scripted post-finish step (workdaySubmitStep); both
+ * run src/apply/unattended-submit.js's runGuardedSubmit (click-time gate, atomic marker, single click,
+ * confirmation). The run holds a per-application advisory lock throughout, so reconcileStale never treats
+ * a live run as stale.
+ *
  * Advisory lock: reuses scan's own LOCK_KEY (730193001, src/core/scan-run.js) VERBATIM, on its own
  * dedicated connection, so a scan and an apply run never share the scan Chrome concurrently -- Postgres
  * advisory locks are per-key, not per-module, so simply importing the same numeric constant is what makes
@@ -26,9 +32,11 @@ import { connectDedicated as defaultConnectDedicated, withTransaction } from '..
 import { errFields } from '../core/errors.js';
 import { log as defaultLog } from '../core/logger.js';
 import {
-  getApplication, transition, transitionUnwrapped, markSubmitted, recordSubmitRequestSent, hasSubmitRequestSentThisAttempt,
-  hasAssistedNextClickEver, assistedPartialQuestion,
+  getApplication, transition, transitionUnwrapped, markSubmitted, hasSubmitRequestSentEver,
+  hasAssistedNextClickEver, assistedPartialQuestion, submitUnconfirmedQuestion, APPLICATION_LOCK_NAMESPACE,
 } from '../core/applications.js';
+import { runGuardedSubmit, clickTimeExclusionCheck } from './unattended-submit.js';
+import { SUBMIT_GATE_KIND } from './submit-gate.js';
 import { classifyExclusion, loadExclusionConfig, walkDuplicateRoot } from './exclusions.js';
 import { resolveOutputPath } from '../core/documents.js';
 import { hostsForAts } from './ats-detect.js';
@@ -210,6 +218,14 @@ function hashLinkedFile(outputRoot, relPath) {
  * @property {typeof preSubmitExclusionRecheck} [preSubmitExclusionRecheck] test seam ONLY -- see
  *   preSubmitExclusionRecheck's own export for why a test suite with shared company/title fixtures across
  *   many unrelated test cases needs this. Never set by bin/apply.js or bin/auto-apply.js.
+ * @property {() => any} [loadFreshConfig] unattended submit (spec v2 C1): the config read AT CLICK TIME.
+ *   Default: a fresh, uncached loadConfig of the same config directory. Test seam.
+ * @property {(client: import('pg').ClientBase, app: any) => Promise<{ branch: string, reason?: string }>} [clickTimeExclusionCheck]
+ *   unattended submit (spec item 1, v2 C11): the exclusion verdict AT CLICK TIME. Default: the full
+ *   classifyExclusion with this application's own row excluded, against a fresh read of
+ *   config/apply-exclusions.json (or the exclusionConfig seam when a test set one). Test seam.
+ * @property {{ pollMs?: number, maxPolls?: number, settleMs?: number }} [submitTiming] confirmation poll
+ *   cadence after the click (src/apply/unattended-submit.js defaults). Test seam.
  */
 
 /**
@@ -246,16 +262,34 @@ export async function runApplyWorker(applicationId, deps = {}) {
   // the SAME path every run, by design: it is how a crashed run's own leftover page gets found and closed
   // by the NEXT run (session.js's reconcileTargets/writeTargetMarker).
   const targetMarkerFile = deps.targetMarkerFile ?? applyTargetMarkerPath(env.JOBSEARCH_LOG_DIR);
+  // Unattended submit (spec v2 C1): the click-time gate reads config and the exclusion list FRESH from
+  // disk, never this run's start-of-run copies.
+  const loadFreshConfig = deps.loadFreshConfig ?? (() => loadConfig({ fresh: true, dir: config.configDir }));
+  const runClickTimeExclusion = deps.clickTimeExclusionCheck
+    ?? ((/** @type {import('pg').ClientBase} */ c, /** @type {any} */ a) => clickTimeExclusionCheck(c, a, deps.exclusionConfig ?? loadExclusionConfig(config.configDir)));
+  const submitTiming = deps.submitTiming ?? {};
 
   const client = await connectDedicated();
   let locked = false;
+  let appLocked = false;
   /** @type {import('../browser/session.js').Session|null} */
   let session = null;
+  /** The Workday prelude tab's capability, for the scripted post-finish submit step only. @type {any} */
+  let preludeCap = null;
   try {
     const lockRes = await client.query('SELECT pg_try_advisory_lock($1::bigint) AS ok', [LOCK_KEY]);
     locked = Boolean(lockRes.rows[0].ok);
     if (!locked) {
       log({ evt: 'apply_locked', application_id: applicationId });
+      return { ok: false, status: 'locked' };
+    }
+    // Spec v2 C3/C9: the per-application lock, held for the whole run. The submit gate re-takes it
+    // (re-entrant on this session) across check, marker insert, and click; reconcileStale skips a row
+    // whose lock is held, so a live run is never reconciled as stale.
+    const appLockRes = await client.query('SELECT pg_try_advisory_lock($1::int, $2::int) AS ok', [APPLICATION_LOCK_NAMESPACE, applicationId]);
+    appLocked = Boolean(appLockRes.rows[0].ok);
+    if (!appLocked) {
+      log({ evt: 'apply_locked', application_id: applicationId, scope: 'application' });
       return { ok: false, status: 'locked' };
     }
 
@@ -366,6 +400,8 @@ export async function runApplyWorker(applicationId, deps = {}) {
           prelude: () => runPrelude({
             client, app, controller, adapter: adapters[app.ats_type], outputRoot, bank, env, config, connectSession, progress, log, lookup: deps.lookup, targetMarkerFile, credentials, gmailVerify, sleep,
           }),
+          // Unattended submit (spec item 2): the scripted post-finish step. The model never reaches it.
+          submitStep: (m) => workdaySubmitStep({ client, app, ledger: m.ledger, prefilledUnledgered: m.prefilledUnledgered }),
           // The scripted prelude has already used part of the worker's budget; the model gets what is left.
           runner: workdayDeps.runner ?? createAssistedRunner({
             profile: assistedProfile, env, logDir: env.JOBSEARCH_LOG_DIR, repoRoot: repoRoot(), spawn: nodeSpawn,
@@ -385,13 +421,14 @@ export async function runApplyWorker(applicationId, deps = {}) {
         })
         : await runOneApplication({
           client, app, controller, adapters, outputRoot, bank, env, config, connectSession, progress, log, lookup: deps.lookup, targetMarkerFile, credentials, gmailVerify, sleep,
+          loadFreshConfig, clickTimeExclusionCheck: runClickTimeExclusion, submitTiming,
         });
     } catch (err) {
       clearTimeout(timeout);
       // "no assume-ok path": any throw the adapter/browser layer raises is a failure UNLESS the durable
-      // submit_request_sent marker already fired for this attempt, in which case a duplicate-submission
-      // guard applies (amended spec) and the application parks in needs_human instead.
-      const sent = await hasSubmitRequestSentThisAttempt(client, applicationId);
+      // submit_request_sent marker exists (spec v2 C2: from ANY attempt), in which case a duplicate-
+      // submission guard applies and the application parks as submit_unconfirmed instead.
+      const sent = await hasSubmitRequestSentEver(client, applicationId);
       const f = errFields(err);
       log({ evt: 'apply_failed', application_id: applicationId, submit_request_sent: sent, ...f });
       // A10: a run that clicked Next may have left a saved draft at the ATS; a human decides the retry.
@@ -405,12 +442,8 @@ export async function runApplyWorker(applicationId, deps = {}) {
       }
       if (sent) {
         await transition(client, applicationId, 'needs_human', {
-          actor: 'apply', note: 'submit request was sent but the run then failed; verify manually before retrying', error: f.err_message,
-          pending_question: {
-            kind: 'post_submit_uncertain',
-            label: 'The submit request was sent but the run failed before confirming completion. Check the site or your email for a confirmation before retrying, to avoid a duplicate application.',
-            page_url: app.apply_url,
-          },
+          actor: 'apply', note: 'submit request was sent but the run then failed; submit unconfirmed, never retried', error: f.err_message,
+          pending_question: submitUnconfirmedQuestion(app.apply_url ?? null, 'the run failed after the submit marker'),
         });
         return { ok: true, status: 'needs_human' };
       }
@@ -457,6 +490,13 @@ export async function runApplyWorker(applicationId, deps = {}) {
         /* ignore */
       }
     }
+    if (appLocked) {
+      try {
+        await client.query('SELECT pg_advisory_unlock($1::int, $2::int)', [APPLICATION_LOCK_NAMESPACE, applicationId]);
+      } catch {
+        /* connection gone: the lock dies with it */
+      }
+    }
     if (locked) {
       try {
         await client.query('SELECT pg_advisory_unlock($1::bigint)', [LOCK_KEY]);
@@ -472,7 +512,7 @@ export async function runApplyWorker(applicationId, deps = {}) {
   }
 
   /**
-   * @param {{ client: import('pg').Client, app: any, controller: AbortController, adapters: Record<string, any>, outputRoot: string, bank: import('./answers.js').AnswerBank, env: any, config: any, connectSession: typeof defaultConnectSession, progress: (f: any) => void, log: (f: any) => void, lookup?: import('../core/urlguard.js').Lookup, targetMarkerFile?: string, credentials: WorkerDeps['credentials'], gmailVerify: WorkerDeps['gmailVerify'], sleep: WorkerDeps['sleep'] }} p
+   * @param {{ client: import('pg').Client, app: any, controller: AbortController, adapters: Record<string, any>, outputRoot: string, bank: import('./answers.js').AnswerBank, env: any, config: any, connectSession: typeof defaultConnectSession, progress: (f: any) => void, log: (f: any) => void, lookup?: import('../core/urlguard.js').Lookup, targetMarkerFile?: string, credentials: WorkerDeps['credentials'], gmailVerify: WorkerDeps['gmailVerify'], sleep: (ms: number) => Promise<void>, loadFreshConfig: () => any, clickTimeExclusionCheck: (client: import('pg').ClientBase, app: any) => Promise<{ branch: string, reason?: string }>, submitTiming: { pollMs?: number, maxPolls?: number, settleMs?: number } }} p
    */
   async function runOneApplication(p) {
     const { client: c, app, controller, adapters: adapterRegistry, outputRoot: outRoot, bank: rawBank, env: e, config: cfg, connectSession: connectSess, progress: prog, log: lg } = p;
@@ -538,6 +578,8 @@ export async function runApplyWorker(applicationId, deps = {}) {
       documents,
       profile: {
         email: (b.facts.get('email')?.value) ?? app.account_email,
+        // The ledger source of the email value (spec item 1: contact data or the account email).
+        emailSource: b.facts.get('email')?.value ? 'contact' : 'account_email',
         fullName: (b.facts.get('full_name')?.value) ?? null,
         phone: (b.facts.get('phone')?.value) ?? null,
       },
@@ -548,10 +590,15 @@ export async function runApplyWorker(applicationId, deps = {}) {
       signal: controller.signal,
       log: (/** @type {any} */ f) => lg({ application_id: app.id, ...f }),
       progress: (/** @type {any} */ f) => prog({ applicationId: app.id, ...f }),
-      recordSubmitRequestSent: async () => {
-        await recordSubmitRequestSent(c, app.id);
-        lg({ evt: 'apply_submit_request_sent', application_id: app.id });
-      },
+      // Unattended submit (spec items 1-4, v2 C1-C6): the ONLY way a form adapter reaches its final Submit.
+      // There is no other submit hook in ctx: the gate, the atomic marker, the single click, and the
+      // confirmation check cannot be skipped by an adapter.
+      submit: (/** @type {{ submitSelector: string, scopeSelector: string, ledger: any[] }} */ o) => runGuardedSubmit({
+        client: c, app, cap, mode: 'form', submitSelector: o.submitSelector, scopeSelector: o.scopeSelector, ledger: o.ledger,
+        loadConfig: p.loadFreshConfig, exclusionCheck: p.clickTimeExclusionCheck,
+        resumeHash: () => hashLinkedFile(outRoot, documents.resumePath),
+        sleep: p.sleep, log: (/** @type {any} */ f) => lg(f), ...p.submitTiming,
+      }),
       // apply pipeline slice 6: account-holding adapters (Workday) reach credentials and Gmail
       // verify-email ONLY through these two ctx members -- never by importing src/core/credentials.js or
       // src/apply/gmail-verify.js directly, mirroring how every adapter already reaches the browser only
@@ -567,6 +614,44 @@ export async function runApplyWorker(applicationId, deps = {}) {
     };
 
     return adapter.run(cap, ctx);
+  }
+
+  /**
+   * Workday unattended submit (spec item 2, v2 C4): runs after the model's VERIFIED finish, on the same tab,
+   * with the route policy still on. Reads config FRESH: submitMode other than 'unattended' (or an unreadable
+   * config) returns null, which keeps the assisted awaiting_submit hand-off unchanged. Otherwise the click
+   * goes through runGuardedSubmit's Workday mode (classifyStep 'review', verifyResumeCards, exactly one
+   * Submit control, no consent box or signature, the audit, the marker, the confirmation). A SOFT gate park
+   * (kill switch, ATS off, cap) also returns null, so Damian can still submit by hand; a HARD park (an
+   * exclusion, a drifted resume, a failed audit) is a needs_human outcome and the tab is closed.
+   * @param {{ client: import('pg').Client, app: any, ledger: any[], prefilledUnledgered: string[] }} s
+   */
+  async function workdaySubmitStep(s) {
+    /** @type {any} */
+    let fresh;
+    try {
+      fresh = loadFreshConfig();
+    } catch (err) {
+      log({ evt: 'workday_submit_config_unreadable', application_id: s.app.id, ...errFields(err) });
+      return null;
+    }
+    if (workdayAssistedConfig(fresh).submitMode !== 'unattended') return null;
+    if (!preludeCap) {
+      return { outcome: /** @type {const} */ ('needs_human'), clicked: false, pendingQuestion: { kind: SUBMIT_GATE_KIND, label: 'The Workday tab was not available to the submit step; nothing was submitted.', page_url: s.app.apply_url ?? null } };
+    }
+    const documents = await loadLinkedDocuments(s.client, s.app);
+    const r = await runGuardedSubmit({
+      client: s.client, app: s.app, cap: preludeCap, mode: 'workday', ledger: s.ledger, prefilledUnledgered: s.prefilledUnledgered,
+      expectedResume: documents.resumePath ? path.basename(documents.resumePath) : null,
+      loadConfig: () => fresh, exclusionCheck: runClickTimeExclusion,
+      resumeHash: () => hashLinkedFile(outputRoot, documents.resumePath),
+      sleep, log, ...submitTiming,
+    });
+    if (r.outcome === 'needs_human' && r.gate && r.gate.soft) {
+      log({ evt: 'workday_submit_soft_park', application_id: s.app.id, reason: r.gate.reason });
+      return null;
+    }
+    return r;
   }
 
   /**
@@ -629,8 +714,11 @@ export async function runApplyWorker(applicationId, deps = {}) {
     await page.goto(guarded.url.toString(), { waitUntil: 'domcontentloaded', timeout: 45000 });
 
     const cap = makeApplyCapability(page, { signal: controller.signal, applicationId: app.id, outputRoot: outRoot });
+    // Kept for the worker's own scripted post-finish submit step (workdaySubmitStep), never handed to
+    // prepare() or to the model.
+    preludeCap = cap;
     const b = p.bank;
-    // A15: no recordSubmitRequestSent here; prepare() has no path to a submit control.
+    // A15: no submit hook here; prepare() has no path to a submit control.
     const ctx = {
       applicationId: app.id,
       applyUrl: app.apply_url,

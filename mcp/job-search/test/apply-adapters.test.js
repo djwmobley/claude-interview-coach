@@ -39,10 +39,12 @@ function makeFakeCap(responses = {}) {
   };
 }
 
-/** @param {{ match?: Function, salaryFloor?: number|null }} overrides */
+/** @param {{ match?: Function, salaryFloor?: number|null, submitResult?: any }} overrides */
 function makeCtx(overrides = {}) {
   /** @type {any[]} */
   const events = [];
+  /** @type {any[]} */
+  const submits = [];
   return {
     applicationId: 1,
     applyUrl: 'https://boards.greenhouse.io/acme/jobs/12345',
@@ -53,37 +55,41 @@ function makeCtx(overrides = {}) {
       bank: { meta: { salary_floor: overrides.salaryFloor === undefined ? null : overrides.salaryFloor } },
     },
     log: (f) => events.push(f),
-    recordSubmitRequestSent: async () => { events.push({ evt: 'submit_request_sent' }); },
+    // Unattended submit spec items 1-4: the adapter's ONLY path to Submit. The gate, the marker, the
+    // click, and the confirmation are src/apply/unattended-submit.js's (tested against real DOM fixtures in
+    // test/unattended-submit-dom.test.js); here the fake records what the adapter handed it.
+    submit: async (/** @type {any} */ o) => { submits.push(o); return overrides.submitResult ?? { outcome: 'submitted', confirmationRef: null }; },
     _events: events,
+    _submits: submits,
   };
 }
 
 for (const [name, adapter, SEL] of [['greenhouse', greenhouse, GH_SEL], ['lever', lever, LV_SEL], ['smartrecruiters', smartrecruiters, SR_SEL]]) {
   describe(`${name} adapter`, () => {
-    test('happy path: fills, uploads, no custom fields, submits, confirms by heading -> submitted', async () => {
-      const cap = makeFakeCap({
-        waitFor: {
-          [SEL.formProbe]: { tagName: 'form', text: '' },
-          [SEL.confirmationHeading]: { tagName: 'h1', text: 'Thank you for applying!' },
-        },
-      });
+    test('happy path: fills, uploads, no custom fields, hands Submit to ctx.submit with its ledger, never clicks Submit itself', async () => {
+      const cap = makeFakeCap({ waitFor: { [SEL.formProbe]: { tagName: 'form', text: '' } } });
       const ctx = makeCtx();
       const result = await adapter.run(cap, ctx);
       assert.equal(result.outcome, 'submitted');
       assert.ok(cap.calls.some((c) => c[0] === 'upload'));
-      assert.ok(ctx._events.some((e) => e.evt === 'submit_request_sent'), 'submit_request_sent must fire before the submit click');
-      const submitSentIdx = ctx._events.findIndex((e) => e.evt === 'submit_request_sent');
-      const submitClickIdx = cap.calls.findIndex((c) => c[0] === 'click' && c[1] === SEL.submit);
-      assert.ok(submitClickIdx !== -1);
-      assert.ok(submitSentIdx !== -1);
+      assert.equal(cap.calls.some((c) => c[0] === 'click' && c[1] === SEL.submit), false, 'the adapter never clicks Submit; ctx.submit does');
+      assert.equal(ctx._submits.length, 1);
+      const handed = ctx._submits[0];
+      assert.equal(handed.submitSelector, SEL.submit);
+      assert.equal(handed.scopeSelector, SEL.formProbe);
+      const resume = handed.ledger.find((/** @type {any} */ e) => e.key === 'resume');
+      assert.deepEqual({ source: resume.source, controlType: resume.controlType, value: resume.value }, { source: 'document', controlType: 'file', value: 'resume.docx' });
+      const email = handed.ledger.find((/** @type {any} */ e) => e.key === 'email');
+      assert.deepEqual({ source: email.source, value: email.value, selector: email.selector }, { source: 'contact', value: 'jordan@example.com', selector: SEL.email });
     });
 
-    test('confirms by /thanks URL when no confirmation heading matches', async () => {
+    test('D1/D2: the adapter never judges confirmation itself (a stale /thanks applyUrl is not a confirmation); it returns the gate\'s verdict unchanged', async () => {
       const cap = makeFakeCap({ waitFor: { [SEL.formProbe]: { tagName: 'form', text: '' } } });
-      const ctx = makeCtx();
+      const unconfirmed = { outcome: 'needs_human', pendingQuestion: { kind: 'submit_unconfirmed', label: 'x' } };
+      const ctx = makeCtx({ submitResult: unconfirmed });
       ctx.applyUrl = 'https://boards.greenhouse.io/acme/jobs/12345/thanks';
       const result = await adapter.run(cap, ctx);
-      assert.equal(result.outcome, 'submitted');
+      assert.deepEqual(result, unconfirmed);
     });
 
     test('form never found -> needs_human (unrecognized_page), never attempts to fill or submit', async () => {
@@ -109,7 +115,7 @@ for (const [name, adapter, SEL] of [['greenhouse', greenhouse, GH_SEL], ['lever'
       assert.equal(result.pendingQuestion.kind, 'captcha');
       assert.ok(result.pendingQuestion.screenshot);
       assert.equal(cap.calls.some((c) => c[0] === 'click' && c[1] === SEL.submit), false);
-      assert.equal(ctx._events.some((e) => e.evt === 'submit_request_sent'), false);
+      assert.equal(ctx._submits.length, 0);
     });
 
     test('an unmatched REQUIRED custom question parks with a screenshot + pendingQuestion, never guesses', async () => {
@@ -126,6 +132,35 @@ for (const [name, adapter, SEL] of [['greenhouse', greenhouse, GH_SEL], ['lever'
       assert.equal(result.pendingQuestion.label, 'Why do you want to work here?');
       assert.ok(result.pendingQuestion.screenshot);
       assert.equal(cap.calls.some((c) => c[0] === 'click' && c[1] === SEL.submit), false, 'must never submit past an unanswered required question');
+      assert.equal(ctx._submits.length, 0);
+    });
+
+    test('D3: an UNLABELED required field parks; it is never skipped and counted as answered', async () => {
+      const cap = makeFakeCap({
+        waitFor: {
+          [SEL.formProbe]: { tagName: 'form', text: '' },
+          [SEL.customFields]: [{ tagName: 'input', type: 'text', id: 'q9', name: 'q9', text: '', value: null, required: true, options: null }],
+        },
+      });
+      const ctx = makeCtx({ match: () => ({ outcome: 'auto_answer', tier: 'learned', key: 'x', value: 'y', controlResult: { ok: true, text: 'y' } }) });
+      const result = await adapter.run(cap, ctx);
+      assert.equal(result.outcome, 'needs_human');
+      assert.match(result.pendingQuestion.label, /unlabeled required field/i);
+      assert.equal(ctx._submits.length, 0);
+    });
+
+    test('D3: a required field the matcher answered but that has no id to target parks; it is never counted as answered', async () => {
+      const cap = makeFakeCap({
+        waitFor: {
+          [SEL.formProbe]: { tagName: 'form', text: '' },
+          [SEL.customFields]: [{ tagName: 'input', type: 'text', id: null, name: 'q2', text: 'Years of experience?', value: null, required: true, options: null }],
+        },
+      });
+      const ctx = makeCtx({ match: () => ({ outcome: 'auto_answer', tier: 'learned', key: 'years', value: '20', controlResult: { ok: true, text: '20' } }) });
+      const result = await adapter.run(cap, ctx);
+      assert.equal(result.outcome, 'needs_human');
+      assert.equal(result.pendingQuestion.label, 'Years of experience?');
+      assert.equal(ctx._submits.length, 0);
     });
 
     test('an unmatched OPTIONAL custom question is skipped and logged, never blocks the run', async () => {
@@ -133,7 +168,6 @@ for (const [name, adapter, SEL] of [['greenhouse', greenhouse, GH_SEL], ['lever'
         waitFor: {
           [SEL.formProbe]: { tagName: 'form', text: '' },
           [SEL.customFields]: [{ tagName: 'input', type: 'text', id: 'q1', name: 'q1', text: 'Anything else?', value: null, required: false, options: null }],
-          [SEL.confirmationHeading]: { tagName: 'h1', text: 'Application received' },
         },
       });
       const ctx = makeCtx({ match: () => ({ outcome: 'needs_human_no_match', tier: 'none', key: null }) });
@@ -147,13 +181,14 @@ for (const [name, adapter, SEL] of [['greenhouse', greenhouse, GH_SEL], ['lever'
         waitFor: {
           [SEL.formProbe]: { tagName: 'form', text: '' },
           [SEL.customFields]: [{ tagName: 'input', type: 'text', id: 'q1', name: 'q1', text: 'What is your work authorization status?', value: null, required: true, options: null }],
-          [SEL.confirmationHeading]: { tagName: 'h1', text: 'Thank you for applying!' },
         },
       });
       const ctx = makeCtx({ match: () => ({ outcome: 'auto_answer', tier: 'learned', key: 'work_authorization', value: true, controlResult: { ok: true, text: 'Yes' } }) });
       const result = await adapter.run(cap, ctx);
       assert.equal(result.outcome, 'submitted');
       assert.ok(cap.calls.some((c) => c[0] === 'fill' && c[1] === '#q1' && c[2] === 'Yes'));
+      const entry = ctx._submits[0].ledger.find((/** @type {any} */ e) => e.selector === '#q1');
+      assert.deepEqual({ source: entry.source, bankKey: entry.bankKey, value: entry.value, label: entry.label }, { source: 'learned', bankKey: 'work_authorization', value: 'Yes', label: 'What is your work authorization status?' });
     });
 
     test('an unconfirmed resume upload (browser never registered a file) refuses to proceed to submit', async () => {
@@ -166,15 +201,15 @@ for (const [name, adapter, SEL] of [['greenhouse', greenhouse, GH_SEL], ['lever'
       assert.equal(result.outcome, 'needs_human');
       assert.equal(result.pendingQuestion.kind, 'unrecognized_page');
       assert.equal(cap.calls.some((c) => c[0] === 'click' && c[1] === SEL.submit), false);
+      assert.equal(ctx._submits.length, 0);
     });
 
-    test('submitted-but-unconfirmed (no heading match, no /thanks URL) parks as post_submit_uncertain, after recording submit_request_sent', async () => {
+    test('a gate park (no click) comes back from ctx.submit unchanged', async () => {
       const cap = makeFakeCap({ waitFor: { [SEL.formProbe]: { tagName: 'form', text: '' } } });
-      const ctx = makeCtx();
+      const parked = { outcome: 'needs_human', pendingQuestion: { kind: 'submit_gate', label: 'kill switch', gate_reason: 'kill_switch' } };
+      const ctx = makeCtx({ submitResult: parked });
       const result = await adapter.run(cap, ctx);
-      assert.equal(result.outcome, 'needs_human');
-      assert.equal(result.pendingQuestion.kind, 'post_submit_uncertain');
-      assert.ok(ctx._events.some((e) => e.evt === 'submit_request_sent'), 'the submit request must still have been recorded before this ambiguous outcome');
+      assert.deepEqual(result, parked);
     });
 
     test('uploadHosts declares only this ATS\'s own registered hosts (documented, unverified against live CDN behavior)', () => {
@@ -208,13 +243,14 @@ for (const [name, adapter, SEL] of [['greenhouse', greenhouse, GH_SEL], ['lever'
         waitFor: {
           [SEL.formProbe]: { tagName: 'form', text: '' },
           [SEL.customFields]: [{ tagName: 'input', type: 'text', id: 'salary', name: 'salary', text: 'Desired annual salary', value: null, required: true, options: null }],
-          [SEL.confirmationHeading]: { tagName: 'h1', text: 'Thank you for applying!' },
         },
       });
       const ctx = makeCtx({ salaryFloor: 150000 });
       const result = await adapter.run(cap, ctx);
       assert.equal(result.outcome, 'submitted');
       assert.ok(cap.calls.some((c) => c[0] === 'fill' && c[1] === '#salary' && c[2] === '150000'));
+      const entry = ctx._submits[0].ledger.find((/** @type {any} */ e) => e.selector === '#salary');
+      assert.equal(entry.source, 'salary_floor', 'the floor is the ledger source the click-time audit allows for a pay field only');
     });
   });
 }
