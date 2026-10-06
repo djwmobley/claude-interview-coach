@@ -996,6 +996,19 @@ describe('runSingleApplication: --application re-drive (submit-on-resume spec se
     assert.equal(row.state, 'needs_human', 'never transitioned when refused');
   });
 
+  test('chain-park spec D2: a legacy blocked resume-runner park is still refused, and the message points to dashboard Resume', async () => {
+    const listingId = await insertListing();
+    const appId = await seedApplication(listingId, { state: 'needs_human', pendingQuestion: { kind: 'blocked', label: 'Resume drafting stopped: docx_exists' } });
+    await client.query(`UPDATE ic_job_applications SET error = 'docx_exists' WHERE id = $1`, [appId]);
+    let resumeCalled = false;
+    const r = await runSingleApplication(appId, baseSingleDeps({ resumeRunner: { run: async () => { resumeCalled = true; return { ok: true }; } } }));
+    assert.equal(r.outcome, 'refused');
+    assert.equal(r.reason, 'needs_human_not_resume_failed');
+    assert.match(r.message, /Resume on the dashboard/);
+    assert.equal(resumeCalled, false);
+    assert.equal((await getApplication(client, appId)).state, 'needs_human');
+  });
+
   test('resume gate R3: an application an assisted run clicked Next on is never re-driven, in any re-drivable state', async () => {
     for (const [state, pq] of /** @type {[string, any][]} */ ([['needs_human', { kind: 'resume_failed', label: 'x' }], ['failed', null], ['drafting', null], ['docs_ready', null]])) {
       const listingId = await insertListing();

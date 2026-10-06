@@ -40,6 +40,8 @@ export function classify(status, body) {
   // caller may retry the same request with `override: true` in the body to proceed anyway.
   if (status === 409 && code === 'APPLY_EXCLUDED') return { kind: 'apply_excluded', branch: b.branch, reason: b.reason, message: b.message };
   if (status === 409 && code === 'APPLY_NEEDS_OVERRIDE') return { kind: 'apply_needs_override', branch: b.branch, reason: b.reason, message: b.message };
+  // Apply now refused while the resume runner is drafting another application (chain-park spec A2).
+  if (status === 409 && code === 'RESUME_RUNNER_BUSY') return { kind: 'resume_runner_busy', message: b.message };
   // Assisted LinkedIn Easy Apply card conflicts (routes/easy-apply.js, routes/applications.js): the server
   // message is shown as-is.
   if (status === 409 && (code === 'TAB_GONE' || code === 'NOT_AWAITING_SUBMIT' || code === 'USE_EASY_APPLY_SUBMITTED')) return { kind: 'easy_apply_conflict', code, message: b.message };

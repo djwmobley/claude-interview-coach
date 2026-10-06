@@ -545,6 +545,16 @@ describe('resumeButtonVisible (resume gate R1)', () => {
     assert.equal(resumeButtonVisible(null), false);
   });
 
+  test('a server-computed resume_eligible decides, so a legacy blocked resume-runner park shows Resume', () => {
+    assert.equal(resumeButtonVisible({ state: 'needs_human', pending_kind: 'blocked', resume_eligible: true }), true);
+    assert.equal(resumeButtonVisible({ state: 'needs_human', pending_question: { kind: 'blocked' }, resume_eligible: true }), true);
+    assert.equal(resumeButtonVisible({ state: 'needs_human', pending_kind: 'blocked', resume_eligible: false }), false);
+    assert.equal(resumeButtonVisible({ state: 'needs_human', pending_kind: 'captcha', resume_eligible: false }), false);
+    assert.equal(resumeButtonVisible({ state: 'docs_ready', pending_kind: 'blocked', resume_eligible: true }), false);
+    // Not a boolean: falls back to the kind list, never treated as eligible.
+    assert.equal(resumeButtonVisible({ state: 'needs_human', pending_kind: 'blocked', resume_eligible: 'yes' }), false);
+  });
+
   test('RESUME_BUTTON_KINDS and the card warning mirror the server exactly (drift guard)', () => {
     assert.deepEqual([...RESUME_BUTTON_KINDS].sort(), [...RESUME_APPROVE_KINDS, ...RESUME_REDRAFT_KINDS].sort());
     assert.equal(PARTIAL_DRAFT_CARD_WARNING, PARTIAL_DRAFT_WARNING);

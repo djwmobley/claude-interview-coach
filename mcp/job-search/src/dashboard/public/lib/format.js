@@ -468,6 +468,9 @@ export const RESUME_BUTTON_KINDS = Object.freeze(['unrecognized_page', 'captcha'
  */
 export function resumeButtonVisible(row) {
   if (!row || typeof row !== 'object' || row.state !== 'needs_human') return false;
+  // Chain-park spec D2: a server-computed resume_eligible (apply/resume-gate.js resumeEligible) decides
+  // when present, so a legacy blocked resume-runner park shows Resume. Absent: the kind list below.
+  if (typeof row.resume_eligible === 'boolean') return row.resume_eligible;
   const kind = row.pending_kind ?? (row.pending_question && typeof row.pending_question === 'object' ? row.pending_question.kind : null);
   return typeof kind === 'string' && RESUME_BUTTON_KINDS.includes(kind);
 }

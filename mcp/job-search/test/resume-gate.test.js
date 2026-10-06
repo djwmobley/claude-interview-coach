@@ -26,6 +26,7 @@ import {
 } from '../src/core/applications.js';
 import {
   classifyResume, resumeParkedApplication, resumeForCredential, RESUME_APPROVE_KINDS, RESUME_REFUSAL_REASONS,
+  RESUME_RUNNER_FAILURE_REASONS, RESUME_RUNNER_PARK_LABELS, isResumeRunnerPark, humanizeParkReason, resumeEligible,
 } from '../src/apply/resume-gate.js';
 import { issueLease } from '../src/core/easy-apply-state.js';
 
@@ -65,7 +66,7 @@ async function seedListing(o = {}) {
 /**
  * @param {string} state
  * @param {any} pq
- * @param {{ ats?: string, doc?: boolean, listingStatus?: string|null }} [o]
+ * @param {{ ats?: string, doc?: boolean, listingStatus?: string|null, error?: string|null }} [o]
  */
 async function seed(state, pq, o = {}) {
   const listingId = await seedListing({ status: o.listingStatus ?? null });
@@ -75,7 +76,7 @@ async function seed(state, pq, o = {}) {
     const d = await c.query(`INSERT INTO ic_job_documents (listing_id, kind, rel_path, actor) VALUES ($1, 'resume', $2, 'mcp') RETURNING id`, [listingId, `resumes/rg-${listingId}.docx`]);
     docId = Number(d.rows[0].id);
   }
-  await c.query('UPDATE ic_job_applications SET state = $2, pending_question = $3::jsonb, resume_doc_id = $4 WHERE id = $1', [a.id, state, pq ? JSON.stringify(pq) : null, docId]);
+  await c.query('UPDATE ic_job_applications SET state = $2, pending_question = $3::jsonb, resume_doc_id = $4, error = $5 WHERE id = $1', [a.id, state, pq ? JSON.stringify(pq) : null, docId, o.error ?? null]);
   return Number(a.id);
 }
 
@@ -152,7 +153,7 @@ describe('classifyResume(): total classification by pending_question.kind', () =
       unrecognized_page: 'approve', captcha: 'approve', assisted_stopped: 'approve', assisted_partial: 'approve', email_verification: 'approve',
       resume_failed: 'redraft',
       question: 'use_answer', credential: 'use_credential_save', awaiting_submit: 'submit_or_abandon', post_submit_uncertain: 'may_be_submitted',
-      blocked: 'unknown_kind', abandoned_tab: 'unknown_kind', easy_apply_stopped: 'unknown_kind', zz_never_seen: 'unknown_kind', '': 'unknown_kind',
+      blocked: 'blocked_not_resume_failure', abandoned_tab: 'unknown_kind', easy_apply_stopped: 'unknown_kind', zz_never_seen: 'unknown_kind', '': 'unknown_kind',
     };
     assert.deepEqual([...RESUME_APPROVE_KINDS].sort(), ['assisted_partial', 'assisted_stopped', 'captcha', 'email_verification', 'unrecognized_page']);
     for (const [kind, want] of Object.entries(expected)) {
@@ -326,6 +327,175 @@ describe('resumeParkedApplication(): the DB-backed gate', () => {
       const out = await resumeParkedApplication(c, li, { config: { ...ROOMY, autoApply: { ...ROOMY.autoApply, linkedin: { easyApplyDaily: 0 } } } });
       assert.equal(out.reason, 'budget_exhausted');
     });
+  });
+});
+
+describe('D2: resuming a legacy blocked resume-runner park', () => {
+  /** @param {unknown} error @param {unknown} label @param {string} [kind] */
+  const blockedRow = (error, label, kind = 'blocked') => ({ state: 'needs_human', error, pending_question: { kind, label }, resume_doc_id: null });
+  /** @param {any} row */
+  const verdictOf = (row) => {
+    const out = classifyResume(row, ctxOk);
+    return out.action === 'refuse' ? out.reason : out.action;
+  };
+
+  test('positive: docx_exists with the generic label redrafts', () => {
+    assert.equal(verdictOf(blockedRow('docx_exists', 'Resume drafting stopped: docx_exists')), 'redraft');
+  });
+
+  test('positive: the prefixed error form ("resume runner failed: <reason>") redrafts', () => {
+    assert.equal(verdictOf(blockedRow('resume runner failed: docx_exists', 'Resume drafting stopped: docx_exists')), 'redraft');
+  });
+
+  test('positive: every member of the set redrafts with its frozen label and with the generic label', () => {
+    for (const reason of RESUME_RUNNER_FAILURE_REASONS) {
+      assert.equal(verdictOf(blockedRow(reason, humanizeParkReason(reason))), 'redraft', `${reason} (humanized label)`);
+      assert.equal(verdictOf(blockedRow(reason, `Resume drafting stopped: ${reason}`)), 'redraft', `${reason} (generic label)`);
+    }
+  });
+
+  test('drift: the set covers every frozen label, holds the named extras, and every refusal reason has a message', () => {
+    for (const reason of Object.keys(RESUME_RUNNER_PARK_LABELS)) {
+      assert.ok(RESUME_RUNNER_FAILURE_REASONS.includes(reason), `set is missing frozen-label reason ${reason}`);
+      assert.equal(humanizeParkReason(reason), RESUME_RUNNER_PARK_LABELS[reason]);
+    }
+    for (const r of ['no_description', 'timeout', 'spawn_failed', 'listing_mismatch', 'model_asked', 'no_docs_ready', 'markdown_not_found',
+      'runner_unavailable', 'docx_exists', 'docx_locked', 'role_inclusion_conflict', 'resume_runner_busy', 'chain_error']) {
+      assert.ok(RESUME_RUNNER_FAILURE_REASONS.includes(r), r);
+    }
+    assert.ok(Object.isFrozen(RESUME_RUNNER_FAILURE_REASONS));
+    assert.ok(Object.isFrozen(RESUME_RUNNER_PARK_LABELS));
+    assert.ok(RESUME_REFUSAL_REASONS.includes('blocked_not_resume_failure'));
+    const refused = classifyResume(blockedRow('zz_unknown', 'Resume drafting stopped: zz_unknown'), ctxOk);
+    assert.ok(refused.action === 'refuse' && /resume/i.test(refused.message));
+  });
+
+  test('negative: an apply_exclusion park is refused even with a matching error and label', () => {
+    assert.equal(verdictOf(blockedRow('docx_exists', 'Resume drafting stopped: docx_exists', 'apply_exclusion')), 'unknown_kind');
+  });
+
+  test('negative: blocked with no error, a non-string error, or an unknown reason is refused blocked_not_resume_failure', () => {
+    assert.equal(verdictOf(blockedRow(null, 'Resume drafting stopped: docx_exists')), 'blocked_not_resume_failure');
+    assert.equal(verdictOf(blockedRow(undefined, 'Resume drafting stopped: docx_exists')), 'blocked_not_resume_failure');
+    assert.equal(verdictOf(blockedRow('', 'Resume drafting stopped: ')), 'blocked_not_resume_failure');
+    assert.equal(verdictOf(blockedRow(42, 'Resume drafting stopped: 42')), 'blocked_not_resume_failure');
+    assert.equal(verdictOf(blockedRow('zz_unknown', 'Resume drafting stopped: zz_unknown')), 'blocked_not_resume_failure');
+    assert.equal(verdictOf(blockedRow('unknown', 'Resume drafting stopped: unknown')), 'blocked_not_resume_failure');
+  });
+
+  test('adversarial: a set reason with a label that does not match is refused', () => {
+    assert.equal(verdictOf(blockedRow('docx_exists', 'company is missing from the listing')), 'blocked_not_resume_failure');
+    assert.equal(verdictOf(blockedRow('docx_exists', null)), 'blocked_not_resume_failure');
+    assert.equal(verdictOf(blockedRow('docx_exists', '')), 'blocked_not_resume_failure');
+    assert.equal(verdictOf(blockedRow('docx_exists', 'Resume drafting stopped: docx_locked')), 'blocked_not_resume_failure');
+    assert.equal(verdictOf(blockedRow('docx_exists', 'Resume drafting stopped: docx_exists; please check')), 'blocked_not_resume_failure');
+    assert.equal(verdictOf(blockedRow('timeout', RESUME_RUNNER_PARK_LABELS.no_description)), 'blocked_not_resume_failure');
+    assert.equal(verdictOf(blockedRow('docx_exists', 'Resume drafting failed: docx_exists')), 'blocked_not_resume_failure');
+  });
+
+  test('adversarial: an exclusion-shaped error with its own default label is refused', () => {
+    const err = 'company is missing from the listing';
+    assert.equal(verdictOf(blockedRow(err, humanizeParkReason(err))), 'blocked_not_resume_failure');
+    assert.equal(verdictOf(blockedRow(`resume runner failed: ${err}`, humanizeParkReason(err))), 'blocked_not_resume_failure');
+  });
+
+  test('adversarial: near-miss reasons are refused (suffix, prefix, embedded, double prefix)', () => {
+    for (const e of ['docx_exists_extra', 'xdocx_exists', 'docx exists', 'docx_exists, timeout', 'resume runner failed: resume runner failed: docx_exists']) {
+      assert.equal(verdictOf(blockedRow(e, `Resume drafting stopped: ${e}`)), 'blocked_not_resume_failure', e);
+    }
+  });
+
+  test('adversarial: mixed-case or padded reasons are normalized and redraft', () => {
+    assert.equal(verdictOf(blockedRow('  DOCX_EXISTS ', 'Resume drafting stopped: DOCX_EXISTS')), 'redraft');
+    assert.equal(verdictOf(blockedRow('Resume Runner Failed: Docx_Locked', 'Resume drafting stopped: docx_locked')), 'redraft');
+    assert.equal(verdictOf(blockedRow('timeout\n', `  ${RESUME_RUNNER_PARK_LABELS.timeout}  `)), 'redraft');
+  });
+
+  test('isResumeRunnerPark is false for any non-blocked kind and for malformed rows', () => {
+    assert.equal(isResumeRunnerPark(null), false);
+    assert.equal(isResumeRunnerPark({}), false);
+    assert.equal(isResumeRunnerPark({ error: 'docx_exists', pending_question: null }), false);
+    assert.equal(isResumeRunnerPark({ error: 'docx_exists', pending_question: [] }), false);
+    for (const kind of ['resume_failed', 'apply_exclusion', 'question', 'Blocked', ' blocked']) {
+      assert.equal(isResumeRunnerPark({ error: 'docx_exists', pending_question: { kind, label: 'Resume drafting stopped: docx_exists' } }), false, kind);
+    }
+  });
+
+  test('a matching legacy park still honors the in-flight and submit_request_sent refusals', () => {
+    const row = blockedRow('docx_exists', 'Resume drafting stopped: docx_exists');
+    assert.equal(classifyResume(row, { ...ctxOk, chainRunning: true }).action === 'refuse' && classifyResume(row, { ...ctxOk, chainRunning: true }).reason, 'chain_running');
+    const sent = classifyResume(row, { ...ctxOk, submitRequestSent: true });
+    assert.equal(sent.action === 'refuse' && sent.reason, 'submit_request_sent');
+  });
+
+  test('resumeEligible mirrors the gate kinds and the legacy park rule', () => {
+    assert.equal(resumeEligible({ state: 'needs_human', pending_question: { kind: 'captcha' } }), true);
+    assert.equal(resumeEligible({ state: 'needs_human', pending_question: { kind: 'resume_failed' } }), true);
+    assert.equal(resumeEligible(blockedRow('docx_exists', 'Resume drafting stopped: docx_exists')), true);
+    assert.equal(resumeEligible(blockedRow('zz', 'Resume drafting stopped: zz')), false);
+    assert.equal(resumeEligible({ state: 'needs_human', pending_question: { kind: 'question', label: 'q' } }), false);
+    assert.equal(resumeEligible({ state: 'docs_ready', pending_question: { kind: 'captcha' } }), false);
+    assert.equal(resumeEligible(null), false);
+  });
+
+  test('DB: a legacy docx_exists park moves needs_human -> drafting under the lock', async () => {
+    const id = await seed('needs_human', { kind: 'blocked', label: 'Resume drafting stopped: docx_exists' }, { doc: false, error: 'docx_exists' });
+    const out = await resumeParkedApplication(c, id, { config: ROOMY });
+    assert.equal(out.outcome, 'drafting');
+    const row = await getApplication(c, id);
+    assert.equal(row.state, 'drafting');
+    assert.equal(row.pending_question, null);
+    const ev = (await listApplicationEvents(c, id)).find((e) => e.to_state === 'drafting' && e.from_state === 'needs_human');
+    assert.equal(ev.actor, 'dashboard');
+    assert.equal(ev.meta.prior_kind, 'blocked');
+  });
+
+  test('DB: a blocked park with a mismatched label or unknown reason stays parked', async () => {
+    const bad = await seed('needs_human', { kind: 'blocked', label: 'company is missing from the listing' }, { doc: false, error: 'docx_exists' });
+    const out = await resumeParkedApplication(c, bad, { config: ROOMY });
+    assert.equal(out.outcome === 'refused' && out.reason, 'blocked_not_resume_failure');
+    assert.equal((await getApplication(c, bad)).state, 'needs_human');
+    const excl = await seed('needs_human', { kind: 'apply_exclusion', label: 'Resume drafting stopped: docx_exists' }, { doc: false, error: 'docx_exists' });
+    assert.equal((await resumeParkedApplication(c, excl, { config: ROOMY })).reason, 'unknown_kind');
+    assert.equal((await getApplication(c, excl)).state, 'needs_human');
+  });
+
+  test('DB: an error column changed to an unknown reason while the resume waits on the lock is honored', async () => {
+    const id = await seed('needs_human', { kind: 'blocked', label: 'Resume drafting stopped: docx_exists' }, { doc: false, error: 'docx_exists' });
+    const locker = new pg.Client(pgConnectionConfig());
+    await locker.connect();
+    try {
+      await locker.query('BEGIN');
+      await locker.query('SELECT 1 FROM ic_job_applications WHERE id = $1 FOR UPDATE', [id]);
+      const pending = withClient((cc) => resumeParkedApplication(cc, id, { config: ROOMY }));
+      await new Promise((r) => { setTimeout(r, 300); });
+      await locker.query(`UPDATE ic_job_applications SET error = 'company is missing from the listing' WHERE id = $1`, [id]);
+      await locker.query('COMMIT');
+      const out = await pending;
+      assert.equal(out.outcome === 'refused' && out.reason, 'blocked_not_resume_failure');
+    } finally {
+      await locker.end();
+    }
+  });
+
+  test('routes: Resume accepts a legacy park; list rows and the listing detail carry resume_eligible', async () => {
+    const good = await seed('needs_human', { kind: 'blocked', label: 'Resume drafting stopped: docx_exists' }, { doc: false, error: 'docx_exists' });
+    const bad = await seed('needs_human', { kind: 'blocked', label: 'Resume drafting stopped: zz_other' }, { doc: false, error: 'zz_other' });
+    const list = /** @type {any} */ (await (await fetch(`http://127.0.0.1:${port}/api/applications?state=needs_human`)).json());
+    assert.equal(list.rows.find((/** @type {any} */ r) => r.application_id === good).resume_eligible, true);
+    assert.equal(list.rows.find((/** @type {any} */ r) => r.application_id === bad).resume_eligible, false);
+    const goodListing = (await getApplication(c, good)).listing_id;
+    const det = /** @type {any} */ (await (await fetch(`http://127.0.0.1:${port}/api/listings/${goodListing}`)).json());
+    assert.equal(det.application.resume_eligible, true);
+
+    const refused = await post(`/api/applications/${bad}/resume`);
+    assert.equal(refused.status, 409);
+    assert.equal(refused.body.reason, 'blocked_not_resume_failure');
+    const ok = await post(`/api/applications/${good}/resume`);
+    assert.equal(ok.status, 200);
+    assert.equal(ok.body.outcome, 'drafting');
+    await new Promise((r) => { setTimeout(r, 50); });
+    assert.deepEqual(started, []);
   });
 });
 

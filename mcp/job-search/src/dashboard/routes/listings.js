@@ -19,6 +19,7 @@ import { prescoreParts } from '../../core/prescore.js';
 import { weightedPrescore, getDefaultNoiseRules } from '../../core/noise.js';
 import { classifyApplyUrl } from '../../apply/ats-detect.js';
 import { getApplicationForListing, hasAssistedNextClickEver } from '../../core/applications.js';
+import { resumeEligible } from '../../apply/resume-gate.js';
 import { classifyExclusion, loadExclusionConfig } from '../../apply/exclusions.js';
 import { loadConfig } from '../../core/config.js';
 import { sendJson } from '../http.js';
@@ -186,7 +187,8 @@ export function register(router, deps, streamHub) {
       c.query('SELECT id, source, location FROM ic_job_listings WHERE duplicate_of = $1 OR repost_of = $1', [id]),
       c.query('SELECT run_id FROM ic_scan_run_items WHERE listing_id = $1 ORDER BY run_id DESC LIMIT 10', [id]),
       // Resume gate R3: the card shows the partial-draft warning when an assisted run ever clicked Next.
-      getApplicationForListing(c, id).then(async (a) => (a ? { ...a, partial_draft: await hasAssistedNextClickEver(c, Number(a.id)) } : a)),
+      // Chain-park spec D2: resume_eligible lets the card show Resume on a legacy blocked resume-runner park.
+      getApplicationForListing(c, id).then(async (a) => (a ? { ...a, partial_draft: await hasAssistedNextClickEver(c, Number(a.id)), resume_eligible: resumeEligible(a) } : a)),
     ]));
     const files = listOutputFiles(deps.outputRoot);
     const aliases = deps.config?.companyAliases ?? {};

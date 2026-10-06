@@ -11,14 +11,15 @@
  */
 import fs from 'node:fs';
 import path from 'node:path';
-import { JobSearchError } from '../../core/errors.js';
+import { JobSearchError, errFields } from '../../core/errors.js';
+import { withTransaction } from '../../core/db.js';
 import {
   createApplication, approve, getApplication, getApplicationForListing, retry, markAppliedByHand, resume,
-  listApplicationEvents, recordApplicationEvent, transition, APPLICATION_STATES, checkApplicationBlockers,
+  listApplicationEvents, recordApplicationEvent, transitionUnwrapped, APPLICATION_STATES, checkApplicationBlockers,
   withdrawApplication, ASSISTED_ATS_TYPES,
   cleanupWithdrawnNudgeCalendar, hasAssistedNextClickEver, partialDraftSql, PARTIAL_DRAFT_WARNING,
 } from '../../core/applications.js';
-import { resumeParkedApplication } from '../../apply/resume-gate.js';
+import { resumeParkedApplication, humanizeParkReason, resumeEligible } from '../../apply/resume-gate.js';
 import { classifyApplyUrl } from '../../apply/ats-detect.js';
 import { resolveLatestApplicationScreenshot } from '../../apply/screenshot.js';
 import { appendLearnedLabel } from '../../apply/answers.js';
@@ -55,13 +56,11 @@ export const STALE_REUSE_RESET_MS = 7 * 24 * 60 * 60 * 1000;
 export const EASY_APPLY_HARD_TIMEOUT_MS = 17 * 60 * 1000;
 
 /**
- * Apply-chain-park fix, spec item 3: how long a re-clicked "Apply" on a listing's own still-drafting
- * application is treated as "the earlier click's chain is presumably still in flight" and refused a
- * second chain start, independent of the in-memory per-application chain lock below (which is the
- * precise, same-process signal -- this age-based check is the defense-in-depth backstop that also covers
- * a process restart, or any other way the in-memory lock's state could be lost or never set). Mirrored in
- * public/lib/format.js's applyButtonState() (drift-tested against this export) so the Apply button
- * itself renders as non-actionable for the same window on the client.
+ * Apply-chain-park fix, spec item 3: the age under which the job-row Apply button renders a drafting
+ * application as "Drafting in progress" (public/lib/format.js applyButtonState(), drift-tested against
+ * this export). The apply-now route itself no longer uses it to decide "chain_running" (chain-park spec
+ * A1): a created_at-based window refused a fresh chain for a row that had been parked and resumed within
+ * 30 minutes, answering 202 with nothing running. Only the in-memory runningChains set decides that now.
  */
 export const STALE_ACTIONABLE_MS = 30 * 60 * 1000;
 
@@ -79,57 +78,58 @@ export const STALE_ACTIONABLE_MS = 30 * 60 * 1000;
 const runningChains = new Set();
 
 /**
- * Human-readable label for a parked application's pending_question (apply-chain-park fix, spec item 1).
- * TOTAL classification, never an allow-list: every known resume-runner failure reason gets its own
- * specific label; anything else (including an arbitrary HEADLESS_ABORT reason string from the write-resume
- * skill, an open/unbounded set) falls through to the generic default branch, never a thrown error or a
- * blank label.
- * @param {string} reason
- */
-function humanizeParkReason(reason) {
-  const KNOWN = /** @type {Record<string, string>} */ ({
-    no_description: 'Job posting has no usable description to draft a resume from.',
-    timeout: 'Resume drafting timed out.',
-    spawn_failed: 'Resume drafting failed to start.',
-    listing_mismatch: 'The drafted resume did not match this listing; the link was reset.',
-    model_asked: 'Resume drafting stopped to ask a question instead of finishing.',
-    no_docs_ready: 'Resume drafting finished without producing a resume.',
-    markdown_not_found: 'Resume drafting finished but the draft file could not be found.',
-    runner_unavailable: 'Resume drafting is not available on this server right now.',
-  });
-  if (Object.prototype.hasOwnProperty.call(KNOWN, reason)) return KNOWN[reason];
-  return `Resume drafting stopped: ${reason}`;
-}
-
-/**
- * Apply-chain-park fix, spec item 1: park an application that hit a resume-runner precheck failure (or a
- * missing runner) into needs_human instead of leaving it silently stuck in drafting -- the entire point of
- * this fix is that a resume-runner failure must always be visible and actionable to the operator, not a
- * dead end. Wrapped in try/catch: if the row already moved on (parked by another actor between this
- * chain's own read and this write, or advanced past drafting some other way), the transition is rejected
- * by TRANSITIONS as a plain VALIDATION error -- that is a benign, expected race, not a chain failure, so
- * it is logged at info and swallowed here rather than surfaced as `apply_now_chain_failed` by the caller's
- * own outer catch.
+ * Chain-park spec D1: park an Apply now chain's resume-phase failure into needs_human with kind
+ * `resume_failed` (the kind the resume gate redrafts), error = reason, and a human label from
+ * humanizeParkReason (apply/resume-gate.js, the one source the legacy `blocked` check also reads).
+ *
+ * Guarded (A4): one transaction, transitionUnwrapped with expectedFromState 'drafting', so the park only
+ * ever moves a row that is STILL drafting under the row lock. A row another actor moved on (submitting,
+ * docs_ready, already parked) is never touched.
+ *
+ * Narrow swallow (A5): a VALIDATION error carrying details.expected is the expected state-mismatch race,
+ * logged at info and swallowed. Any other VALIDATION error is logged at error level and not rethrown (the
+ * row stays drafting; the log is the signal). Every non-VALIDATION error propagates to the caller.
  * @param {import('../server.js').DashboardDeps} deps
  * @param {ReturnType<typeof import('../stream.js').createStreamHub>|undefined} streamHub
  * @param {number} applicationId
  * @param {string} reason
+ * @param {Record<string, unknown>} [meta]
+ * @returns {Promise<boolean>} true when the row was parked
  */
-async function parkApplyChain(deps, streamHub, applicationId, reason) {
+async function parkChainFailure(deps, streamHub, applicationId, reason, meta) {
   try {
-    await deps.withClient((c) => transition(c, applicationId, 'needs_human', {
-      actor: 'apply', error: reason, pending_question: { kind: 'blocked', label: humanizeParkReason(reason) },
-    }));
+    await deps.withClient((c) => withTransaction(c, (tx) => transitionUnwrapped(tx, applicationId, 'needs_human', {
+      actor: 'apply', error: reason, note: `one-click apply parked: ${reason}`, meta,
+      pending_question: { kind: 'resume_failed', label: humanizeParkReason(reason) },
+    }, { expectedFromState: 'drafting', helperName: 'parkChainFailure' })));
     streamHub?.notifyChanged('events');
+    return true;
   } catch (err) {
     if (err instanceof JobSearchError && err.code === 'VALIDATION') {
-      deps.log?.({
-        evt: 'apply_now_chain_park_skipped', application_id: applicationId, reason,
-        err_message: err.message.slice(0, 300),
-      });
-      return;
+      const expected = /** @type {any} */ (err).details?.expected;
+      if (expected !== undefined && expected !== null) {
+        deps.log?.({ evt: 'apply_now_chain_park_skipped', application_id: applicationId, reason, err_message: err.message.slice(0, 300) });
+      } else {
+        deps.log?.({ evt: 'apply_now_chain_park_failed', severity: 'error', application_id: applicationId, reason, err_message: err.message.slice(0, 300) });
+      }
+      return false;
     }
     throw err;
+  }
+}
+
+/**
+ * Whether the dashboard's resume runner reports a run in flight. Process-local only (A2): bin/auto-apply.js
+ * runs its own resume runner in another process, which this cannot see.
+ * @param {import('../server.js').DashboardDeps} deps
+ */
+function resumeRunnerBusy(deps) {
+  const runner = /** @type {any} */ (deps.resumeRunner);
+  if (!runner || typeof runner.status !== 'function') return false;
+  try {
+    return Boolean(runner.status()?.running);
+  } catch {
+    return false;
   }
 }
 
@@ -238,49 +238,81 @@ function kickApplyRunner(deps, applicationId, row) {
  */
 async function runApplyNowChain(deps, streamHub, applicationId, listingId) {
   const notify = () => streamHub?.notifyChanged('events');
-  const progress = async (note) => {
+  const progress = async (/** @type {string} */ note) => {
     await deps.withClient((c) => recordApplicationEvent(c, { applicationId, kind: 'progress', actor: 'apply', note }));
     notify();
   };
+  /** The chain phase in flight when an exception is thrown (D1): decides how the catch classifies it.
+   * @type {'resume'|'review'|'approve'} */
+  let phase = 'resume';
   try {
     if (!deps.resumeRunner || !deps.reviewRunner) {
       deps.log?.({ evt: 'apply_now_chain_missing_runner', application_id: applicationId });
-      await parkApplyChain(deps, streamHub, applicationId, 'runner_unavailable');
+      await parkChainFailure(deps, streamHub, applicationId, 'runner_unavailable');
       return;
     }
     await progress('one-click apply: drafting resume');
     const resumeResult = await deps.resumeRunner.run(applicationId, listingId);
     notify();
     if (!resumeResult.ok || !resumeResult.markdownPath) {
-      // Resume-runner failure (precheck or otherwise): park to needs_human rather than the previous
-      // silent return that left the row stuck, invisible, in 'drafting' forever (apply-chain-park fix,
-      // spec item 1). Review-phase failures below are unaffected -- they stay at docs_ready, out of scope.
-      await parkApplyChain(deps, streamHub, applicationId, resumeResult.reason ?? 'unknown');
+      // D1: the resume runner's own fail() usually parks the row already; park here only when it is
+      // still drafting after that (the guarded park checks the state under the row lock). A failed result
+      // with no reason is chain_error; an ok result with no draft path is markdown_not_found.
+      const reason = !resumeResult.ok ? (resumeResult.reason ?? 'chain_error') : 'markdown_not_found';
+      await parkChainFailure(deps, streamHub, applicationId, reason);
       return;
     }
 
+    phase = 'review';
     await progress('one-click apply: reviewing draft');
     const reviewResult = await deps.reviewRunner.run(applicationId, resumeResult.markdownPath, listingId);
     notify();
-    if (!reviewResult.ok || reviewResult.verdict !== 'PASS') return;
+    if (!reviewResult.ok || reviewResult.verdict !== 'PASS') {
+      // D1: stays docs_ready with Approve visible; say so on the card.
+      await progress('one-click apply: review did not pass; approve by hand');
+      return;
+    }
 
+    phase = 'approve';
     await progress('one-click apply: approving');
     const approvedRow = await deps.withClient((c) => approve(c, applicationId, { outputRoot: deps.outputRoot, actor: 'apply' }));
     notify();
     kickApplyRunner(deps, applicationId, approvedRow);
   } catch (err) {
-    deps.log?.({
-      evt: 'apply_now_chain_failed', application_id: applicationId,
-      err_message: err instanceof Error ? err.message.slice(0, 300) : String(err).slice(0, 300),
-    });
+    // A3: the whole catch body is guarded; nothing in it may reject out of the fire-and-forget chain.
     try {
+      const f = errFields(err);
+      deps.log?.({ evt: 'apply_now_chain_failed', application_id: applicationId, phase, err_code: f.err_code, err_message: f.err_message });
+      /** @type {unknown} */
+      let state;
+      try {
+        state = (await deps.withClient((c) => getApplication(c, applicationId))).state;
+      } catch (probeErr) {
+        deps.log?.({ evt: 'apply_now_chain_park_failed', severity: 'error', application_id: applicationId, phase, step: 'state_probe', ...errFields(probeErr) });
+        return;
+      }
+      // Total classification of the row's state (D1). An approve-phase failure never parks.
+      if (state === 'drafting' && phase !== 'approve') {
+        const reason = err instanceof JobSearchError && err.code === 'LOCKED' ? 'resume_runner_busy' : 'chain_error';
+        await parkChainFailure(deps, streamHub, applicationId, reason, { phase, err_code: f.err_code });
+        return;
+      }
+      // docs_ready (no edge to needs_human; Approve stays visible), or any other state (another actor
+      // owns the row): an error event only.
+      const note = state === 'docs_ready'
+        ? `one-click apply ${phase} failed; the draft is still ready, approve it by hand`
+        : 'one-click apply chain failed unexpectedly';
       await deps.withClient((c) => recordApplicationEvent(c, {
-        applicationId, kind: 'error', actor: 'apply', note: 'one-click apply chain failed unexpectedly',
-        meta: { err_message: err instanceof Error ? err.message.slice(0, 300) : String(err).slice(0, 300) },
+        applicationId, kind: 'error', actor: 'apply', note,
+        meta: { phase, state: typeof state === 'string' ? state : null, err_code: f.err_code, err_message: f.err_message },
       }));
       notify();
-    } catch {
-      /* best-effort logging only; never let a failed error-log throw out of the fire-and-forget chain */
+    } catch (catchErr) {
+      try {
+        deps.log?.({ evt: 'apply_now_chain_park_failed', severity: 'error', application_id: applicationId, phase, ...errFields(catchErr) });
+      } catch {
+        /* a throwing logger must not reject the fire-and-forget chain either */
+      }
     }
   }
 }
@@ -339,23 +371,31 @@ export function register(router, deps, streamHub) {
     });
     if (blocked) return;
 
+    if (app && app.state !== 'drafting') {
+      return sendJson(ctx.res, 409, {
+        ok: false, code: 'DUPLICATE_APPLICATION',
+        message: `an active application (${app.id}, state "${app.state}") already exists for listing ${listingId}`,
+      });
+    }
+    // Chain-park spec A1: a chain counts as running ONLY when this process's runningChains has the id.
+    // A drafting row with no chain in flight (for example one parked and then resumed) starts a new chain.
+    if (app && runningChains.has(app.id)) {
+      streamHub?.notifyChanged('events');
+      return sendJson(ctx.res, 202, { ok: true, application_id: app.id, outcome: 'chain_running' });
+    }
+    // Chain-park spec A2: refuse while the resume runner is busy, BEFORE any row is created or reused, so a
+    // 409 leaves nothing behind. The check is process-local (bin/auto-apply.js has its own runner) and
+    // racy: a run starting between this check and the chain's own run() call is covered only by the
+    // LOCKED -> resume_runner_busy park in runApplyNowChain.
+    if (resumeRunnerBusy(deps)) {
+      return sendJson(ctx.res, 409, {
+        ok: false, code: 'RESUME_RUNNER_BUSY',
+        message: 'Another resume is being drafted right now. Try Apply now again when it finishes.',
+      });
+    }
+
     if (app) {
-      if (app.state !== 'drafting') {
-        return sendJson(ctx.res, 409, {
-          ok: false, code: 'DUPLICATE_APPLICATION',
-          message: `an active application (${app.id}, state "${app.state}") already exists for listing ${listingId}`,
-        });
-      }
-      // Apply-chain-park fix, spec items 2/3: never start a second chain for an id whose chain is already
-      // known in-flight this process (the in-memory lock), and never re-kick a still-fresh drafting row
-      // even if the in-memory lock's state was lost (process restart) -- both checks answer the same
-      // question ("is the earlier click's chain presumably still running") from two independent angles, so
-      // either one alone is enough to refuse a second chain start here.
       const ageMs = Date.now() - new Date(app.created_at).getTime();
-      if (runningChains.has(app.id) || ageMs < STALE_ACTIONABLE_MS) {
-        streamHub?.notifyChanged('events');
-        return sendJson(ctx.res, 202, { ok: true, application_id: app.id, outcome: 'chain_running' });
-      }
       if (ageMs > STALE_REUSE_RESET_MS) {
         await deps.withClient((c) => c.query('UPDATE ic_job_applications SET resume_doc_id = NULL, updated_at = now() WHERE id = $1', [app.id]));
         app = await deps.withClient((c) => getApplication(c, app.id));
@@ -377,7 +417,17 @@ export function register(router, deps, streamHub) {
     // unexpected failure) -- removed in the .finally() below, never left dangling.
     const applicationId = app.id;
     runningChains.add(applicationId);
-    runApplyNowChain(deps, streamHub, applicationId, listingId).finally(() => { runningChains.delete(applicationId); });
+    // A3: runApplyNowChain guards its own catch body; this .catch is the last line so nothing can ever
+    // surface as an unhandled rejection from the fire-and-forget chain.
+    runApplyNowChain(deps, streamHub, applicationId, listingId)
+      .finally(() => { runningChains.delete(applicationId); })
+      .catch((err) => {
+        try {
+          deps.log?.({ evt: 'apply_now_chain_park_failed', severity: 'error', application_id: applicationId, step: 'chain_rejected', ...errFields(err) });
+        } catch {
+          /* never rethrow from the last-resort handler */
+        }
+      });
   }, { allowEmptyBody: true });
 
   // Review page "Applications awaiting approval" list (review-approvals-list PR spec A1). `state` is a
@@ -412,7 +462,7 @@ export function register(router, deps, streamHub) {
         // resume/Open cover letter buttons can call POST /api/documents/open with the same {path} body
         // application-card.js's own docRow() already uses -- that route takes a rel_path, not a doc id.
         `SELECT a.id AS application_id, a.listing_id, a.state, a.review_verdict, a.review_findings,
-                a.resume_doc_id, a.coverletter_doc_id, a.pending_question, a.created_at, a.updated_at,
+                a.resume_doc_id, a.coverletter_doc_id, a.pending_question, a.error, a.created_at, a.updated_at,
                 l.title, l.company, l.company_norm, l.title_norm, l.location_norm, l.apply_ats, l.apply_url,
                 l.url, l.url_normalized, l.description, l.status AS listing_status,
                 rd.rel_path AS resume_rel_path, cd.rel_path AS coverletter_rel_path,
@@ -444,6 +494,9 @@ export function register(router, deps, streamHub) {
           resume_rel_path: row.resume_rel_path ?? null, coverletter_rel_path: row.coverletter_rel_path ?? null,
           parked_reason: row.pending_question && typeof row.pending_question.label === 'string' ? row.pending_question.label : null,
           pending_kind: row.pending_question && typeof row.pending_question.kind === 'string' ? row.pending_question.kind : null,
+          // Chain-park spec D2/A6: server-computed from state, the full pending_question (label) and error,
+          // so a legacy blocked resume-runner park shows Resume and every other blocked park does not.
+          resume_eligible: resumeEligible({ state: row.state, pending_question: row.pending_question, error: row.error }),
           partial_draft: Boolean(row.partial_draft),
           created_at: row.created_at, updated_at: row.updated_at,
           blocked: blockers.blocked, blocked_reason: blockers.blockedReason, sibling_active: blockers.siblingActive,
