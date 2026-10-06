@@ -12,6 +12,8 @@
  *     email_verification
  *   resume_failed                                                      needs_human -> drafting (as the
  *                                                                        bin/auto-apply.js re-drive does)
+ *   blocked, and isResumeRunnerPark() (legacy resume-runner park)      needs_human -> drafting (D2)
+ *   blocked, anything else                                             refuse blocked_not_resume_failure
  *   question                                                           refuse use_answer
  *   credential                                                         refuse use_credential_save
  *   awaiting_submit                                                    refuse submit_or_abandon
@@ -50,11 +52,95 @@ export const RESUME_APPROVE_KINDS = Object.freeze(['unrecognized_page', 'captcha
 export const RESUME_REDRAFT_KINDS = Object.freeze(['resume_failed']);
 
 /**
+ * Frozen human labels for resume-runner and Apply now chain park reasons (chain-park spec D1). The route's
+ * park writes these, and the legacy `blocked` park check below (D2) matches against them, so both read
+ * one source.
+ */
+export const RESUME_RUNNER_PARK_LABELS = Object.freeze(/** @type {Record<string, string>} */ ({
+  no_description: 'Job posting has no usable description to draft a resume from.',
+  timeout: 'Resume drafting timed out.',
+  spawn_failed: 'Resume drafting failed to start.',
+  listing_mismatch: 'The drafted resume did not match this listing; the link was reset.',
+  model_asked: 'Resume drafting stopped to ask a question instead of finishing.',
+  no_docs_ready: 'Resume drafting finished without producing a resume.',
+  markdown_not_found: 'Resume drafting finished but the draft file could not be found.',
+  runner_unavailable: 'Resume drafting is not available on this server right now.',
+  resume_runner_busy: 'Another resume draft was already running, so this one did not start.',
+  chain_error: 'Apply now stopped on an unexpected error while drafting the resume.',
+}));
+
+/**
+ * Every reason a resume-runner park can carry (D2): the frozen-label reasons plus the HEADLESS_ABORT
+ * reasons the write-resume skill is known to emit. A `blocked` park whose error is outside this set is
+ * never resumed.
+ */
+export const RESUME_RUNNER_FAILURE_REASONS = Object.freeze([
+  ...Object.keys(RESUME_RUNNER_PARK_LABELS), 'docx_exists', 'docx_locked', 'role_inclusion_conflict',
+]);
+
+/** Generic label prefix for a reason with no frozen label. */
+const GENERIC_PARK_LABEL_PREFIX = 'Resume drafting stopped: ';
+
+/** Error-column prefix the resume runner's own error events use. */
+const RUNNER_ERROR_PREFIX = 'resume runner failed: ';
+
+/**
+ * Human-readable label for a resume-runner or chain park reason. TOTAL: a frozen label for a known
+ * reason, otherwise the generic "Resume drafting stopped: <reason>" (never a throw or a blank label).
+ * @param {string} reason
+ */
+export function humanizeParkReason(reason) {
+  if (Object.prototype.hasOwnProperty.call(RESUME_RUNNER_PARK_LABELS, reason)) return RESUME_RUNNER_PARK_LABELS[reason];
+  return `${GENERIC_PARK_LABEL_PREFIX}${reason}`;
+}
+
+/**
+ * D2: whether a needs_human row is a legacy `blocked` park written by a resume-runner failure (the only
+ * writer of kind `blocked` was the Apply now chain's park). True only when ALL hold: kind is exactly
+ * 'blocked'; the error column, with a leading "resume runner failed: " stripped, lowercased and trimmed, is
+ * in RESUME_RUNNER_FAILURE_REASONS; and the label is that reason's frozen label or the generic
+ * "Resume drafting stopped: <reason>". Anything else is false. Reads only the row (no event history).
+ * @param {any} row
+ */
+export function isResumeRunnerPark(row) {
+  if (!row || typeof row !== 'object') return false;
+  const pq = row.pending_question;
+  if (!pq || typeof pq !== 'object' || Array.isArray(pq) || pq.kind !== 'blocked') return false;
+  if (typeof row.error !== 'string') return false;
+  let raw = row.error.trim();
+  if (raw.toLowerCase().startsWith(RUNNER_ERROR_PREFIX)) raw = raw.slice(RUNNER_ERROR_PREFIX.length);
+  const reason = raw.trim().toLowerCase();
+  if (!reason || !RESUME_RUNNER_FAILURE_REASONS.includes(reason)) return false;
+  if (typeof pq.label !== 'string') return false;
+  const label = pq.label.trim();
+  if (Object.prototype.hasOwnProperty.call(RESUME_RUNNER_PARK_LABELS, reason) && label === RESUME_RUNNER_PARK_LABELS[reason]) return true;
+  const lower = label.toLowerCase();
+  const prefix = GENERIC_PARK_LABEL_PREFIX.toLowerCase();
+  return lower.startsWith(prefix) && lower.slice(prefix.length).trim() === reason;
+}
+
+/**
+ * Whether the dashboard shows Resume for a row (server-computed `resume_eligible`): needs_human parked on
+ * a kind classifyResume() can resume, or a legacy `blocked` resume-runner park. In-flight and site checks
+ * are not part of this; the gate itself still decides and refuses with a toast.
+ * @param {any} row
+ */
+export function resumeEligible(row) {
+  if (!row || typeof row !== 'object' || row.state !== 'needs_human') return false;
+  const pq = row.pending_question;
+  const kind = pq && typeof pq === 'object' && !Array.isArray(pq) && typeof pq.kind === 'string' ? pq.kind : null;
+  if (kind === null) return false;
+  if (RESUME_APPROVE_KINDS.includes(kind) || RESUME_REDRAFT_KINDS.includes(kind)) return true;
+  return kind === 'blocked' && isResumeRunnerPark(row);
+}
+
+/**
  * Closed set of reasons a resume is refused with (409 RESUME_REFUSED). Every refusal names one.
  */
 export const RESUME_REFUSAL_REASONS = Object.freeze([
   'not_parked', 'lease_held', 'apply_running', 'chain_running',
   'use_answer', 'use_credential_save', 'submit_or_abandon', 'may_be_submitted', 'unknown_kind',
+  'blocked_not_resume_failure',
   'submit_request_sent', 'listing_closed', 'no_resume_doc', 'breaker_tripped', 'slot_busy', 'budget_exhausted',
   'partial_draft_ack_required',
 ]);
@@ -70,6 +156,7 @@ const RESUME_REFUSAL_MESSAGES = Object.freeze({
   submit_or_abandon: 'This form is filled and waiting in a browser tab. Submit it there and press "I submitted", or Abandon it.',
   may_be_submitted: 'The submit request may already have reached the site. Check the site or your email for a confirmation, then use "I applied by hand" or Withdraw.',
   unknown_kind: 'This application is parked for a reason the dashboard does not recognize, so it was not resumed. Finish it by hand or withdraw it.',
+  blocked_not_resume_failure: 'This application is blocked for a reason other than a resume drafting failure, so it was not resumed. Finish it by hand or withdraw it.',
   submit_request_sent: 'A submit request was already sent on this attempt. Check the site for a confirmation before anything runs again.',
   listing_closed: 'The listing is closed (dead, skipped, passed, lost, or accepted), so it was not resumed.',
   no_resume_doc: 'No resume is linked to this application, so it cannot go back to approved.',
@@ -97,7 +184,7 @@ const RESUME_REFUSAL_MESSAGES = Object.freeze({
  * Total classification of a resume request. Order: state, in-flight signals, kind, then the checks that
  * only apply once a kind is allowed (submit request, listing, resume link, breaker, slot, budget, partial
  * draft acknowledgment).
- * @param {{ state?: unknown, pending_question?: any, resume_doc_id?: unknown }} row
+ * @param {{ state?: unknown, pending_question?: any, resume_doc_id?: unknown, error?: unknown }} row
  * @param {ResumeContext} [ctx]
  * @returns {{ action: 'approve' } | { action: 'redraft' } | { action: 'refuse', reason: string, message: string }}
  */
@@ -119,7 +206,12 @@ export function classifyResume(row, ctx = {}) {
   else if (kind === 'credential') return refuse('use_credential_save');
   else if (kind === AWAITING_SUBMIT_KIND) return refuse('submit_or_abandon');
   else if (kind === 'post_submit_uncertain') return refuse('may_be_submitted');
-  else return refuse('unknown_kind');
+  else if (kind === 'blocked') {
+    // D2: a legacy resume-runner park goes back to drafting, exactly like resume_failed; any other
+    // blocked park (or one whose error or label does not match) is refused.
+    if (!isResumeRunnerPark(row)) return refuse('blocked_not_resume_failure');
+    action = 'redraft';
+  } else return refuse('unknown_kind');
 
   if (ctx.submitRequestSent) return refuse('submit_request_sent');
   if (ctx.listingClosed) return refuse('listing_closed');
@@ -170,7 +262,7 @@ export async function resumeParkedApplication(client, id, opts = {}) {
   const actor = opts.actor ?? 'dashboard';
   const now = opts.now ?? new Date();
   return withTransaction(client, async (c) => {
-    const cur = await c.query('SELECT id, listing_id, ats_type, state, pending_question, resume_doc_id FROM ic_job_applications WHERE id = $1 FOR UPDATE', [id]);
+    const cur = await c.query('SELECT id, listing_id, ats_type, state, pending_question, resume_doc_id, error FROM ic_job_applications WHERE id = $1 FOR UPDATE', [id]);
     if (cur.rowCount === 0) throw new JobSearchError('NOT_FOUND', `application ${id} not found`);
     const row = cur.rows[0];
     const config = opts.config ?? loadConfig();

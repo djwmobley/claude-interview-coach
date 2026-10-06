@@ -763,6 +763,14 @@ export async function runSingleApplication(id, deps) {
 
   if (app.state === 'needs_human') {
     const kind = app.pending_question && typeof app.pending_question.kind === 'string' ? app.pending_question.kind : null;
+    if (kind === 'blocked') {
+      // Chain-park spec D2: --application never accepts a legacy blocked park (DECIDED); the dashboard's
+      // Resume button checks it under the row lock and sends a matching resume-runner park back to drafting.
+      return {
+        outcome: 'refused', applicationId: id, listingId: app.listing_id, reason: 'needs_human_not_resume_failed',
+        message: 'Parked as blocked. If it is a resume drafting failure, use Resume on the dashboard card (it checks the park under the row lock), then re-drive.',
+      };
+    }
     if (kind !== 'resume_failed') {
       return {
         outcome: 'refused', applicationId: id, listingId: app.listing_id, reason: 'needs_human_not_resume_failed',

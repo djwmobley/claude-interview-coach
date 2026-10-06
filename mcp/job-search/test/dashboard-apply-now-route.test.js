@@ -20,6 +20,8 @@ import { createCalendarCache } from '../src/dashboard/calendar-cache.js';
 import { createApplication, getApplication, transition, listApplicationEvents } from '../src/core/applications.js';
 import { STALE_ACTIONABLE_MS } from '../src/dashboard/routes/applications.js';
 import { applyExclusionGate as realApplyExclusionGate } from '../src/dashboard/routes/applications.js';
+import { humanizeParkReason } from '../src/apply/resume-gate.js';
+import { JobSearchError } from '../src/core/errors.js';
 
 const CO = `ZZ-TEST-APPLYNOW-${process.pid}`;
 /** @type {any} the dashboard's own deps object, hoisted so a later describe block can temporarily swap
@@ -215,7 +217,7 @@ describe('POST /api/listings/:id/apply-now: apply-chain-park fix -- resume-runne
     const row = await waitForState(appId, ['needs_human']);
     assert.equal(row.state, 'needs_human');
     assert.equal(row.error, 'no_description');
-    assert.equal(row.pending_question?.kind, 'blocked');
+    assert.equal(row.pending_question?.kind, 'resume_failed');
     assert.ok(row.pending_question?.label, 'pending_question.label must be a human-readable string');
     assert.deepEqual(reviewRunnerCalls, []);
     assert.deepEqual(applyRunnerStartCalls, []);
@@ -234,7 +236,7 @@ describe('POST /api/listings/:id/apply-now: apply-chain-park fix -- resume-runne
       const row = await waitForState(appId, ['needs_human']);
       assert.equal(row.state, 'needs_human');
       assert.equal(row.error, 'runner_unavailable');
-      assert.equal(row.pending_question?.kind, 'blocked');
+      assert.equal(row.pending_question?.kind, 'resume_failed');
       assert.deepEqual(resumeRunnerCalls, []);
     } finally {
       deps.resumeRunner = savedResumeRunner;
@@ -416,5 +418,358 @@ describe('POST /api/listings/:id/apply-now: apply exclusion gate (real gate rest
     const second = await req('POST', `/api/listings/${listingId}/apply-now`);
     assert.equal(second.status, 202);
     assert.equal(second.json.application_id, first.json.application_id);
+  });
+});
+
+describe('POST /api/listings/:id/apply-now: D1 total classification of chain failures', () => {
+  /** @type {any[]} */
+  let logs;
+  /** @type {any} */
+  let savedLog;
+  /** @type {any} */
+  let savedWithClient;
+  // Earlier describe blocks fire chains they never wait for; let them finish so they never reach the
+  // deps.withClient wrappers some tests below install.
+  before(async () => { await new Promise((r) => setTimeout(r, 1000)); });
+  beforeEach(() => {
+    logs = [];
+    savedLog = deps.log;
+    savedWithClient = deps.withClient;
+    deps.log = (/** @type {any} */ f) => { logs.push(f); };
+  });
+  afterEach(() => {
+    deps.log = savedLog;
+    deps.withClient = savedWithClient;
+  });
+
+  /** Wait until `pred()` holds or the timeout passes. @param {() => boolean | Promise<boolean>} pred */
+  async function waitFor(pred, timeoutMs = 3000) {
+    const deadline = Date.now() + timeoutMs;
+    for (;;) {
+      if (await pred()) return true;
+      if (Date.now() > deadline) return false;
+      await new Promise((r) => setTimeout(r, 20));
+    }
+  }
+
+  test('LOCKED from the resume runner parks resume_failed with reason resume_runner_busy, and Resume accepts it', async () => {
+    resumeRunnerImpl = async () => { throw new JobSearchError('LOCKED', 'a resume run is already in progress'); };
+    const listingId = await seedListing();
+    const r = await req('POST', `/api/listings/${listingId}/apply-now`);
+    assert.equal(r.status, 202);
+    const appId = r.json.application_id;
+    const row = await waitForState(appId, ['needs_human']);
+    assert.equal(row.state, 'needs_human');
+    assert.equal(row.error, 'resume_runner_busy');
+    assert.equal(row.pending_question?.kind, 'resume_failed');
+    assert.equal(row.pending_question?.label, humanizeParkReason('resume_runner_busy'));
+    const parkEv = (await listApplicationEvents(verifyClient, appId)).find((e) => e.kind === 'state' && e.to_state === 'needs_human');
+    assert.equal(parkEv.meta.phase, 'resume');
+    assert.equal(parkEv.meta.err_code, 'LOCKED');
+    assert.ok(logs.some((l) => l.evt === 'apply_now_chain_failed' && l.application_id === appId));
+    assert.ok(!logs.some((l) => l.evt === 'apply_now_chain_park_failed' && l.application_id === appId));
+
+    const resumed = await req('POST', `/api/applications/${appId}/resume`);
+    assert.equal(resumed.status, 200);
+    assert.equal(resumed.json.outcome, 'drafting');
+  });
+
+  test('a generic throw parks resume_failed with reason chain_error, and Resume accepts it', async () => {
+    resumeRunnerImpl = async () => { throw new Error('boom'); };
+    const listingId = await seedListing();
+    const r = await req('POST', `/api/listings/${listingId}/apply-now`);
+    const appId = r.json.application_id;
+    const row = await waitForState(appId, ['needs_human']);
+    assert.equal(row.error, 'chain_error');
+    assert.equal(row.pending_question?.kind, 'resume_failed');
+    const parkEv = (await listApplicationEvents(verifyClient, appId)).find((e) => e.kind === 'state' && e.to_state === 'needs_human');
+    assert.equal(parkEv.meta.phase, 'resume');
+    assert.equal(parkEv.meta.err_code, 'INTERNAL');
+    assert.deepEqual(reviewRunnerCalls, []);
+    const resumed = await req('POST', `/api/applications/${appId}/resume`);
+    assert.equal(resumed.status, 200);
+    assert.equal(resumed.json.outcome, 'drafting');
+  });
+
+  test('an ok resume result with no markdownPath, row still drafting, parks resume_failed and Resume accepts it', async () => {
+    resumeRunnerImpl = async () => ({ ok: true });
+    const listingId = await seedListing();
+    const r = await req('POST', `/api/listings/${listingId}/apply-now`);
+    const appId = r.json.application_id;
+    const row = await waitForState(appId, ['needs_human']);
+    assert.equal(row.pending_question?.kind, 'resume_failed');
+    assert.equal(row.error, 'markdown_not_found');
+    assert.deepEqual(reviewRunnerCalls, []);
+    const resumed = await req('POST', `/api/applications/${appId}/resume`);
+    assert.equal(resumed.status, 200);
+  });
+
+  test('a failed result with no reason parks chain_error, never "unknown"', async () => {
+    resumeRunnerImpl = async () => ({ ok: false });
+    const listingId = await seedListing();
+    const r = await req('POST', `/api/listings/${listingId}/apply-now`);
+    const row = await waitForState(r.json.application_id, ['needs_human']);
+    assert.equal(row.error, 'chain_error');
+    assert.equal(row.pending_question?.kind, 'resume_failed');
+  });
+
+  test('negative: an approve that throws on blockers stays docs_ready, is never parked, and logs an approve-phase error event', async () => {
+    // The default fake drafts and links a resume; then the listing is closed so approve()'s blocker check throws.
+    const listingId = await seedListing();
+    const inner = resumeRunnerImpl;
+    resumeRunnerImpl = async (applicationId, lid) => {
+      const out = await inner(applicationId, lid);
+      await verifyClient.query(`UPDATE ic_job_listings SET status = 'dead' WHERE id = $1`, [lid]);
+      return out;
+    };
+    const r = await req('POST', `/api/listings/${listingId}/apply-now`);
+    const appId = r.json.application_id;
+    const ok = await waitFor(async () => (await listApplicationEvents(verifyClient, appId)).some((e) => e.kind === 'error' && e.meta?.phase === 'approve'));
+    assert.ok(ok, 'an approve-phase error event must be recorded');
+    const row = await getApplication(verifyClient, appId);
+    assert.equal(row.state, 'docs_ready');
+    assert.equal(row.pending_question, null);
+    const events = await listApplicationEvents(verifyClient, appId);
+    assert.ok(!events.some((e) => e.kind === 'state' && e.to_state === 'needs_human'));
+    assert.ok(!applyRunnerStartCalls.includes(appId), 'the apply runner must never start for this application');
+  });
+
+  test('a review that does not PASS stays docs_ready with a progress event saying to approve by hand', async () => {
+    reviewRunnerImpl = async () => ({ ok: true, verdict: 'FAIL' });
+    const listingId = await seedListing();
+    const r = await req('POST', `/api/listings/${listingId}/apply-now`);
+    const appId = r.json.application_id;
+    const ok = await waitFor(async () => (await listApplicationEvents(verifyClient, appId)).some((e) => e.kind === 'progress' && /review did not pass; approve by hand/.test(e.note ?? '')));
+    assert.ok(ok);
+    assert.equal((await getApplication(verifyClient, appId)).state, 'docs_ready');
+    assert.ok(!applyRunnerStartCalls.includes(appId), 'the apply runner must never start for this application');
+  });
+
+  test('a review-phase throw with the row at docs_ready logs a review-phase error event and is never parked', async () => {
+    reviewRunnerImpl = async () => { throw new Error('review exploded'); };
+    const listingId = await seedListing();
+    const r = await req('POST', `/api/listings/${listingId}/apply-now`);
+    const appId = r.json.application_id;
+    const ok = await waitFor(async () => (await listApplicationEvents(verifyClient, appId)).some((e) => e.kind === 'error' && e.meta?.phase === 'review'));
+    assert.ok(ok);
+    assert.equal((await getApplication(verifyClient, appId)).state, 'docs_ready');
+  });
+
+  test('adversarial: a row another actor moved to submitting is never parked by the chain (throw path)', async () => {
+    resumeRunnerImpl = async (applicationId) => {
+      await verifyClient.query(`UPDATE ic_job_applications SET state = 'submitting' WHERE id = $1`, [applicationId]);
+      throw new Error('late failure');
+    };
+    const listingId = await seedListing();
+    const r = await req('POST', `/api/listings/${listingId}/apply-now`);
+    const appId = r.json.application_id;
+    const ok = await waitFor(async () => (await listApplicationEvents(verifyClient, appId)).some((e) => e.kind === 'error' && e.meta?.state === 'submitting'));
+    assert.ok(ok, 'an error event naming the foreign state must be recorded');
+    const row = await getApplication(verifyClient, appId);
+    assert.equal(row.state, 'submitting');
+    assert.ok(!(await listApplicationEvents(verifyClient, appId)).some((e) => e.kind === 'state' && e.to_state === 'needs_human'));
+  });
+
+  test('adversarial: a row another actor moved to submitting is never parked by the chain (failed-result path, guarded transition)', async () => {
+    resumeRunnerImpl = async (applicationId) => {
+      await verifyClient.query(`UPDATE ic_job_applications SET state = 'submitting' WHERE id = $1`, [applicationId]);
+      return { ok: false, reason: 'timeout' };
+    };
+    const listingId = await seedListing();
+    const r = await req('POST', `/api/listings/${listingId}/apply-now`);
+    const appId = r.json.application_id;
+    const ok = await waitFor(() => logs.some((l) => l.evt === 'apply_now_chain_park_skipped' && l.application_id === appId));
+    assert.ok(ok);
+    const row = await getApplication(verifyClient, appId);
+    assert.equal(row.state, 'submitting');
+    assert.ok(!(await listApplicationEvents(verifyClient, appId)).some((e) => e.kind === 'state' && e.to_state === 'needs_human'));
+  });
+
+  test('adversarial: a state probe that throws gives an error-level log and no transition', async () => {
+    resumeRunnerImpl = async (applicationId) => {
+      await verifyClient.query('DELETE FROM ic_job_application_events WHERE application_id = $1', [applicationId]);
+      await verifyClient.query('DELETE FROM ic_job_applications WHERE id = $1', [applicationId]);
+      throw new Error('row vanished');
+    };
+    const listingId = await seedListing();
+    const r = await req('POST', `/api/listings/${listingId}/apply-now`);
+    const appId = r.json.application_id;
+    const ok = await waitFor(() => logs.some((l) => l.evt === 'apply_now_chain_park_failed' && l.application_id === appId));
+    assert.ok(ok);
+    const entry = logs.find((l) => l.evt === 'apply_now_chain_park_failed' && l.application_id === appId);
+    assert.equal(entry.severity, 'error');
+    const left = await verifyClient.query('SELECT 1 FROM ic_job_applications WHERE id = $1', [appId]);
+    assert.equal(left.rowCount, 0);
+  });
+
+  test('A3: a park that throws a non-VALIDATION error causes no crash and logs apply_now_chain_park_failed', async () => {
+    /** @type {unknown[]} */
+    const unhandled = [];
+    const onUnhandled = (/** @type {unknown} */ e) => { unhandled.push(e); };
+    process.on('unhandledRejection', onUnhandled);
+    try {
+      let failing = false;
+      const real = savedWithClient;
+      deps.withClient = (/** @type {any} */ fn) => {
+        if (failing) return Promise.reject(new Error('db connection lost'));
+        return real(fn);
+      };
+      resumeRunnerImpl = async () => { failing = true; return { ok: false, reason: 'timeout' }; };
+      const listingId = await seedListing();
+      const r = await req('POST', `/api/listings/${listingId}/apply-now`);
+      const appId = r.json.application_id;
+      const ok = await waitFor(() => logs.some((l) => l.evt === 'apply_now_chain_park_failed' && l.application_id === appId));
+      assert.ok(ok);
+      const entry = logs.find((l) => l.evt === 'apply_now_chain_park_failed' && l.application_id === appId);
+      assert.equal(entry.severity, 'error');
+      failing = false;
+      await new Promise((res) => setTimeout(res, 100));
+      assert.deepEqual(unhandled, []);
+      assert.equal((await getApplication(verifyClient, appId)).state, 'drafting');
+    } finally {
+      process.off('unhandledRejection', onUnhandled);
+    }
+  });
+
+  test('A5: a VALIDATION error without details.expected is logged at error level, not swallowed as a race', async () => {
+    let calls = 0;
+    let armed = false;
+    const real = savedWithClient;
+    deps.withClient = (/** @type {any} */ fn) => {
+      if (armed) {
+        calls += 1;
+        if (calls === 1) return Promise.reject(new JobSearchError('VALIDATION', 'pending_question.kind must be a non-empty string'));
+      }
+      return real(fn);
+    };
+    resumeRunnerImpl = async () => { armed = true; return { ok: false, reason: 'timeout' }; };
+    const listingId = await seedListing();
+    const r = await req('POST', `/api/listings/${listingId}/apply-now`);
+    const appId = r.json.application_id;
+    const ok = await waitFor(() => logs.some((l) => l.evt === 'apply_now_chain_park_failed' && l.application_id === appId && l.severity === 'error'));
+    assert.ok(ok);
+    assert.ok(!logs.some((l) => l.evt === 'apply_now_chain_park_skipped' && l.application_id === appId));
+  });
+
+  test('A5: a VALIDATION state mismatch (details.expected present) is swallowed at info as a race', async () => {
+    let calls = 0;
+    let armed = false;
+    const real = savedWithClient;
+    deps.withClient = (/** @type {any} */ fn) => {
+      if (armed) {
+        calls += 1;
+        if (calls === 1) return Promise.reject(new JobSearchError('VALIDATION', 'state mismatch', { details: { from: 'needs_human', expected: 'drafting' } }));
+      }
+      return real(fn);
+    };
+    resumeRunnerImpl = async () => { armed = true; return { ok: false, reason: 'timeout' }; };
+    const listingId = await seedListing();
+    const r = await req('POST', `/api/listings/${listingId}/apply-now`);
+    const appId = r.json.application_id;
+    const ok = await waitFor(() => logs.some((l) => l.evt === 'apply_now_chain_park_skipped' && l.application_id === appId));
+    assert.ok(ok);
+    assert.ok(!logs.some((l) => l.evt === 'apply_now_chain_park_failed' && l.application_id === appId));
+  });
+});
+
+describe('GET /api/listings: application_chain_running for the job-row Apply button (A1 client side)', () => {
+  /** @param {number} listingId */
+  async function listRow(listingId) {
+    const r = await req('GET', `/api/listings?source=${encodeURIComponent(`zz-test-applynow-${process.pid}`)}&limit=200`);
+    assert.equal(r.status, 200);
+    return r.json.rows.find((/** @type {any} */ x) => Number(x.id) === listingId);
+  }
+
+  test('true while the chain is actually running, false once it parks, false again after Resume', async () => {
+    /** @type {() => void} */
+    let release = () => {};
+    resumeRunnerImpl = async () => {
+      await new Promise((resolve) => { release = () => resolve(undefined); });
+      return { ok: false, reason: 'no_description' };
+    };
+    const listingId = await seedListing();
+    const first = await req('POST', `/api/listings/${listingId}/apply-now`);
+    const appId = first.json.application_id;
+    const running = await listRow(listingId);
+    assert.equal(running.application_id, appId);
+    assert.equal(running.application_state, 'drafting');
+    assert.equal(running.application_chain_running, true);
+
+    release();
+    await waitForState(appId, ['needs_human']);
+    await new Promise((r) => setTimeout(r, 50));
+    assert.equal((await listRow(listingId)).application_chain_running, false);
+
+    const resumed = await req('POST', `/api/applications/${appId}/resume`);
+    assert.equal(resumed.status, 200);
+    const idle = await listRow(listingId);
+    assert.equal(idle.application_state, 'drafting');
+    assert.equal(idle.application_chain_running, false, 'a fresh drafting row with no chain must read as idle');
+  });
+
+  test('a listing with no application reads false, and the listing detail carries chain_running', async () => {
+    const listingId = await seedListing();
+    const row = await listRow(listingId);
+    assert.equal(row.application_id, null);
+    assert.equal(row.application_chain_running, false);
+    const created = await createApplication(verifyClient, { listingId, actor: 'mcp' });
+    const det = await req('GET', `/api/listings/${listingId}`);
+    assert.equal(det.json.application.id, created.id);
+    assert.equal(det.json.application.chain_running, false);
+  });
+});
+
+describe('POST /api/listings/:id/apply-now: A1 freshness and A2 busy runner', () => {
+  test('A1: create, chain parks it, Resume, then Apply Now within 30 minutes starts a new chain', async () => {
+    resumeRunnerImpl = async () => ({ ok: false, reason: 'no_description' });
+    const listingId = await seedListing();
+    const first = await req('POST', `/api/listings/${listingId}/apply-now`);
+    const appId = first.json.application_id;
+    await waitForState(appId, ['needs_human']);
+    const resumed = await req('POST', `/api/applications/${appId}/resume`);
+    assert.equal(resumed.status, 200);
+    assert.equal(resumed.json.outcome, 'drafting');
+    const row = await getApplication(verifyClient, appId);
+    assert.ok(Date.now() - new Date(row.created_at).getTime() < STALE_ACTIONABLE_MS, 'the row is still inside the old freshness window');
+
+    const second = await req('POST', `/api/listings/${listingId}/apply-now`);
+    assert.equal(second.status, 202);
+    assert.equal(second.json.application_id, appId);
+    assert.notEqual(second.json.outcome, 'chain_running');
+    await waitForState(appId, ['needs_human']);
+    assert.equal(resumeRunnerCalls.length, 2, 'the second click must start a real chain');
+  });
+
+  test('A2: a busy resume runner is a 409 RESUME_RUNNER_BUSY and creates no row', async () => {
+    const savedStatus = deps.resumeRunner.status;
+    deps.resumeRunner.status = () => ({ running: true, applicationId: 999999, startedAt: new Date().toISOString() });
+    try {
+      const listingId = await seedListing();
+      const r = await req('POST', `/api/listings/${listingId}/apply-now`);
+      assert.equal(r.status, 409);
+      assert.equal(r.json.code, 'RESUME_RUNNER_BUSY');
+      assert.equal(typeof r.json.message, 'string');
+      const rows = await verifyClient.query('SELECT id FROM ic_job_applications WHERE listing_id = $1', [listingId]);
+      assert.equal(rows.rowCount, 0);
+      assert.deepEqual(resumeRunnerCalls, []);
+    } finally {
+      deps.resumeRunner.status = savedStatus;
+    }
+  });
+
+  test('A2: a busy resume runner refuses reuse of an existing drafting row too, leaving it untouched', async () => {
+    const savedStatus = deps.resumeRunner.status;
+    deps.resumeRunner.status = () => ({ running: true, applicationId: 999999, startedAt: new Date().toISOString() });
+    try {
+      const listingId = await seedListing();
+      const created = await createApplication(verifyClient, { listingId, actor: 'mcp' });
+      const r = await req('POST', `/api/listings/${listingId}/apply-now`);
+      assert.equal(r.status, 409);
+      assert.equal(r.json.code, 'RESUME_RUNNER_BUSY');
+      assert.equal((await getApplication(verifyClient, created.id)).state, 'drafting');
+      assert.deepEqual(resumeRunnerCalls, []);
+    } finally {
+      deps.resumeRunner.status = savedStatus;
+    }
   });
 });

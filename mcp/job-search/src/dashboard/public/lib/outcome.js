@@ -66,6 +66,9 @@ export function handleOutcome(outcome, opts = {}) {
     case 'withdraw_refused':
       showToast({ message: outcome.message ? String(outcome.message) : 'This application cannot be withdrawn right now.', tone: 'error' });
       break;
+    case 'resume_runner_busy':
+      showToast({ message: outcome.message ? String(outcome.message) : 'Another resume is being drafted right now. Try again when it finishes.', tone: 'error' });
+      break;
     case 'resume_refused':
       showToast({ message: outcome.message ? String(outcome.message) : 'This application cannot be resumed right now.', tone: 'error' });
       break;

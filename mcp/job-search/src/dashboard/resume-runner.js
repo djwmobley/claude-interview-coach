@@ -110,7 +110,7 @@ export function createResumeRunner(deps) {
    * park reason and safely re-run the resume runner, never a screening-question park -- see A3's own
    * doc comment there.
    *
-   * A race (the row already moved on -- parked by the dashboard's own parkApplyChain, or advanced past
+   * A race (the row already moved on -- parked by the dashboard's own parkChainFailure, or advanced past
    * drafting by another actor -- between the error event above and this transition) is a benign,
    * expected VALIDATION rejection from TRANSITIONS, logged and swallowed here rather than thrown: the
    * error event and the { ok: false, reason } result already happened either way.

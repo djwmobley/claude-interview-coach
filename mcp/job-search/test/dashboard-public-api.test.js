@@ -108,6 +108,14 @@ describe('classify(): answer refusals (answer-fallback F6/F7)', () => {
   }
 });
 
+describe('classify(): Apply now with a busy resume runner (chain-park spec A2)', () => {
+  test('409 RESUME_RUNNER_BUSY maps to resume_runner_busy with the server message, never the scan "locked" toast', () => {
+    const r = /** @type {any} */ (classify(409, { ok: false, code: 'RESUME_RUNNER_BUSY', message: 'busy' }));
+    assert.equal(r.kind, 'resume_runner_busy');
+    assert.equal(r.message, 'busy');
+  });
+});
+
 describe('classify(): resume refusals (resume gate R1)', () => {
   test('409 RESUME_REFUSED maps to resume_refused with the reason and server message', () => {
     const r = /** @type {any} */ (classify(409, { ok: false, code: 'RESUME_REFUSED', reason: 'unknown_kind', message: 'm' }));

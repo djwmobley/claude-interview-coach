@@ -171,27 +171,43 @@ describe('applyButtonState: TOTAL classification of job-row.js\'s Apply button (
     assert.equal(r.disabledReason, 'Application withdrawn.');
   });
 
-  test('precedence 5: drafting fresher than STALE_ACTIONABLE_MS is not actionable ("Drafting in progress")', () => {
-    const r = applyButtonState({ status: 'new', application_id: 1, application_state: 'drafting', application_created_at: FRESH, description_chars: GOOD_DESC }, NOW);
-    assert.deepEqual(r, { label: 'Drafting resume', actionable: false, disabledReason: 'Drafting in progress.' });
+  test('precedence 5: a drafting row whose chain is actually running is not actionable ("Drafting in progress"), whatever its age', () => {
+    for (const createdAt of [FRESH, STALE]) {
+      const r = applyButtonState({ status: 'new', application_id: 1, application_state: 'drafting', application_created_at: createdAt, application_chain_running: true, description_chars: GOOD_DESC }, NOW);
+      assert.deepEqual(r, { label: 'Drafting resume', actionable: false, disabledReason: 'Drafting in progress.' });
+    }
   });
 
-  test('a drafting row with no application_created_at at all cannot be proven fresh or stale -- treated as still fresh (friction over silent escape)', () => {
-    const r = applyButtonState({ status: 'new', application_id: 1, application_state: 'drafting', description_chars: GOOD_DESC }, NOW);
-    assert.equal(r.actionable, false);
-    assert.equal(r.disabledReason, 'Drafting in progress.');
+  test('chain-park A1 client side: a row parked then resumed inside 30 minutes (fresh, no chain running) shows an actionable Apply', () => {
+    const r = applyButtonState({ status: 'new', application_id: 1, application_state: 'drafting', application_created_at: FRESH, application_chain_running: false, description_chars: GOOD_DESC }, NOW);
+    assert.deepEqual(r, { label: 'Drafting resume', actionable: true, disabledReason: null });
   });
 
-  test('precedence 6: description_chars missing/undefined -> "Unknown description, not fetched yet." (no application yet, or stale drafting)', () => {
+  test('chain-park A1 client side: a fresh drafting row with no chain running is actionable, even created a moment ago', () => {
+    const justNow = new Date(NOW.getTime() - 1000).toISOString();
+    const r = applyButtonState({ status: 'new', application_id: 1, application_state: 'drafting', application_created_at: justNow, application_chain_running: false, description_chars: GOOD_DESC }, NOW);
+    assert.equal(r.actionable, true);
+    assert.equal(r.disabledReason, null);
+  });
+
+  test('a drafting row with no boolean application_chain_running cannot be proven idle -- treated as running (friction over silent escape)', () => {
+    for (const flag of [undefined, null, 'false', 0]) {
+      const r = applyButtonState({ status: 'new', application_id: 1, application_state: 'drafting', application_created_at: STALE, application_chain_running: /** @type {any} */ (flag), description_chars: GOOD_DESC }, NOW);
+      assert.equal(r.actionable, false, String(flag));
+      assert.equal(r.disabledReason, 'Drafting in progress.', String(flag));
+    }
+  });
+
+  test('precedence 6: description_chars missing/undefined -> "Unknown description, not fetched yet." (no application yet, or idle drafting)', () => {
     assert.deepEqual(applyButtonState({ status: 'new', application_id: null }, NOW), { label: 'Apply', actionable: false, disabledReason: 'Unknown description, not fetched yet.' });
-    const r = applyButtonState({ status: 'new', application_id: 1, application_state: 'drafting', application_created_at: STALE }, NOW);
+    const r = applyButtonState({ status: 'new', application_id: 1, application_state: 'drafting', application_created_at: STALE, application_chain_running: false }, NOW);
     assert.equal(r.actionable, false);
     assert.equal(r.disabledReason, 'Unknown description, not fetched yet.');
   });
 
   test('precedence 7: description_chars below DETAIL_MIN_CHARS -> "Posting too thin to draft from."', () => {
     assert.deepEqual(applyButtonState({ status: 'new', application_id: null, description_chars: THIN_DESC }, NOW), { label: 'Apply', actionable: false, disabledReason: 'Posting too thin to draft from.' });
-    const r = applyButtonState({ status: 'new', application_id: 1, application_state: 'drafting', application_created_at: STALE, description_chars: THIN_DESC }, NOW);
+    const r = applyButtonState({ status: 'new', application_id: 1, application_state: 'drafting', application_created_at: STALE, application_chain_running: false, description_chars: THIN_DESC }, NOW);
     assert.equal(r.actionable, false);
     assert.equal(r.disabledReason, 'Posting too thin to draft from.');
   });
@@ -201,8 +217,8 @@ describe('applyButtonState: TOTAL classification of job-row.js\'s Apply button (
     assert.deepEqual(applyButtonState({ status: 'new', application_id: undefined, description_chars: GOOD_DESC }, NOW), { label: 'Apply', actionable: true, disabledReason: null });
   });
 
-  test('precedence 8: a stale (re-clickable) drafting row with a good description is actionable again', () => {
-    const r = applyButtonState({ status: 'new', application_id: 1, application_state: 'drafting', application_created_at: STALE, description_chars: GOOD_DESC }, NOW);
+  test('precedence 8: an idle (re-clickable) drafting row with a good description is actionable again', () => {
+    const r = applyButtonState({ status: 'new', application_id: 1, application_state: 'drafting', application_created_at: STALE, application_chain_running: false, description_chars: GOOD_DESC }, NOW);
     assert.deepEqual(r, { label: 'Drafting resume', actionable: true, disabledReason: null });
   });
 
@@ -543,6 +559,16 @@ describe('resumeButtonVisible (resume gate R1)', () => {
       assert.equal(resumeButtonVisible({ state: s, pending_kind: 'captcha' }), false, String(s));
     }
     assert.equal(resumeButtonVisible(null), false);
+  });
+
+  test('a server-computed resume_eligible decides, so a legacy blocked resume-runner park shows Resume', () => {
+    assert.equal(resumeButtonVisible({ state: 'needs_human', pending_kind: 'blocked', resume_eligible: true }), true);
+    assert.equal(resumeButtonVisible({ state: 'needs_human', pending_question: { kind: 'blocked' }, resume_eligible: true }), true);
+    assert.equal(resumeButtonVisible({ state: 'needs_human', pending_kind: 'blocked', resume_eligible: false }), false);
+    assert.equal(resumeButtonVisible({ state: 'needs_human', pending_kind: 'captcha', resume_eligible: false }), false);
+    assert.equal(resumeButtonVisible({ state: 'docs_ready', pending_kind: 'blocked', resume_eligible: true }), false);
+    // Not a boolean: falls back to the kind list, never treated as eligible.
+    assert.equal(resumeButtonVisible({ state: 'needs_human', pending_kind: 'blocked', resume_eligible: 'yes' }), false);
   });
 
   test('RESUME_BUTTON_KINDS and the card warning mirror the server exactly (drift guard)', () => {
