@@ -24,6 +24,7 @@ import { createApplyRunner } from '../src/dashboard/apply-runner.js';
 import { createResumeRunner } from '../src/dashboard/resume-runner.js';
 import { createReviewRunner } from '../src/dashboard/review-runner.js';
 import { createCalendarCache } from '../src/dashboard/calendar-cache.js';
+import { createLinkedInLiveCheck } from '../src/apply/linkedin-button-prepare.js';
 
 const HERE = path.dirname(fileURLToPath(import.meta.url));
 const PACKAGE_ROOT = path.join(HERE, '..');
@@ -165,6 +166,9 @@ async function main() {
     healthBanner,
     // routes/google-reauth.js's POST /api/google/reauth (2026-09-17): the real node:child_process spawn.
     spawn: nodeSpawn,
+    // routes/applications.js's create routes (spec v1 F1.4): the live LinkedIn page-state check. Left unset
+    // when config failed to load, so a LinkedIn listing is refused (check_unavailable), never host-labeled.
+    ...(config ? { linkedInApplyCheck: createLinkedInLiveCheck({ env, config, log, withClient }) } : {}),
   };
 
   const app = createDashboardServer(/** @type {any} */ (deps));

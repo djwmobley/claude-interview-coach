@@ -16,12 +16,23 @@
  *     worker's start gate through reserveBudget.
  *   - A worker result of 'deferred' (any start-gate refusal) stops the phase; the application stays
  *     'approved' and is re-driven first next time.
+ *   - Page-state check (spec v1 F1.4, v2 B1): src/apply/linkedin-button-prepare.js's live check classifies
+ *     the LinkedIn job page right before the worker runs, for EVERY item, new or existing, and also before a
+ *     new application is created. Total handling of the result:
+ *       easy_apply                              proceed
+ *       challenge, auth_wall                    (breaker already tripped by the check) new: skip; existing
+ *                                               or created: park; then stop the phase
+ *       breaker, budget_exhausted, no_browser,  the check could not run: stop the phase, park nothing (the
+ *       check_error                             application stays approved and is re-checked next time)
+ *       anything else                           new: skip with a warning and continue; existing or created:
+ *                                               park visibly (needs_human, kind easy_apply_unverified, the
+ *                                               branch in the label) and continue. Never the dialog.
  */
 import { localMinutes, nextMorningSpacingMs } from './easy-apply-policy.js';
 import { easyApplyConfig } from './easy-apply-flow.js';
 import { breakerStatus, hasEasyApplyInFlight, lastAttemptAt, EASY_APPLY_BUDGET_SOURCE } from '../core/easy-apply-state.js';
 import { remainingBudget } from '../core/budget.js';
-import { createApplication, approve } from '../core/applications.js';
+import { createApplication, approve, transition } from '../core/applications.js';
 
 /**
  * @typedef {Object} MorningDeps
@@ -36,7 +47,18 @@ import { createApplication, approve } from '../core/applications.js';
  * @property {(applicationId: number, row: import('../core/auto-apply-select.js').CandidateRow) => Promise<{ ok: boolean, reason?: string|null }>} draft
  * @property {(applicationId: number, actor: string) => Promise<void>} approve
  * @property {(applicationId: number, opts: { easyApply: { trigger: 'morning' } }) => Promise<{ ok: boolean, status: string, reason?: string }>} runWorker
+ * @property {(target: { listingId: number|null, applicationId: number|null }) => Promise<{ branch: string, reason?: string }>} verifyEasyApply
+ *   the live LinkedIn page-state check (by listing for a new row, by application for an existing one)
+ * @property {(applicationId: number, branch: string) => Promise<void>} parkUnverified approved -> needs_human,
+ *   kind easy_apply_unverified
  */
+
+/** Kind of the visible park when the page does not show exactly one Easy Apply control (spec v2 B1). */
+export const EASY_APPLY_UNVERIFIED_KIND = 'easy_apply_unverified';
+/** Check results that stop the phase after handling the item (the check already tripped the breaker). */
+const HALT_BRANCHES = Object.freeze(['challenge', 'auth_wall']);
+/** Check results meaning the check itself could not run: stop the phase, park nothing. */
+const GATE_BRANCHES = Object.freeze(['breaker', 'budget_exhausted', 'no_browser', 'check_error']);
 
 /** @param {string} hhmm */
 function hhmm(hhmm) {
@@ -69,6 +91,16 @@ export async function runEasyApplyMorning(rows, deps) {
     return null;
   }
 
+  /** @param {{ listingId: number|null, applicationId: number|null }} target */
+  async function verify(target) {
+    try {
+      return await deps.verifyEasyApply(target);
+    } catch (err) {
+      deps.log({ evt: 'easy_apply_morning_check_failed', severity: 'warning', ...target, err_message: err instanceof Error ? err.message.slice(0, 200) : String(err) });
+      return { branch: 'check_error', reason: 'check_threw' };
+    }
+  }
+
   for (const item of queue) {
     let stop = await gate();
     if (stop) return { results, stopReason: stop };
@@ -76,6 +108,15 @@ export async function runEasyApplyMorning(rows, deps) {
 
     let applicationId = item.id;
     if (item.kind === 'new' && item.row) {
+      // Pre-create check (spec v1 F1.4): unattended, so a non-Easy-Apply page is skipped with a warning.
+      const pre = await verify({ listingId: item.row.listingId, applicationId: null });
+      if (pre.branch !== 'easy_apply') {
+        deps.log({ evt: 'easy_apply_morning_not_easy_apply', severity: 'warning', listing_id: item.row.listingId, branch: pre.branch, reason: pre.reason ?? null });
+        if (GATE_BRANCHES.includes(pre.branch)) return { results, stopReason: `verify_${pre.branch}` };
+        results.push({ listingId: item.row.listingId, outcome: 'not_easy_apply', branch: pre.branch });
+        if (HALT_BRANCHES.includes(pre.branch)) return { results, stopReason: `linkedin_${pre.branch}` };
+        continue;
+      }
       try {
         applicationId = (await deps.createApplication(item.row)).id;
       } catch (err) {
@@ -103,6 +144,19 @@ export async function runEasyApplyMorning(rows, deps) {
     stop = await gate();
     if (stop) return { results, stopReason: stop };
 
+    // Pre-worker check for EVERY item (spec v2 B1): the dialog is only ever attempted on a page that shows
+    // exactly one Easy Apply control right now.
+    const listingId = item.row ? item.row.listingId : null;
+    const v = await verify({ listingId, applicationId });
+    if (v.branch !== 'easy_apply') {
+      deps.log({ evt: 'easy_apply_morning_unverified', severity: 'warning', application_id: applicationId, listing_id: listingId, branch: v.branch, reason: v.reason ?? null });
+      if (GATE_BRANCHES.includes(v.branch)) return { results, stopReason: `verify_${v.branch}` };
+      await deps.parkUnverified(applicationId, v.branch);
+      results.push({ listingId, applicationId, outcome: 'parked_unverified', branch: v.branch });
+      if (HALT_BRANCHES.includes(v.branch)) return { results, stopReason: `linkedin_${v.branch}` };
+      continue;
+    }
+
     const r = await deps.runWorker(applicationId, { easyApply: { trigger: 'morning' } });
     lastRun = deps.now();
     results.push({ listingId: item.row ? item.row.listingId : null, applicationId, outcome: r.status, reason: r.reason ?? null });
@@ -119,7 +173,9 @@ export async function runEasyApplyMorning(rows, deps) {
  *   reviewRunner: { run: (applicationId: number, markdownPath: string, listingId: number) => Promise<any> },
  *   runApplyWorker: (id: number, deps: any) => Promise<any>,
  *   outputRoot: string, env: any, log: (f: any) => void, config: any, timezone: string,
+ *   liveCheck: (listingId: number) => Promise<{ branch: string, reason?: string }>,
  * }} o
+ *   liveCheck: src/apply/linkedin-button-prepare.js's createLinkedInLiveCheck(...) in production.
  * @returns {MorningDeps}
  */
 export function defaultMorningDeps(o) {
@@ -151,5 +207,25 @@ export function defaultMorningDeps(o) {
     },
     approve: async (applicationId, actor) => { await o.withClientFn((c) => approve(c, applicationId, { outputRoot: o.outputRoot, actor })); },
     runWorker: (applicationId, opts) => o.runApplyWorker(applicationId, { env: o.env, log: o.log, ...opts }),
+    async verifyEasyApply({ listingId, applicationId }) {
+      let id = listingId;
+      if (id === null && applicationId !== null) {
+        const r = await o.withClientFn((c) => c.query('SELECT listing_id FROM ic_job_applications WHERE id = $1', [applicationId]));
+        id = r.rowCount ? Number(r.rows[0].listing_id) : null;
+      }
+      if (id === null) return { branch: 'not_found', reason: 'no_listing_for_application' };
+      return o.liveCheck(id);
+    },
+    async parkUnverified(applicationId, branch) {
+      await o.withClientFn((c) => transition(c, applicationId, 'needs_human', {
+        actor: 'apply',
+        note: `Easy Apply not verified on the LinkedIn page (${branch}); the dialog was not opened`,
+        pending_question: {
+          kind: EASY_APPLY_UNVERIFIED_KIND,
+          label: `The LinkedIn job page did not show exactly one Easy Apply button (page state: ${branch}). Nothing was filled or submitted. Check the posting, then apply by hand or withdraw this application.`,
+          branch,
+        },
+      }));
+    },
   };
 }

@@ -72,36 +72,61 @@ export async function persistApplyTargetForListing(client, listing, applyDetail,
     if (Number.isFinite(ageMs) && ageMs < opts.reprobeAfterHours * 3600000) return { outcome: 'skipped_cooldown' };
   }
 
-  const candidate = (applyDetail && applyDetail.externalApplyUrl) || listing.url_normalized || listing.url || null;
-  const hasHintOnly = Boolean(applyDetail && (applyDetail.easyApplyOnly || applyDetail.applyProbe) && !candidate);
-  if (!candidate && !hasHintOnly) return { outcome: 'skipped_no_candidate' };
+  const external = (applyDetail && applyDetail.externalApplyUrl) || null;
 
-  if (applyDetail && applyDetail.easyApplyOnly && !candidate) {
+  // Easy-apply-only is checked BEFORE any listing-URL fallback (spec v1 F1.3): the old order let a
+  // LinkedIn listing's own URL become the "candidate", so the easy-apply hint was never persisted. Stale
+  // target fields are cleared (spec v2 B6) so a previously resolved external target cannot shadow it.
+  if (applyDetail && applyDetail.easyApplyOnly && !external) {
     await client.query(
-      `UPDATE ic_job_listings SET apply_easy_only = true, apply_probed_at = $2, probe_attempts = probe_attempts + 1 WHERE id = $1`,
+      `UPDATE ic_job_listings SET apply_easy_only = true, apply_url = NULL, apply_ats = NULL, apply_ats_confidence = NULL,
+         apply_ats_hint = NULL, apply_probed_at = $2, probe_attempts = probe_attempts + 1 WHERE id = $1`,
       [listing.id, opts.now],
     );
     return { outcome: 'resolved' };
   }
 
+  // The listing's own URL is a fallback candidate only off LinkedIn: a LinkedIn job page is never itself an
+  // apply target, and resolving it could only ever report 'unresolved' while burning a lifetime attempt.
+  const listingUrl = listing.url_normalized || listing.url || null;
+  const candidate = external || (listingUrl && !isLinkedInListingUrl(listingUrl) ? listingUrl : null);
+  const hasHintOnly = Boolean(applyDetail && applyDetail.applyProbe && !candidate);
+  if (!candidate && !hasHintOnly) return { outcome: 'skipped_no_candidate' };
+
   const hint = applyDetail && applyDetail.applyProbe ? JSON.stringify(applyDetail.applyProbe) : null;
   const result = candidate
     ? await resolveApplyTarget(candidate, opts.probeRegistry, { fetch: opts.fetch, lookup: opts.lookup })
     : { resolved: false, reason: 'no_candidate' };
+  // An external candidate or an external-apply hint means this listing is not Easy-Apply-only (spec v2 B6:
+  // every non-easy outcome writes apply_easy_only = false). A plain listing-URL re-probe leaves it alone.
+  const easyOnlyFalse = external || hint ? ', apply_easy_only = false' : '';
 
   if (result.resolved) {
     await client.query(
       `UPDATE ic_job_listings SET apply_url = $2, apply_ats = $3, apply_ats_confidence = $4,
-         apply_ats_hint = coalesce($5::jsonb, apply_ats_hint), apply_probed_at = $6, probe_attempts = probe_attempts + 1
+         apply_ats_hint = coalesce($5::jsonb, apply_ats_hint), apply_probed_at = $6, probe_attempts = probe_attempts + 1${easyOnlyFalse}
        WHERE id = $1`,
       [listing.id, result.url, result.ats, result.confidence, hint, opts.now],
     );
     return { outcome: 'resolved' };
   }
   await client.query(
-    `UPDATE ic_job_listings SET apply_ats_hint = coalesce($2::jsonb, apply_ats_hint), apply_probed_at = $3, probe_attempts = probe_attempts + 1
+    `UPDATE ic_job_listings SET apply_ats_hint = coalesce($2::jsonb, apply_ats_hint), apply_probed_at = $3, probe_attempts = probe_attempts + 1${easyOnlyFalse}
      WHERE id = $1`,
     [listing.id, hint, opts.now],
   );
   return { outcome: 'unresolved' };
+}
+
+/**
+ * True for a URL on linkedin.com (or a subdomain). Unparseable input is not LinkedIn.
+ * @param {string} u
+ */
+function isLinkedInListingUrl(u) {
+  try {
+    const host = new URL(u).hostname.toLowerCase();
+    return host === 'linkedin.com' || host.endsWith('.linkedin.com');
+  } catch {
+    return false;
+  }
 }

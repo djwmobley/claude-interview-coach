@@ -26,8 +26,20 @@ import { BUILT_IN_BLOCKED } from '../src/apply/exclusions.js';
 import { EventEmitter } from 'node:events';
 import {
   parseArgs, acquireLockWithPoll, applyOneCandidate, runPrepare, datedRunJsonPath, writeRunJsonNoOverwrite,
-  AutoApplyLockedError, createFinish, runLifecycle, runSingleApplication, installLoopDrainedGuard,
+  AutoApplyLockedError, createFinish, runLifecycle, runSingleApplication, installLoopDrainedGuard, linkedInHaltWarning,
 } from '../bin/auto-apply.js';
+
+describe('linkedInHaltWarning: the run report names a LinkedIn halt (spec v2 B8)', () => {
+  test('each halt maps to its own warning code; no halt is no warning', () => {
+    assert.equal(linkedInHaltWarning(null), null);
+    assert.equal(linkedInHaltWarning('challenge')?.code, 'LINKEDIN_PROBE_CHALLENGE');
+    assert.equal(linkedInHaltWarning('auth_wall')?.code, 'LINKEDIN_AUTH_EXPIRED');
+    assert.equal(linkedInHaltWarning('breaker')?.code, 'LINKEDIN_PROBE_BREAKER');
+    assert.equal(linkedInHaltWarning('breaker_check_failed')?.code, 'LINKEDIN_PROBE_BREAKER');
+    assert.equal(linkedInHaltWarning('something_else')?.code, 'LINKEDIN_PROBE_HALTED');
+    assert.equal(linkedInHaltWarning('challenge')?.severity, 'warning');
+  });
+});
 
 /** A candidate row from runPrepare's own SELECT, with every field the new pre-filters/caps need. */
 function prepareRow(overrides = {}) {
@@ -497,15 +509,16 @@ describe('runPrepare: no-browser fallback caps ONLY the LinkedIn subset (spec am
       now: new Date(), dryRun: true, log: () => {}, linkedInBrowser: null,
       classifyExclusion: async () => ({ branch: 'eligible' }),
     });
-    // No browser: every LinkedIn row that was even considered (capped at probeRowCap=3) is skipped, never
-    // attempted -- but the non-LinkedIn subset is UNAFFECTED by the missing browser and still gets probed
-    // all the way up to its own, much larger cap (probeRowCapWithBrowser=5).
+    // No browser: every LinkedIn row is skipped, never attempted, and never consumes the LinkedIn cap (spec
+    // v1 F2.1: the cap is counted only after the exclusion, hourly-pay, and browser checks) -- while the
+    // non-LinkedIn subset is UNAFFECTED by the missing browser and still gets probed all the way up to its
+    // own, much larger cap (probeRowCapWithBrowser=5).
     assert.equal(stats.attempted, 5);
-    assert.equal(stats.skippedByReason.no_browser, 3);
+    assert.equal(stats.skippedByReason.no_browser, 10);
     assert.equal(stats.skippedByReason.skipped_dry_run, 5);
   });
 
-  test('the LinkedIn cap itself never changes just because a row order/mix changes', async () => {
+  test('without a browser the LinkedIn cap is never consumed, whatever the row order/mix', async () => {
     const linkedinRows = Array.from({ length: 10 }, (_, i) => prepareRow({ id: 100 + i, source: 'linkedin', fit_score: 90 - i }));
     const nonLinkedinRows = Array.from({ length: 10 }, (_, i) => prepareRow({ id: 200 + i, source: 'exec:board', fit_score: 85 - i }));
     const client = {
@@ -526,7 +539,167 @@ describe('runPrepare: no-browser fallback caps ONLY the LinkedIn subset (spec am
       now: new Date(), dryRun: true, log: () => {}, linkedInBrowser: null,
       classifyExclusion: async () => ({ branch: 'eligible' }),
     });
-    assert.equal(stats.skippedByReason.no_browser, 3); // still 3 -- the linkedin CAP itself never changes
+    assert.equal(stats.skippedByReason.no_browser, 10); // every LinkedIn row, none counted against the cap
+    assert.equal(stats.linkedinTaken, 0);
+  });
+});
+
+/**
+ * Harness for the LinkedIn half of runPrepare (spec v1 F2.1/F2.2, v2 B8/B9/B10): a fake client that only
+ * answers the candidate SELECT, a fake browser handle, and seams for the per-row probe, the budget, and the
+ * breaker so no real page, database row, or budget counter is touched.
+ * @param {{ rows: any[], probeRowCap?: number, probe?: (listing: any) => Promise<{ outcome: string, branch: string|null }>,
+ *   budgetOk?: (n: number) => boolean, remainingDetails?: number, breakerTripped?: boolean, scanRanToday?: boolean, dryRun?: boolean }} o
+ */
+async function runLinkedInPrepare(o) {
+  const client = {
+    async query(/** @type {string} */ text) {
+      if (/^\s*SELECT id, url, url_normalized/.test(text)) return { rows: o.rows };
+      return { rows: [] };
+    },
+  };
+  const config = {
+    atsApply: {
+      greenhouse: { hosts: ['boards.greenhouse.io'] }, lever: { hosts: [] }, smartrecruiters: { hosts: [] },
+      icims: { hostSuffix: 'icims.com' }, dayforce: { hostSuffix: 'dayforcehcm.com' },
+    },
+    autoApply: { reprobeAfterHours: 48, probeRowCap: o.probeRowCap ?? 10, probeRowCapWithBrowser: 40, probeFitFloor: 0 },
+    adapters: { adapters: { linkedin: { dailyPages: 40, dailyDetails: 200, maxDetailsPerRun: 60, detailDelayMs: [3000, 6000] } } },
+  };
+  /** @type {any[]} */
+  const probed = [];
+  /** @type {any[]} */
+  const reserves = [];
+  /** @type {number[]} */
+  const sleeps = [];
+  /** @type {any[]} */
+  const logs = [];
+  const stats = await runPrepare(/** @type {any} */ (client), /** @type {any} */ (config), {
+    now: new Date('2026-10-06T12:00:00Z'), dryRun: o.dryRun ?? false, log: (f) => logs.push(f),
+    linkedInBrowser: /** @type {any} */ ({ cap: {}, probeSession: null }),
+    classifyExclusion: async (listing) => (String(listing.company).startsWith('Excluded') ? { branch: 'blocked_company' } : { branch: 'eligible' }),
+    prepareLinkedIn: async (_c, listing) => { probed.push(listing.id); return o.probe ? o.probe(listing) : { outcome: 'resolved', branch: 'easy_apply' }; },
+    reserveBudget: async (_c, source, want, caps) => { reserves.push({ source, want, caps }); return { ok: o.budgetOk ? o.budgetOk(reserves.length) : true }; },
+    remainingBudget: async (_c, _s, caps) => ({ details: o.remainingDetails ?? caps.dailyDetails, pages: 40 }),
+    breakerStatus: async () => ({ tripped: Boolean(o.breakerTripped) }),
+    sleep: async (ms) => { sleeps.push(ms); },
+    rand: () => 0.5,
+    scanRanToday: o.scanRanToday,
+  });
+  return { stats, probed, reserves, sleeps, logs };
+}
+
+/** @param {number} n @param {Partial<any>} [over] */
+const liRow = (n, over = {}) => prepareRow({ id: n, source: 'linkedin', url_normalized: `https://www.linkedin.com/jobs/view/${4100000000 + n}/`, fit_score: 95 - n, ...over });
+
+describe('runPrepare: the LinkedIn cap counts only real attempts (spec v1 F2.1)', () => {
+  test('3 excluded listings plus 15 eligible gives exactly 10 attempts', async () => {
+    const rows = [
+      ...[1, 2, 3].map((n) => liRow(n, { company: `Excluded ${n}`, company_norm: `excluded ${n}` })),
+      ...Array.from({ length: 15 }, (_, i) => liRow(10 + i)),
+    ];
+    const r = await runLinkedInPrepare({ rows });
+    assert.equal(r.stats.attempted, 10);
+    assert.equal(r.probed.length, 10);
+    assert.equal(r.stats.skippedByReason.exclusion_blocked_company, 3);
+    assert.equal(r.stats.linkedinTaken, 10);
+    assert.ok(!r.probed.some((id) => id <= 3), 'an excluded listing is never probed');
+  });
+
+  test('an excluded listing never uses up the cap, even when every row before the eligible one is excluded', async () => {
+    const rows = [...Array.from({ length: 12 }, (_, i) => liRow(i + 1, { company: `Excluded ${i}` })), liRow(50)];
+    const r = await runLinkedInPrepare({ rows, probeRowCap: 1 });
+    assert.deepEqual(r.probed, [50]);
+    assert.equal(r.reserves.length, 1, 'only the eligible row reserved budget');
+  });
+
+  test('hourly-pay rows never use up the cap either', async () => {
+    const rows = [liRow(1, { salary_period: 'hour' }), liRow(2, { salary_period: 'hour' }), liRow(3)];
+    const r = await runLinkedInPrepare({ rows, probeRowCap: 1 });
+    assert.deepEqual(r.probed, [3]);
+  });
+
+  test('the over-fetch running out of eligible LinkedIn rows is logged with counts (spec v2 B10)', async () => {
+    const rows = Array.from({ length: 200 }, (_, i) => liRow(i + 1, { company: `Excluded ${i}` }));
+    const r = await runLinkedInPrepare({ rows, probeRowCap: 10 });
+    const evt = r.logs.find((l) => l.evt === 'auto_apply_prepare_linkedin_pool_exhausted');
+    assert.ok(evt, 'a pool-exhausted log line is written');
+    assert.equal(evt.linkedin_taken, 0);
+    assert.equal(evt.linkedin_cap, 10);
+    assert.equal(evt.fetched, 200);
+  });
+});
+
+describe('runPrepare: LinkedIn budget, floor, and pacing (spec v1 F2.2, v2 B9)', () => {
+  test('one detail is reserved per page load, BEFORE the probe runs', async () => {
+    const order = /** @type {string[]} */ ([]);
+    const rows = [liRow(1), liRow(2)];
+    const r = await runLinkedInPrepare({ rows, probe: async (l) => { order.push(`probe:${l.id}`); return { outcome: 'resolved', branch: 'easy_apply' }; } });
+    assert.equal(r.reserves.length, 2);
+    assert.deepEqual(r.reserves[0].want, { details: 1 });
+    assert.equal(r.reserves[0].source, 'linkedin');
+    assert.deepEqual(order, ['probe:1', 'probe:2']);
+  });
+
+  test('budget exhausted: skipped, no attempt, no cap consumed', async () => {
+    const r = await runLinkedInPrepare({ rows: [liRow(1), liRow(2), liRow(3)], budgetOk: () => false });
+    assert.equal(r.stats.attempted, 0);
+    assert.deepEqual(r.probed, []);
+    assert.equal(r.stats.skippedByReason.linkedin_budget_exhausted, 3);
+    assert.equal(r.stats.linkedinTaken, 0);
+  });
+
+  test('budget check runs before the cap: a remaining-details read of 0 skips without reserving', async () => {
+    const r = await runLinkedInPrepare({ rows: [liRow(1)], remainingDetails: 0 });
+    assert.equal(r.reserves.length, 0);
+    assert.equal(r.stats.skippedByReason.linkedin_budget_exhausted, 1);
+  });
+
+  test('before today\'s scan has run, probes leave the scan\'s per-run share (60) of dailyDetails untouched', async () => {
+    const before = await runLinkedInPrepare({ rows: [liRow(1)], scanRanToday: false });
+    assert.equal(before.reserves[0].caps.dailyDetails, 140);
+    const unknown = await runLinkedInPrepare({ rows: [liRow(1)] });
+    assert.equal(unknown.reserves[0].caps.dailyDetails, 140, 'unknown scan state keeps the floor');
+    const after = await runLinkedInPrepare({ rows: [liRow(1)], scanRanToday: true });
+    assert.equal(after.reserves[0].caps.dailyDetails, 200);
+  });
+
+  test('LinkedIn page loads are paced by detailDelayMs [3000, 6000], never before the first one', async () => {
+    const r = await runLinkedInPrepare({ rows: [liRow(1), liRow(2), liRow(3)] });
+    assert.equal(r.sleeps.length, 2);
+    for (const ms of r.sleeps) assert.ok(ms >= 3000 && ms <= 6000, String(ms));
+  });
+
+  test('dry run: no reservation, no probe page load, nothing paced', async () => {
+    const r = await runLinkedInPrepare({ rows: [liRow(1), liRow(2)], dryRun: true });
+    assert.equal(r.reserves.length, 0);
+    assert.equal(r.sleeps.length, 0);
+  });
+});
+
+describe('runPrepare: challenge, auth wall, and the breaker stop LinkedIn probing (spec v1 F1.1, v2 B8)', () => {
+  test('a challenge stops LinkedIn for the run; other sources continue; a warning is recorded', async () => {
+    // The non-LinkedIn row has no URL at all, so its persist call is skipped_no_candidate (no network).
+    const rows = [liRow(1), liRow(2), liRow(3), prepareRow({ id: 900, source: 'exec:board', fit_score: 10, url_normalized: null, url: null })];
+    const r = await runLinkedInPrepare({ rows, probe: async (l) => (l.id === 1 ? { outcome: 'halted_challenge', branch: 'challenge' } : { outcome: 'resolved', branch: 'easy_apply' }) });
+    assert.deepEqual(r.probed, [1]);
+    assert.equal(r.stats.skippedByReason.linkedin_halted, 2);
+    assert.equal(r.stats.linkedinHalt, 'challenge');
+    assert.ok(r.stats.attempted >= 2, 'the non-LinkedIn row is still attempted');
+  });
+
+  test('an auth wall stops LinkedIn for the run', async () => {
+    const r = await runLinkedInPrepare({ rows: [liRow(1), liRow(2)], probe: async () => ({ outcome: 'halted_auth_wall', branch: 'auth_wall' }) });
+    assert.deepEqual(r.probed, [1]);
+    assert.equal(r.stats.linkedinHalt, 'auth_wall');
+  });
+
+  test('a tripped breaker at the start blocks every LinkedIn probe and reserves nothing', async () => {
+    const r = await runLinkedInPrepare({ rows: [liRow(1), liRow(2)], breakerTripped: true });
+    assert.deepEqual(r.probed, []);
+    assert.equal(r.reserves.length, 0);
+    assert.equal(r.stats.skippedByReason.linkedin_breaker, 2);
+    assert.equal(r.stats.linkedinHalt, 'breaker');
   });
 });
 

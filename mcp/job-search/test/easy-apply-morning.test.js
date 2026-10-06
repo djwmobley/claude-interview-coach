@@ -15,14 +15,22 @@ import { runEasyApplyMorning } from '../src/apply/easy-apply-morning.js';
 const at = (hhmm) => new Date(`2026-10-05T${hhmm}:00-05:00`).getTime();
 
 /**
- * @param {{ start: string, inFlightAfterRun?: boolean, breaker?: boolean, cap?: number, leftover?: number[], workerStatus?: string }} o
+ * @param {{ start: string, inFlightAfterRun?: boolean, breaker?: boolean, cap?: number, leftover?: number[], workerStatus?: string,
+ *   verify?: (target: { listingId: number|null, applicationId: number|null }, n: number) => { branch: string } }} o
  */
 function harness(o) {
   let clock = at(o.start);
   const log = /** @type {any[]} */ ([]);
   let inFlight = false;
   let nextId = 500;
+  let verifies = 0;
   const deps = {
+    verifyEasyApply: async (/** @type {any} */ target) => {
+      verifies++;
+      log.push(['verify', target.listingId, target.applicationId]);
+      return o.verify ? o.verify(target, verifies) : { branch: 'easy_apply', reason: 'one_easy_apply_control' };
+    },
+    parkUnverified: async (/** @type {number} */ id, /** @type {string} */ branch) => { log.push(['park', id, branch]); },
     now: () => new Date(clock),
     sleep: async (/** @type {number} */ ms) => { log.push(['sleep', ms]); clock += ms; },
     rand: () => 0.5,
@@ -90,6 +98,67 @@ describe('runEasyApplyMorning', () => {
     assert.deepEqual(h.log.filter((x) => x[0] === 'worker').map((x) => x[1]), [77]);
     assert.equal(h.log.filter((x) => x[0] === 'create').length, 0);
   });
+  test('the page-state check runs before the worker for EVERY item, new or existing (spec v2 B1)', async () => {
+    const h = harness({ start: '10:00', leftover: [77], inFlightAfterRun: false, workerStatus: 'needs_human' });
+    await runEasyApplyMorning(/** @type {any} */ (rows), /** @type {any} */ (h.deps));
+    const seq = h.log.filter((x) => x[0] === 'verify' || x[0] === 'worker').map((x) => x[0]);
+    // existing 77: verify, worker. Each new row: verify (pre-create), verify (pre-worker), worker.
+    assert.deepEqual(seq, ['verify', 'worker', 'verify', 'verify', 'worker', 'verify', 'verify', 'worker']);
+    assert.deepEqual(h.log.find((x) => x[0] === 'verify'), ['verify', null, 77]);
+  });
+
+  test('a new listing that is not Easy Apply is never created, drafted, or run; the loop continues (spec v1 F1.4)', async () => {
+    const h = harness({ start: '10:00', inFlightAfterRun: false, workerStatus: 'needs_human', verify: (t) => (t.listingId === 1 ? { branch: 'external' } : { branch: 'easy_apply' }) });
+    const out = await runEasyApplyMorning(/** @type {any} */ (rows), /** @type {any} */ (h.deps));
+    assert.deepEqual(h.log.filter((x) => x[0] === 'create').map((x) => x[1]), [2]);
+    assert.deepEqual(out.results[0], { listingId: 1, outcome: 'not_easy_apply', branch: 'external' });
+    assert.equal(out.stopReason, null);
+  });
+
+  test('a leftover approved application whose page is not Easy Apply is parked visibly, never run (spec v2 B1)', async () => {
+    const h = harness({ start: '10:00', leftover: [77], inFlightAfterRun: false, workerStatus: 'needs_human', verify: (t) => (t.applicationId === 77 ? { branch: 'closed' } : { branch: 'easy_apply' }) });
+    const out = await runEasyApplyMorning(/** @type {any} */ (rows), /** @type {any} */ (h.deps));
+    assert.deepEqual(h.log.find((x) => x[0] === 'park'), ['park', 77, 'closed']);
+    assert.ok(!h.log.some((x) => x[0] === 'worker' && x[1] === 77));
+    assert.equal(out.results[0].outcome, 'parked_unverified');
+    assert.equal(out.results[0].branch, 'closed');
+  });
+
+  test('a new application whose pre-worker check fails is parked, not run', async () => {
+    const h = harness({ start: '10:00', verify: (t, n) => (n === 2 ? { branch: 'unknown' } : { branch: 'easy_apply' }) });
+    await runEasyApplyMorning(/** @type {any} */ ([rows[0]]), /** @type {any} */ (h.deps));
+    assert.deepEqual(h.log.find((x) => x[0] === 'park'), ['park', 500, 'unknown']);
+    assert.equal(h.log.filter((x) => x[0] === 'worker').length, 0);
+  });
+
+  test('an auth wall during the check parks that application and stops the phase', async () => {
+    const h = harness({ start: '10:00', leftover: [77, 78], verify: () => ({ branch: 'auth_wall' }) });
+    const out = await runEasyApplyMorning(/** @type {any} */ (rows), /** @type {any} */ (h.deps));
+    assert.deepEqual(h.log.filter((x) => x[0] === 'park'), [['park', 77, 'auth_wall']]);
+    assert.equal(h.log.filter((x) => x[0] === 'worker' || x[0] === 'create').length, 0);
+    assert.equal(out.stopReason, 'linkedin_auth_wall');
+  });
+
+  test('an auth wall at the pre-create check stops the phase with nothing created', async () => {
+    const h = harness({ start: '10:00', verify: () => ({ branch: 'auth_wall' }) });
+    const out = await runEasyApplyMorning(/** @type {any} */ (rows), /** @type {any} */ (h.deps));
+    assert.equal(h.log.filter((x) => x[0] === 'create' || x[0] === 'park').length, 0);
+    assert.equal(out.stopReason, 'linkedin_auth_wall');
+  });
+
+  test('a check that could not run (breaker, budget, no browser, error) stops the phase without parking', async () => {
+    for (const branch of ['breaker', 'budget_exhausted', 'no_browser']) {
+      const h = harness({ start: '10:00', leftover: [77], verify: () => ({ branch }) });
+      const out = await runEasyApplyMorning(/** @type {any} */ (rows), /** @type {any} */ (h.deps));
+      assert.equal(h.log.filter((x) => x[0] === 'park' || x[0] === 'worker').length, 0, branch);
+      assert.equal(out.stopReason, `verify_${branch}`);
+    }
+    const h = harness({ start: '10:00', leftover: [77] });
+    h.deps.verifyEasyApply = async () => { throw new Error('boom'); };
+    const out = await runEasyApplyMorning(/** @type {any} */ (rows), /** @type {any} */ (h.deps));
+    assert.equal(out.stopReason, 'verify_check_error');
+  });
+
   test('a deferred worker result stops the loop', async () => {
     const h = harness({ start: '10:00', inFlightAfterRun: false, workerStatus: 'deferred' });
     const out = await runEasyApplyMorning(/** @type {any} */ (rows), /** @type {any} */ (h.deps));

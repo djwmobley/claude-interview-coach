@@ -1,0 +1,38 @@
+<!doctype html>
+<!--
+  SYNTHETIC fixture (not recorded from linkedin.com): a logged-in /jobs/view/<id> page shaped like
+  LinkedIn's, with hashed class names. The top card holds the job title h1 and ONE Easy Apply button.
+  Outside the top card: the description body mentions "Easy Apply" in prose, the similar-jobs rail and a
+  promoted card each carry their own "Easy Apply" button (they link to OTHER job ids), and the global nav
+  has an unrelated button. Used by test/linkedin-apply-state.test.js.
+-->
+<html lang="en"><head><meta charset="utf-8"><title>Chief Technology Officer | Acme Corp | LinkedIn</title></head>
+<body>
+<header class="gx81kq"><nav><button type="button" aria-label="Messaging">Messaging</button><a href="https://www.linkedin.com/feed/">Home</a></nav></header>
+<main class="q8z1pw">
+  <div class="v2kd0e">
+    <div class="m4r7tt">
+      <div class="p0aa1z">
+        <h1 class="t-24 f9x2rl">Chief Technology Officer</h1>
+        <div class="b7c1"><a href="https://www.linkedin.com/company/acme/">Acme Corp</a> <span>Houston, TX</span> <span>2 days ago</span></div>
+      </div>
+      <div class="k3m9qq">
+        <button type="button" class="jobs-apply-button h8e2dd" aria-label="Easy Apply to Chief Technology Officer at Acme Corp" id="ember42"><span class="artdeco-button__text">Easy Apply</span></button>
+        <button type="button" class="jobs-save-button" aria-label="Save Chief Technology Officer at Acme Corp"><span>Save</span></button>
+      </div>
+    </div>
+    <article class="jobs-description__content">
+      <div id="job-details"><p>About the role. Candidates may use Easy Apply. Applied 3 days ago is not a status here. We are no longer accepting paper resumes.</p>
+      <button type="button" aria-label="Easy Apply to another thing">Easy Apply</button></div>
+    </article>
+  </div>
+  <aside class="r9t0aa">
+    <h2>Similar jobs</h2>
+    <ul>
+      <li class="c1x"><a href="https://www.linkedin.com/jobs/view/4999000111/">VP Engineering</a><button type="button" aria-label="Easy Apply to VP Engineering at Beta">Easy Apply</button></li>
+      <li class="c1x"><a href="https://www.linkedin.com/jobs/view/4999000222/">CIO</a><span>Easy Apply</span></li>
+    </ul>
+    <section class="promo7"><a href="https://www.linkedin.com/jobs/view/4999000333/">Promoted: CTO at Gamma</a><button type="button">Apply</button></section>
+  </aside>
+</main>
+</body></html>
