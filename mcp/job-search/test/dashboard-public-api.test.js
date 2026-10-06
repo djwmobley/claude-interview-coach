@@ -98,7 +98,7 @@ describe('classify(): withdraw refusals', () => {
 });
 
 describe('classify(): answer refusals (answer-fallback F6/F7)', () => {
-  for (const code of ['not_an_offered_option', 'bank_write_failed']) {
+  for (const code of ['not_an_offered_option', 'bank_write_failed', 'bank_changed_retry']) {
     test(`409 ${code} maps to answer_refused with the server message`, () => {
       const r = /** @type {any} */ (classify(409, { ok: false, code, message: 'm' }));
       assert.equal(r.kind, 'answer_refused');

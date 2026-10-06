@@ -22,7 +22,7 @@ import { sanitizeOptions, pendingOptionFields, OPTION_CAP } from '../src/apply/a
 import { WORKDAY_PROFILE } from '../src/apply/assisted/profiles/workday.js';
 import { LINKEDIN_PROFILE } from '../src/apply/assisted/profiles/linkedin.js';
 import { outcomeForStop } from '../src/apply/assisted/handoff.js';
-import { applyChoiceAnswer, writeBankAtomic, deriveBankKey } from '../src/apply/bank-writer.js';
+import { applyChoiceAnswer, writeBankAtomic, deriveBankKey, updateBank, BankChangedError } from '../src/apply/bank-writer.js';
 
 const HEARD = [
   '## how_did_you_hear', 'type: enum', 'value: Job Board', 'fallback: 2 | Internet Search',
@@ -197,6 +197,73 @@ describe('F6: applyChoiceAnswer (create or update a key derived from the questio
     assert.throws(() => applyChoiceAnswer(['## adult', 'type: boolean', 'value: true', 'learned: Are you 18?'].join('\n'), { label: 'Are you 18?', option: 'Yes' }), /not type enum/);
     assert.throws(() => applyChoiceAnswer('', { label: 'Q', option: 'a\nvalue: x' }), /control character/);
     assert.throws(() => applyChoiceAnswer('garbage line', { label: 'Q', option: 'A' }), /unrecognized top-level line/);
+  });
+});
+
+describe('F7: updateBank (in-process mutex + optimistic concurrency against hand edits)', () => {
+  const tmpBank = (/** @type {string} */ text) => {
+    const dir = fs.mkdtempSync(path.join(os.tmpdir(), 'banku-'));
+    const file = path.join(dir, 'apply-answers.md');
+    fs.writeFileSync(file, text);
+    return file;
+  };
+  const addAlias = (/** @type {string} */ alias) => (/** @type {string} */ t) => `${t.replace(/\n*$/, '')}\naliases: ${alias}\n`;
+
+  test('two concurrent writes both land (serialized, neither lost)', async () => {
+    const file = tmpBank(HEARD.join('\n'));
+    await Promise.all([updateBank(file, addAlias('Source of this application')), updateBank(file, addAlias('Where did you find this job'))]);
+    const bank = parseAnswerBank(fs.readFileSync(file, 'utf8'));
+    assert.equal(bank.labels.get('source of this application')?.key, 'how_did_you_hear');
+    assert.equal(bank.labels.get('where did you find this job')?.key, 'how_did_you_hear');
+  });
+
+  test('a hand edit between read and replace is preserved and the change is re-applied to it', async () => {
+    const file = tmpBank(HEARD.join('\n'));
+    let edited = false;
+    await updateBank(file, addAlias('Source of this application'), {
+      beforeReplace: () => {
+        if (edited) return;
+        edited = true;
+        fs.writeFileSync(file, `salary_floor: 1\n${HEARD.join('\n')}\n`);
+      },
+    });
+    const text = fs.readFileSync(file, 'utf8');
+    const bank = parseAnswerBank(text);
+    assert.equal(bank.meta.salary_floor, 1, 'the hand edit survived');
+    assert.equal(bank.labels.get('source of this application')?.key, 'how_did_you_hear', 'the dashboard change was re-applied');
+  });
+
+  test('a hand edit the change cannot be re-applied to is refused visibly; the file keeps the hand edit', async () => {
+    const file = tmpBank(HEARD.join('\n'));
+    const handEdit = `${HEARD.join('\n')}\naliases: Source of this application\n`;
+    let edited = false;
+    await assert.rejects(updateBank(file, addAlias('Source of this application'), {
+      beforeReplace: () => {
+        if (edited) return;
+        edited = true;
+        fs.writeFileSync(file, handEdit);
+      },
+    }), (err) => err instanceof BankChangedError && err.code === 'bank_changed_retry');
+    assert.equal(fs.readFileSync(file, 'utf8'), handEdit);
+  });
+
+  test('a file that changes again during the re-apply is refused visibly and left as the editor wrote it', async () => {
+    const file = tmpBank(HEARD.join('\n'));
+    let n = 0;
+    await assert.rejects(updateBank(file, addAlias('Source of this application'), {
+      beforeReplace: () => {
+        n++;
+        fs.writeFileSync(file, `# edit ${n}\n${HEARD.join('\n')}\n`);
+      },
+    }), (err) => err instanceof BankChangedError);
+    assert.equal(fs.readFileSync(file, 'utf8'), `# edit 2\n${HEARD.join('\n')}\n`);
+  });
+
+  test('a lock holder that throws does not wedge later writes', async () => {
+    const file = tmpBank(HEARD.join('\n'));
+    await assert.rejects(updateBank(file, () => { throw new Error('boom'); }), /boom/);
+    await updateBank(file, addAlias('Source of this application'));
+    assert.match(fs.readFileSync(file, 'utf8'), /Source of this application/);
   });
 });
 

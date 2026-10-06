@@ -167,7 +167,88 @@ function verify(text, key, norm, option) {
 }
 
 /**
- * Replace the bank file atomically after parse-validating the WHOLE new content (spec F7). On a parse
+ * A bank write refused because the file changed under it (a hand edit) and the change could not be
+ * re-applied cleanly, or the file changed again. Nothing was written. The route maps it to 409
+ * bank_changed_retry.
+ */
+export class BankChangedError extends Error {
+  /** @param {string} message */
+  constructor(message) {
+    super(message);
+    this.name = 'BankChangedError';
+    this.code = 'bank_changed_retry';
+  }
+}
+
+/** Tail of the in-process write queue: every updateBank call runs after the previous one settles. */
+let lockTail = /** @type {Promise<unknown>} */ (Promise.resolve());
+
+/**
+ * Run `fn` holding the process-wide bank-write mutex. A rejected holder never wedges the queue.
+ * @template T
+ * @param {() => Promise<T>|T} fn
+ * @returns {Promise<T>}
+ */
+export function withBankLock(fn) {
+  const run = lockTail.then(() => fn());
+  lockTail = run.catch(() => {});
+  return run;
+}
+
+/** @param {string} file @returns {string} '' when the file does not exist */
+function readBankFile(file) {
+  try {
+    return fs.readFileSync(file, 'utf8');
+  } catch (err) {
+    if (/** @type {any} */ (err)?.code === 'ENOENT') return '';
+    throw err;
+  }
+}
+
+/** @param {string} text */
+const hashOf = (text) => crypto.createHash('sha256').update(text).digest('hex');
+
+/**
+ * THE way every caller writes the bank (dashboard answer route, both paths). Under the in-process mutex:
+ * read the file and hash it, compute `transform(text)`, parse-validate it (F7). Immediately before the
+ * atomic replace, re-read: unchanged -> replace. Changed (a hand edit) -> re-apply the SAME transform to
+ * the fresh content and re-validate, once; then re-read again and replace only if it is still that fresh
+ * content. A re-apply that throws, or a second change, refuses with BankChangedError and writes nothing.
+ * A transform or validation error on the first pass is thrown as is (the caller's bank_write_failed).
+ * @param {string} file
+ * @param {(text: string) => string} transform pure; may throw to refuse
+ * @param {{ beforeReplace?: () => void }} [hooks] test seam: runs just before each pre-replace re-read
+ * @returns {Promise<{ text: string }>}
+ */
+export function updateBank(file, transform, hooks = {}) {
+  return withBankLock(() => {
+    const original = readBankFile(file);
+    let base = hashOf(original);
+    let next = transform(original);
+    parseAnswerBank(next);
+    for (let attempt = 0; ; attempt++) {
+      hooks.beforeReplace?.();
+      const current = readBankFile(file);
+      if (hashOf(current) === base) {
+        writeBankAtomic(file, next);
+        return { text: next };
+      }
+      if (attempt >= 1) throw new BankChangedError('The answer bank changed again while this answer was being saved. Nothing was written; try again.');
+      try {
+        next = transform(current);
+        parseAnswerBank(next);
+      } catch (err) {
+        const msg = err instanceof Error ? err.message.slice(0, 200) : String(err).slice(0, 200);
+        throw new BankChangedError(`The answer bank was edited while this answer was being saved, and the answer no longer applies cleanly (${msg}). Nothing was written; check the bank and try again.`);
+      }
+      base = hashOf(current);
+    }
+  });
+}
+
+/**
+ * Replace the bank file atomically after parse-validating the WHOLE new content (spec F7). Callers use
+ * updateBank, which holds the mutex and does the hand-edit check around this. On a parse
  * error nothing is written and the JobSearchError is thrown. The temp file lives next to the target so the
  * rename never crosses a volume; it is removed if the rename fails.
  * @param {string} file

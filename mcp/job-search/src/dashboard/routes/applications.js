@@ -22,7 +22,7 @@ import { resumeParkedApplication } from '../../apply/resume-gate.js';
 import { classifyApplyUrl } from '../../apply/ats-detect.js';
 import { resolveLatestApplicationScreenshot } from '../../apply/screenshot.js';
 import { appendLearnedLabel } from '../../apply/answers.js';
-import { applyChoiceAnswer, writeBankAtomic } from '../../apply/bank-writer.js';
+import { applyChoiceAnswer, updateBank, BankChangedError } from '../../apply/bank-writer.js';
 import { packageRoot, loadConfig } from '../../core/config.js';
 import { classifyExclusion, loadExclusionConfig, HARD_BRANCHES } from '../../apply/exclusions.js';
 import { sendJson } from '../http.js';
@@ -605,19 +605,16 @@ export function register(router, deps, streamHub) {
     }
     const pq = app.pending_question;
     const bankPath = typeof deps.answerBankPath === 'string' && deps.answerBankPath ? deps.answerBankPath : ANSWER_BANK_PATH;
-    const readBank = () => {
-      try {
-        return fs.readFileSync(bankPath, 'utf8');
-      } catch (err) {
-        if (/** @type {any} */ (err)?.code === 'ENOENT') return '';
-        throw err;
-      }
-    };
-    /** Every bank write (F7): parse-validated, atomic; any failure is a visible 409 and nothing resumes. */
+    /**
+     * Every bank write (F7) goes through updateBank (process-wide mutex, parse-validated, atomic, re-applied
+     * once over a concurrent hand edit). Any failure is a visible 409 and nothing resumes: bank_changed_retry
+     * when a hand edit got in the way, bank_write_failed otherwise.
+     */
     const bankWriteFailed = (/** @type {unknown} */ err) => {
       const msg = err instanceof Error ? err.message.slice(0, 300) : String(err).slice(0, 300);
-      deps.log?.({ evt: 'apply_answer_bank_write_failed', application_id: id, err_message: msg });
-      return sendJson(ctx.res, 409, { ok: false, code: 'bank_write_failed', message: `The answer bank was not changed: ${msg}` });
+      const changed = err instanceof BankChangedError;
+      deps.log?.({ evt: 'apply_answer_bank_write_failed', application_id: id, err_message: msg, bank_changed: changed });
+      return sendJson(ctx.res, 409, { ok: false, code: changed ? 'bank_changed_retry' : 'bank_write_failed', message: changed ? msg : `The answer bank was not changed: ${msg}` });
     };
 
     // Answer-fallback F6: a parked CHOICE field with captured options takes exactly one of those options,
@@ -628,11 +625,13 @@ export function register(router, deps, streamHub) {
         return sendJson(ctx.res, 409, { ok: false, code: 'not_an_offered_option', message: 'Pick one of the options the site offered for this question.' });
       }
       /** @type {{ key: string, created: boolean }} */
-      let written;
+      let written = { key: '', created: false };
       try {
-        const out = applyChoiceAnswer(readBank(), { label: pq.label, option: b.text });
-        writeBankAtomic(bankPath, out.text);
-        written = out;
+        await updateBank(bankPath, (text) => {
+          const out = applyChoiceAnswer(text, { label: pq.label, option: b.text });
+          written = out;
+          return out.text;
+        });
       } catch (err) {
         return bankWriteFailed(err);
       }
@@ -652,7 +651,7 @@ export function register(router, deps, streamHub) {
 
     if (save && key) {
       try {
-        writeBankAtomic(bankPath, appendLearnedLabel(readBank(), key, String(pq.label ?? '')));
+        await updateBank(bankPath, (text) => appendLearnedLabel(text, key, String(pq.label ?? '')));
       } catch (err) {
         return bankWriteFailed(err);
       }
