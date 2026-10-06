@@ -80,9 +80,12 @@ import { writeApplicationScreenshot } from './screenshot.js';
 /**
  * In-page snapshot function for pageState(). Self-contained (Playwright serializes its source): no closed-
  * over Node values, never string-built code. Reads only; never dispatches events or changes values.
+ * Run through page.$eval('html', ...) like waitFor's own reads (test/safety.test.js keeps page.evaluate
+ * to the scan capability only), so the first argument is the root element and is unused.
+ * @param {Element} _root
  * @param {any} req
  */
-const PAGE_STATE_FN = (req) => {
+const PAGE_STATE_FN = (_root, req) => {
   const clip = (/** @type {unknown} */ s, /** @type {number} */ n) => String(s ?? '').replace(/\s+/g, ' ').trim().slice(0, n);
   const isVisible = (/** @type {Element} */ el) => {
     if (!el || !(el instanceof Element)) return false;
@@ -218,11 +221,19 @@ const PAGE_STATE_FN = (req) => {
 };
 
 /**
+ * A child frame's visible text, kept apart from the main frame's (an iframe-only confirmation never
+ * counts). Self-contained.
+ * @param {Element} body
+ */
+const FRAME_TEXT_FN = (body) => String(/** @type {HTMLElement} */ (body).innerText || '').replace(/\s+/g, ' ').trim().slice(0, 20000);
+
+/**
  * In-page half of clickSingle(): find the candidates, and only when there is exactly one, tag it with the
  * caller's nonce so the Node side clicks that one element through Playwright. Self-contained.
+ * @param {Element} _root unused (run through page.$eval('html', ...))
  * @param {{ selector: string, names: string[]|null, nonce: string }} req
  */
-const CLICK_SINGLE_FN = (req) => {
+const CLICK_SINGLE_FN = (_root, req) => {
   const norm = (/** @type {unknown} */ s) => String(s ?? '').normalize('NFKC').replace(/[​-‍⁠﻿]/g, '').replace(/\s+/g, ' ').toLowerCase().trim().replace(/[\s.,;:!?…>›→»]+$/g, '').trim();
   const isVisible = (/** @type {Element} */ el) => {
     const r = el.getBoundingClientRect();
@@ -336,7 +347,7 @@ export function makeApplyCapability(page, opts) {
     },
     async pageState(req = {}) {
       checkAbort();
-      const main = await page.evaluate(PAGE_STATE_FN, req);
+      const main = await page.$eval('html', PAGE_STATE_FN, req);
       /** @type {Array<{ url: string, text: string }>} */
       const frames = [];
       const mainFrame = typeof page.mainFrame === 'function' ? page.mainFrame() : null;
@@ -344,7 +355,7 @@ export function makeApplyCapability(page, opts) {
         if (f === mainFrame) continue;
         let text = '';
         try {
-          text = await f.evaluate(() => String(document.body ? document.body.innerText : '').replace(/\s+/g, ' ').trim().slice(0, 20000));
+          text = await f.$eval('body', FRAME_TEXT_FN);
         } catch {
           text = '';
         }
@@ -356,7 +367,7 @@ export function makeApplyCapability(page, opts) {
       checkAbort();
       const names = Array.isArray(o.names) ? [...o.names] : null;
       const nonce = crypto.randomBytes(12).toString('hex');
-      const r = await page.evaluate(CLICK_SINGLE_FN, { selector, names, nonce });
+      const r = await page.$eval('html', CLICK_SINGLE_FN, { selector, names, nonce });
       if (!r || r.count !== 1) return { clicked: false, count: r && Number.isInteger(r.count) ? r.count : -1 };
       checkAbort();
       await page.click(`[data-jobsearch-click="${nonce}"]`);

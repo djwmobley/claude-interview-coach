@@ -453,7 +453,7 @@ export const PARTIAL_DRAFT_CARD_WARNING = 'An assisted run clicked Next on this 
  * button, because the server refuses it (question, credential, awaiting_submit, post_submit_uncertain
  * have their own actions; an unknown kind is refused by default).
  */
-export const RESUME_BUTTON_KINDS = Object.freeze(['unrecognized_page', 'captcha', 'assisted_stopped', 'assisted_partial', 'email_verification', 'resume_failed']);
+export const RESUME_BUTTON_KINDS = Object.freeze(['unrecognized_page', 'captcha', 'assisted_stopped', 'assisted_partial', 'email_verification', 'submit_gate', 'resume_failed']);
 
 /**
  * Whether an application card or Review row shows Resume: needs_human parked on one of
