@@ -14,7 +14,7 @@ import { errFields } from './errors.js';
 const HERE = path.dirname(fileURLToPath(import.meta.url));
 const SQL_DIR = path.join(HERE, '..', '..', 'sql');
 
-export const AUX_MIGRATIONS = Object.freeze(['007_mark_meta.sql', '008_noise_and_report.sql', '009_pipeline_events_documents.sql', '011_triage_actor.sql', '012_applications.sql', '013_confirm_mail.sql', '014_application_salary_floor.sql', '015_listing_apply_target.sql', '016_listing_salary_period.sql', '017_detail_outcome.sql', '018_easy_apply_assisted.sql']);
+export const AUX_MIGRATIONS = Object.freeze(['007_mark_meta.sql', '008_noise_and_report.sql', '009_pipeline_events_documents.sql', '011_triage_actor.sql', '012_applications.sql', '013_confirm_mail.sql', '014_application_salary_floor.sql', '015_listing_apply_target.sql', '016_listing_salary_period.sql', '017_detail_outcome.sql', '018_easy_apply_assisted.sql', '019_assisted_ats.sql']);
 
 /**
  * Applies each aux-migration file in its own try/catch so one file's failure never blocks the rest.

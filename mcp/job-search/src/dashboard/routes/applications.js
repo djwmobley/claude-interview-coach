@@ -15,7 +15,7 @@ import { JobSearchError } from '../../core/errors.js';
 import {
   createApplication, approve, getApplication, getApplicationForListing, retry, markAppliedByHand, resume,
   listApplicationEvents, recordApplicationEvent, transition, APPLICATION_STATES, checkApplicationBlockers,
-  withdrawApplication,
+  withdrawApplication, ASSISTED_ATS_TYPES,
   cleanupWithdrawnNudgeCalendar,
 } from '../../core/applications.js';
 import { classifyApplyUrl } from '../../apply/ats-detect.js';
@@ -195,7 +195,8 @@ function kickApplyRunner(deps, applicationId, row) {
   // EASY_APPLY_TIMEOUT_MS); the default 7-minute hard kill would cut the headless fill session off, so a
   // linkedin_easy application gets EASY_APPLY_HARD_TIMEOUT_MS instead. `row` (the application row the
   // calling route already has) decides synchronously; without it the row is read first.
-  const startFor = (/** @type {any} */ app) => (app && app.ats_type === 'linkedin_easy' ? runner.start(applicationId, { hardTimeoutMs: EASY_APPLY_HARD_TIMEOUT_MS }) : runner.start(applicationId));
+  // Assisted Workday (spec v1 clause 9) runs the same 15-minute assisted budget, so it gets the same kill.
+  const startFor = (/** @type {any} */ app) => (app && ASSISTED_ATS_TYPES.includes(app.ats_type) ? runner.start(applicationId, { hardTimeoutMs: EASY_APPLY_HARD_TIMEOUT_MS }) : runner.start(applicationId));
   const fail = (/** @type {unknown} */ err) => {
     deps.log?.({ evt: 'apply_runner_start_failed', application_id: applicationId, err_message: err instanceof Error ? err.message.slice(0, 300) : String(err).slice(0, 300) });
   };

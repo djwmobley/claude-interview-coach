@@ -27,6 +27,7 @@ import { errFields } from '../core/errors.js';
 import { log as defaultLog } from '../core/logger.js';
 import {
   getApplication, transition, transitionUnwrapped, markSubmitted, recordSubmitRequestSent, hasSubmitRequestSentThisAttempt,
+  hasAssistedNextClickThisAttempt, assistedPartialQuestion,
 } from '../core/applications.js';
 import { classifyExclusion, loadExclusionConfig, walkDuplicateRoot } from './exclusions.js';
 import { resolveOutputPath } from '../core/documents.js';
@@ -41,6 +42,10 @@ import { findVerificationMessage } from './gmail-verify.js';
 import { easyApplyStartGate, runAssistedEasyApply, easyApplyConfig, refundEasyApplyCharge } from './easy-apply-flow.js';
 import { createEasyApplyRunner } from './easy-apply-runner.js';
 import { parkAwaitingSubmit } from '../core/easy-apply-state.js';
+import { profileForAts } from './assisted/profiles/index.js';
+import { runAssistedHandoff } from './assisted/handoff.js';
+import { workdayStartGate, refundWorkdayCharge, workdayAssistedConfig } from './assisted/gate.js';
+import { createAssistedRunner } from './assisted/runner.js';
 import { spawn as nodeSpawn } from 'node:child_process';
 
 /** Same numeric key as src/core/scan-run.js's LOCK_KEY -- see the module doc comment. Never a different key. */
@@ -121,7 +126,7 @@ export const EASY_APPLY_TIMEOUT_MS = 15 * 60 * 1000;
  */
 function isUniqueViolationLike(err) {
   const e = /** @type {any} */ (err);
-  return Boolean(e && (e.code === '23505' || (e.cause && e.cause.code === '23505') || /duplicate key value|easy_apply_inflight_uq/.test(String(e.message ?? ''))));
+  return Boolean(e && (e.code === '23505' || (e.cause && e.cause.code === '23505') || /duplicate key value|inflight_uq/.test(String(e.message ?? ''))));
 }
 
 /**
@@ -199,6 +204,9 @@ function hashLinkedFile(outputRoot, relPath) {
  * @property {import('./exclusions.js').ExclusionConfig} [exclusionConfig] apply exclusion gate test seam:
  *   override config/apply-exclusions.json's loaded shape (src/apply/exclusions.js's loadExclusionConfig by
  *   default). A missing/invalid file is a hard error here exactly as it is for auto-apply's select phase.
+ * @property {{ runner?: { run: (input: { applicationId: number, leaseToken: string }) => Promise<any> }, now?: () => Date, trigger?: 'morning'|'dashboard' }} [workday]
+ *   assisted Workday seams: the headless runner (default: src/apply/assisted/runner.js with the Workday
+ *   profile, tool assisted_apply), the clock, and the trigger.
  * @property {typeof preSubmitExclusionRecheck} [preSubmitExclusionRecheck] test seam ONLY -- see
  *   preSubmitExclusionRecheck's own export for why a test suite with shared company/title fixtures across
  *   many unrelated test cases needs this. Never set by bin/apply.js or bin/auto-apply.js.
@@ -264,14 +272,33 @@ export async function runApplyWorker(applicationId, deps = {}) {
     // read and claim, the in-flight index refused it, or the recheck found it ineligible) refunds it,
     // because no attempt ran.
     const assisted = Boolean(adapters[app.ats_type] && adapters[app.ats_type].assisted);
+    // Total classification of the assisted path (spec v1 clause 7): LinkedIn keeps its raw-CDP flow;
+    // an assisted adapter with a profile and a scripted prepare() runs the prelude handoff (Workday);
+    // anything else assisted has no runnable path and is deferred, never run unattended.
+    const assistedProfile = assisted ? profileForAts(app.ats_type) : null;
+    const assistedKind = !assisted ? null
+      : app.ats_type === 'linkedin_easy' ? 'linkedin'
+        : assistedProfile && typeof adapters[app.ats_type].prepare === 'function' ? 'prelude' : 'unsupported';
+    if (assistedKind === 'unsupported') {
+      log({ evt: 'assisted_deferred', application_id: applicationId, reason: 'no_assisted_path' });
+      return { ok: true, status: 'deferred', reason: 'no_assisted_path', state: 'approved' };
+    }
     /** @type {import('./easy-apply-flow.js').EasyApplyDeps} */
     const easyApplyDeps = deps.easyApply ?? {};
-    /** @type {import('./easy-apply-flow.js').EasyApplyCharge|null} */
+    const workdayDeps = deps.workday ?? {};
+    /** @type {any} */
     let easyApplyCharge = null;
-    if (assisted) {
+    if (assistedKind === 'linkedin') {
       const gate = await easyApplyStartGate(client, { config, easyApply: easyApplyDeps });
       if (!gate.ok) {
         log({ evt: 'easy_apply_deferred', application_id: applicationId, reason: gate.reason });
+        return { ok: true, status: 'deferred', reason: gate.reason, state: 'approved' };
+      }
+      easyApplyCharge = gate.charge;
+    } else if (assistedKind === 'prelude') {
+      const gate = await workdayStartGate(client, { config, now: (workdayDeps.now ?? (() => new Date()))() });
+      if (!gate.ok) {
+        log({ evt: 'assisted_deferred', application_id: applicationId, reason: gate.reason });
         return { ok: true, status: 'deferred', reason: gate.reason, state: 'approved' };
       }
       easyApplyCharge = gate.charge;
@@ -281,7 +308,8 @@ export async function runApplyWorker(applicationId, deps = {}) {
       const charge = easyApplyCharge;
       easyApplyCharge = null;
       try {
-        await refundEasyApplyCharge(client, charge);
+        if (charge.kind === 'workday') await refundWorkdayCharge(client, charge);
+        else await refundEasyApplyCharge(client, charge);
         log({ evt: 'easy_apply_charge_refunded', application_id: applicationId });
       } catch (err) {
         log({ evt: 'easy_apply_charge_refund_failed', application_id: applicationId, ...errFields(err) });
@@ -330,7 +358,21 @@ export async function runApplyWorker(applicationId, deps = {}) {
     /** @type {any} */
     let result;
     try {
-      result = assisted
+      const wdCfg = workdayAssistedConfig(config);
+      result = assistedKind === 'prelude'
+        ? await runAssistedHandoff({
+          client, app, profile: assistedProfile, trigger: workdayDeps.trigger ?? easyApplyDeps.trigger ?? 'dashboard', log, now: workdayDeps.now,
+          ttlMs: wdCfg.runTimeoutMinutes * 60000, breakerHours: wdCfg.breakerHours,
+          prelude: () => runPrelude({
+            client, app, controller, adapter: adapters[app.ats_type], outputRoot, bank, env, config, connectSession, progress, log, lookup: deps.lookup, targetMarkerFile, credentials, gmailVerify, sleep,
+          }),
+          // The scripted prelude has already used part of the worker's budget; the model gets what is left.
+          runner: workdayDeps.runner ?? createAssistedRunner({
+            profile: assistedProfile, env, logDir: env.JOBSEARCH_LOG_DIR, repoRoot: repoRoot(), spawn: nodeSpawn,
+            timeoutMs: Math.max(60000, (wdCfg.runTimeoutMinutes - 5) * 60000),
+          }),
+        })
+        : assistedKind === 'linkedin'
         ? await runAssistedEasyApply({
           client, app, config, env, outputRoot, lookup: deps.lookup, log,
           easyApply: {
@@ -352,6 +394,14 @@ export async function runApplyWorker(applicationId, deps = {}) {
       const sent = await hasSubmitRequestSentThisAttempt(client, applicationId);
       const f = errFields(err);
       log({ evt: 'apply_failed', application_id: applicationId, submit_request_sent: sent, ...f });
+      // A10: a run that clicked Next may have left a saved draft at the ATS; a human decides the retry.
+      if (!sent && await hasAssistedNextClickThisAttempt(client, applicationId)) {
+        await transition(client, applicationId, 'needs_human', {
+          actor: 'apply', note: 'assisted run failed after a Next click; a human checks the saved draft before any retry', error: f.err_message,
+          pending_question: assistedPartialQuestion(app.apply_url ?? null, 'the run crashed'),
+        });
+        return { ok: true, status: 'needs_human' };
+      }
       if (sent) {
         await transition(client, applicationId, 'needs_human', {
           actor: 'apply', note: 'submit request was sent but the run then failed; verify manually before retrying', error: f.err_message,
@@ -377,9 +427,12 @@ export async function runApplyWorker(applicationId, deps = {}) {
     if (result.outcome === 'awaiting_submit') {
       // Spec G12: the tab stays open, its CDP target id is stored, and nothing here (or anywhere else) ever
       // clicks Submit. Damian submits in the scan Chrome and confirms with "I submitted".
+      // Workday (A9): the handoff already removed the route policy from the tab before returning here.
       await parkAwaitingSubmit(client, applicationId, {
         targetId: result.targetId, ledger: result.ledger, screenshotRelPath: result.screenshotRelPath,
-        note: `easy apply filled and stopped at Review (${result.reason})`, pageUrl: app.apply_url ?? null, reason: result.reason,
+        note: `${assistedKind === 'prelude' ? 'assisted Workday' : 'easy apply'} filled and stopped at Review (${result.reason})`, pageUrl: app.apply_url ?? null, reason: result.reason,
+        ...(assistedProfile ? { atsLabel: assistedProfile.label } : {}),
+        ...(Array.isArray(result.prefilledUnledgered) ? { prefilledUnledgered: result.prefilledUnledgered } : {}),
       });
       progress({ applicationId, message: 'awaiting_submit' });
       log({ evt: 'easy_apply_awaiting_submit', application_id: applicationId, reason: result.reason });
@@ -513,5 +566,103 @@ export async function runApplyWorker(applicationId, deps = {}) {
     };
 
     return adapter.run(cap, ctx);
+  }
+
+  /**
+   * Assisted prelude (Workday; spec v1 clauses 6-7, v2 A8, A12, A15): open ONE apply-mode page under the
+   * tenant's route policy, write the target marker (BEFORE any lease, so a crash leaves a tab the next run
+   * closes), run the adapter's scripted, model-blind prepare() (entry, sign-in or account creation, email
+   * verification; there is no submit hook in its ctx), assert exactly one page, and hand back the tab's
+   * target id with a release(keepTab) that unroutes-and-leaves-open or closes. The route policy stays
+   * active until release.
+   * @param {{ client: import('pg').Client, app: any, controller: AbortController, adapter: any, outputRoot: string, bank: import('./answers.js').AnswerBank, env: any, config: any, connectSession: typeof defaultConnectSession, progress: (f: any) => void, log: (f: any) => void, lookup?: import('../core/urlguard.js').Lookup, targetMarkerFile?: string, credentials: WorkerDeps['credentials'], gmailVerify: WorkerDeps['gmailVerify'], sleep: WorkerDeps['sleep'] }} p
+   * @returns {Promise<import('./assisted/handoff.js').PreludeResult>}
+   */
+  async function runPrelude(p) {
+    const { client: c, app, controller, adapter, outputRoot: outRoot, env: e, config: cfg, connectSession: connectSess, log: lg } = p;
+    /** @param {boolean} keepTab */
+    const release = async (keepTab) => {
+      const s = session;
+      if (!s) return { ok: !keepTab };
+      if (keepTab) {
+        const r = await s.detachLeaveOpen();
+        if (r && r.ok) {
+          session = null;
+          if (p.targetMarkerFile) await s.writeTargetMarker(p.targetMarkerFile);
+          return { ok: true };
+        }
+      }
+      session = null;
+      await s.closeAll();
+      if (p.targetMarkerFile) await s.writeTargetMarker(p.targetMarkerFile);
+      return { ok: !keepTab };
+    };
+    /** @param {any} pendingQuestion */
+    const fail = (pendingQuestion) => ({ ok: /** @type {const} */ (false), result: { outcome: /** @type {const} */ ('needs_human'), pendingQuestion }, release });
+
+    if (app.resume_hash) {
+      const documents = await loadLinkedDocuments(c, app);
+      if (hashLinkedFile(outRoot, documents.resumePath) !== app.resume_hash) {
+        return fail({ kind: 'document_drift', label: 'The linked resume file changed on disk since Approve. Re-approve (or regenerate and re-approve) before submitting.', page_url: app.apply_url });
+      }
+    }
+    if (typeof app.apply_url !== 'string' || !app.apply_url) return fail({ kind: 'unrecognized_page', label: 'This application has no apply URL on record; apply by hand.' });
+    /** @type {string} */
+    let tenantHost;
+    try {
+      tenantHost = new URL(app.apply_url).hostname.toLowerCase();
+    } catch {
+      return fail({ kind: 'unrecognized_page', label: 'The application URL could not be parsed; apply by hand.' });
+    }
+
+    session = await connectSess({ cdpUrl: e.SCAN_CDP_URL });
+    if (p.targetMarkerFile) await session.reconcileTargets(p.targetMarkerFile);
+    await session.reconcile();
+    const page = await session.attachPage({
+      mode: 'apply', tenantHost, atsHosts: hostsForAts(app.ats_type), uploadHosts: adapter.uploadHosts ?? [], signal: controller.signal,
+    });
+    // A8: the marker lists this tab BEFORE any lease is issued.
+    if (p.targetMarkerFile) await session.writeTargetMarker(p.targetMarkerFile);
+
+    const guarded = await guardUrl(app.apply_url, buildRegistry(cfg), { source: app.ats_type, lookup: p.lookup });
+    await page.goto(guarded.url.toString(), { waitUntil: 'domcontentloaded', timeout: 45000 });
+
+    const cap = makeApplyCapability(page, { signal: controller.signal, applicationId: app.id, outputRoot: outRoot });
+    const b = p.bank;
+    // A15: no recordSubmitRequestSent here; prepare() has no path to a submit control.
+    const ctx = {
+      applicationId: app.id,
+      applyUrl: app.apply_url,
+      tenantHost,
+      atsType: app.ats_type,
+      profile: {
+        email: (b.facts.get('email')?.value) ?? app.account_email,
+        fullName: (b.facts.get('full_name')?.value) ?? null,
+        phone: (b.facts.get('phone')?.value) ?? null,
+      },
+      signal: controller.signal,
+      log: (/** @type {any} */ f) => lg({ application_id: app.id, ...f }),
+      progress: (/** @type {any} */ f) => p.progress({ applicationId: app.id, ...f }),
+      credentials: {
+        read: () => p.credentials.read(tenantHost),
+        write: (/** @type {string} */ username, /** @type {string} */ password) => p.credentials.write(tenantHost, username, password),
+        generatePassword: p.credentials.generatePassword,
+        target: credentialTarget(tenantHost),
+      },
+      gmailVerify: (/** @type {{ sentAfter: Date }} */ o) => p.gmailVerify({ tenantHost, sentAfter: o.sentAfter }),
+      sleep: p.sleep,
+    };
+    const prep = await adapter.prepare(cap, ctx);
+    if (!prep || prep.outcome !== 'ok') {
+      return fail(prep && prep.pendingQuestion ? prep.pendingQuestion : { kind: 'unrecognized_page', label: 'The scripted Workday entry did not finish.', page_url: app.apply_url });
+    }
+    // A12: exactly one page after prepare (a popup or a second tab means the model could act elsewhere).
+    if (session.openPages() !== 1) {
+      return fail({ kind: 'assisted_stopped', label: 'More than one browser tab was open after the scripted Workday entry; apply by hand.', page_url: app.apply_url, assisted_reason: 'multiple_tabs' });
+    }
+    const targetId = await session.targetIdOf(page);
+    if (!targetId) return fail({ kind: 'assisted_stopped', label: 'The Workday tab could not be identified; apply by hand.', page_url: app.apply_url, assisted_reason: 'target_id_unknown' });
+    if (p.targetMarkerFile) await session.writeTargetMarker(p.targetMarkerFile);
+    return { ok: true, targetId, release };
   }
 }

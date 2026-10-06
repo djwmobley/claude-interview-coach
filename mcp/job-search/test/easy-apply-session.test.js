@@ -160,6 +160,37 @@ describe('session.js awaiting_submit tab exemption', () => {
     await s.closeAll();
     assert.equal(p._closed, false, 'a page handed off by detachLeaveOpen is no longer this session\'s to close');
   });
+  test('detachLeaveOpen reports ok, and a failed unroute forgets nothing so closeAll still closes the page (A9)', async () => {
+    const f = fakeChromium();
+    const s = await connectSession({ cdpUrl: 'x', chromium: f.chromium, awaitingTabs: tabs(new Set()) });
+    const p = /** @type {any} */ (await s.attachPage({ mode: 'scan' }));
+    await new Promise((r) => setTimeout(r, 20));
+    p.unroute = async () => { throw new Error('page crashed'); };
+    const r = await s.detachLeaveOpen();
+    assert.deepEqual(r, { ok: false, failed: 1 });
+    assert.equal(s.openPages(), 1);
+    await s.closeAll();
+    assert.equal(p._closed, true);
+    const s2 = await connectSession({ cdpUrl: 'x', chromium: fakeChromium().chromium, awaitingTabs: tabs(new Set()) });
+    await s2.attachPage({ mode: 'scan' });
+    await new Promise((res) => setTimeout(res, 20));
+    assert.deepEqual(await s2.detachLeaveOpen(), { ok: true, failed: 0 });
+  });
+  test('targetIdOf returns the page\'s CDP target id; the marker written after a handoff no longer lists it', async () => {
+    const f = fakeChromium();
+    const s = await connectSession({ cdpUrl: 'x', chromium: f.chromium, awaitingTabs: tabs(new Set()) });
+    const p = /** @type {any} */ (await s.attachPage({ mode: 'scan' }));
+    await new Promise((r) => setTimeout(r, 20));
+    const id = await s.targetIdOf(p);
+    assert.equal(typeof id, 'string');
+    assert.equal(id, p._targetId);
+    const marker = path.join(dir, 'm.json');
+    await s.writeTargetMarker(marker);
+    assert.deepEqual(JSON.parse(fs.readFileSync(marker, 'utf8')).target_ids, [id]);
+    await s.detachLeaveOpen();
+    await s.writeTargetMarker(marker);
+    assert.deepEqual(JSON.parse(fs.readFileSync(marker, 'utf8')).target_ids, []);
+  });
   test('on connect, awaiting rows whose tab is gone are demoted against the live target list', async () => {
     const live = makePage({ targetId: 'LIVE-1' });
     const f = fakeChromium({ existing: [live] });

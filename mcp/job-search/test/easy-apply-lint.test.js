@@ -43,6 +43,19 @@ const FLOW_FILES = [
   path.join('apply', 'adapters', 'linkedin-easy.js'),
   path.join('apply', 'worker.js'),
   path.join('tools', 'easy_apply.js'),
+  // Assisted apply modules (PR #80 reviewer note; assisted Workday PR-2). assisted/driver.js only
+  // re-exports the driver and is listed too: it must never grow page actions of its own.
+  path.join('tools', 'assisted_apply.js'),
+  path.join('apply', 'assisted', 'answers.js'),
+  path.join('apply', 'assisted', 'driver.js'),
+  path.join('apply', 'assisted', 'field-policy.js'),
+  path.join('apply', 'assisted', 'gate.js'),
+  path.join('apply', 'assisted', 'guard.js'),
+  path.join('apply', 'assisted', 'handoff.js'),
+  path.join('apply', 'assisted', 'runner.js'),
+  path.join('apply', 'assisted', 'profiles', 'index.js'),
+  path.join('apply', 'assisted', 'profiles', 'linkedin.js'),
+  path.join('apply', 'assisted', 'profiles', 'workday.js'),
   path.join('dashboard', 'routes', 'easy-apply.js'),
   path.join('core', 'easy-apply-state.js'),
   path.join('core', 'easy-apply-tabs.js'),
@@ -81,6 +94,34 @@ describe('easy apply lint: only the driver acts on the page', () => {
     const files = [...FLOW_FILES, DRIVER];
     const hits = files.filter((f) => /bypassPermissions|\.route\(|Fetch\.enable|Network\.setRequestInterception|Network\.enable/.test(read(f)));
     assert.deepEqual(hits, []);
+  });
+  test('every assisted module under src/apply/assisted/ is in FLOW_FILES (a new module cannot slip past the action check)', () => {
+    const assistedDir = path.join(SRC, 'apply', 'assisted');
+    const missing = walk(assistedDir).map((f) => path.relative(SRC, f)).filter((f) => !FLOW_FILES.includes(f));
+    assert.deepEqual(missing, []);
+  });
+  test('model-reachable modules never import core/credentials.js, the worker, the Workday adapter, or Gmail verification (spec v1 clause 6)', () => {
+    const IMPORT_RE = /(?:^|\n)\s*(?:import|export)\s[^'"]*?from\s*['"](\.{1,2}\/[^'"]+)['"]|import\(\s*['"](\.{1,2}\/[^'"]+)['"]\s*\)/g;
+    /** @param {string} entry */
+    const closure = (entry) => {
+      const seen = new Set();
+      const stack = [path.join(SRC, entry)];
+      while (stack.length) {
+        const f = /** @type {string} */ (stack.pop());
+        if (seen.has(f)) continue;
+        seen.add(f);
+        for (const m of fs.readFileSync(f, 'utf8').matchAll(IMPORT_RE)) stack.push(path.resolve(path.dirname(f), m[1] ?? m[2]));
+      }
+      return [...seen].map((f) => path.relative(SRC, f));
+    };
+    const banned = [path.join('core', 'credentials.js'), path.join('apply', 'worker.js'), path.join('apply', 'adapters', 'workday.js'), path.join('apply', 'gmail-verify.js')];
+    for (const entry of [path.join('tools', 'assisted_apply.js'), path.join('tools', 'easy_apply.js')]) {
+      const reach = closure(entry);
+      assert.ok(reach.length > 10, `${entry}: the import walk found its dependencies`);
+      assert.deepEqual(reach.filter((f) => banned.includes(f)), [], entry);
+    }
+    // The lease-mode MCP server process as a whole never loads the credential store either.
+    assert.deepEqual(closure('server.js').filter((f) => f === path.join('core', 'credentials.js')), []);
   });
   test('the scan side still never imports src/apply/ (session.js reads the tab set through src/core/)', () => {
     const s = read(path.join('browser', 'session.js'));

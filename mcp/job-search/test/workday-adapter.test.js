@@ -4,7 +4,8 @@
  * Chrome, no network, no live DOM. Mirrors test/apply-adapters.test.js's fake-capability style (the
  * greenhouse/lever coverage from slice 5), extended for what is genuinely new here: per-tenant credential
  * read/write, self-registration (generate + write the password BEFORE any account-creation DOM call),
- * verify-email via a mocked ctx.gmailVerify, and a bounded multi-step wizard loop. See workday.js's own
+ * verify-email via a mocked ctx.gmailVerify, and (assisted Workday PR-2) a prepare() that stops at the
+ * first wizard step: it never fills a wizard field, uploads, or clicks Next or Submit. See workday.js's own
  * doc comment for the honest caveat: the CSS/data-automation-id selectors this adapter targets are
  * unverified against a live *.myworkdayjobs.com tenant in this sandboxed environment -- this test verifies
  * the CONTROL FLOW is correct given whatever the capability reports, not that the real selectors match a
@@ -12,7 +13,7 @@
  */
 import { test, describe } from 'node:test';
 import assert from 'node:assert/strict';
-import { workday, SELECTORS, MAX_STEPS } from '../src/apply/adapters/workday.js';
+import { workday, SELECTORS } from '../src/apply/adapters/workday.js';
 
 /** The adapter's two union probes, mapped to their member selectors for the fake capability. */
 const UNIONS = {
@@ -95,24 +96,19 @@ function makeCtx(overrides = {}) {
 const EL = { tagName: 'div', text: '' };
 
 describe('workday adapter', () => {
-  test('existing credential: signs in, fills the single-step form, uploads, submits, confirms -> submitted', async () => {
+  test('existing credential: signs in and stops at the wizard -> ok (no field filled, nothing uploaded, nothing submitted)', async () => {
     const cap = makeFakeCap({
       waitFor: {
         [SELECTORS.authGate]: EL,
-        [SELECTORS.stepProbe]: EL,
-        [SELECTORS.resumeUpload]: { tagName: 'input', text: '' },
-        [SELECTORS.submit]: { tagName: 'button', text: 'Submit' },
-        [SELECTORS.confirmationHeading]: { tagName: 'h1', text: 'Thank you for applying!' },
+        [SELECTORS.wizardProbe]: EL,
       },
     });
     const ctx = makeCtx({ credential: { username: 'jordan@example.com', password: 'stored-pw' } });
-    const result = await workday.run(cap, ctx);
-    assert.equal(result.outcome, 'submitted');
+    const result = await workday.prepare(cap, ctx);
+    assert.equal(result.outcome, 'ok');
     assert.deepEqual(ctx._credCalls, [['read']], 'an existing credential is never regenerated or rewritten');
     assert.ok(cap.calls.some((c) => c[0] === 'fill' && c[1] === SELECTORS.signInEmail && c[2] === 'jordan@example.com'));
     assert.ok(cap.calls.some((c) => c[0] === 'click' && c[1] === SELECTORS.signInSubmit));
-    assert.ok(cap.calls.some((c) => c[0] === 'upload'));
-    assert.ok(ctx._events.some((e) => e.evt === 'submit_request_sent'));
   });
 
   test('existing credential rejected at sign-in -> needs_human (credential), target/username set for the dashboard prompt', async () => {
@@ -123,26 +119,24 @@ describe('workday adapter', () => {
       },
     });
     const ctx = makeCtx({ credential: { username: 'jordan@example.com', password: 'stale-pw' } });
-    const result = await workday.run(cap, ctx);
+    const result = await workday.prepare(cap, ctx);
     assert.equal(result.outcome, 'needs_human');
     assert.equal(result.pendingQuestion.kind, 'credential');
     assert.equal(result.pendingQuestion.target, 'ic-jobsearch/acme.wd5.myworkdayjobs.com');
     assert.equal(result.pendingQuestion.username, 'jordan@example.com');
-    assert.equal(cap.calls.some((c) => c[0] === 'click' && c[1] === SELECTORS.submit), false);
+    assert.equal(cap.calls.some((c) => c[0] === 'click' && /pageFooterNextButton|submit/i.test(c[1]) && c[1] !== SELECTORS.signInSubmit), false);
   });
 
   test('no stored credential: generates and WRITES the password before any account-creation DOM call', async () => {
     const cap = makeFakeCap({
       waitFor: {
         [SELECTORS.authGate]: EL,
-        [SELECTORS.stepProbe]: EL,
-        [SELECTORS.submit]: { tagName: 'button', text: 'Submit' },
-        [SELECTORS.confirmationHeading]: { tagName: 'h1', text: 'Application received' },
+        [SELECTORS.wizardProbe]: EL,
       },
     });
     const ctx = makeCtx({ credential: null, sharedCalls: cap.calls });
-    const result = await workday.run(cap, ctx);
-    assert.equal(result.outcome, 'submitted');
+    const result = await workday.prepare(cap, ctx);
+    assert.equal(result.outcome, 'ok');
     const readIdx = cap.calls.findIndex((c) => c[0] === 'read');
     const writeIdx = cap.calls.findIndex((c) => c[0] === 'write');
     const firstCreateFillIdx = cap.calls.findIndex((c) => c[0] === 'fill' && c[1] === SELECTORS.createEmail);
@@ -162,28 +156,26 @@ describe('workday adapter', () => {
       },
     });
     const ctx = makeCtx({ credential: null });
-    const result = await workday.run(cap, ctx);
+    const result = await workday.prepare(cap, ctx);
     assert.equal(result.outcome, 'needs_human');
     assert.equal(result.pendingQuestion.kind, 'credential');
     assert.equal(result.pendingQuestion.target, 'ic-jobsearch/acme.wd5.myworkdayjobs.com');
     assert.equal(ctx._credCalls.some((c) => c[0] === 'write'), true, 'the password is written before the create-account attempt regardless of outcome');
   });
 
-  test('verify-email: a code arrives -> fills the code field and continues to the application form -> submitted', async () => {
+  test('verify-email: a code arrives -> fills the code field and continues to the wizard -> ok', async () => {
     const cap = makeFakeCap({
       waitFor: {
         [SELECTORS.authGate]: EL,
         [SELECTORS.verifyCodeInput]: { tagName: 'input', text: '' },
-        [SELECTORS.stepProbe]: EL,
-        [SELECTORS.submit]: { tagName: 'button', text: 'Submit' },
-        [SELECTORS.confirmationHeading]: { tagName: 'h1', text: 'Thank you for applying!' },
+        [SELECTORS.wizardProbe]: EL,
       },
     });
     let calls = 0;
     const gmailVerify = async () => { calls += 1; return { ok: true, code: '583920', link: null }; };
     const ctx = makeCtx({ credential: null, gmailVerify });
-    const result = await workday.run(cap, ctx);
-    assert.equal(result.outcome, 'submitted');
+    const result = await workday.prepare(cap, ctx);
+    assert.equal(result.outcome, 'ok');
     assert.equal(calls, 1, 'the first poll already had the code, no retry needed');
     assert.ok(cap.calls.some((c) => c[0] === 'fill' && c[1] === SELECTORS.verifyCodeInput && c[2] === '583920'));
     assert.ok(cap.calls.some((c) => c[0] === 'click' && c[1] === SELECTORS.verifySubmit));
@@ -193,7 +185,7 @@ describe('workday adapter', () => {
     const cap = makeFakeCap({ waitFor: { [SELECTORS.authGate]: EL, [SELECTORS.verifyCodeInput]: { tagName: 'input', text: '' } } });
     const gmailVerify = async () => ({ ok: true, code: null, link: null });
     const ctx = makeCtx({ credential: null, gmailVerify });
-    const result = await workday.run(cap, ctx);
+    const result = await workday.prepare(cap, ctx);
     assert.equal(result.outcome, 'needs_human');
     assert.equal(result.pendingQuestion.kind, 'email_verification');
     assert.ok(ctx._sleeps.length >= 1, 'the adapter must wait between polls rather than busy-looping');
@@ -204,7 +196,7 @@ describe('workday adapter', () => {
     let calls = 0;
     const gmailVerify = async () => { calls += 1; return { ok: false, reason: 'gmail_auth_broken_no_refresh_token' }; };
     const ctx = makeCtx({ credential: null, gmailVerify });
-    const result = await workday.run(cap, ctx);
+    const result = await workday.prepare(cap, ctx);
     assert.equal(result.outcome, 'needs_human');
     assert.equal(result.pendingQuestion.kind, 'email_verification');
     assert.match(result.pendingQuestion.label, /gmail_auth_broken_no_refresh_token/);
@@ -215,7 +207,7 @@ describe('workday adapter', () => {
     const cap = makeFakeCap({ waitFor: { [SELECTORS.authGate]: EL, [SELECTORS.verifyCodeInput]: { tagName: 'input', text: '' } } });
     const gmailVerify = async () => ({ ok: true, code: null, link: 'https://acme.wd5.myworkdayjobs.com/verify?token=abc' });
     const ctx = makeCtx({ credential: null, gmailVerify });
-    const result = await workday.run(cap, ctx);
+    const result = await workday.prepare(cap, ctx);
     assert.equal(result.outcome, 'needs_human');
     assert.equal(result.pendingQuestion.kind, 'email_verification');
     assert.match(result.pendingQuestion.label, /link/);
@@ -225,22 +217,20 @@ describe('workday adapter', () => {
     const cap = makeFakeCap({
       waitFor: {
         [SELECTORS.authGate]: EL,
-        [SELECTORS.stepProbe]: EL,
-        [SELECTORS.submit]: { tagName: 'button', text: 'Submit' },
-        [SELECTORS.confirmationHeading]: { tagName: 'h1', text: 'Thank you for applying!' },
+        [SELECTORS.wizardProbe]: EL,
       },
     });
     let gmailCalls = 0;
     const ctx = makeCtx({ credential: null, gmailVerify: async () => { gmailCalls += 1; return { ok: true, code: null, link: null }; } });
-    const result = await workday.run(cap, ctx);
-    assert.equal(result.outcome, 'submitted');
+    const result = await workday.prepare(cap, ctx);
+    assert.equal(result.outcome, 'ok');
     assert.equal(gmailCalls, 0, 'gmail is never polled when the tenant never presented a code-entry step');
   });
 
   test('auth gate never found -> needs_human (unrecognized_page), never attempts to fill anything', async () => {
     const cap = makeFakeCap({});
     const ctx = makeCtx({ credential: null });
-    const result = await workday.run(cap, ctx);
+    const result = await workday.prepare(cap, ctx);
     assert.equal(result.outcome, 'needs_human');
     assert.equal(result.pendingQuestion.kind, 'unrecognized_page');
     assert.equal(cap.calls.some((c) => c[0] === 'fill'), false);
@@ -249,143 +239,10 @@ describe('workday adapter', () => {
   test('captcha at the auth gate -> needs_human (captcha), never solved, account creation never attempted', async () => {
     const cap = makeFakeCap({ waitFor: { [SELECTORS.authGate]: EL, [SELECTORS.captcha]: { tagName: 'div', text: '' } } });
     const ctx = makeCtx({ credential: null });
-    const result = await workday.run(cap, ctx);
+    const result = await workday.prepare(cap, ctx);
     assert.equal(result.outcome, 'needs_human');
     assert.equal(result.pendingQuestion.kind, 'captcha');
     assert.equal(ctx._credCalls.some((c) => c[0] === 'write'), false, 'never generates/writes a password before even knowing there is no captcha wall');
-  });
-
-  test('multi-step wizard: step 1 has no fields (click Next), step 2 has a REQUIRED unmatched question -> parks, never reaches submit', async () => {
-    let stepCall = 0;
-    const cap = makeFakeCap({
-      waitFor: {
-        [SELECTORS.authGate]: EL,
-        [SELECTORS.stepProbe]: (() => { stepCall += 1; return EL; })(),
-        [SELECTORS.next]: { tagName: 'button', text: 'Next' },
-        [SELECTORS.customFields]: (o) => (o.all
-          ? [{ tagName: 'input', type: 'text', id: 'q1', name: 'q1', text: 'Why Workday?', value: null, required: true, options: null }]
-          : []),
-      },
-    });
-    const ctx = makeCtx({ credential: { username: 'jordan@example.com', password: 'stored-pw' } });
-    const result = await workday.run(cap, ctx);
-    assert.equal(result.outcome, 'needs_human');
-    assert.equal(result.pendingQuestion.kind, 'question');
-    assert.equal(cap.calls.some((c) => c[0] === 'click' && c[1] === SELECTORS.submit), false);
-  });
-
-  test('a learned-tier auto-answer fills the field on its step and never parks', async () => {
-    const cap = makeFakeCap({
-      waitFor: {
-        [SELECTORS.authGate]: EL,
-        [SELECTORS.stepProbe]: EL,
-        [SELECTORS.customFields]: [{ tagName: 'input', type: 'text', id: 'q1', name: 'q1', text: 'What is your work authorization status?', value: null, required: true, options: null }],
-        [SELECTORS.submit]: { tagName: 'button', text: 'Submit' },
-        [SELECTORS.confirmationHeading]: { tagName: 'h1', text: 'Thank you for applying!' },
-      },
-    });
-    const ctx = makeCtx({
-      credential: { username: 'jordan@example.com', password: 'stored-pw' },
-      match: () => ({ outcome: 'auto_answer', tier: 'learned', key: 'work_authorization', value: true, controlResult: { ok: true, text: 'Yes' } }),
-    });
-    const result = await workday.run(cap, ctx);
-    assert.equal(result.outcome, 'submitted');
-    assert.ok(cap.calls.some((c) => c[0] === 'fill' && c[1] === '#q1' && c[2] === 'Yes'));
-  });
-
-  // Damian's ruling (hourly-disqualifier), spec item B: the compensation-family gate runs BEFORE the
-  // generic bank matcher / tier-1 learned lookup, unconditionally -- an hourly-shaped question must park
-  // even when a "learned" tier-1 match exists and would otherwise auto-answer it.
-  test('an HOURLY-shaped question is gated BEFORE the generic bank matcher: never filled, even when a learned-tier match would otherwise auto-answer it', async () => {
-    let matchCalled = false;
-    const cap = makeFakeCap({
-      waitFor: {
-        [SELECTORS.authGate]: EL,
-        [SELECTORS.stepProbe]: EL,
-        [SELECTORS.customFields]: [{ tagName: 'input', type: 'text', id: 'rate', name: 'rate', text: 'Desired hourly rate', value: null, required: true, options: null }],
-      },
-    });
-    const ctx = makeCtx({
-      credential: { username: 'jordan@example.com', password: 'stored-pw' },
-      salaryFloor: 150000,
-      match: () => { matchCalled = true; return { outcome: 'auto_answer', tier: 'learned', value: 72, controlResult: { ok: true, text: '72' } }; },
-    });
-    const result = await workday.run(cap, ctx);
-    assert.equal(result.outcome, 'needs_human');
-    assert.equal(result.pendingQuestion.kind, 'question');
-    assert.equal(matchCalled, false, 'the compensation gate must intercept before the generic bank matcher is ever consulted');
-    assert.equal(cap.calls.some((c) => c[0] === 'fill' && c[1] === '#rate'), false, 'an hourly field must never be filled, even from a learned tier-1 match');
-  });
-
-  test('a plain-text BASE ANNUAL salary question fills from the configured floor', async () => {
-    const cap = makeFakeCap({
-      waitFor: {
-        [SELECTORS.authGate]: EL,
-        [SELECTORS.stepProbe]: EL,
-        [SELECTORS.customFields]: [{ tagName: 'input', type: 'text', id: 'salary', name: 'salary', text: 'Desired annual salary', value: null, required: true, options: null }],
-        [SELECTORS.submit]: { tagName: 'button', text: 'Submit' },
-        [SELECTORS.confirmationHeading]: { tagName: 'h1', text: 'Thank you for applying!' },
-      },
-    });
-    const ctx = makeCtx({ credential: { username: 'jordan@example.com', password: 'stored-pw' }, salaryFloor: 150000 });
-    const result = await workday.run(cap, ctx);
-    assert.equal(result.outcome, 'submitted');
-    assert.ok(cap.calls.some((c) => c[0] === 'fill' && c[1] === '#salary' && c[2] === '150000'));
-  });
-
-  test('Workday\'s two-step compensation shape (a number field with a sibling unit/currency selector) parks salary_unit_selector_present rather than guessing which unit', async () => {
-    const cap = makeFakeCap({
-      waitFor: {
-        [SELECTORS.authGate]: EL,
-        [SELECTORS.stepProbe]: EL,
-        [SELECTORS.customFields]: [
-          { tagName: 'input', type: 'text', id: 'compAmount', name: 'compAmount', text: 'Compensation', value: null, required: true, options: null },
-          { tagName: 'select', type: null, id: 'compUnit', name: 'compUnit', text: '', value: null, required: true, options: ['Hourly', 'Annual'] },
-        ],
-      },
-    });
-    const ctx = makeCtx({ credential: { username: 'jordan@example.com', password: 'stored-pw' }, salaryFloor: 150000 });
-    const result = await workday.run(cap, ctx);
-    assert.equal(result.outcome, 'needs_human');
-    assert.equal(result.pendingQuestion.kind, 'question');
-    assert.equal(cap.calls.some((c) => c[0] === 'fill' && c[1] === '#compAmount'), false, 'never guess a fill when the unit is unresolved');
-  });
-
-  test('an unconfirmed resume upload refuses to proceed to submit', async () => {
-    const cap = makeFakeCap({
-      waitFor: { [SELECTORS.authGate]: EL, [SELECTORS.stepProbe]: EL, [SELECTORS.resumeUpload]: { tagName: 'input', text: '' } },
-      uploadResult: null,
-    });
-    const ctx = makeCtx({ credential: { username: 'jordan@example.com', password: 'stored-pw' } });
-    const result = await workday.run(cap, ctx);
-    assert.equal(result.outcome, 'needs_human');
-    assert.equal(result.pendingQuestion.kind, 'unrecognized_page');
-    assert.equal(cap.calls.some((c) => c[0] === 'click' && c[1] === SELECTORS.submit), false);
-  });
-
-  test('wizard never reaches a submit step within MAX_STEPS -> needs_human, bounded (never an infinite loop)', async () => {
-    const cap = makeFakeCap({
-      waitFor: {
-        [SELECTORS.authGate]: EL,
-        [SELECTORS.stepProbe]: EL,
-        [SELECTORS.next]: { tagName: 'button', text: 'Next' },
-      },
-    });
-    const ctx = makeCtx({ credential: { username: 'jordan@example.com', password: 'stored-pw' } });
-    const result = await workday.run(cap, ctx);
-    assert.equal(result.outcome, 'needs_human');
-    assert.equal(result.pendingQuestion.kind, 'unrecognized_page');
-    const stepProbeCount = cap.calls.filter((c) => c[0] === 'waitFor' && c[1] === SELECTORS.stepProbe).length;
-    assert.equal(stepProbeCount, MAX_STEPS, `must probe exactly MAX_STEPS (${MAX_STEPS}) times, never more`);
-  });
-
-  test('submitted but no confirmation heading seen -> needs_human (post_submit_uncertain), after recording submit_request_sent', async () => {
-    const cap = makeFakeCap({ waitFor: { [SELECTORS.authGate]: EL, [SELECTORS.stepProbe]: EL, [SELECTORS.submit]: { tagName: 'button', text: 'Submit' } } });
-    const ctx = makeCtx({ credential: { username: 'jordan@example.com', password: 'stored-pw' } });
-    const result = await workday.run(cap, ctx);
-    assert.equal(result.outcome, 'needs_human');
-    assert.equal(result.pendingQuestion.kind, 'post_submit_uncertain');
-    assert.ok(ctx._events.some((e) => e.evt === 'submit_request_sent'));
   });
 
   describe('entering the apply flow from the job-description page', () => {
@@ -408,7 +265,7 @@ describe('workday adapter', () => {
     test('already on the auth gate: never clicks Apply or Apply Manually', async () => {
       const cap = makeFakeCap({ waitFor: { [SELECTORS.authGate]: EL, [SELECTORS.authError]: { tagName: 'div', text: 'Invalid' } } });
       const ctx = makeCtx({ credential: { username: 'jordan@example.com', password: 'pw' } });
-      const result = await workday.run(cap, ctx);
+      const result = await workday.prepare(cap, ctx);
       assert.equal(result.pendingQuestion.kind, 'credential', 'reached authenticate()');
       assert.equal(cap.calls.some((c) => c[0] === 'click' && (c[1] === SELECTORS.applyButton || c[1] === SELECTORS.applyManually)), false);
     });
@@ -417,14 +274,12 @@ describe('workday adapter', () => {
       const shared = makeFakeCap({
         waitFor: (c) => ({
           ...jobPage(c),
-          [SELECTORS.stepProbe]: EL,
-          [SELECTORS.submit]: { tagName: 'button', text: 'Submit' },
-          [SELECTORS.confirmationHeading]: { tagName: 'h1', text: 'Thank you for applying!' },
+          [SELECTORS.wizardProbe]: EL,
         }),
       });
       const ctx = makeCtx({ credential: null, sharedCalls: shared.calls });
-      const result = await workday.run(shared, ctx);
-      assert.equal(result.outcome, 'submitted');
+      const result = await workday.prepare(shared, ctx);
+      assert.equal(result.outcome, 'ok');
       const applyIdx = shared.calls.findIndex((c) => c[0] === 'click' && c[1] === SELECTORS.applyButton);
       const manualIdx = shared.calls.findIndex((c) => c[0] === 'click' && c[1] === SELECTORS.applyManually);
       const writeIdx = shared.calls.findIndex((c) => c[0] === 'write');
@@ -436,7 +291,7 @@ describe('workday adapter', () => {
 
     test('Apply button not found -> needs_human (unrecognized_page) naming that step, nothing clicked or filled', async () => {
       const cap = makeFakeCap({});
-      const result = await workday.run(cap, makeCtx({ credential: null }));
+      const result = await workday.prepare(cap, makeCtx({ credential: null }));
       assert.equal(result.outcome, 'needs_human');
       assert.equal(result.pendingQuestion.kind, 'unrecognized_page');
       assert.match(result.pendingQuestion.label, /Apply button not found/);
@@ -447,7 +302,7 @@ describe('workday adapter', () => {
       const cap = makeFakeCap({ waitFor: (c) => jobPage(c, { manualOption: false }) });
       const calls = cap.calls;
       const ctx = makeCtx({ credential: null, sharedCalls: calls });
-      const result = await workday.run(cap, ctx);
+      const result = await workday.prepare(cap, ctx);
       assert.equal(result.outcome, 'needs_human');
       assert.equal(result.pendingQuestion.kind, 'unrecognized_page');
       assert.match(result.pendingQuestion.label, /Apply Manually option not found/);
@@ -459,7 +314,7 @@ describe('workday adapter', () => {
       const cap = makeFakeCap({ waitFor: (c) => jobPage(c, { after: 'nothing' }) });
       const calls = cap.calls;
       const ctx = makeCtx({ credential: null, sharedCalls: calls });
-      const result = await workday.run(cap, ctx);
+      const result = await workday.prepare(cap, ctx);
       assert.equal(result.outcome, 'needs_human');
       assert.equal(result.pendingQuestion.kind, 'unrecognized_page');
       assert.match(result.pendingQuestion.label, /auth form not found after Apply Manually/);
@@ -471,15 +326,13 @@ describe('workday adapter', () => {
       const cap = makeFakeCap({
         waitFor: (c) => ({
           ...jobPage(c, { after: 'guest' }),
-          [SELECTORS.stepProbe]: EL,
-          [SELECTORS.submit]: { tagName: 'button', text: 'Submit' },
-          [SELECTORS.confirmationHeading]: { tagName: 'h1', text: 'Thank you for applying!' },
+          [SELECTORS.wizardProbe]: EL,
         }),
       });
       const calls = cap.calls;
       const ctx = makeCtx({ credential: null, sharedCalls: calls });
-      const result = await workday.run(cap, ctx);
-      assert.equal(result.outcome, 'submitted');
+      const result = await workday.prepare(cap, ctx);
+      assert.equal(result.outcome, 'ok');
       assert.equal(calls.some((c) => c[0] === 'read' || c[0] === 'write'), false, 'a guest flow never touches Credential Manager');
       assert.equal(calls.some((c) => c[0] === 'fill' && c[1] === SELECTORS.createEmail), false);
     });
@@ -511,7 +364,7 @@ describe('workday adapter', () => {
         },
       });
       const ctx = makeCtx({ credential: { username: 'jordan@example.com', password: 'stored-pw' }, sharedCalls: [] });
-      await workday.run(cap, ctx);
+      await workday.prepare(cap, ctx);
       const toggleIdx = cap.calls.findIndex((c) => c[0] === 'click' && c[1] === SELECTORS.signInToggle);
       const emailIdx = cap.calls.findIndex((c) => c[0] === 'fill' && c[1] === SELECTORS.signInEmail);
       const submitIdx = cap.calls.findIndex((c) => c[0] === 'click' && c[1] === SELECTORS.signInSubmit);
@@ -523,7 +376,7 @@ describe('workday adapter', () => {
     test('Sign In form never appears after clicking the Sign In link -> needs_human (unrecognized_page), nothing filled', async () => {
       const cap = makeFakeCap({ waitFor: { [SELECTORS.authGate]: EL, [SELECTORS.signInToggle]: { tagName: 'button', text: 'Sign In' } } });
       const ctx = makeCtx({ credential: { username: 'jordan@example.com', password: 'stored-pw' } });
-      const result = await workday.run(cap, ctx);
+      const result = await workday.prepare(cap, ctx);
       assert.equal(result.outcome, 'needs_human');
       assert.equal(result.pendingQuestion.kind, 'unrecognized_page');
       assert.match(result.pendingQuestion.label, /Sign In form not found/);
@@ -532,49 +385,18 @@ describe('workday adapter', () => {
 
     test('no stored credential: the Sign In link is never clicked (account creation stays on the Create Account panel)', async () => {
       const cap = makeFakeCap({ waitFor: { [SELECTORS.authGate]: EL, [SELECTORS.signInToggle]: { tagName: 'button', text: 'Sign In' }, [SELECTORS.authError]: { tagName: 'div', text: 'x' } } });
-      await workday.run(cap, makeCtx({ credential: null }));
+      await workday.prepare(cap, makeCtx({ credential: null }));
       assert.equal(cap.calls.some((c) => c[0] === 'click' && c[1] === SELECTORS.signInToggle), false);
     });
   });
 
-  describe('live wizard shape (talentmanagementsolution.wd3 My Information page)', () => {
-    test('a footer button labeled Submit is treated as the submit step: submit_request_sent is recorded BEFORE the click', async () => {
-      const cap = makeFakeCap({
-        waitFor: {
-          [SELECTORS.authGate]: EL,
-          [SELECTORS.stepProbe]: EL,
-          [SELECTORS.next]: { tagName: 'button', text: 'Submit' },
-          [SELECTORS.confirmationHeading]: { tagName: 'h1', text: 'Thank you for applying!' },
-        },
-      });
-      const ctx = makeCtx({ credential: { username: 'jordan@example.com', password: 'stored-pw' } });
-      ctx.recordSubmitRequestSent = async () => { cap.calls.push(['submit_request_sent']); };
-      const result = await workday.run(cap, ctx);
-      assert.equal(result.outcome, 'submitted');
-      const recordIdx = cap.calls.findIndex((c) => c[0] === 'submit_request_sent');
-      const clickIdx = cap.calls.findIndex((c) => c[0] === 'click' && c[1] === SELECTORS.next);
-      assert.ok(recordIdx >= 0 && recordIdx < clickIdx, 'the duplicate-application guard must be recorded before the submitting click');
-      assert.equal(cap.calls.filter((c) => c[0] === 'click' && c[1] === SELECTORS.next).length, 1);
-    });
-
-    test('a footer button labeled Next is clicked as Next, never recorded as a submit', async () => {
-      const cap = makeFakeCap({ waitFor: { [SELECTORS.authGate]: EL, [SELECTORS.stepProbe]: EL, [SELECTORS.next]: { tagName: 'button', text: 'Next' } } });
-      const ctx = makeCtx({ credential: { username: 'jordan@example.com', password: 'stored-pw' } });
-      const result = await workday.run(cap, ctx);
-      assert.equal(result.outcome, 'needs_human');
-      assert.equal(ctx._events.some((e) => e.evt === 'submit_request_sent'), false);
-    });
-
-    test('selector contract includes the live wizard and Sign In ids (2026-10-05 read-only probe)', () => {
-      assert.match(SELECTORS.firstName, /input\[name="legalName--firstName"\]/);
-      assert.match(SELECTORS.lastName, /input\[name="legalName--lastName"\]/);
-      assert.match(SELECTORS.phone, /input\[name="phoneNumber"\]/);
-      assert.match(SELECTORS.next, /pageFooterNextButton/);
-      assert.match(SELECTORS.resumeUpload, /file-upload-input-ref/);
-      assert.match(SELECTORS.signInToggle, /signInLink/);
-      assert.match(SELECTORS.signInFormReady, /signInSubmitButton/);
-      assert.match(SELECTORS.signInSubmit, /click_filter/);
-    });
+  test('selector contract includes the live wizard and Sign In ids (2026-10-05 read-only probe)', () => {
+    assert.match(SELECTORS.wizardProbe, /applyFlowMyInfoPage/);
+    assert.match(SELECTORS.wizardProbe, /pageFooterNextButton/);
+    assert.doesNotMatch(SELECTORS.wizardProbe, /applyFlowPage"/, 'applyFlowPage also wraps the auth gate');
+    assert.match(SELECTORS.signInToggle, /signInLink/);
+    assert.match(SELECTORS.signInFormReady, /signInSubmitButton/);
+    assert.match(SELECTORS.signInSubmit, /click_filter/);
   });
 
   test('uploadHosts is empty (the tenant host itself already covers this ATS, per session.js route policy)', () => {
@@ -583,5 +405,40 @@ describe('workday adapter', () => {
 
   test('requires declares a credential dependency', () => {
     assert.deepEqual(workday.requires, ['credential']);
+  });
+});
+
+describe('workday prepare stops at the wizard (assisted Workday PR-2, spec v1 clause 6, v2 A15)', () => {
+  test('signed in, wizard present: the only fills are the sign-in fields, and nothing past sign-in is clicked', async () => {
+    const cap = makeFakeCap({ waitFor: { [SELECTORS.authGate]: EL, [SELECTORS.wizardProbe]: EL } });
+    const ctx = makeCtx({ credential: { username: 'jordan@example.com', password: 'stored-pw' } });
+    const result = await workday.prepare(cap, ctx);
+    assert.equal(result.outcome, 'ok');
+    const fills = cap.calls.filter((c) => c[0] === 'fill').map((c) => c[1]);
+    assert.deepEqual(fills, [SELECTORS.signInEmail, SELECTORS.signInPassword]);
+    const clicks = cap.calls.filter((c) => c[0] === 'click').map((c) => c[1]);
+    assert.deepEqual(clicks, [SELECTORS.signInSubmit]);
+    assert.equal(cap.calls.some((c) => c[0] === 'upload' || c[0] === 'select'), false);
+  });
+
+  test('wizard never appears after sign-in -> needs_human (unrecognized_page)', async () => {
+    const cap = makeFakeCap({ waitFor: { [SELECTORS.authGate]: EL } });
+    const result = await workday.prepare(cap, makeCtx({ credential: { username: 'jordan@example.com', password: 'pw' } }));
+    assert.equal(result.outcome, 'needs_human');
+    assert.equal(/** @type {any} */ (result).pendingQuestion.kind, 'unrecognized_page');
+  });
+
+  test('a captcha on the wizard -> needs_human (captcha)', async () => {
+    const cap = makeFakeCap({ waitFor: (c) => ({ [SELECTORS.authGate]: EL, [SELECTORS.wizardProbe]: EL, [SELECTORS.captcha]: c.calls.some((x) => x[0] === 'click') ? { tagName: 'div', text: '' } : null }) });
+    const result = await workday.prepare(cap, makeCtx({ credential: { username: 'jordan@example.com', password: 'pw' } }));
+    assert.equal(/** @type {any} */ (result).pendingQuestion.kind, 'captcha');
+  });
+
+  test('run() is the unreachable unattended entry: it parks and touches nothing', async () => {
+    const cap = makeFakeCap({ waitFor: { [SELECTORS.authGate]: EL } });
+    const result = await workday.run(cap, makeCtx());
+    assert.equal(result.outcome, 'needs_human');
+    assert.deepEqual(cap.calls, []);
+    assert.equal(workday.assisted, true);
   });
 });

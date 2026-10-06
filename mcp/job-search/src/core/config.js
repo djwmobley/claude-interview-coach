@@ -471,6 +471,16 @@ export const autoApplySchema = z.object({
     runTimeoutMinutes: z.number().int().positive().default(15),
     staleAwaitingHours: z.number().positive().default(24),
   }).default({}),
+  // Assisted Workday (spec v1 clause 8): the model fills the wizard and stops before Submit; Damian
+  // submits. submitMode accepts ONLY 'assisted' in this release (an unattended mode would be a separate,
+  // worker-only driver op, never a tool verb). assistedDaily is Workday's own daily cap
+  // (ic_scan_budget source 'workday_assisted'); breakerHours sizes the Workday breaker trip.
+  workday: z.object({
+    submitMode: z.enum(['assisted']).default('assisted'),
+    assistedDaily: z.number().int().min(0).max(25).default(5),
+    breakerHours: z.number().positive().default(24),
+    runTimeoutMinutes: z.number().int().min(8).max(30).default(15),
+  }).default({}),
 });
 
 export const companyAliasesSchema = z.object({

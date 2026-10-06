@@ -24,6 +24,10 @@ export const LEASE_ENV = 'JOBSEARCH_EASY_APPLY_LEASE';
 export const ASSISTED_LEASE_ENV = 'JOBSEARCH_ASSISTED_APPLY_LEASE';
 /** ic_scan_budget source name for the Easy Apply daily cap. */
 export const EASY_APPLY_BUDGET_SOURCE = 'linkedin_easy_apply';
+/** ic_scan_budget source name for the assisted Workday daily cap (its own budget, spec v1 clause 9). */
+export const WORKDAY_ASSISTED_BUDGET_SOURCE = 'workday_assisted';
+/** The breaker/lease key every pre-019 caller means. */
+const DEFAULT_ATS = 'linkedin_easy';
 
 /** @param {string} s */
 function sha256(s) {
@@ -54,16 +58,18 @@ function leaseError(reason, message) {
 /**
  * Issue a lease for one attempt. Returns the token the runner passes to the MCP server.
  * @param {import('pg').ClientBase} client
- * @param {{ applicationId: number, trigger: 'morning'|'dashboard', targetId: string|null, ttlMs: number, now?: Date }} input
+ * @param {{ applicationId: number, trigger: 'morning'|'dashboard', targetId: string|null, ttlMs: number, now?: Date, ats?: string }} input
+ *   ats defaults to 'linkedin_easy' (the LinkedIn callers predate sql/019); the column refuses any value
+ *   outside the assisted ATS vocabulary.
  */
 export async function issueLease(client, input) {
   const now = input.now ?? new Date();
   const nonce = crypto.randomBytes(24).toString('hex');
   const expiresAt = new Date(now.getTime() + input.ttlMs);
   const r = await client.query(
-    `INSERT INTO ic_easy_apply_leases (application_id, nonce_hash, trigger, target_id, issued_at, expires_at)
-     VALUES ($1, $2, $3, $4, $5, $6) RETURNING id`,
-    [input.applicationId, sha256(nonce), input.trigger, input.targetId, now, expiresAt],
+    `INSERT INTO ic_easy_apply_leases (application_id, nonce_hash, trigger, target_id, issued_at, expires_at, ats)
+     VALUES ($1, $2, $3, $4, $5, $6, $7) RETURNING id`,
+    [input.applicationId, sha256(nonce), input.trigger, input.targetId, now, expiresAt, input.ats ?? DEFAULT_ATS],
   );
   return { leaseId: Number(r.rows[0].id), token: `${input.applicationId}.${nonce}`, expiresAt };
 }
@@ -126,19 +132,26 @@ export async function closeLease(client, leaseId, o) {
   );
 }
 
-/** @param {import('pg').ClientBase} client @returns {Promise<Date|null>} */
-export async function lastAttemptAt(client) {
-  const r = await client.query('SELECT max(issued_at) AS t FROM ic_easy_apply_leases');
+/**
+ * Latest lease issue time for one ATS (LinkedIn's spacing rule reads its own leases only).
+ * @param {import('pg').ClientBase} client
+ * @param {string} [ats]
+ * @returns {Promise<Date|null>}
+ */
+export async function lastAttemptAt(client, ats = DEFAULT_ATS) {
+  const r = await client.query('SELECT max(issued_at) AS t FROM ic_easy_apply_leases WHERE ats = $1', [ats]);
   return r.rows[0].t ? new Date(r.rows[0].t) : null;
 }
 
 /**
+ * The circuit breaker for one ATS (sql/019: keyed per ATS; default LinkedIn).
  * @param {import('pg').ClientBase} client
  * @param {Date} [now]
+ * @param {string} [ats]
  * @returns {Promise<{ tripped: boolean, until: Date|null, reason: string|null, trippedAt: Date|null }>}
  */
-export async function breakerStatus(client, now = new Date()) {
-  const r = await client.query('SELECT tripped_until, tripped_at, reason FROM ic_easy_apply_breaker WHERE id = 1');
+export async function breakerStatus(client, now = new Date(), ats = DEFAULT_ATS) {
+  const r = await client.query('SELECT tripped_until, tripped_at, reason FROM ic_easy_apply_breaker WHERE ats = $1', [ats]);
   if (r.rowCount === 0 || !r.rows[0].tripped_until) return { tripped: false, until: null, reason: null, trippedAt: null };
   const until = new Date(r.rows[0].tripped_until);
   return { tripped: until.getTime() > now.getTime(), until, reason: r.rows[0].reason ?? null, trippedAt: r.rows[0].tripped_at ? new Date(r.rows[0].tripped_at) : null };
@@ -147,15 +160,15 @@ export async function breakerStatus(client, now = new Date()) {
 /**
  * Trip the breaker for `hours` from `now` (never shortens a longer existing trip).
  * @param {import('pg').ClientBase} client
- * @param {{ reason: string, applicationId: number|null, hours: number, now?: Date }} o
+ * @param {{ reason: string, applicationId: number|null, hours: number, now?: Date, ats?: string }} o
  */
 export async function tripBreaker(client, o) {
   const now = o.now ?? new Date();
   const until = new Date(now.getTime() + o.hours * 3600000);
   await client.query(
-    `INSERT INTO ic_easy_apply_breaker (id, tripped_until, tripped_at, reason, application_id) VALUES (1, $1, $2, $3, $4)
-     ON CONFLICT (id) DO UPDATE SET tripped_until = GREATEST(coalesce(ic_easy_apply_breaker.tripped_until, $1), $1), tripped_at = $2, reason = $3, application_id = $4`,
-    [until, now, o.reason, o.applicationId],
+    `INSERT INTO ic_easy_apply_breaker (ats, tripped_until, tripped_at, reason, application_id) VALUES ($5, $1, $2, $3, $4)
+     ON CONFLICT (ats) DO UPDATE SET tripped_until = GREATEST(coalesce(ic_easy_apply_breaker.tripped_until, $1), $1), tripped_at = $2, reason = $3, application_id = $4`,
+    [until, now, o.reason, o.applicationId, o.ats ?? DEFAULT_ATS],
   );
 }
 
@@ -205,13 +218,44 @@ export async function refundEasyApplyAttempt(client, o) {
   });
 }
 
-/** @param {import('pg').ClientBase} client */
-export async function hasEasyApplyInFlight(client) {
+/**
+ * Whether this ATS's single assisted in-flight slot is taken (a row in 'submitting', or parked at
+ * awaiting_submit). sql/019's per-ATS unique index is the database backstop for the same rule.
+ * @param {import('pg').ClientBase} client
+ * @param {string} ats
+ */
+export async function hasAssistedInFlight(client, ats) {
   const r = await client.query(
-    `SELECT 1 FROM ic_job_applications WHERE ats_type = 'linkedin_easy'
+    `SELECT 1 FROM ic_job_applications WHERE ats_type = $1
        AND (state = 'submitting' OR (state = 'needs_human' AND pending_question->>'kind' = '${AWAITING_SUBMIT_KIND}')) LIMIT 1`,
+    [ats],
   );
   return (r.rowCount ?? 0) > 0;
+}
+
+/** LinkedIn's slot (the pre-019 name). @param {import('pg').ClientBase} client */
+export async function hasEasyApplyInFlight(client) {
+  return hasAssistedInFlight(client, 'linkedin_easy');
+}
+
+/**
+ * Consume one assisted Workday attempt against its own daily cap (spec v1 clause 9).
+ * @param {import('pg').ClientBase} client
+ * @param {{ daily: number, now?: Date }} o
+ * @returns {Promise<{ ok: true } | { ok: false, reason: 'workday_daily_cap' }>}
+ */
+export async function reserveWorkdayAttempt(client, o) {
+  const r = await reserveBudget(client, WORKDAY_ASSISTED_BUDGET_SOURCE, { pages: 1 }, { dailyPages: o.daily, dailyDetails: 1_000_000_000 }, o.now ?? new Date());
+  return r.ok ? { ok: true } : { ok: false, reason: 'workday_daily_cap' };
+}
+
+/**
+ * Undo one reserveWorkdayAttempt for the same day (a refused claim: no attempt ran). Never below zero.
+ * @param {import('pg').ClientBase} client
+ * @param {{ now: Date }} o
+ */
+export async function refundWorkdayAttempt(client, o) {
+  await client.query('UPDATE ic_scan_budget SET pages = GREATEST(pages - 1, 0) WHERE source = $1 AND day = $2', [WORKDAY_ASSISTED_BUDGET_SOURCE, budgetDay(o.now)]);
 }
 
 /**
@@ -220,17 +264,22 @@ export async function hasEasyApplyInFlight(client) {
  * path with every field verified).
  * @param {import('pg').ClientBase} client
  * @param {number} applicationId
- * @param {{ targetId: string, ledger: unknown[], screenshotRelPath: string|null, note: string, pageUrl?: string|null, reason?: string }} o
+ * @param {{ targetId: string, ledger: unknown[], screenshotRelPath: string|null, note: string, pageUrl?: string|null, reason?: string, atsLabel?: string, prefilledUnledgered?: string[] }} o
+ *   atsLabel names the site on the card (default LinkedIn Easy Apply); prefilledUnledgered lists the
+ *   questions the SITE filled (resume parse, saved draft) that no server-side answer wrote (clause 10).
  */
 export async function parkAwaitingSubmit(client, applicationId, o) {
+  const atsLabel = o.atsLabel ?? 'LinkedIn Easy Apply';
   return withTransaction(client, (c) => transitionUnwrapped(c, applicationId, 'needs_human', {
     actor: 'apply',
     note: o.note,
     pending_question: {
       kind: AWAITING_SUBMIT_KIND,
-      label: 'LinkedIn Easy Apply is filled and waiting on the Review screen in the scan Chrome. Review it there and click Submit yourself, then press "I submitted".',
+      label: `${atsLabel} is filled and waiting on the Review screen in the scan Chrome. Review it there and click Submit yourself, then press "I submitted".`,
+      ats_label: atsLabel,
       target_id: o.targetId,
       ledger: o.ledger,
+      prefilled_unledgered: Array.isArray(o.prefilledUnledgered) ? o.prefilledUnledgered : [],
       awaiting_since: new Date().toISOString(),
       page_url: o.pageUrl ?? null,
       reason: o.reason ?? 'finish_verified',

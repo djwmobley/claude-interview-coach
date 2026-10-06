@@ -23,8 +23,12 @@ import { JobSearchError } from '../../core/errors.js';
 import { getApplication, markAppliedByHand, transition, recordApplicationEvent } from '../../core/applications.js';
 import { breakerStatus, listAwaitingTargets, demoteAbandonedTabs, AWAITING_SUBMIT_KIND } from '../../core/easy-apply-state.js';
 import { connectCdp } from '../../browser/cdp-target.js';
-import { createEasyApplyDriver } from '../../apply/easy-apply-driver.js';
+import { createAssistedDriver } from '../../apply/easy-apply-driver.js';
+import { profileForAts } from '../../apply/assisted/profiles/index.js';
 import { sendJson } from '../http.js';
+
+/** The ATS breakers the status route reports. */
+const ASSISTED_BREAKER_KEYS = Object.freeze(['linkedin_easy', 'workday']);
 
 /**
  * @param {any} deps
@@ -33,7 +37,8 @@ function tabDeps(deps) {
   const seam = deps.easyApplyTab ?? {};
   return {
     connect: seam.connect ?? (() => connectCdp({ cdpHttpUrl: deps.env.SCAN_CDP_URL, timeoutMs: 10000 })),
-    createDriver: seam.createDriver ?? ((/** @type {any} */ cdp, /** @type {string} */ targetId) => createEasyApplyDriver({ cdp, targetId, pacing: false })),
+    // Clause 10: "I submitted" reads the application's OWN profile's applied evidence (read-only).
+    createDriver: seam.createDriver ?? ((/** @type {any} */ cdp, /** @type {string} */ targetId, /** @type {any} */ profile) => createAssistedDriver({ cdp, targetId, pacing: false, profile })),
   };
 }
 
@@ -74,11 +79,19 @@ export function register(router, deps, streamHub) {
   };
 
   registerWithAlias('GET', '/api/easy-apply/status', async (ctx) => {
-    const out = await deps.withClient(async (/** @type {any} */ c) => ({ breaker: await breakerStatus(c), awaiting: await listAwaitingTargets(c) }));
+    const out = await deps.withClient(async (/** @type {any} */ c) => {
+      /** @type {Record<string, any>} */
+      const breakers = {};
+      for (const k of ASSISTED_BREAKER_KEYS) breakers[k] = await breakerStatus(c, new Date(), k);
+      return { breakers, awaiting: await listAwaitingTargets(c) };
+    });
+    const shape = (/** @type {any} */ b) => ({ tripped: b.tripped, until: b.until ? b.until.toISOString() : null, reason: b.reason });
     sendJson(ctx.res, 200, {
       ok: true,
-      breaker: { tripped: out.breaker.tripped, until: out.breaker.until ? out.breaker.until.toISOString() : null, reason: out.breaker.reason },
-      awaiting: out.awaiting.map((/** @type {any} */ a) => ({ application_id: a.applicationId })),
+      // `breaker` stays LinkedIn's (the card client reads it); `breakers` has every assisted ATS.
+      breaker: shape(out.breakers.linkedin_easy),
+      breakers: Object.fromEntries(Object.entries(out.breakers).map(([k, b]) => [k, shape(b)])),
+      awaiting: out.awaiting.map((/** @type {any} */ a) => ({ application_id: a.applicationId, ats: a.ats })),
     });
   });
 
@@ -113,14 +126,17 @@ export function register(router, deps, streamHub) {
       return sendJson(ctx.res, 200, { ok: true, outcome: 'submitted', verified_badge: false, row });
     }
     const t = tabDeps(deps);
+    const profile = profileForAts(found.app.ats_type);
+    const site = profile ? String(profile.label) : 'The site';
     /** @type {{ state: string, evidence: string|null }} */
     let badge = { state: 'unknown', evidence: null };
     let cdp = null;
     try {
+      if (!profile) throw new Error('no assisted profile for this application');
       cdp = await t.connect();
       const live = new Set((await cdp.listPageTargets()).map((x) => x.targetId));
       if (live.has(found.targetId)) {
-        const driver = t.createDriver(cdp, found.targetId);
+        const driver = t.createDriver(cdp, found.targetId, profile);
         await driver.attach();
         try {
           badge = await driver.appliedBadge();
@@ -134,13 +150,13 @@ export function register(router, deps, streamHub) {
       cdp?.close();
     }
     if (badge.state === 'applied') {
-      const row = await deps.withClient((/** @type {any} */ c) => markAppliedByHand(c, id, { actor: 'dashboard', note: `Easy Apply: Damian submitted; LinkedIn shows "${String(badge.evidence ?? 'Applied').slice(0, 80)}"` }));
+      const row = await deps.withClient((/** @type {any} */ c) => markAppliedByHand(c, id, { actor: 'dashboard', note: `${site}: Damian submitted; the page shows "${String(badge.evidence ?? 'Applied').slice(0, 80)}"` }));
       notify();
       return sendJson(ctx.res, 200, { ok: true, outcome: 'submitted', verified_badge: true, row });
     }
     const message = badge.state === 'unknown'
-      ? 'Could not read the LinkedIn tab to confirm an Applied badge. If you did submit, confirm anyway.'
-      : 'LinkedIn does not show an Applied badge in that tab yet. Submit there first, or confirm anyway if you already did.';
+      ? `Could not read the ${site} tab to confirm an Applied badge or submitted confirmation. If you did submit, confirm anyway.`
+      : `${site} does not show an Applied badge or submitted confirmation in that tab yet. Submit there first, or confirm anyway if you already did.`;
     await deps.withClient(async (/** @type {any} */ c) => {
       await c.query(
         `UPDATE ic_job_applications SET pending_question = pending_question || jsonb_build_object('last_check', jsonb_build_object('at', now(), 'result', $2::text, 'message', $3::text)), updated_at = now()

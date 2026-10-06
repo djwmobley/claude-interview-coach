@@ -31,13 +31,13 @@ describe('profile registry (total classification over ats_type)', () => {
   test('linkedin_easy maps to the LinkedIn profile', () => {
     assert.equal(profileForAts('linkedin_easy'), LINKEDIN_PROFILE);
   });
-  test('every other ats_type, including workday and junk, has no profile', () => {
-    for (const ats of ['workday', 'greenhouse', 'unknown', '', null, undefined, 42, 'LINKEDIN_EASY', '__proto__', 'constructor']) {
+  test('every other ats_type, including junk, has no profile (workday has its own since PR-2)', () => {
+    for (const ats of ['WORKDAY', 'greenhouse', 'unknown', '', null, undefined, 42, 'LINKEDIN_EASY', '__proto__', 'constructor']) {
       assert.equal(profileForAts(/** @type {any} */ (ats)), null, String(ats));
     }
   });
-  test('LinkedIn is the only profile in this release', () => {
-    assert.deepEqual(Object.keys(PROFILES), ['linkedin_easy']);
+  test('LinkedIn and Workday are the profiles', () => {
+    assert.deepEqual(Object.keys(PROFILES), ['linkedin_easy', 'workday']);
   });
   test('the LinkedIn profile carries its budget source, breaker key, timeout, prompt, and contact labels', () => {
     assert.equal(LINKEDIN_PROFILE.budgetSource, EASY_APPLY_BUDGET_SOURCE);
@@ -151,7 +151,7 @@ describe('assisted_apply tool, easy_apply alias (A14)', () => {
     const fakeClient = {
       query: async (/** @type {string} */ sql, /** @type {any[]} */ params) => {
         if (/FROM ic_easy_apply_leases l JOIN/.test(sql)) return { rowCount: 1, rows: [{ id: 9, application_id: 5, nonce_hash: '', expires_at: new Date(Date.now() + 60000), closed_at: null, application_state: 'submitting', target_id: 'T' }] };
-        if (/FROM ic_job_applications/.test(sql)) return { rowCount: 1, rows: [{ id: 5, ats_type: 'workday' }] };
+        if (/FROM ic_job_applications/.test(sql)) return { rowCount: 1, rows: [{ id: 5, ats_type: 'greenhouse' }] };
         if (/UPDATE ic_easy_apply_leases SET closed_at/.test(sql)) { closed.push(params); return { rowCount: 1, rows: [] }; }
         return { rowCount: 0, rows: [] };
       },

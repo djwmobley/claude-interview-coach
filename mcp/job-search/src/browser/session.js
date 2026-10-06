@@ -170,7 +170,8 @@ export function routeDecision(req, policy = { mode: 'scan', blockedCount: 0 }) {
  * @property {(markerFile: string) => Promise<void>} writeTargetMarker overwrite markerFile with this run's tracked pages' CDP target ids
  * @property {(markerFile: string) => Promise<{ attempted: number, closed: number }>} reconcileTargets close every target id recorded in markerFile from a prior run, by CDP target id (apply pipeline slice 5: SPA-navigation-safe, unlike the URL-fragment reconcile above)
  * @property {() => Promise<void>} closeAll close every page this session created, then disconnect
- * @property {() => Promise<void>} detachLeaveOpen unroute and forget every tracked page WITHOUT closing it, then disconnect
+ * @property {() => Promise<{ ok: boolean, failed: number }>} detachLeaveOpen unroute and forget every tracked page WITHOUT closing it, then disconnect; when any unroute fails, nothing is forgotten (ok false) so closeAll() can still close them
+ * @property {(page: import('playwright-core').Page) => Promise<string|null>} targetIdOf the CDP target id of a page (cached from arming, else looked up), or null
  * @property {() => number} openPages
  * @property {(page: import('playwright-core').Page) => PagePolicy|undefined} policyFor test/worker seam: read back a tracked page's policy (e.g. blockedCount)
  */
@@ -561,12 +562,19 @@ export async function connectSession(opts = {}) {
       log.info({ evt: 'session_closed' });
     },
     async detachLeaveOpen() {
+      // Assisted Workday (spec v2 A9): the caller reports awaiting_submit only when EVERY tracked page was
+      // unrouted. On any failure nothing is forgotten or disconnected, so closeAll() can still close them.
+      let failed = 0;
       for (const p of [...pages.keys()]) {
         try {
           await p.unroute('**/*');
         } catch {
-          /* page already gone */
+          failed++;
         }
+      }
+      if (failed > 0) {
+        log.warn({ evt: 'session_unroute_failed', failed });
+        return { ok: false, failed };
       }
       pages.clear();
       targetIds.clear();
@@ -581,6 +589,14 @@ export async function connectSession(opts = {}) {
         }
       }
       log.info({ evt: 'session_detached_leave_open' });
+      return { ok: true, failed: 0 };
+    },
+    async targetIdOf(page) {
+      const known = targetIds.get(page);
+      if (known) return known;
+      const id = await lookupTargetId(page);
+      if (id && pages.has(page)) targetIds.set(page, id);
+      return id;
     },
     openPages() {
       return pages.size;
