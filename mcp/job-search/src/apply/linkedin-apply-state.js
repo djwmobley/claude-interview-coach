@@ -29,7 +29,9 @@
  * h1. The container is found by climbing from the h1 while the next ancestor stays free of links to OTHER job
  * ids, of a second h1, and of main/body/aside. That is a content rule, not a position rule: the similar-jobs
  * rail and promoted cards always link to other jobs, so the climb stops below them wherever they sit in the
- * DOM. Inside the container, dialogs, hidden subtrees, and the description body are skipped. Matching uses
+ * DOM. LinkedIn's current server-driven layout (live 2026-10-06) has NO h1 (the title is a styled <p>); there
+ * the climb starts from each apply control and each closed/applied marker instead, and a climbed scope is kept
+ * only when it contains the job title read from <title> (anchoredScope). Inside the container, dialogs, hidden subtrees, and the description body are skipped. Matching uses
  * accessible names and text only, never class names (logged-in pages use hashed classes) and never sibling
  * order or adjacency (spec v1 F1.2).
  *
@@ -226,6 +228,109 @@ function isControl(n) {
 }
 
 /**
+ * Climb from `start` while the next ancestor stays free of links to other job ids and of a second h1, and
+ * is not main/body/html/aside. Returns the highest ancestor reached (or `start` itself).
+ * @param {any} start
+ * @param {string|null} jobId
+ * @param {string} base
+ */
+function climbScope(start, jobId, base) {
+  let scope = start;
+  let cur = start.parent;
+  for (let depth = 0; cur && isEl(cur) && depth < MAX_CLIMB; depth++) {
+    const role = String(attr(cur, 'role') ?? '').toLowerCase();
+    if (cur.name === 'html' || cur.name === 'body' || cur.name === 'main' || cur.name === 'aside' || role === 'main' || role === 'complementary') break;
+    if (linksToOtherJob(cur, jobId, base) || countH1(cur) > 1) break;
+    scope = cur;
+    cur = cur.parent;
+  }
+  return scope;
+}
+
+/**
+ * @param {any} n
+ * @param {string} base
+ * @returns {ObservedControl}
+ */
+function describeControl(n, base) {
+  const ariaLabel = normalizeName(attr(n, 'aria-label') ?? '');
+  const visible = n.name === 'input' ? normalizeName(attr(n, 'value') ?? '') : normalizeName(textOf(n, skipSubtree));
+  const rawHref = n.name === 'a' ? attr(n, 'href') : null;
+  let href = null;
+  if (rawHref && !/^\s*(?:javascript:|#)/i.test(rawHref)) {
+    try {
+      href = new URL(rawHref, base).toString();
+    } catch {
+      href = rawHref;
+    }
+  }
+  return {
+    tag: n.name === 'a' ? 'link' : 'button', name: ariaLabel || visible, ariaLabel, text: visible, href,
+    disabled: isDisabled(n), path: cssPath(n),
+  };
+}
+
+/**
+ * The job title from the document <title> ("<job title> | <company> | LinkedIn", optionally prefixed by a
+ * notification count "(3) "). Null when it cannot be read.
+ * @param {import('cheerio').CheerioAPI} $
+ * @returns {string|null}
+ */
+function jobTitleFromDocument($) {
+  const raw = String($('title').first().text() ?? '').replace(/\s+/g, ' ').trim().replace(/^\(\d+\)\s*/, '');
+  if (!raw) return null;
+  const parts = raw.split(' | ');
+  const title = (parts.length >= 3 ? parts.slice(0, -2).join(' | ') : parts[0]).trim();
+  if (!title || /^linkedin$/i.test(title)) return null;
+  return normalizeName(title);
+}
+
+/**
+ * No-h1 layout scope: every apply-ish control and every closed/applied marker outside rails, dialogs, hidden
+ * subtrees, and the description is an anchor; each anchor climbs with climbScope; a climbed scope counts only
+ * when its text contains the job title. A rail or promoted card's control climbs no further than its own card
+ * (the card links to another job), which never contains this job's title, so it is dropped. Nested scopes
+ * collapse to the outermost; two or more disjoint scopes are ambiguous.
+ * @param {import('cheerio').CheerioAPI} $
+ * @param {any} root
+ * @param {string|null} jobId
+ * @param {string} base
+ * @returns {{ scope: any, missing: string|null }}
+ */
+function anchoredScope($, root, jobId, base) {
+  const title = jobTitleFromDocument($);
+  if (!title) return { scope: null, missing: 'no_title' };
+  /** @type {any[]} */
+  const anchors = [];
+  const pruneAnchor = (/** @type {any} */ n) => skipSubtree(n) || n.name === 'aside' || String(attr(n, 'role') ?? '').toLowerCase() === 'complementary';
+  walk(root, pruneAnchor, (n) => {
+    if (isControl(n)) {
+      if (controlKind(describeControl(n, base)) !== 'other') anchors.push(n);
+      return;
+    }
+    const own = (n.children ?? []).filter((/** @type {any} */ c) => c.type === 'text').map((/** @type {any} */ c) => String(c.data ?? '')).join(' ').replace(/\s+/g, ' ');
+    if (CLOSED_RE.test(own) || APPLIED_RE.test(own)) anchors.push(n);
+  });
+  if (anchors.length === 0) return { scope: null, missing: 'no_anchor' };
+  /** @type {any[]} */
+  const scopes = [];
+  for (const a of anchors) {
+    const s = climbScope(a, jobId, base);
+    if (!normalizeName(textOf(s, skipSubtree)).includes(title)) continue;
+    if (!scopes.includes(s)) scopes.push(s);
+  }
+  /** @param {any} inner @param {any} outer */
+  const within = (inner, outer) => {
+    for (let cur = inner.parent; cur && isEl(cur); cur = cur.parent) if (cur === outer) return true;
+    return false;
+  };
+  const outermost = scopes.filter((s) => !scopes.some((o) => o !== s && within(s, o)));
+  if (outermost.length === 0) return { scope: null, missing: 'no_titled_scope' };
+  if (outermost.length > 1) return { scope: null, missing: 'ambiguous_scope' };
+  return { scope: outermost[0], missing: null };
+}
+
+/**
  * @typedef {Object} ObservedControl
  * @property {'button'|'link'} tag
  * @property {string} name accessible name, normalized: the aria-label when present, else the visible text
@@ -290,45 +395,33 @@ export function buildLinkedInApplyObservation(input) {
   /** @type {any[]} */
   const h1s = [];
   walk(root, (n) => isDialog(n) || isHiddenSelf(n), (n) => { if (n.name === 'h1') h1s.push(n); });
-  if (h1s.length === 0) {
-    obs.topCardMissing = 'no_title';
-    return obs;
-  }
   if (h1s.length > 1) {
     obs.topCardMissing = 'ambiguous_title';
     return obs;
   }
   const jobId = jobIdFromUrl(url);
-  let scope = h1s[0];
-  let cur = scope.parent;
-  for (let depth = 0; cur && isEl(cur) && depth < MAX_CLIMB; depth++) {
-    const role = String(attr(cur, 'role') ?? '').toLowerCase();
-    if (cur.name === 'html' || cur.name === 'body' || cur.name === 'main' || cur.name === 'aside' || role === 'main') break;
-    if (linksToOtherJob(cur, jobId, base) || countH1(cur) > 1) break;
-    scope = cur;
-    cur = cur.parent;
+  /** @type {any} */
+  let scope = null;
+  if (h1s.length === 1) {
+    // Older layout: the top card is the container around the one job-title h1.
+    scope = climbScope(h1s[0], jobId, base);
+  } else {
+    // Current server-driven layout (live 2026-10-06): no h1 at all, the title is a styled <p>. The scope is
+    // anchored on the apply controls and the closed/applied markers instead, each climbed with the same
+    // rule, and kept only when it also contains the job title from <title>.
+    const anchored = anchoredScope($, root, jobId, base);
+    if (!anchored.scope) {
+      obs.topCardMissing = anchored.missing;
+      return obs;
+    }
+    scope = anchored.scope;
   }
 
   const text = textOf(scope, skipSubtree);
   /** @type {ObservedControl[]} */
   const controls = [];
   walk(scope, skipSubtree, (n) => {
-    if (!isControl(n)) return;
-    const ariaLabel = normalizeName(attr(n, 'aria-label') ?? '');
-    const visible = n.name === 'input' ? normalizeName(attr(n, 'value') ?? '') : normalizeName(textOf(n, skipSubtree));
-    const rawHref = n.name === 'a' ? attr(n, 'href') : null;
-    let href = null;
-    if (rawHref && !/^\s*(?:javascript:|#)/i.test(rawHref)) {
-      try {
-        href = new URL(rawHref, base).toString();
-      } catch {
-        href = rawHref;
-      }
-    }
-    controls.push({
-      tag: n.name === 'a' ? 'link' : 'button', name: ariaLabel || visible, ariaLabel, text: visible, href,
-      disabled: isDisabled(n), path: cssPath(n),
-    });
+    if (isControl(n)) controls.push(describeControl(n, base));
   });
   obs.topCardMissing = null;
   obs.topCard = { closed: CLOSED_RE.test(text), applied: APPLIED_RE.test(text), controls };

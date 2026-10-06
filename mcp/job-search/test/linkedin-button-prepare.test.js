@@ -100,6 +100,14 @@ describe('prepareLinkedInListing: easy_apply', () => {
     assert.match(w.text, /probe_attempts = probe_attempts \+ 1/);
   });
 
+  test('a live no-h1 Easy Apply page (2026-10-06 snapshot) persists easy_apply', async () => {
+    const client = fakeClient();
+    const b = browser({ html: fixture('live-2026-10-06/14581.html') });
+    const r = await prepareLinkedInListing(client, LISTING, { ...deps().d, cap: b.cap, probeSession: b.probeSession });
+    assert.equal(r.branch, 'easy_apply');
+    assert.match(writes(client)[0].text, /apply_easy_only = true/);
+  });
+
   test('the sticky-header duplicate still classifies and persists easy_apply', async () => {
     const client = fakeClient();
     const b = browser({ html: fixture('sticky-duplicate.html') });

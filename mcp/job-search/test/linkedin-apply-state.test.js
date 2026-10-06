@@ -114,8 +114,8 @@ describe('classifyLinkedInApplyState: reordered DOM (no positional or adjacency 
 });
 
 describe('classifyLinkedInApplyState: negative cases never set easy_apply', () => {
-  test('no top card (no h1) is unknown', () => {
-    const markup = html('easy-apply.html').replace(/<h1[^>]*>[\s\S]*?<\/h1>/, '<div>Chief Technology Officer</div>');
+  test('no h1 and no usable job title in <title>: no top card, unknown', () => {
+    const markup = html('easy-apply.html').replace(/<h1[^>]*>[\s\S]*?<\/h1>/, '<div>Chief Technology Officer</div>').replace(/<title>[^<]*<\/title>/, '<title>LinkedIn</title>');
     assert.equal(classifyHtml(markup).branch, 'unknown');
   });
 
@@ -148,7 +148,7 @@ describe('classifyLinkedInApplyState: negative cases never set easy_apply', () =
   });
 
   test('every branch value is in the closed branch list', () => {
-    for (const f of fs.readdirSync(FIX)) assert.ok(LINKEDIN_APPLY_BRANCHES.includes(classifyHtml(html(f)).branch), f);
+    for (const f of fs.readdirSync(FIX).filter((n) => n.endsWith('.html'))) assert.ok(LINKEDIN_APPLY_BRANCHES.includes(classifyHtml(html(f)).branch), f);
   });
 });
 
@@ -258,6 +258,69 @@ describe('classifyLinkedInApplyState: adversarial', () => {
   test('a null or empty snapshot is unknown or load_failure, never easy_apply', () => {
     assert.equal(classifyLinkedInApplyState(/** @type {any} */ (null)).branch, 'unknown');
     assert.equal(classifyHtml('').branch, 'unknown');
+  });
+});
+
+describe('live snapshots 2026-10-06: the server-driven layout with no h1 (sanitized)', () => {
+  const LIVE = path.join(FIX, 'live-2026-10-06');
+  const expected = { 9698: 'external', 9709: 'closed', 6709: 'external', 14581: 'easy_apply', 11960: 'easy_apply', 14007: 'external' };
+  for (const [id, branch] of Object.entries(expected)) {
+    test(`listing ${id} classifies ${branch}`, () => {
+      const markup = fs.readFileSync(path.join(LIVE, `${id}.html`), 'utf8');
+      assert.doesNotMatch(markup, /<h1[\s>]/i, 'the live layout really has no h1');
+      const r = classifyHtml(markup);
+      assert.equal(r.branch, branch, `${id}: ${r.reason}`);
+      if (branch === 'external') {
+        assert.ok(r.control && r.control.href && !/linkedin\.com/.test(r.control.href), 'the safety/go href decodes off LinkedIn');
+      }
+    });
+  }
+
+  test('a sticky duplicate of the live Easy Apply button (same name) still classifies easy_apply', () => {
+    const markup = fs.readFileSync(path.join(LIVE, '14581.html'), 'utf8')
+      .replace('<button type="button" aria-label="Easy Apply to this job">', '<button type="button" aria-label="Easy Apply to this job">Easy Apply</button><button type="button" aria-label="Easy Apply to this job">');
+    assert.equal(classifyHtml(markup).branch, 'easy_apply');
+  });
+
+  test('live Easy Apply plus an external Apply in the same scope is unknown', () => {
+    const markup = fs.readFileSync(path.join(LIVE, '14581.html'), 'utf8')
+      .replace('<button type="button" aria-label="Easy Apply to this job">', '<a href="https://boards.greenhouse.io/x/jobs/1" aria-label="Apply on company website">Apply</a><button type="button" aria-label="Easy Apply to this job">');
+    assert.equal(classifyHtml(markup).branch, 'unknown');
+  });
+});
+
+describe('no-h1 layout: the scope is anchored on the apply controls, never on a rail or promoted card', () => {
+  const shell = (/** @type {string} */ inner) => `<!doctype html><html lang="en"><head><title>Chief Technology Officer | Acme Corp | LinkedIn</title></head><body><main>${inner}</main></body></html>`;
+  const topCard = (/** @type {string} */ controls) => `<section aria-label="Primary content"><div><div><p>Acme Corp</p><p>Chief Technology Officer</p><span>Houston, TX</span></div><div>${controls}</div></div></section>`;
+  const railCard = '<aside><ul><li><a href="https://www.linkedin.com/jobs/view/4999000111/">VP Engineering</a><button type="button" aria-label="Easy Apply to VP Engineering at Beta">Easy Apply</button></li></ul></aside>';
+  const inlineCard = '<div><a href="https://www.linkedin.com/jobs/view/4999000222/">Chief Technology Officer</a><button type="button" aria-label="Easy Apply to this job">Easy Apply</button></div>';
+
+  test('a top card with Easy Apply next to a rail card with Easy Apply: easy_apply from the top card only', () => {
+    assert.equal(classifyHtml(shell(topCard('<button type="button" aria-label="Easy Apply to this job">Easy Apply</button>') + railCard)).branch, 'easy_apply');
+  });
+
+  test('only rail or promoted cards carry an apply control: never easy_apply', () => {
+    assert.notEqual(classifyHtml(shell(topCard('<button type="button">Save</button>') + railCard)).branch, 'easy_apply');
+    assert.notEqual(classifyHtml(shell(topCard('<button type="button">Save</button>') + inlineCard)).branch, 'easy_apply');
+  });
+
+  test('an apply control whose scope does not contain the job title (from <title>) is not used', () => {
+    const markup = shell('<div><p>Something else</p><button type="button" aria-label="Easy Apply to this job">Easy Apply</button></div>');
+    assert.notEqual(classifyHtml(markup).branch, 'easy_apply');
+  });
+
+  test('two disjoint scopes each with the job title and an Easy Apply button: unknown', () => {
+    const one = topCard('<button type="button" aria-label="Easy Apply to this job">Easy Apply</button>');
+    assert.equal(classifyHtml(shell(`${one}<aside></aside>${one}`.replace('<aside></aside>', '<a href="https://www.linkedin.com/jobs/view/4999000555/">x</a>'))).branch, 'unknown');
+  });
+
+  test('closed text with no control in the title scope: closed', () => {
+    assert.equal(classifyHtml(shell(topCard('<div aria-live="assertive"><p>No longer accepting applications</p></div>'))).branch, 'closed');
+  });
+
+  test('no h1 and no title in <title>: unknown', () => {
+    const markup = shell(topCard('<button type="button" aria-label="Easy Apply to this job">Easy Apply</button>')).replace(/<title>[^<]*<\/title>/, '');
+    assert.equal(classifyHtml(markup).branch, 'unknown');
   });
 });
 
