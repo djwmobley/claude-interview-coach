@@ -30,8 +30,8 @@ const HEARD = [
 ];
 
 describe('F1: fallback lines parse only where allowed', () => {
-  test('FALLBACK_KEYS is exactly how_did_you_hear', () => {
-    assert.deepEqual([...FALLBACK_KEYS], ['how_did_you_hear']);
+  test('FALLBACK_KEYS is exactly how_did_you_hear and phone_device_type', () => {
+    assert.deepEqual([...FALLBACK_KEYS], ['how_did_you_hear', 'phone_device_type']);
   });
 
   test('a fallback on the opted-in enum key parses, ranked', () => {
@@ -285,4 +285,38 @@ describe('F7: writeBankAtomic', () => {
     assert.equal(fs.readFileSync(file, 'utf8'), before);
     assert.deepEqual(fs.readdirSync(dir), ['apply-answers.md']);
   });
+});
+
+describe('F1b: phone_device_type fallback (operator ruling 2026-10-06: Mobile or Cell, whichever the site offers)', () => {
+  const PHONE = ['## phone_device_type', 'type: enum', 'value: Mobile', 'fallback: 2 | Cell', 'learned: Phone Device Type'];
+  const bank = parseAnswerBank(PHONE.join('\n'));
+  const fact = /** @type {any} */ (bank.facts.get('phone_device_type'));
+  /** @param {string[]} options */
+  const q = (options) => resolveFieldAnswer({ question: 'Phone Device Type', kind: 'select', required: true, options }, { bank, accountEmail: null });
+
+  test('a fallback on phone_device_type parses, ranked', () => {
+    assert.deepEqual(candidateValues(fact), [{ value: 'Mobile', rank: 1 }, { value: 'Cell', rank: 2 }]);
+  });
+  test('Mobile present wins at rank 1 with no fallback used', () => {
+    assert.deepEqual(q(['Landline', 'Mobile', 'Cell']), { action: 'fill', value: 'Mobile', bankKey: 'phone_device_type', source: 'learned' });
+  });
+  test('Mobile absent and Cell present picks Cell and reports the fallback rank', () => {
+    assert.deepEqual(q(['Landline', 'Cell']), { action: 'fill', value: 'Cell', bankKey: 'phone_device_type', source: 'learned', fallbackRank: 2 });
+  });
+  test('both absent parks', () => {
+    assert.deepEqual(q(['Landline', 'Home']), { action: 'park', reason: 'no_exact_option', bankKey: 'phone_device_type' });
+  });
+  test('the existing structural fatals still apply on phone_device_type', () => {
+    assert.throws(() => parseAnswerBank(['## phone_device_type', 'type: text', 'value: Mobile', 'fallback: 2 | Cell'].join('\n')), /only allowed on type enum/);
+    assert.throws(() => parseAnswerBank([...PHONE, 'fallback: 2 | Cellular'].join('\n')), /duplicate fallback rank 2/);
+    assert.throws(() => parseAnswerBank(['## phone_device_type', 'type: enum', 'value: Mobile', 'fallback: 2 | mobile.'].join('\n')), /equals the value or another fallback/);
+  });
+  test('a fallback on a key still outside FALLBACK_KEYS (country) stays fatal', () => {
+    assert.throws(() => parseAnswerBank(['## country', 'type: enum', 'value: United States', 'fallback: 2 | USA'].join('\n')), /not in FALLBACK_KEYS/);
+  });
+  for (const key of ['eeo_gender', 'eeo_race_ethnicity', 'eeo_disability', 'eeo_veteran', 'work_authorization', 'sponsorship_needed']) {
+    test(`a fallback on ${key} stays fatal`, () => {
+      assert.throws(() => parseAnswerBank([`## ${key}`, 'type: enum', 'value: a', 'fallback: 2 | b'].join('\n')), /not in FALLBACK_KEYS|EEO_TAXONOMY/);
+    });
+  }
 });

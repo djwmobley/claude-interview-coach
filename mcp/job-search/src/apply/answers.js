@@ -112,9 +112,10 @@ const FALLBACK_BODY_RE = /^\s*(\d+)\s*\|\s*(\S.*?)\s*$/;
 /**
  * Keys allowed to carry `fallback: <rank> | <value>` lines (answer-fallback spec F1). A code-level opt-in,
  * not a bank-file setting: a fallback line on any other key is a fatal parse error, so a hand edit can
- * never quietly widen where ranked fallbacks apply.
+ * never quietly widen where ranked fallbacks apply. phone_device_type added 2026-10-06 (operator ruling:
+ * Mobile vs Cell does not matter, take whichever the site offers; not a sensitive class).
  */
-export const FALLBACK_KEYS = Object.freeze(['how_did_you_hear']);
+export const FALLBACK_KEYS = Object.freeze(['how_did_you_hear', 'phone_device_type']);
 
 /**
  * @param {Map<string, LabelEntry>} labels
