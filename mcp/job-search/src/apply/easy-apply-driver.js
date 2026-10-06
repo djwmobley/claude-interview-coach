@@ -640,9 +640,15 @@ function pageMain(req, G) {
         if (!c.ok) return { ok: false, reason: c.reason };
         const sc = scrollerOf(c.list, c.root);
         const sizes = [c.list, ...c.rows.map((x) => x.el)].map((e) => Number(e.getAttribute('aria-setsize'))).filter((n) => Number.isFinite(n) && n > 0);
+        // P4: each row's position in the scroller's CONTENT (independent of the current scroll), so the
+        // caller can tell whether the rows it has seen cover the whole scrollable extent.
+        const scTop = sc.getBoundingClientRect().top + sc.clientTop;
         return {
           ok: true,
-          rows: c.rows.map((x) => ({ key: x.key, text: x.text, kind: x.kind, expanded: x.expanded })),
+          rows: c.rows.map((x) => {
+            const b = x.el.getBoundingClientRect();
+            return { key: x.key, text: x.text, kind: x.kind, expanded: x.expanded, off: b.top - scTop + sc.scrollTop, h: b.height };
+          }),
           setsize: sizes.length > 0 ? Math.max(...sizes) : 0,
           scroll: { top: sc.scrollTop, height: sc.scrollHeight, client: sc.clientHeight },
         };
@@ -763,6 +769,27 @@ const POLL_MS = 100;
 const POLL_TRIES = 15;
 const SCROLL_CAP = 30;
 const SCROLL_SETTLE_MS = 150;
+/** P4: slack (px) allowed between the rows seen and the scroll extent's edges, and between adjacent rows. */
+const COVER_TOL_PX = 4;
+/** P4: scroll rounds in a row that add no coverage before the list is declared list_incomplete. */
+const SCROLL_STALL_TRIES = 3;
+
+/**
+ * P4: how far from the top of the scroll content the rows seen cover it without a gap (px). Rows are
+ * intervals [off, off + h]; nested rows overlap their parent, which is fine.
+ * @param {Array<{ off: number, h: number }>} rows
+ * @returns {number}
+ */
+function coveredPrefix(rows) {
+  const iv = rows.filter((r) => Number.isFinite(r.off) && Number.isFinite(r.h)).map((r) => [r.off, r.off + Math.max(0, r.h)]).sort((a, b) => a[0] - b[0]);
+  if (iv.length === 0 || iv[0][0] > COVER_TOL_PX) return 0;
+  let end = iv[0][1];
+  for (const [s, e] of iv) {
+    if (s > end + COVER_TOL_PX) break;
+    if (e > end) end = e;
+  }
+  return end;
+}
 
 /** The one function declaration sent with every Runtime.callFunctionOn. */
 export const PAGE_FUNCTION = `function (req) {
@@ -852,36 +879,54 @@ export function createAssistedDriver(deps) {
   }
 
   /**
-   * P4: every row of the open prompt. A list whose aria-setsize exceeds its rendered rows, or whose
-   * scroller overflows, is enumerated by bounded scrolling, rows merged by their id/data-value/posinset
-   * key; a keyless row while scrolling, a scroller that stops moving, the iteration cap, or fewer rows
-   * than aria-setsize is list_incomplete.
+   * P4: every row of the open prompt. Completeness is judged by COVERAGE, never by the scroller reaching
+   * its end: the rows seen, placed by their offset in the scroll content, must span the whole scroll
+   * extent without a gap (and number at least aria-setsize when one is given). A list whose rendered rows
+   * already cover it (live Workday State: all 61 rows in the DOM, the ul itself scrolling) is read as is,
+   * without scrolling and without merging, so rows sharing an identity key all stay in the set. Otherwise
+   * it is enumerated by bounded scrolling to the first uncovered offset, rows merged by their
+   * id/data-value/posinset key. The scroller jumping BACK (live Workday resets scrollTop to 0 shortly
+   * after opening) only costs a round. list_incomplete: a keyless row while merging; one key twice in a
+   * window, or seen again with other text or at another offset (a duplicate key would otherwise hide a
+   * row); a scroll that cannot reach its target; SCROLL_STALL_TRIES rounds without new coverage; the
+   * SCROLL_CAP bound.
    * @returns {Promise<{ ok: true, rows: Array<{ key: string, text: string, kind: string, expanded: boolean, top: number }>, scrolled: boolean } | { ok: false, reason: string }>}
    */
   async function enumerate() {
     let cur = await promptCall('list_options');
     if (!cur.ok) return { ok: false, reason: cur.reason };
-    const needs = cur.setsize > cur.rows.length || cur.scroll.height > cur.scroll.client + 1;
-    if (!needs) return { ok: true, rows: cur.rows.map((/** @type {any} */ x) => ({ ...x, top: cur.scroll.top })), scrolled: false };
+    const covers = (/** @type {any[]} */ rows, /** @type {any} */ c) => coveredPrefix(rows) >= c.scroll.height - COVER_TOL_PX && (c.setsize === 0 || rows.length >= c.setsize);
+    if (covers(cur.rows, cur)) return { ok: true, rows: cur.rows.map((/** @type {any} */ x) => ({ ...x, top: cur.scroll.top })), scrolled: false };
     /** @type {Map<string, any>} */
     const seen = new Map();
-    let lastTop = -1;
+    let best = -1;
+    let stall = 0;
     for (let i = 0; i < SCROLL_CAP; i++) {
+      /** @type {Set<string>} */
+      const win = new Set();
       for (const row of cur.rows) {
-        if (!row.key) return { ok: false, reason: 'list_incomplete' };
-        if (!seen.has(row.key)) seen.set(row.key, { ...row, top: cur.scroll.top });
+        if (!row.key || win.has(row.key)) return { ok: false, reason: 'list_incomplete' };
+        win.add(row.key);
+        const prev = seen.get(row.key);
+        if (prev && (prev.text !== row.text || Math.abs(prev.off - row.off) > COVER_TOL_PX)) return { ok: false, reason: 'list_incomplete' };
+        if (!prev) seen.set(row.key, { ...row, top: cur.scroll.top });
       }
-      if (cur.scroll.top + cur.scroll.client >= cur.scroll.height - 1) {
-        if (cur.setsize > 0 && seen.size < cur.setsize) return { ok: false, reason: 'list_incomplete' };
+      const all = [...seen.values()];
+      if (covers(all, cur)) {
         const back = await promptCall('scroll_popup', { value: 0 });
         if (!back.ok) return { ok: false, reason: back.reason };
         await sleep(SCROLL_SETTLE_MS);
-        return { ok: true, rows: [...seen.values()], scrolled: true };
+        return { ok: true, rows: all, scrolled: true };
       }
-      if (cur.scroll.top <= lastTop) return { ok: false, reason: 'list_incomplete' };
-      lastTop = cur.scroll.top;
-      const s = await promptCall('scroll_popup', { value: cur.scroll.top + Math.max(1, Math.floor(cur.scroll.client * 0.8)) });
+      const prefix = coveredPrefix(all);
+      if (prefix > best + COVER_TOL_PX) {
+        best = prefix;
+        stall = 0;
+      } else if (++stall >= SCROLL_STALL_TRIES) return { ok: false, reason: 'list_incomplete' };
+      const target = Math.max(0, Math.min(Math.floor(prefix) - COVER_TOL_PX, cur.scroll.height - cur.scroll.client));
+      const s = await promptCall('scroll_popup', { value: target });
       if (!s.ok) return { ok: false, reason: s.reason };
+      if (Math.abs(s.top - target) > 1) return { ok: false, reason: 'list_incomplete' };
       await sleep(SCROLL_SETTLE_MS);
       cur = await promptCall('list_options');
       if (!cur.ok) return { ok: false, reason: cur.reason };

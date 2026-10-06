@@ -1,0 +1,152 @@
+<!doctype html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<title>Live-shaped Workday State prompt (test fixture)</title>
+<style>
+  body { margin: 0; font: 14px sans-serif; }
+  .portal-list { position: absolute; width: 342px; max-height: 200px; overflow-y: auto; background: #fff; border: 1px solid #999; margin: 0; padding: 0; list-style: none; }
+  .portal-list li { height: 32px; line-height: 32px; margin: 0; padding: 0; }
+  .portal-list li.spacer { height: auto; }
+  .offscreen { position: absolute; left: -99999px; }
+</style>
+</head>
+<body>
+<!-- Sanitized reproduction of a READ-ONLY probe (2026-10-06, own headless guest session, nothing selected
+     or typed) of application 5's live Workday tenant, My Information page, "State" prompt. Kept from the
+     probe: the trigger (button aria-haspopup=listbox, value="", aria-label "State Select One Required",
+     name countryRegion, id address--countryRegion) and its helper text input; on open the trigger gets
+     aria-expanded="true" and aria-controls naming a ul[role=listbox] (tabindex -1,
+     aria-activedescendant="select-one") mounted in a portal at the end of body. The ul ITSELF is the
+     scroll container (overflow-y auto, clientHeight 200, scrollHeight 1952). It holds ALL 61 rows at once
+     (no virtualization, no aria-setsize/aria-posinset): a disabled Select One (id select-one, data-value "")
+     and 60 states/territories in the observed order, each 32 px, each with id == data-value (a 32-hex
+     tenant id; replaced here by synthetic ids). "Texas" occurs exactly once. Observed with the real driver:
+     shortly after opening, the widget resets the list's scrollTop to 0 (it brings the active descendant
+     back into view), so a scroll the driver made in the first moments is undone; this fixture replays that
+     reset RESET_MS after opening. The commit on pick replays the observed Workday commit (value attribute
+     and helper input = data-value at once; aria-expanded and aria-controls removed and the popup unmounted
+     about 150 ms later). SYNTHETIC modes: ?mode=virtual renders a sliding window of 8 rows between spacer
+     items (re-rendered on scroll); ?mode=stuck never renders past the first window; ?mode=dupkey adds a
+     second "Texas" row reusing the first one's id/data-value at the end of the flat list;
+     ?mode=dupkey-virtual does the same in the windowed list. -->
+<div data-automation-id="applyFlowPage">
+  <div data-automation-id="applyFlowMyInfoPage">
+    <div role="group" aria-labelledby="address-section">
+      <h3 id="address-section">Address</h3>
+      <div data-automation-id="formField-countryRegion" data-fkit-id="address--countryRegion">
+        <label for="address--countryRegion"><span>State<abbr aria-hidden="true">*</abbr></span></label>
+        <div><div style="width: 100%; max-width: 344px; min-width: 280px;"><div>
+          <button aria-haspopup="listbox" type="button" value="" aria-label="State Select One Required" name="countryRegion" id="address--countryRegion">Select One</button>
+          <input type="text" class="offscreen" value="">
+        </div></div></div>
+      </div>
+    </div>
+  </div>
+</div>
+<script>
+  window.__clicks = [];
+  const params = new URLSearchParams(location.search);
+  const mode = params.get('mode') || 'live';
+  const RESET_MS = Number(params.get('reset') || 60);
+  const NAMES = ['Alabama', 'Alaska', 'American Samoa', 'Arizona', 'Arkansas', 'Armed Forces Americas', 'Armed Forces Europe',
+    'Armed Forces Pacific', 'California', 'Colorado', 'Connecticut', 'Delaware', 'District of Columbia', 'Florida', 'Georgia', 'Guam',
+    'Hawaii', 'Idaho', 'Illinois', 'Indiana', 'Iowa', 'Kansas', 'Kentucky', 'Louisiana', 'Maine', 'Maryland', 'Massachusetts', 'Michigan',
+    'Minnesota', 'Mississippi', 'Missouri', 'Montana', 'Nebraska', 'Nevada', 'New Hampshire', 'New Jersey', 'New Mexico', 'New York',
+    'North Carolina', 'North Dakota', 'Northern Mariana Islands', 'Ohio', 'Oklahoma', 'Oregon', 'Pennsylvania', 'Puerto Rico',
+    'Rhode Island', 'South Carolina', 'South Dakota', 'Tennessee', 'Texas', 'United States Minor Outlying Islands', 'Utah', 'Vermont',
+    'Virginia', 'Virgin Islands, U.S.', 'Washington', 'West Virginia', 'Wisconsin', 'Wyoming'];
+  /** [id (== data-value), text]; the Select One placeholder first. */
+  const ROWS = [['select-one', 'Select One', '']].concat(NAMES.map((n, i) => {
+    const id = 'synthetic-state-' + String(i + 1).padStart(2, '0');
+    return [id, n, id];
+  }));
+  if (mode === 'dupkey' || mode === 'dupkey-virtual') {
+    const tx = ROWS.find((r) => r[1] === 'Texas');
+    ROWS.push([tx[0], 'Texas', tx[2]]);
+  }
+  const btn = document.getElementById('address--countryRegion');
+  const helper = btn.parentElement.querySelector('input');
+  function close() {
+    const p = document.getElementById('portal');
+    if (p) p.remove();
+    btn.removeAttribute('aria-expanded');
+    btn.removeAttribute('aria-controls');
+  }
+  function rowLi(row) {
+    const [id, text, dv] = row;
+    const li = document.createElement('li');
+    li.setAttribute('data-value', dv);
+    li.setAttribute('role', 'option');
+    li.id = id;
+    if (id === 'select-one') { li.setAttribute('aria-disabled', 'true'); li.setAttribute('aria-selected', 'true'); }
+    const d = document.createElement('div');
+    d.textContent = text;
+    li.appendChild(d);
+    if (id !== 'select-one') {
+      li.onclick = () => {
+        window.__clicks.push('option:' + text);
+        btn.setAttribute('value', dv);
+        helper.value = dv;
+        helper.setAttribute('value', dv);
+        btn.textContent = text;
+        btn.setAttribute('aria-label', 'State ' + text + ' Required');
+        setTimeout(close, 150);
+      };
+    }
+    return li;
+  }
+  function spacer(px) {
+    const s = document.createElement('li');
+    s.className = 'spacer';
+    s.setAttribute('aria-hidden', 'true');
+    s.style.height = px + 'px';
+    return s;
+  }
+  btn.onclick = () => {
+    window.__clicks.push('listbox');
+    if (btn.getAttribute('aria-expanded') === 'true') { close(); return; }
+    const outer = document.createElement('div');
+    outer.id = 'portal';
+    const inner = document.createElement('div');
+    const ul = document.createElement('ul');
+    ul.setAttribute('role', 'listbox');
+    ul.setAttribute('tabindex', '-1');
+    ul.setAttribute('aria-activedescendant', 'select-one');
+    ul.setAttribute('aria-required', 'true');
+    ul.id = 'g7wi4';
+    ul.className = 'portal-list';
+    const windowed = mode === 'virtual' || mode === 'stuck' || mode === 'dupkey-virtual';
+    if (!windowed) {
+      for (const row of ROWS) ul.appendChild(rowLi(row));
+    } else {
+      // A windowed list cannot point aria-activedescendant at a row it has unmounted.
+      ul.removeAttribute('aria-activedescendant');
+      const H = 32;
+      const W = 8;
+      const render = () => {
+        const first = mode === 'stuck' ? 0 : Math.max(0, Math.min(ROWS.length - W, Math.floor(ul.scrollTop / H)));
+        const st = ul.scrollTop;
+        ul.innerHTML = '';
+        ul.appendChild(spacer(first * H));
+        for (let i = first; i < Math.min(ROWS.length, first + W); i++) ul.appendChild(rowLi(ROWS[i]));
+        ul.appendChild(spacer((ROWS.length - Math.min(ROWS.length, first + W)) * H));
+        ul.scrollTop = st;
+      };
+      render();
+      ul.addEventListener('scroll', render);
+    }
+    const r = btn.getBoundingClientRect();
+    ul.style.top = (r.bottom + window.scrollY + 2) + 'px';
+    ul.style.left = (r.left + window.scrollX) + 'px';
+    inner.appendChild(ul);
+    outer.appendChild(inner);
+    document.body.appendChild(outer);
+    btn.setAttribute('aria-expanded', 'true');
+    btn.setAttribute('aria-controls', 'g7wi4');
+    // Observed settle: the widget brings its active descendant back into view shortly after opening.
+    setTimeout(() => { if (ul.isConnected) ul.scrollTop = 0; }, RESET_MS);
+  };
+</script>
+</body>
+</html>
