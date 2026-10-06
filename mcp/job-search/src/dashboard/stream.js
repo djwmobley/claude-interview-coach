@@ -7,7 +7,7 @@
  */
 import { log } from '../core/logger.js';
 import { errFields } from '../core/errors.js';
-import { resume } from '../core/applications.js';
+import { resumeAutomatic, partialDraftSql } from '../core/applications.js';
 import { DashboardError } from './http.js';
 
 export const MAX_STREAMS = 16;
@@ -125,8 +125,11 @@ export function createStreamHub(deps, opts = {}) {
   async function pollCredentialResume() {
     if (!deps.credentials) return;
     try {
+      // Resume gate R3: an application an assisted run ever clicked Next on is a human's call, so it is
+      // skipped here (no per-tick refusal log) and resumeAutomatic() re-checks under the row lock.
       const r = await deps.withClient((c) => c.query(
-        `SELECT id, pending_question FROM ic_job_applications WHERE state = 'needs_human' AND pending_question->>'kind' = 'credential'`,
+        `SELECT a.id, a.pending_question FROM ic_job_applications a
+          WHERE a.state = 'needs_human' AND a.pending_question->>'kind' = 'credential' AND NOT ${partialDraftSql('a')}`,
       ));
       for (const row of r.rows) {
         const pq = row.pending_question;
@@ -142,7 +145,7 @@ export function createStreamHub(deps, opts = {}) {
         }
         if (!found) continue;
         try {
-          await deps.withClient((c) => resume(c, Number(row.id), { actor: 'apply', note: `credential found for ${target}, auto-resumed` }));
+          await deps.withClient((c) => resumeAutomatic(c, Number(row.id), { actor: 'apply', note: `credential found for ${target}, auto-resumed` }));
           broadcast('changed', { kind: 'events' });
           // Apply pipeline slice 5: this poll is the OTHER half of the "resume seam" slice 4 built (the
           // dashboard credential route is the first half) -- start the runner right away instead of

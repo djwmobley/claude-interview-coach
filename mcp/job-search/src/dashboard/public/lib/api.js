@@ -46,6 +46,11 @@ export function classify(status, body) {
   // Withdraw refused (routes/applications.js POST /api/applications/:id/withdraw): `reason` is one of
   // core/applications.js WITHDRAW_REFUSAL_REASONS; the server message is shown as-is.
   if (status === 409 && code === 'WITHDRAW_REFUSED') return { kind: 'withdraw_refused', reason: b.reason ?? null, message: b.message };
+  // Resume refused (routes/applications.js POST /api/applications/:id/resume): `reason` is one of
+  // apply/resume-gate.js RESUME_REFUSAL_REASONS; the server message is shown as-is.
+  if (status === 409 && code === 'RESUME_REFUSED') return { kind: 'resume_refused', reason: b.reason ?? null, message: b.message };
+  // Retry refused (POST /api/applications/:id/retry, partial-draft acknowledgment missing): same toast.
+  if (status === 409 && code === 'RETRY_REFUSED') return { kind: 'resume_refused', reason: b.reason ?? null, message: b.message };
   if (status === 413 && code === 'PAYLOAD_TOO_LARGE') return { kind: 'payload_too_large', message: b.message };
   if (status === 415 && code === 'UNSUPPORTED_MEDIA_TYPE') return { kind: 'client_bug', code, message: b.message };
   if (status === 503 && code === 'DB_UNAVAILABLE') return { kind: 'db_unavailable', message: b.message };

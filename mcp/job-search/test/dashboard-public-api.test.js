@@ -97,6 +97,21 @@ describe('classify(): withdraw refusals', () => {
   });
 });
 
+describe('classify(): resume refusals (resume gate R1)', () => {
+  test('409 RESUME_REFUSED maps to resume_refused with the reason and server message', () => {
+    const r = /** @type {any} */ (classify(409, { ok: false, code: 'RESUME_REFUSED', reason: 'unknown_kind', message: 'm' }));
+    assert.equal(r.kind, 'resume_refused');
+    assert.equal(r.reason, 'unknown_kind');
+    assert.equal(r.message, 'm');
+  });
+
+  test('409 RETRY_REFUSED maps to the same resume_refused toast branch', () => {
+    const r = /** @type {any} */ (classify(409, { ok: false, code: 'RETRY_REFUSED', reason: 'partial_draft_ack_required', message: 'w' }));
+    assert.equal(r.kind, 'resume_refused');
+    assert.equal(r.reason, 'partial_draft_ack_required');
+  });
+});
+
 describe('classify(): assisted Easy Apply conflicts', () => {
   test('TAB_GONE, NOT_AWAITING_SUBMIT, and USE_EASY_APPLY_SUBMITTED map to easy_apply_conflict with the server message', () => {
     for (const code of ['TAB_GONE', 'NOT_AWAITING_SUBMIT', 'USE_EASY_APPLY_SUBMITTED']) {

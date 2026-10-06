@@ -27,7 +27,7 @@ import { errFields } from '../core/errors.js';
 import { log as defaultLog } from '../core/logger.js';
 import {
   getApplication, transition, transitionUnwrapped, markSubmitted, recordSubmitRequestSent, hasSubmitRequestSentThisAttempt,
-  hasAssistedNextClickThisAttempt, assistedPartialQuestion,
+  hasAssistedNextClickEver, assistedPartialQuestion,
 } from '../core/applications.js';
 import { classifyExclusion, loadExclusionConfig, walkDuplicateRoot } from './exclusions.js';
 import { resolveOutputPath } from '../core/documents.js';
@@ -395,7 +395,8 @@ export async function runApplyWorker(applicationId, deps = {}) {
       const f = errFields(err);
       log({ evt: 'apply_failed', application_id: applicationId, submit_request_sent: sent, ...f });
       // A10: a run that clicked Next may have left a saved draft at the ATS; a human decides the retry.
-      if (!sent && await hasAssistedNextClickThisAttempt(client, applicationId)) {
+      // Resume gate R3: the durable marker counts a Next click from ANY attempt, not only this one.
+      if (!sent && await hasAssistedNextClickEver(client, applicationId)) {
         await transition(client, applicationId, 'needs_human', {
           actor: 'apply', note: 'assisted run failed after a Next click; a human checks the saved draft before any retry', error: f.err_message,
           pending_question: assistedPartialQuestion(app.apply_url ?? null, 'the run crashed'),

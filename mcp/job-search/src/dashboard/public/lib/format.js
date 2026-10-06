@@ -444,3 +444,30 @@ export function withdrawButtonVisible(row) {
   const kind = row.pending_kind ?? (row.pending_question && typeof row.pending_question === 'object' ? row.pending_question.kind : null);
   return kind !== 'awaiting_submit';
 }
+
+/**
+ * Card text for the A10 partial-draft warning: the same text as core/applications.js
+ * PARTIAL_DRAFT_WARNING (drift-tested), shown on any needs_human card whose row carries partial_draft.
+ */
+export const PARTIAL_DRAFT_CARD_WARNING = 'An assisted run clicked Next on this application before, so the site (Workday) may hold a partial draft. Check the draft on the site before the run continues.';
+
+/**
+ * Parked kinds the Resume button is shown for (resume gate R1): the server's RESUME_APPROVE_KINDS plus
+ * RESUME_REDRAFT_KINDS (apply/resume-gate.js; drift-tested against them). Every other kind hides the
+ * button, because the server refuses it (question, credential, awaiting_submit, post_submit_uncertain
+ * have their own actions; an unknown kind is refused by default).
+ */
+export const RESUME_BUTTON_KINDS = Object.freeze(['unrecognized_page', 'captcha', 'assisted_stopped', 'assisted_partial', 'email_verification', 'resume_failed']);
+
+/**
+ * Whether an application card or Review row shows Resume: needs_human parked on one of
+ * RESUME_BUTTON_KINDS. The server (apply/resume-gate.js classifyResume) is the authority; a refusal it
+ * makes anyway (breaker, slot, budget, closed listing, submit request sent) comes back as a toast.
+ * Accepts a full application row (pending_question) or a GET /api/applications list row (pending_kind).
+ * @param {any} row
+ */
+export function resumeButtonVisible(row) {
+  if (!row || typeof row !== 'object' || row.state !== 'needs_human') return false;
+  const kind = row.pending_kind ?? (row.pending_question && typeof row.pending_question === 'object' ? row.pending_question.kind : null);
+  return typeof kind === 'string' && RESUME_BUTTON_KINDS.includes(kind);
+}

@@ -18,7 +18,7 @@ import { urlPassesRegistry } from '../../core/report.js';
 import { prescoreParts } from '../../core/prescore.js';
 import { weightedPrescore, getDefaultNoiseRules } from '../../core/noise.js';
 import { classifyApplyUrl } from '../../apply/ats-detect.js';
-import { getApplicationForListing } from '../../core/applications.js';
+import { getApplicationForListing, hasAssistedNextClickEver } from '../../core/applications.js';
 import { classifyExclusion, loadExclusionConfig } from '../../apply/exclusions.js';
 import { loadConfig } from '../../core/config.js';
 import { sendJson } from '../http.js';
@@ -185,7 +185,8 @@ export function register(router, deps, streamHub) {
       c.query('SELECT id, title, company, source, status FROM ic_job_listings WHERE duplicate_of = $1', [id]),
       c.query('SELECT id, source, location FROM ic_job_listings WHERE duplicate_of = $1 OR repost_of = $1', [id]),
       c.query('SELECT run_id FROM ic_scan_run_items WHERE listing_id = $1 ORDER BY run_id DESC LIMIT 10', [id]),
-      getApplicationForListing(c, id),
+      // Resume gate R3: the card shows the partial-draft warning when an assisted run ever clicked Next.
+      getApplicationForListing(c, id).then(async (a) => (a ? { ...a, partial_draft: await hasAssistedNextClickEver(c, Number(a.id)) } : a)),
     ]));
     const files = listOutputFiles(deps.outputRoot);
     const aliases = deps.config?.companyAliases ?? {};

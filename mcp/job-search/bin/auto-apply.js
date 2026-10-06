@@ -91,7 +91,7 @@ import { spawn } from 'node:child_process';
 import { fileURLToPath } from 'node:url';
 import { getEnv, loadConfig, repoRoot } from '../src/core/config.js';
 import { createLogger, dailyLogPath, pruneLogs } from '../src/core/logger.js';
-import { errFields } from '../src/core/errors.js';
+import { errFields, JobSearchError } from '../src/core/errors.js';
 import { connectDedicated, withClient, closePool } from '../src/core/db.js';
 import { LOCK_KEY } from '../src/core/scan-run.js';
 import { buildProbeRegistryFromAtsApply } from '../src/apply/probe-registry.js';
@@ -100,7 +100,7 @@ import { persistApplyTargetForListing, LIFETIME_PROBE_ATTEMPTS } from '../src/co
 import { prepareLinkedInListing, adaptPlaywrightPage } from '../src/apply/linkedin-button-prepare.js';
 import { selectCandidates, isUsLocation, isHourlyPaySignal, classifyCandidate, countAutoApprovedToday } from '../src/core/auto-apply-select.js';
 import { exclusionConfigPath, loadExclusionConfig, classifyExclusion } from '../src/apply/exclusions.js';
-import { createApplication, approve, getApplication, transition, retry, checkApplicationBlockers } from '../src/core/applications.js';
+import { createApplication, approve, getApplication, transition, retry, checkApplicationBlockers, hasAssistedNextClickEver, transitionRefusingPartialDraft } from '../src/core/applications.js';
 import { createResumeRunner } from '../src/dashboard/resume-runner.js';
 import { createReviewRunner } from '../src/dashboard/review-runner.js';
 import { runApplyWorker } from '../src/apply/worker.js';
@@ -721,10 +721,12 @@ const RE_DRIVE_ALLOWED_STATES = Object.freeze(['drafting', 'needs_human', 'docs_
  *   countAutoApprovedTodayFn?: typeof countAutoApprovedToday,
  *   retryFn?: typeof retry,
  *   launchChromeFn?: typeof launchChrome,
+ *   hasPartialDraftFn?: typeof hasAssistedNextClickEver,
  * }} deps `classifyExclusionFn`/`classifyCandidateFn`/`checkApplicationBlockersFn`/
- *   `countAutoApprovedTodayFn`/`retryFn`/`launchChromeFn` are test seams ONLY (never set by production
- *   wiring -- main() below leaves every one at its real default), matching this file's own
- *   `opts.classifyExclusion` seam on runPrepare.
+ *   `countAutoApprovedTodayFn`/`retryFn`/`launchChromeFn`/`hasPartialDraftFn` are test seams ONLY (never
+ *   set by production wiring -- main() below leaves every one at its real default), matching this file's
+ *   own `opts.classifyExclusion` seam on runPrepare. `hasPartialDraftFn` replaces only the early marker
+ *   read; the locked re-checks inside retry/approve/transitionRefusingPartialDraft always read the real one.
  */
 export async function runSingleApplication(id, deps) {
   const classifyExclusionFn = deps.classifyExclusionFn ?? classifyExclusion;
@@ -744,6 +746,20 @@ export async function runSingleApplication(id, deps) {
   if (!RE_DRIVE_ALLOWED_STATES.includes(app.state)) {
     return { outcome: 'refused', applicationId: id, listingId: app.listing_id, reason: `state_${app.state}` };
   }
+
+  // Resume gate R3 (A10 enforcement): once an assisted run clicked Next for this application, on any
+  // attempt, the site may hold a partial draft and only a human may resume it (dashboard Resume). This
+  // re-drive is not that human path, whatever state the row is in. This early read avoids running any
+  // gate for a marked row; every mutation below repeats the check under the row lock, which is the
+  // authority (a Next click recorded between this read and the lock is still refused).
+  const hasPartialDraftFn = deps.hasPartialDraftFn ?? hasAssistedNextClickEver;
+  const partialDraftRefusal = () => ({
+    outcome: 'refused', applicationId: id, listingId: app.listing_id, reason: 'requires_human_retry',
+    message: 'An assisted run clicked Next on this application, so the site may hold a partial draft. Check it, then use Resume on the dashboard card.',
+  });
+  /** @param {unknown} err */
+  const isPartialDraftRefusal = (err) => err instanceof JobSearchError && /** @type {any} */ (err).details?.reason === 'requires_human_retry';
+  if (await deps.withClientFn((c) => hasPartialDraftFn(c, id))) return partialDraftRefusal();
 
   if (app.state === 'needs_human') {
     const kind = app.pending_question && typeof app.pending_question.kind === 'string' ? app.pending_question.kind : null;
@@ -819,7 +835,12 @@ export async function runSingleApplication(id, deps) {
   }
 
   if (app.state === 'needs_human') {
-    await deps.withClientFn((c) => transition(c, id, 'drafting', { actor: 'cli', note: 're-drive: resume_failed park cleared for another attempt' }));
+    try {
+      await deps.withClientFn((c) => transitionRefusingPartialDraft(c, id, 'drafting', { actor: 'cli', note: 're-drive: resume_failed park cleared for another attempt' }));
+    } catch (err) {
+      if (isPartialDraftRefusal(err)) return partialDraftRefusal();
+      throw err;
+    }
     app = await deps.withClientFn((c) => getApplication(c, id));
   }
 
@@ -843,8 +864,9 @@ export async function runSingleApplication(id, deps) {
   let retriedFailed = false;
   if (app.state === 'failed') {
     try {
-      await deps.withClientFn((c) => retryFn(c, id, { actor: 'cli', note: 're-drive: retry after failure' }));
+      await deps.withClientFn((c) => retryFn(c, id, { actor: 'cli', note: 're-drive: retry after failure', partialDraftPolicy: 'refuse' }));
     } catch (err) {
+      if (isPartialDraftRefusal(err)) return partialDraftRefusal();
       deps.log({ evt: 'auto_apply_single_retry_failed', application_id: id, ...errFields(err) });
       return { outcome: 'retry_failed', applicationId: id, listingId: app.listing_id, reason: errFields(err).err_code, review_verdict: null, review_reason: null };
     }
@@ -890,8 +912,9 @@ export async function runSingleApplication(id, deps) {
 
   if (!retriedFailed) {
     try {
-      await deps.withClientFn((c) => approve(c, id, { outputRoot: deps.outputRoot, actor: assistedRedrive ? 'apply' : 'auto' }));
+      await deps.withClientFn((c) => approve(c, id, { outputRoot: deps.outputRoot, actor: assistedRedrive ? 'apply' : 'auto', refuseIfPartialDraft: true }));
     } catch (err) {
+      if (isPartialDraftRefusal(err)) return partialDraftRefusal();
       deps.log({ evt: 'auto_apply_single_approve_failed', application_id: id, ...errFields(err) });
       return {
         outcome: 'approve_failed', applicationId: id, listingId: app.listing_id, reason: errFields(err).err_code,

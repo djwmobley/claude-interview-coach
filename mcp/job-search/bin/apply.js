@@ -23,7 +23,7 @@ import { getEnv } from '../src/core/config.js';
 import { createLogger, dailyLogPath, pruneLogs } from '../src/core/logger.js';
 import { errFields } from '../src/core/errors.js';
 import { withClient, closePool } from '../src/core/db.js';
-import { reconcileStale, resume } from '../src/core/applications.js';
+import { reconcileStale, resumeAutomatic, partialDraftSql } from '../src/core/applications.js';
 import { createCredentials } from '../src/core/credentials.js';
 import { runApplyWorker } from '../src/apply/worker.js';
 
@@ -59,8 +59,11 @@ export function parseArgs(argv) {
  */
 export async function resumeCredentialReadyApplications(client, credentials, log) {
   let resumed = 0;
+  // Resume gate R3: skip an application an assisted run ever clicked Next on (a human's call);
+  // resumeAutomatic() re-checks under the row lock.
   const r = await client.query(
-    `SELECT id, pending_question FROM ic_job_applications WHERE state = 'needs_human' AND pending_question->>'kind' = 'credential'`,
+    `SELECT a.id, a.pending_question FROM ic_job_applications a
+      WHERE a.state = 'needs_human' AND a.pending_question->>'kind' = 'credential' AND NOT ${partialDraftSql('a')}`,
   );
   for (const row of r.rows) {
     const pq = row.pending_question;
@@ -76,7 +79,7 @@ export async function resumeCredentialReadyApplications(client, credentials, log
     }
     if (!found) continue;
     try {
-      await resume(client, Number(row.id), { actor: 'apply', note: `credential found for ${target}, auto-resumed at worker startup` });
+      await resumeAutomatic(client, Number(row.id), { actor: 'apply', note: `credential found for ${target}, auto-resumed at worker startup` });
       resumed++;
     } catch (err) {
       log({ evt: 'apply_credential_resume_failed', application_id: Number(row.id), ...errFields(err) });
