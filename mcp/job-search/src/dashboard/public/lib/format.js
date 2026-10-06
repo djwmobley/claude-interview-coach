@@ -471,3 +471,33 @@ export function resumeButtonVisible(row) {
   const kind = row.pending_kind ?? (row.pending_question && typeof row.pending_question === 'object' ? row.pending_question.kind : null);
   return typeof kind === 'string' && RESUME_BUTTON_KINDS.includes(kind);
 }
+
+/**
+ * One "Filled answers" line on the assisted review card (answer-fallback F3): question = value, the bank
+ * key, and the fallback rank when a ranked fallback (not the value) was the option picked.
+ * @param {any} e ledger entry
+ */
+export function ledgerLineText(e) {
+  const notes = [];
+  if (e && e.bank_key) notes.push(`bank: ${String(e.bank_key)}`);
+  if (e && e.fallback_used === true) notes.push(`fallback rank ${String(e.fallback_rank ?? '?')}`);
+  return `${String(e?.question ?? '')} = ${String(e?.value ?? '')}${notes.length ? ` (${notes.join(', ')})` : ''}`;
+}
+
+/** Choice field kinds; mirrors routes/applications.js CHOICE_FIELD_KINDS. */
+const CHOICE_FIELD_KINDS = Object.freeze(['select', 'radio', 'listbox']);
+
+/**
+ * The offered options for a parked choice question (answer-fallback F6), or null for a free-text one. Same
+ * rule as the server's isChoicePending: a non-empty options list, field kind a choice kind or unrecorded.
+ * The card renders each option with textContent only.
+ * @param {any} pq
+ * @returns {string[]|null}
+ */
+export function pendingChoiceOptions(pq) {
+  if (!pq || !Array.isArray(pq.options)) return null;
+  const options = pq.options.filter((/** @type {unknown} */ o) => typeof o === 'string');
+  if (options.length === 0) return null;
+  if (pq.field_kind !== undefined && pq.field_kind !== null && !CHOICE_FIELD_KINDS.includes(pq.field_kind)) return null;
+  return options;
+}

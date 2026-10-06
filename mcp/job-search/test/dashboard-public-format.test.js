@@ -2,7 +2,7 @@
 /** Pure formatting function tests (pr3-spec-decisions.md section 12 item 2). No DOM required. */
 import { test, describe } from 'node:test';
 import assert from 'node:assert/strict';
-import { relativeTime, ageDays, agingBucket, scoreBucket, fitBucket, fitDisplayState, applyButtonState, STALE_ACTIONABLE_MS, DETAIL_MIN_CHARS, shortDate, shortDateTime, salaryRange, formatMoney, pluralize, truncate, sourceLabel, formatPercent, normalizeAgendaTime, agendaTimeLabel, approvalRowFindingsState, approvalRowApproveState, withdrawButtonVisible, resumeButtonVisible, RESUME_BUTTON_KINDS, PARTIAL_DRAFT_CARD_WARNING } from '../src/dashboard/public/lib/format.js';
+import { relativeTime, ageDays, agingBucket, scoreBucket, fitBucket, fitDisplayState, applyButtonState, STALE_ACTIONABLE_MS, DETAIL_MIN_CHARS, shortDate, shortDateTime, salaryRange, formatMoney, pluralize, truncate, sourceLabel, formatPercent, normalizeAgendaTime, agendaTimeLabel, approvalRowFindingsState, approvalRowApproveState, withdrawButtonVisible, resumeButtonVisible, RESUME_BUTTON_KINDS, PARTIAL_DRAFT_CARD_WARNING, ledgerLineText, pendingChoiceOptions } from '../src/dashboard/public/lib/format.js';
 import { RESUME_APPROVE_KINDS, RESUME_REDRAFT_KINDS } from '../src/apply/resume-gate.js';
 import { PARTIAL_DRAFT_WARNING } from '../src/core/applications.js';
 import { STALE_ACTIONABLE_MS as SERVER_STALE_ACTIONABLE_MS } from '../src/dashboard/routes/applications.js';
@@ -548,5 +548,20 @@ describe('resumeButtonVisible (resume gate R1)', () => {
   test('RESUME_BUTTON_KINDS and the card warning mirror the server exactly (drift guard)', () => {
     assert.deepEqual([...RESUME_BUTTON_KINDS].sort(), [...RESUME_APPROVE_KINDS, ...RESUME_REDRAFT_KINDS].sort());
     assert.equal(PARTIAL_DRAFT_CARD_WARNING, PARTIAL_DRAFT_WARNING);
+  });
+});
+
+describe('answer-fallback F3/F6 card helpers', () => {
+  test('ledgerLineText shows the bank key and, for a fallback pick, its rank', () => {
+    assert.equal(ledgerLineText({ question: 'Source', value: 'Job Board', bank_key: 'how_did_you_hear' }), 'Source = Job Board (bank: how_did_you_hear)');
+    assert.equal(ledgerLineText({ question: 'Source', value: 'Internet Search', bank_key: 'how_did_you_hear', fallback_used: true, fallback_rank: 2 }), 'Source = Internet Search (bank: how_did_you_hear, fallback rank 2)');
+    assert.equal(ledgerLineText({ question: 'Phone', value: '1' }), 'Phone = 1');
+  });
+  test('pendingChoiceOptions: options only for a choice field, strings only', () => {
+    assert.deepEqual(pendingChoiceOptions({ options: ['A', 3, 'B'], field_kind: 'listbox' }), ['A', 'B']);
+    assert.deepEqual(pendingChoiceOptions({ options: ['A'] }), ['A']);
+    assert.equal(pendingChoiceOptions({ options: ['A'], field_kind: 'text' }), null);
+    assert.equal(pendingChoiceOptions({ options: [] }), null);
+    assert.equal(pendingChoiceOptions({ label: 'x' }), null);
   });
 });

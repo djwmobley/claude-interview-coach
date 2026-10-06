@@ -50,6 +50,9 @@ export function classify(status, body) {
   // apply/resume-gate.js RESUME_REFUSAL_REASONS; the server message is shown as-is.
   if (status === 409 && code === 'RESUME_REFUSED') return { kind: 'resume_refused', reason: b.reason ?? null, message: b.message };
   // Retry refused (POST /api/applications/:id/retry, partial-draft acknowledgment missing): same toast.
+  // Answer-fallback F6/F7 (routes/applications.js answer route): a pick that is not an offered option, or a
+  // bank write that did not parse-validate; the server message is shown as-is.
+  if (status === 409 && (code === 'not_an_offered_option' || code === 'bank_write_failed')) return { kind: 'answer_refused', code, message: b.message };
   if (status === 409 && code === 'RETRY_REFUSED') return { kind: 'resume_refused', reason: b.reason ?? null, message: b.message };
   if (status === 413 && code === 'PAYLOAD_TOO_LARGE') return { kind: 'payload_too_large', message: b.message };
   if (status === 415 && code === 'UNSUPPORTED_MEDIA_TYPE') return { kind: 'client_bug', code, message: b.message };

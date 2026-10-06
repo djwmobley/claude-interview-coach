@@ -22,11 +22,26 @@ import { resumeParkedApplication } from '../../apply/resume-gate.js';
 import { classifyApplyUrl } from '../../apply/ats-detect.js';
 import { resolveLatestApplicationScreenshot } from '../../apply/screenshot.js';
 import { appendLearnedLabel } from '../../apply/answers.js';
+import { applyChoiceAnswer, writeBankAtomic } from '../../apply/bank-writer.js';
 import { packageRoot, loadConfig } from '../../core/config.js';
 import { classifyExclusion, loadExclusionConfig, HARD_BRANCHES } from '../../apply/exclusions.js';
 import { sendJson } from '../http.js';
 
 const ANSWER_BANK_PATH = path.join(packageRoot(), 'data', 'apply-answers.md');
+
+/** Field kinds whose parked question is a choice (answer-fallback F6). */
+const CHOICE_FIELD_KINDS = Object.freeze(['select', 'radio', 'listbox']);
+
+/**
+ * A parked question is a CHOICE when it carries a non-empty captured option list and its field kind is a
+ * choice kind, or unknown (an options list with no recorded kind is treated as a choice: the stricter
+ * branch). A recorded non-choice kind (text, textarea, checkbox) keeps the free-text answer.
+ * @param {any} pq
+ */
+function isChoicePending(pq) {
+  if (!pq || !Array.isArray(pq.options) || pq.options.length === 0) return false;
+  return pq.field_kind === undefined || pq.field_kind === null || CHOICE_FIELD_KINDS.includes(pq.field_kind);
+}
 
 /** One-click apply (PR A spec item 7): a drafting row this old is reused only after resetting its resume
  * link -- the world (the listing's own description, or the operator's data files) may well have changed
@@ -571,7 +586,10 @@ export function register(router, deps, streamHub) {
   // already carried a matched bank key (an alias/synonym-tier suggestion) -- a question with NO match at
   // all has no key to attach a learned label to, so `save` is a no-op for that case and the answer is
   // recorded only in the application's own event log (audit trail), never written into the bank as a
-  // guessed new fact.
+  // guessed new fact. Answer-fallback F6/F7: a parked CHOICE field (captured options) is different: the
+  // text must be exactly one offered option (409 not_an_offered_option otherwise) and it is written to the
+  // bank (src/apply/bank-writer.js) before resuming. Every bank write is parse-validated and atomic; a
+  // failed write is a visible 409 bank_write_failed and the application stays parked.
   router.register('POST', '/api/applications/:id/answer', async (ctx) => {
     const id = Number(ctx.params.id);
     if (!Number.isInteger(id) || id <= 0) throw new JobSearchError('VALIDATION', 'id must be a positive integer');
@@ -586,21 +604,57 @@ export function register(router, deps, streamHub) {
       });
     }
     const pq = app.pending_question;
+    const bankPath = typeof deps.answerBankPath === 'string' && deps.answerBankPath ? deps.answerBankPath : ANSWER_BANK_PATH;
+    const readBank = () => {
+      try {
+        return fs.readFileSync(bankPath, 'utf8');
+      } catch (err) {
+        if (/** @type {any} */ (err)?.code === 'ENOENT') return '';
+        throw err;
+      }
+    };
+    /** Every bank write (F7): parse-validated, atomic; any failure is a visible 409 and nothing resumes. */
+    const bankWriteFailed = (/** @type {unknown} */ err) => {
+      const msg = err instanceof Error ? err.message.slice(0, 300) : String(err).slice(0, 300);
+      deps.log?.({ evt: 'apply_answer_bank_write_failed', application_id: id, err_message: msg });
+      return sendJson(ctx.res, 409, { ok: false, code: 'bank_write_failed', message: `The answer bank was not changed: ${msg}` });
+    };
+
+    // Answer-fallback F6: a parked CHOICE field with captured options takes exactly one of those options,
+    // and the answer is applied (written to the bank, learned for this exact label) before resuming, so
+    // the resumed run fills it. Text questions keep the behavior below.
+    if (isChoicePending(pq)) {
+      if (!pq.options.includes(b.text)) {
+        return sendJson(ctx.res, 409, { ok: false, code: 'not_an_offered_option', message: 'Pick one of the options the site offered for this question.' });
+      }
+      /** @type {{ key: string, created: boolean }} */
+      let written;
+      try {
+        const out = applyChoiceAnswer(readBank(), { label: pq.label, option: b.text });
+        writeBankAtomic(bankPath, out.text);
+        written = out;
+      } catch (err) {
+        return bankWriteFailed(err);
+      }
+      const partialDraftC = await deps.withClient((c) => hasAssistedNextClickEver(c, id));
+      const ackC = b.acknowledge_partial_draft === true;
+      const rowC = await deps.withClient((c) => resume(c, id, {
+        actor: 'dashboard',
+        note: `answer applied for "${String(pq.label ?? '').slice(0, 200)}": "${b.text.slice(0, 200)}" written to bank key ${written.key}${written.created ? ' (new key)' : ''}${partialDraftC ? `; possible partial draft on the site (warning ${ackC ? 'acknowledged' : 'returned'})` : ''}`,
+        meta: { bank_key: written.key, bank_key_created: written.created, ...(partialDraftC ? { partial_draft: true, partial_draft_acknowledged: ackC } : {}) },
+      }));
+      streamHub?.notifyChanged('events');
+      kickApplyRunner(deps, id, rowC);
+      return sendJson(ctx.res, 200, { ok: true, row: rowC, bank_key: written.key, warning: partialDraftC ? PARTIAL_DRAFT_WARNING : null });
+    }
+
     const key = pq.suggestion && typeof pq.suggestion.key === 'string' ? pq.suggestion.key : null;
 
     if (save && key) {
-      let bankText = '';
       try {
-        bankText = fs.readFileSync(ANSWER_BANK_PATH, 'utf8');
-      } catch {
-        bankText = '';
-      }
-      try {
-        const updated = appendLearnedLabel(bankText, key, String(pq.label ?? ''));
-        fs.mkdirSync(path.dirname(ANSWER_BANK_PATH), { recursive: true });
-        fs.writeFileSync(ANSWER_BANK_PATH, updated);
+        writeBankAtomic(bankPath, appendLearnedLabel(readBank(), key, String(pq.label ?? '')));
       } catch (err) {
-        deps.log?.({ evt: 'apply_answer_bank_write_failed', application_id: id, err_message: err instanceof Error ? err.message.slice(0, 300) : String(err).slice(0, 300) });
+        return bankWriteFailed(err);
       }
     }
 

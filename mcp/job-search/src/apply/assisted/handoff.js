@@ -18,6 +18,7 @@
  */
 import { issueLease, getLease, closeLease, tripBreaker } from '../../core/easy-apply-state.js';
 import { recordApplicationEvent, hasAssistedNextClickEver } from '../../core/applications.js';
+import { pendingOptionFields } from './field-policy.js';
 
 /**
  * The closed stop-reason table (A11). Every stop reason the assisted_apply tool or this handoff can record
@@ -76,7 +77,12 @@ export function outcomeForStop(row, profile, pageUrl) {
     const label = typeof pk.question === 'string' && pk.question.trim() ? pk.question.trim().slice(0, 500) : `${ats} needs an answer (${String(pk.reason ?? 'unknown')}).`;
     return {
       outcome: 'needs_human', keepTab: false, trip: false, stopReason,
-      pendingQuestion: { kind: 'question', label, page_url: pageUrl, assisted_reason: pk.reason ?? stopReason, ...(typeof pk.bank_key === 'string' ? { suggestion: { key: pk.bank_key, value: null } } : {}) },
+      pendingQuestion: {
+        kind: 'question', label, page_url: pageUrl, assisted_reason: pk.reason ?? stopReason,
+        ...(typeof pk.bank_key === 'string' ? { suggestion: { key: pk.bank_key, value: null } } : {}),
+        // Answer-fallback spec F4: a parked choice field's captured options (re-sanitized, F5).
+        ...pendingOptionFields(pk, profile),
+      },
     };
   }
   // 'finished' without a verified result, every listed stop, and every unlisted reason.

@@ -108,6 +108,8 @@ before(async () => {
     calendarCache: createCalendarCache(),
     scanRunner: makeStubScanRunner(),
     applyRunner: makeFakeApplyRunner(),
+    // Answer-fallback F6/F7: a temp bank file, never the real data/apply-answers.md.
+    answerBankPath: path.join(outputRoot, 'apply-answers.md'),
     credentials: { read: async () => null, write: async () => {}, delete: async () => false, list: async () => [] },
     outputRoot,
     version: 'test',
@@ -216,6 +218,59 @@ describe('POST /api/applications/:id/answer', () => {
     const id = await seedApplicationAt('needs_human', { pending_question: { kind: 'question', label: 'x' } });
     const r = await req('POST', `/api/applications/${id}/answer`, { body: { text: '   ' } });
     assert.equal(r.status, 400);
+  });
+});
+
+describe('POST /api/applications/:id/answer, parked choice field (answer-fallback F6/F7)', () => {
+  const bankFile = () => path.join(outputRoot, 'apply-answers.md');
+  const BANK_TEXT = ['## how_did_you_hear', 'type: enum', 'value: Job Board', 'fallback: 2 | Internet Search', 'learned: How Did You Hear About Us?', ''].join('\n');
+  const choicePq = { kind: 'question', label: 'How did you find this role?', options: ['Job Board', 'Referral'], field_kind: 'listbox' };
+
+  test('an answer that is not one of the offered options is refused with 409 and nothing is written', async () => {
+    fs.writeFileSync(bankFile(), BANK_TEXT);
+    const id = await seedApplicationAt('needs_human', { pending_question: choicePq });
+    const r = await req('POST', `/api/applications/${id}/answer`, { body: { text: 'referral' } });
+    assert.equal(r.status, 409);
+    assert.equal(r.json.code, 'not_an_offered_option');
+    assert.equal(fs.readFileSync(bankFile(), 'utf8'), BANK_TEXT);
+    assert.equal((await getApplication(verifyClient, id)).state, 'needs_human');
+    assert.deepEqual(applyRunnerStartCalls, []);
+  });
+
+  test('an offered option is applied to the bank (new key, learned label) and the application resumes', async () => {
+    fs.writeFileSync(bankFile(), BANK_TEXT);
+    const id = await seedApplicationAt('needs_human', { pending_question: choicePq });
+    const r = await req('POST', `/api/applications/${id}/answer`, { body: { text: 'Referral' } });
+    assert.equal(r.status, 200, JSON.stringify(r.json));
+    assert.equal(r.json.row.state, 'approved');
+    assert.deepEqual(applyRunnerStartCalls, [id]);
+    const { parseAnswerBank } = await import('../src/apply/answers.js');
+    const bank = parseAnswerBank(fs.readFileSync(bankFile(), 'utf8'));
+    assert.deepEqual(bank.labels.get('how did you find this role'), { key: 'q_how_did_you_find_this_role', tier: 'learned', polarity: 'same' });
+    assert.equal(/** @type {any} */ (bank.facts.get('q_how_did_you_find_this_role')).value, 'Referral');
+    const events = await listApplicationEvents(verifyClient, id);
+    assert.ok(events.some((e) => e.note && e.note.includes('q_how_did_you_find_this_role')));
+  });
+
+  test('a bank that does not parse fails the request visibly; the file and the application are untouched', async () => {
+    const broken = `${BANK_TEXT}fallback: 2 | Duplicate rank\n`;
+    fs.writeFileSync(bankFile(), broken);
+    const id = await seedApplicationAt('needs_human', { pending_question: choicePq });
+    const r = await req('POST', `/api/applications/${id}/answer`, { body: { text: 'Referral' } });
+    assert.equal(r.status, 409);
+    assert.equal(r.json.code, 'bank_write_failed');
+    assert.equal(fs.readFileSync(bankFile(), 'utf8'), broken);
+    assert.equal((await getApplication(verifyClient, id)).state, 'needs_human');
+  });
+
+  test('the text-question save path (operator path) is parse-validated too: a broken bank fails visibly', async () => {
+    const broken = `${BANK_TEXT}garbage under a key\n`;
+    fs.writeFileSync(bankFile(), broken);
+    const id = await seedApplicationAt('needs_human', { pending_question: { kind: 'question', label: 'Where did you hear about this job', suggestion: { key: 'how_did_you_hear', value: null } } });
+    const r = await req('POST', `/api/applications/${id}/answer`, { body: { text: 'Job Board', save: true } });
+    assert.equal(r.status, 409);
+    assert.equal(r.json.code, 'bank_write_failed');
+    assert.equal(fs.readFileSync(bankFile(), 'utf8'), broken);
   });
 });
 

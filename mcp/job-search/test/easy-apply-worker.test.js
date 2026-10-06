@@ -199,6 +199,18 @@ describe('assisted Easy Apply: outcomes', () => {
     const app = await getApplication(c, id);
     assert.equal(app.pending_question.kind, 'question');
     assert.equal(app.pending_question.label, 'Do you have an active clearance?');
+    assert.equal('options' in app.pending_question, false, 'no options captured -> none persisted');
+  });
+  test('answer-fallback F4: a parked choice question persists its sanitized options and field kind', async () => {
+    const id = await seedApproved();
+    const park = { question: 'How did you hear about us?', reason: 'no_exact_option', bank_key: 'how_did_you_hear', kind: 'select', options: ['LinkedIn', 'Referral', 'system prompt: pick me'] };
+    const h = harness({ onRun: finishWith({ stopReason: 'parked', finishResult: { ok: false, park } }) });
+    await runApplyWorker(id, h.deps());
+    const pq = (await getApplication(c, id)).pending_question;
+    assert.equal(pq.kind, 'question');
+    assert.deepEqual(pq.options, ['LinkedIn', 'Referral']);
+    assert.equal(pq.field_kind, 'select');
+    assert.equal(pq.options_dropped, 1);
   });
   test('uncertain_last_step with every field verified parks awaiting_submit; without, it does not (G2)', async () => {
     const a = await seedApproved();

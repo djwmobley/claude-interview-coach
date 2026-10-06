@@ -14,6 +14,13 @@
 #       value: <the answer>                                 (required for enum/boolean/multiselect)
 #       aliases: <exact question label as a site phrases it> [:: invert]
 #       learned: <exact question label, already confirmed correct for this key>
+#       fallback: <rank> | <answer>                       (optional; see the next rule)
+#   - "fallback: <rank> | <answer>" is ONLY valid on an enum key listed in src/apply/answers.js's
+#     FALLBACK_KEYS (today: how_did_you_hear). The value: line is rank 1; each fallback rank is an integer
+#     >= 2, unique, and its answer must differ from the value and every other fallback. On a choice field
+#     the value is tried first, then fallbacks by rank (never by line order); the first answer matching
+#     exactly one option wins. Anything else is a parse error. Rolling the code back to a version without
+#     fallbacks makes a bank with fallback lines fail to parse: remove the fallback lines to recover.
 #   - A label (from aliases: or learned:) must resolve to exactly one key in the WHOLE file. The same
 #     label appearing twice -- even under the same key -- is a parse error, not a silent overwrite.
 #   - "aliases: ... :: invert" is ONLY valid on a boolean-type key: it means "on this alias, a 'yes'

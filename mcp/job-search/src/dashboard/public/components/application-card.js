@@ -19,7 +19,7 @@ import { credentialPrompt } from './credential-prompt.js';
 import { withdrawControl } from './withdraw-control.js';
 import { resumeControl, partialDraftWarning } from './resume-control.js';
 import { confirmButton } from './confirm-button.js';
-import { withdrawButtonVisible, resumeButtonVisible } from '../lib/format.js';
+import { withdrawButtonVisible, resumeButtonVisible, ledgerLineText, pendingChoiceOptions } from '../lib/format.js';
 
 /** Apply exclusion gate (src/apply/exclusions.js): branches that are never overridable from the dashboard. */
 const HARD_EXCLUSION_BRANCHES = new Set(['blocked_company', 'already_applied_listing', 'already_applied_history']);
@@ -201,8 +201,12 @@ export function applicationCard(opts) {
     hApplicationScreenshot({ src: `/api/applications/${application.id}/screenshot`, alt: 'Latest apply-run screenshot', className: 'application-card__screenshot-img' }),
   ]);
 
-  /** @param {{kind:string,label?:string,page_url?:string}} pq */
+  /** @param {{kind:string,label?:string,page_url?:string,options?:unknown}} pq */
   function answerBox(pq) {
+    // Answer-fallback F6: a parked choice field offers exactly the options the run captured (option text
+    // set with textContent only); the pick is written to the bank, so there is no save checkbox.
+    const choices = pendingChoiceOptions(pq);
+    if (choices) return choiceBox(pq, choices);
     const textInput = h('textarea', { className: 'drawer__input', attrs: { placeholder: 'Your answer', rows: 3 } });
     const saveCheckbox = h('input', { className: 'drawer__checkbox', attrs: { type: 'checkbox' }, checked: true });
     const saveButton = h('button', {
@@ -236,6 +240,47 @@ export function applicationCard(opts) {
       h('label', { className: 'drawer__field' }, [h('span', { text: 'Answer' }), textInput]),
       h('label', { className: 'drawer__field drawer__field--inline' }, [saveCheckbox, h('span', { text: 'Save this answer for future applications' })]),
       saveButton,
+    ]);
+  }
+
+  /**
+   * @param {{label?:string}} pq
+   * @param {string[]} choices
+   */
+  function choiceBox(pq, choices) {
+    const select = h('select', { className: 'drawer__input' }, [
+      h('option', { value: '', text: 'Choose one of the options the site offered' }),
+      ...choices.map((o) => h('option', { value: o, text: o })),
+    ]);
+    const applyButton = h('button', {
+      className: 'btn btn--primary',
+      attrs: { type: 'button' },
+      text: 'Apply answer and Resume',
+      on: {
+        click: async () => {
+          const text = /** @type {HTMLSelectElement} */ (select).value;
+          if (!text) {
+            showToast({ message: 'Pick one of the options.', tone: 'error' });
+            return;
+          }
+          const outcome = handleOutcome(await postJson(`/api/applications/${application.id}/answer`, {
+            text, ...(application.partial_draft === true ? { acknowledge_partial_draft: true } : {}),
+          }));
+          if (outcome.kind === 'ok') {
+            showToast({ message: 'Answer saved to the bank. Resuming this application.' });
+            const warning = /** @type {any} */ (outcome).body?.warning;
+            if (typeof warning === 'string' && warning) showToast({ message: warning, tone: 'error' });
+            opts.onChanged();
+          }
+        },
+      },
+    });
+    return h('div', { className: 'credential-prompt' }, [
+      h('h4', { text: 'Screening question' }),
+      h('p', { className: 'application-card__note', text: pq.label ?? '' }),
+      h('label', { className: 'drawer__field' }, [h('span', { text: 'Answer' }), select]),
+      h('p', { className: 'application-card__hint', text: 'Your pick is saved to the answer bank for this exact question.' }),
+      applyButton,
     ]);
   }
 
@@ -333,9 +378,7 @@ export function applicationCard(opts) {
       h('h4', { text: 'Filled answers' }),
       ledger.length === 0
         ? h('p', { className: 'application-card__hint', text: 'No answers recorded.' })
-        : h('ul', { className: 'application-card__ledger' }, ledger.map((/** @type {any} */ e) => h('li', {
-          text: `${String(e.question ?? '')} = ${String(e.value ?? '')}${e.bank_key ? ` (bank: ${String(e.bank_key)})` : ''}`,
-        }))),
+        : h('ul', { className: 'application-card__ledger' }, ledger.map((/** @type {any} */ e) => h('li', { text: ledgerLineText(e) }))),
       prefilled.length === 0 ? null : h('h4', { text: 'Prefilled by the site (check these)' }),
       prefilled.length === 0 ? null : h('ul', { className: 'application-card__ledger' }, prefilled.map((/** @type {string} */ q) => h('li', { text: q }))),
       checkMessage,
