@@ -5,7 +5,8 @@
  * and had no single place to find every docs_ready application across all listings. This renders that
  * list as its own section card (existing section-card style, thin cyan accent, dashboard UI restraint --
  * minimal color beyond that one accent), plus a "Parked, failed, or drafting" group underneath whose rows
- * carry a Withdraw control (two-click confirm, optional note).
+ * carry a Withdraw control (two-click confirm, optional note) and, for parked kinds the server resumes, a
+ * Resume control (two-click confirm, resume gate R1).
  *
  * Kept out of application-card.js deliberately: this is a cross-listing LIST view (GET /api/applications),
  * not a single listing's own application panel, and its Approve handler has its own explicit
@@ -19,8 +20,9 @@ import { handleOutcome } from '../lib/outcome.js';
 import { showToast } from '../lib/toast.js';
 import { emptyState } from './empty-state.js';
 import { withdrawControl } from './withdraw-control.js';
+import { resumeControl, partialDraftWarning } from './resume-control.js';
 import { chipClassName, atsChip, reviewVerdictChip, applicationStateChip } from './chips.js';
-import { relativeTime, approvalRowFindingsState, approvalRowApproveState, withdrawButtonVisible } from '../lib/format.js';
+import { relativeTime, approvalRowFindingsState, approvalRowApproveState, withdrawButtonVisible, resumeButtonVisible } from '../lib/format.js';
 
 /** @param {{ severity?: string, text?: string }} f */
 function findingText(f) {
@@ -104,6 +106,11 @@ function parkedRow(row, onChanged) {
       h('span', { className: 'approval-row__age', text: `Updated ${relativeTime(row.updated_at)}` }),
     ]),
     h('p', { className: 'approval-row__parked-reason', text: reason }),
+    // Resume gate R1: Resume only for kinds the server resumes; it carries the partial-draft warning.
+    // A row with the warning but no Resume (e.g. a question) still shows it here.
+    resumeButtonVisible(row)
+      ? resumeControl(row.application_id, { partialDraft: row.partial_draft === true, onChanged })
+      : (row.state === 'needs_human' && row.partial_draft === true ? partialDraftWarning() : null),
     withdrawButtonVisible(row) ? withdrawControl(row.application_id, onChanged) : null,
   ]);
 }

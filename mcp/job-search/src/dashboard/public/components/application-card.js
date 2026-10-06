@@ -17,7 +17,8 @@ import { showToast } from '../lib/toast.js';
 import { chipClassName, applicationStateChip } from './chips.js';
 import { credentialPrompt } from './credential-prompt.js';
 import { withdrawControl } from './withdraw-control.js';
-import { withdrawButtonVisible } from '../lib/format.js';
+import { resumeControl, partialDraftWarning } from './resume-control.js';
+import { withdrawButtonVisible, resumeButtonVisible } from '../lib/format.js';
 
 /** Apply exclusion gate (src/apply/exclusions.js): branches that are never overridable from the dashboard. */
 const HARD_EXCLUSION_BRANCHES = new Set(['blocked_company', 'already_applied_listing', 'already_applied_history']);
@@ -207,9 +208,14 @@ export function applicationCard(opts) {
             return;
           }
           const save = /** @type {HTMLInputElement} */ (saveCheckbox).checked;
-          const outcome = handleOutcome(await postJson(`/api/applications/${application.id}/answer`, { text, save }));
+          // Resume gate R3: when the card shows the partial-draft warning, saving acknowledges it.
+          const outcome = handleOutcome(await postJson(`/api/applications/${application.id}/answer`, {
+            text, save, ...(application.partial_draft === true ? { acknowledge_partial_draft: true } : {}),
+          }));
           if (outcome.kind === 'ok') {
             showToast({ message: 'Answer saved. Resuming this application.' });
+            const warning = /** @type {any} */ (outcome).body?.warning;
+            if (typeof warning === 'string' && warning) showToast({ message: warning, tone: 'error' });
             opts.onChanged();
           }
         },
@@ -346,7 +352,12 @@ export function applicationCard(opts) {
         pq.page_url ? h('p', { className: 'application-card__hint', text: String(pq.page_url) }) : null,
       ]);
     }
-    needsHumanPanel = h('div', { className: 'application-card__needs-human' }, [screenshotEl, kindPanel, appliedByHandButton]);
+    // Resume gate R1/R3: Resume (two-click confirm) for kinds the server resumes, carrying the partial-draft
+    // warning when set; a card whose own action resumes it (question, credential) shows the warning alone.
+    const resumeEl = resumeButtonVisible(application)
+      ? resumeControl(application.id, { partialDraft: application.partial_draft === true, onChanged: opts.onChanged })
+      : (application.partial_draft === true ? partialDraftWarning() : null);
+    needsHumanPanel = h('div', { className: 'application-card__needs-human' }, [screenshotEl, kindPanel, resumeEl, appliedByHandButton]);
   }
 
   const failedPanel = application.state === 'failed'

@@ -16,8 +16,9 @@ import {
   createApplication, approve, getApplication, getApplicationForListing, retry, markAppliedByHand, resume,
   listApplicationEvents, recordApplicationEvent, transition, APPLICATION_STATES, checkApplicationBlockers,
   withdrawApplication, ASSISTED_ATS_TYPES,
-  cleanupWithdrawnNudgeCalendar,
+  cleanupWithdrawnNudgeCalendar, hasAssistedNextClickEver, partialDraftSql, PARTIAL_DRAFT_WARNING,
 } from '../../core/applications.js';
+import { resumeParkedApplication } from '../../apply/resume-gate.js';
 import { classifyApplyUrl } from '../../apply/ats-detect.js';
 import { resolveLatestApplicationScreenshot } from '../../apply/screenshot.js';
 import { appendLearnedLabel } from '../../apply/answers.js';
@@ -399,7 +400,8 @@ export function register(router, deps, streamHub) {
                 a.resume_doc_id, a.coverletter_doc_id, a.pending_question, a.created_at, a.updated_at,
                 l.title, l.company, l.company_norm, l.title_norm, l.location_norm, l.apply_ats, l.apply_url,
                 l.url, l.url_normalized, l.description, l.status AS listing_status,
-                rd.rel_path AS resume_rel_path, cd.rel_path AS coverletter_rel_path
+                rd.rel_path AS resume_rel_path, cd.rel_path AS coverletter_rel_path,
+                ${partialDraftSql('a')} AS partial_draft
          FROM ic_job_applications a
          JOIN ic_job_listings l ON l.id = a.listing_id
          LEFT JOIN ic_job_documents rd ON rd.id = a.resume_doc_id
@@ -427,6 +429,7 @@ export function register(router, deps, streamHub) {
           resume_rel_path: row.resume_rel_path ?? null, coverletter_rel_path: row.coverletter_rel_path ?? null,
           parked_reason: row.pending_question && typeof row.pending_question.label === 'string' ? row.pending_question.label : null,
           pending_kind: row.pending_question && typeof row.pending_question.kind === 'string' ? row.pending_question.kind : null,
+          partial_draft: Boolean(row.partial_draft),
           created_at: row.created_at, updated_at: row.updated_at,
           blocked: blockers.blocked, blocked_reason: blockers.blockedReason, sibling_active: blockers.siblingActive,
         });
@@ -508,6 +511,30 @@ export function register(router, deps, streamHub) {
     sendJson(ctx.res, 200, { ok: true, outcome: out.outcome, row: out.row, warnings });
   }, { allowEmptyBody: true });
 
+  // Resume gate (spec v2 R1): a human Resume of a parked application, two-click confirmed on the card.
+  // Total classification by pending_question.kind in src/apply/resume-gate.js; every refusal is 409
+  // RESUME_REFUSED with a closed `reason`. Body { acknowledge_partial_draft? }: required (true) when an
+  // assisted run ever clicked Next for this application (A10), since the site may hold a partial draft.
+  // An approved result starts the apply runner; a resume_failed park goes back to drafting and waits for
+  // Apply now (no runner kick).
+  router.register('POST', '/api/applications/:id/resume', async (ctx) => {
+    const id = Number(ctx.params.id);
+    if (!Number.isInteger(id) || id <= 0) throw new JobSearchError('VALIDATION', 'id must be a positive integer');
+    const b = /** @type {any} */ (ctx.body) ?? {};
+    const runnerStatus = typeof deps.applyRunner?.status === 'function' ? deps.applyRunner.status() : null;
+    const applyRunning = Boolean(runnerStatus && runnerStatus.running && runnerStatus.applicationId === id);
+    const out = await deps.withClient((c) => resumeParkedApplication(c, id, {
+      actor: 'dashboard', applyRunning, chainRunning: runningChains.has(id),
+      acknowledgePartialDraft: b.acknowledge_partial_draft === true, config: deps.config ?? undefined,
+    }));
+    if (out.outcome === 'refused') {
+      return sendJson(ctx.res, 409, { ok: false, code: 'RESUME_REFUSED', reason: out.reason, state: out.state, message: out.message });
+    }
+    streamHub?.notifyChanged('events');
+    if (out.outcome === 'approved') kickApplyRunner(deps, id, out.row);
+    sendJson(ctx.res, 200, { ok: true, outcome: out.outcome, row: out.row, warning: out.warning });
+  }, { allowEmptyBody: true });
+
   // Apply pipeline slice 5: needs_human -> submitted ("I applied by hand"), no attempt increment, no
   // runner kick -- this is the human declaring the automated flow finished outside it.
   router.register('POST', '/api/applications/:id/applied-by-hand', async (ctx) => {
@@ -563,13 +590,18 @@ export function register(router, deps, streamHub) {
       }
     }
 
+    // Resume gate R3: a human path, allowed with the A10 marker set, but the response carries the
+    // partial-draft warning and the event records whether the card's warning was acknowledged.
+    const partialDraft = await deps.withClient((c) => hasAssistedNextClickEver(c, id));
+    const ack = b.acknowledge_partial_draft === true;
     const row = await deps.withClient((c) => resume(c, id, {
       actor: 'dashboard',
-      note: `answer saved for "${String(pq.label ?? '').slice(0, 200)}"${save && key ? ' (promoted to learned)' : ' (one-time)'}: ${b.text.slice(0, 500)}`,
+      note: `answer saved for "${String(pq.label ?? '').slice(0, 200)}"${save && key ? ' (promoted to learned)' : ' (one-time)'}: ${b.text.slice(0, 500)}${partialDraft ? `; possible partial draft on the site (warning ${ack ? 'acknowledged' : 'returned'})` : ''}`,
+      meta: partialDraft ? { partial_draft: true, partial_draft_acknowledged: ack } : undefined,
     }));
     streamHub?.notifyChanged('events');
     kickApplyRunner(deps, id, row);
-    sendJson(ctx.res, 200, { ok: true, row });
+    sendJson(ctx.res, 200, { ok: true, row, warning: partialDraft ? PARTIAL_DRAFT_WARNING : null });
   });
 
   // Apply pipeline slice 5: the needs_human card's screenshot. Never accepts a caller-supplied path --

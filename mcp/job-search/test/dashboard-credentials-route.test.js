@@ -185,13 +185,17 @@ describe('POST /api/credentials: writes the credential and resumes needs_human -
     assert.equal(row.state, 'needs_human', 'a failed validation must never resume the application');
   });
 
-  test('resuming an application not currently in needs_human is rejected (resume() own guard, not swallowed)', async () => {
+  test('an application not currently in needs_human is not resumed; the credential is still saved and the response says so (resume gate R2)', async () => {
     const listingId = await seedListing();
     const created = await createApplication(verifyClient, { listingId, actor: 'mcp' });
     const r = await req('POST', '/api/credentials', {
       body: { applicationId: created.id, target: 'ic-jobsearch/boards.greenhouse.io', username: 'a@b.com', password: 'pw' },
     });
-    assert.equal(r.status, 400);
+    assert.equal(r.status, 200);
+    assert.equal(r.json.resumed, false);
+    assert.equal(r.json.reason, 'not_parked');
+    assert.ok(credStore.has('ic-jobsearch/boards.greenhouse.io'));
+    assert.equal((await getApplication(verifyClient, created.id)).state, 'drafting');
   });
 });
 

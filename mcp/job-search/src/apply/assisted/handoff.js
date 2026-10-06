@@ -17,7 +17,7 @@
  * The model's exit code never decides anything.
  */
 import { issueLease, getLease, closeLease, tripBreaker } from '../../core/easy-apply-state.js';
-import { recordApplicationEvent, hasAssistedNextClickThisAttempt } from '../../core/applications.js';
+import { recordApplicationEvent, hasAssistedNextClickEver } from '../../core/applications.js';
 
 /**
  * The closed stop-reason table (A11). Every stop reason the assisted_apply tool or this handoff can record
@@ -141,9 +141,10 @@ export async function runAssistedHandoff(p) {
       return { outcome: 'awaiting_submit', targetId: pre.targetId, ledger: mapped.ledger, screenshotRelPath: mapped.screenshotRelPath, reason: mapped.reason, prefilledUnledgered: mapped.prefilledUnledgered };
     }
     // A10: once a Next was clicked the site may hold a draft; every parked outcome says so, and a retry is
-    // a human's call (nothing retries a needs_human row automatically).
+    // a human's call (nothing retries a needs_human row automatically). Resume gate R3: the durable
+    // marker (a Next click on any attempt) decides, and every automatic resume path refuses it.
     const pq = mapped.pendingQuestion;
-    if (await hasAssistedNextClickThisAttempt(client, app.id)) {
+    if (await hasAssistedNextClickEver(client, app.id)) {
       return { outcome: 'needs_human', pendingQuestion: { ...pq, next_clicked: true, requires_human_retry: true } };
     }
     return { outcome: 'needs_human', pendingQuestion: pq };

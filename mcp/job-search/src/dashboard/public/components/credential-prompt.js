@@ -89,11 +89,16 @@ export function credentialPrompt(opts) {
           showToast({ message: 'Username and password are both required.', tone: 'error' });
           return;
         }
+        // Resume gate R2: the server resumes only when this application is still parked on this exact
+        // credential target; otherwise it saves the credential and says it did not resume.
         const outcome = handleOutcome(await postJson('/api/credentials', {
           applicationId: application.id, target: pendingQuestion.target, username, password,
+          ...(application.partial_draft === true ? { acknowledge_partial_draft: true } : {}),
         }));
         if (outcome.kind === 'ok') {
-          showToast({ message: 'Credential saved. Resuming this application.' });
+          const body = /** @type {any} */ (outcome).body ?? {};
+          showToast({ message: body.resumed === false ? `Credential saved. The application was not resumed (${String(body.reason ?? 'not parked on this credential')}).` : 'Credential saved. Resuming this application.' });
+          if (typeof body.warning === 'string' && body.warning) showToast({ message: body.warning, tone: 'error' });
           onChanged();
         }
       },

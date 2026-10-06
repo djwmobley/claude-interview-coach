@@ -806,6 +806,61 @@ export async function hasAssistedNextClickThisAttempt(client, applicationId) {
   return (r.rowCount ?? 0) > 0;
 }
 
+/**
+ * The durable A10 marker (resume gate spec R3): whether an assisted run EVER clicked Next for this
+ * application, across every attempt. Event-derived, so nothing a transition does can clear it: the
+ * progress events recordAssistedNextClick() writes are never updated or deleted by any production path,
+ * and leaving needs_human (which nulls pending_question and with it requires_human_retry) does not touch
+ * them. hasAssistedNextClickThisAttempt() above stays for per-attempt questions; every resume or re-drive
+ * decision reads this one.
+ * @param {import('pg').ClientBase} client
+ * @param {number} applicationId
+ * @returns {Promise<boolean>}
+ */
+export async function hasAssistedNextClickEver(client, applicationId) {
+  const r = await client.query(
+    `SELECT 1 FROM ic_job_application_events WHERE application_id = $1 AND kind = 'progress' AND note = $2 LIMIT 1`,
+    [applicationId, ASSISTED_NEXT_CLICK_NOTE],
+  );
+  return (r.rowCount ?? 0) > 0;
+}
+
+/**
+ * SQL predicate (for a WHERE clause over ic_job_applications aliased `alias`) that is true when the
+ * application carries the durable A10 marker. Automatic sweeps use it to skip marked rows up front so
+ * they do not log a refusal on every tick; the locked check in resumeAutomatic() is still the authority.
+ * @param {string} alias
+ */
+export function partialDraftSql(alias) {
+  return `EXISTS (SELECT 1 FROM ic_job_application_events pde WHERE pde.application_id = ${alias}.id AND pde.kind = 'progress' AND pde.note = '${ASSISTED_NEXT_CLICK_NOTE}')`;
+}
+
+/** Shown on the card and returned by every human resume path when the A10 marker is set. */
+export const PARTIAL_DRAFT_WARNING = 'An assisted run clicked Next on this application before, so the site (Workday) may hold a partial draft. Check the draft on the site before the run continues.';
+
+/**
+ * needs_human -> approved for an AUTOMATIC caller (the credential auto-resume sweeps in
+ * src/dashboard/stream.js and bin/apply.js). Same move as resume(), but refuses, under the row lock, when
+ * the durable A10 marker is set: only a human may resume an application whose run clicked Next. The
+ * refusal is a VALIDATION error with details.reason 'requires_human_retry' so the sweeps' existing
+ * per-row catch logs it and moves on.
+ * @param {import('pg').ClientBase} client
+ * @param {number} id
+ * @param {{ actor?: string, note?: string|null, meta?: unknown }} [opts]
+ */
+export async function resumeAutomatic(client, id, opts = {}) {
+  return withTransaction(client, async (c) => {
+    const cur = await c.query('SELECT id FROM ic_job_applications WHERE id = $1 FOR UPDATE', [id]);
+    if (cur.rowCount === 0) throw new JobSearchError('NOT_FOUND', `application ${id} not found`);
+    if (await hasAssistedNextClickEver(c, id)) {
+      throw new JobSearchError('VALIDATION', `application ${id} had an assisted Next click; only a human can resume it`, {
+        details: { application_id: id, reason: 'requires_human_retry' },
+      });
+    }
+    return transitionUnwrapped(c, id, 'approved', opts, { incrementAttempt: true, expectedFromState: 'needs_human', helperName: 'resumeAutomatic' });
+  });
+}
+
 /** pending_question for a run that clicked Next and then ended without a verified finish (spec v2 A10). */
 export function assistedPartialQuestion(/** @type {string|null} */ pageUrl, /** @type {string} */ why) {
   return {
@@ -843,7 +898,8 @@ export async function reconcileStale(client, opts = {}) {
     const results = [];
     for (const staleRow of stale.rows) {
       const sent = await hasSubmitRequestSentThisAttempt(c, staleRow.id);
-      if (!sent && await hasAssistedNextClickThisAttempt(c, staleRow.id)) {
+      // Resume gate R3: the durable marker (any attempt), not only this attempt's Next clicks.
+      if (!sent && await hasAssistedNextClickEver(c, staleRow.id)) {
         results.push(await transitionUnwrapped(c, staleRow.id, 'needs_human', {
           actor: 'apply',
           note: 'stale submitting reconciled after an assisted Next click; a human checks the saved draft before any retry',

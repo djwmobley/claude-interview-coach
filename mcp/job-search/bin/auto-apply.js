@@ -100,7 +100,7 @@ import { persistApplyTargetForListing, LIFETIME_PROBE_ATTEMPTS } from '../src/co
 import { prepareLinkedInListing, adaptPlaywrightPage } from '../src/apply/linkedin-button-prepare.js';
 import { selectCandidates, isUsLocation, isHourlyPaySignal, classifyCandidate, countAutoApprovedToday } from '../src/core/auto-apply-select.js';
 import { exclusionConfigPath, loadExclusionConfig, classifyExclusion } from '../src/apply/exclusions.js';
-import { createApplication, approve, getApplication, transition, retry, checkApplicationBlockers } from '../src/core/applications.js';
+import { createApplication, approve, getApplication, transition, retry, checkApplicationBlockers, hasAssistedNextClickEver } from '../src/core/applications.js';
 import { createResumeRunner } from '../src/dashboard/resume-runner.js';
 import { createReviewRunner } from '../src/dashboard/review-runner.js';
 import { runApplyWorker } from '../src/apply/worker.js';
@@ -743,6 +743,16 @@ export async function runSingleApplication(id, deps) {
 
   if (!RE_DRIVE_ALLOWED_STATES.includes(app.state)) {
     return { outcome: 'refused', applicationId: id, listingId: app.listing_id, reason: `state_${app.state}` };
+  }
+
+  // Resume gate R3 (A10 enforcement): once an assisted run clicked Next for this application, on any
+  // attempt, the site may hold a partial draft and only a human may resume it (dashboard Resume). This
+  // re-drive is not that human path, whatever state the row is in.
+  if (await deps.withClientFn((c) => hasAssistedNextClickEver(c, id))) {
+    return {
+      outcome: 'refused', applicationId: id, listingId: app.listing_id, reason: 'requires_human_retry',
+      message: 'An assisted run clicked Next on this application, so the site may hold a partial draft. Check it, then use Resume on the dashboard card.',
+    };
   }
 
   if (app.state === 'needs_human') {

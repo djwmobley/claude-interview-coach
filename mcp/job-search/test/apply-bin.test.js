@@ -9,7 +9,7 @@ import assert from 'node:assert/strict';
 import pg from 'pg';
 import { pgConnectionConfig } from '../src/core/config.js';
 import { ensureAuxSchema } from '../src/core/schema.js';
-import { createApplication, transition, getApplication } from '../src/core/applications.js';
+import { createApplication, transition, getApplication, recordAssistedNextClick } from '../src/core/applications.js';
 import { parseArgs, resumeCredentialReadyApplications } from '../bin/apply.js';
 
 describe('parseArgs', () => {
@@ -89,5 +89,16 @@ describe('resumeCredentialReadyApplications', () => {
     assert.equal(resumed, 0);
     const row = await getApplication(client, created.id);
     assert.equal(row.state, 'needs_human');
+  });
+
+  test('resume gate R3: never auto-resumes an application an assisted run clicked Next on', async () => {
+    const listingId = await seedListing();
+    const created = await createApplication(client, { listingId, atsType: 'workday', actor: 'mcp' });
+    await transition(client, created.id, 'needs_human', { actor: 'apply', pending_question: { kind: 'credential', target: 'ic-jobsearch/marked.test', username: 'a@b.com' } });
+    await recordAssistedNextClick(client, created.id);
+    const fakeCredentials = { read: async (target) => (target === 'ic-jobsearch/marked.test' ? { username: 'a@b.com', password: 'pw' } : null) };
+    const resumed = await resumeCredentialReadyApplications(client, fakeCredentials, () => {});
+    assert.equal(resumed, 0);
+    assert.equal((await getApplication(client, created.id)).state, 'needs_human');
   });
 });

@@ -254,6 +254,17 @@ describe('assisted Workday handoff in the worker', () => {
     assert.equal((await getApplication(c, id2)).pending_question.kind, 'assisted_partial');
   });
 
+  test('resume gate R3: a crash on a later attempt parks when the Next click came on an EARLIER attempt (durable marker)', async () => {
+    const id = await seedApproved();
+    await recordAssistedNextClick(c, id);
+    await new Promise((r) => { setTimeout(r, 5); });
+    const crash = harness({ closeAllThrows: true, onRun: async () => ({ exitCode: 1 }) });
+    const r = await runApplyWorker(id, crash.deps());
+    assert.equal(r.status, 'needs_human');
+    const pq = (await getApplication(c, id)).pending_question;
+    assert.equal(pq.kind, 'assisted_partial');
+  });
+
   test('A15: the worker never calls adapter.run; the real run touches nothing; no submit path left in workday.js', async () => {
     const id = await seedApproved();
     const { h, deps } = harness();

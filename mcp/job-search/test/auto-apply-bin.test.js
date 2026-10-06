@@ -20,7 +20,7 @@ import { JobSearchError, errFields } from '../src/core/errors.js';
 import { pgConnectionConfig } from '../src/core/config.js';
 import { ensureAuxSchema } from '../src/core/schema.js';
 import { withClient, closePool } from '../src/core/db.js';
-import { getApplication } from '../src/core/applications.js';
+import { getApplication, recordAssistedNextClick } from '../src/core/applications.js';
 import { countAutoApprovedToday } from '../src/core/auto-apply-select.js';
 import { BUILT_IN_BLOCKED } from '../src/apply/exclusions.js';
 import { EventEmitter } from 'node:events';
@@ -994,6 +994,25 @@ describe('runSingleApplication: --application re-drive (submit-on-resume spec se
     assert.equal(resumeCalled, false);
     const row = await getApplication(client, appId);
     assert.equal(row.state, 'needs_human', 'never transitioned when refused');
+  });
+
+  test('resume gate R3: an application an assisted run clicked Next on is never re-driven, in any re-drivable state', async () => {
+    for (const [state, pq] of /** @type {[string, any][]} */ ([['needs_human', { kind: 'resume_failed', label: 'x' }], ['failed', null], ['drafting', null], ['docs_ready', null]])) {
+      const listingId = await insertListing();
+      const appId = await seedApplication(listingId, { state, pendingQuestion: pq ?? undefined });
+      await recordAssistedNextClick(client, appId);
+      let resumeCalled = false;
+      let workerCalled = false;
+      const r = await runSingleApplication(appId, baseSingleDeps({
+        resumeRunner: { run: async () => { resumeCalled = true; return { ok: true }; } },
+        runWorker: async () => { workerCalled = true; return { ok: true, status: 'submitted' }; },
+      }));
+      assert.equal(r.outcome, 'refused', state);
+      assert.equal(r.reason, 'requires_human_retry', state);
+      assert.equal(resumeCalled, false, state);
+      assert.equal(workerCalled, false, state);
+      assert.equal((await getApplication(client, appId)).state, state, `${state} never transitioned`);
+    }
   });
 
   test('the apply exclusion gate refuses a blocked-employer listing (amendment A1), excludeApplicationId set so it is never "already applied" against itself', async () => {

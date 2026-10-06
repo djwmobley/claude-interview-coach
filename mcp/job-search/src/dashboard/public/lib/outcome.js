@@ -66,6 +66,9 @@ export function handleOutcome(outcome, opts = {}) {
     case 'withdraw_refused':
       showToast({ message: outcome.message ? String(outcome.message) : 'This application cannot be withdrawn right now.', tone: 'error' });
       break;
+    case 'resume_refused':
+      showToast({ message: outcome.message ? String(outcome.message) : 'This application cannot be resumed right now.', tone: 'error' });
+      break;
     case 'db_unavailable':
       setBanner('db-unavailable', { tone: 'error', message: 'The database is unavailable right now. This view will recover automatically.' });
       break;

@@ -2,7 +2,9 @@
 /** Pure formatting function tests (pr3-spec-decisions.md section 12 item 2). No DOM required. */
 import { test, describe } from 'node:test';
 import assert from 'node:assert/strict';
-import { relativeTime, ageDays, agingBucket, scoreBucket, fitBucket, fitDisplayState, applyButtonState, STALE_ACTIONABLE_MS, DETAIL_MIN_CHARS, shortDate, shortDateTime, salaryRange, formatMoney, pluralize, truncate, sourceLabel, formatPercent, normalizeAgendaTime, agendaTimeLabel, approvalRowFindingsState, approvalRowApproveState, withdrawButtonVisible } from '../src/dashboard/public/lib/format.js';
+import { relativeTime, ageDays, agingBucket, scoreBucket, fitBucket, fitDisplayState, applyButtonState, STALE_ACTIONABLE_MS, DETAIL_MIN_CHARS, shortDate, shortDateTime, salaryRange, formatMoney, pluralize, truncate, sourceLabel, formatPercent, normalizeAgendaTime, agendaTimeLabel, approvalRowFindingsState, approvalRowApproveState, withdrawButtonVisible, resumeButtonVisible, RESUME_BUTTON_KINDS, PARTIAL_DRAFT_CARD_WARNING } from '../src/dashboard/public/lib/format.js';
+import { RESUME_APPROVE_KINDS, RESUME_REDRAFT_KINDS } from '../src/apply/resume-gate.js';
+import { PARTIAL_DRAFT_WARNING } from '../src/core/applications.js';
 import { STALE_ACTIONABLE_MS as SERVER_STALE_ACTIONABLE_MS } from '../src/dashboard/routes/applications.js';
 import { DETAIL_MIN_CHARS as SERVER_DETAIL_MIN_CHARS } from '../src/core/normalize.js';
 
@@ -525,5 +527,26 @@ describe('withdrawButtonVisible', () => {
       assert.equal(withdrawButtonVisible({ state: s }), false, String(s));
     }
     assert.equal(withdrawButtonVisible(null), false);
+  });
+});
+
+describe('resumeButtonVisible (resume gate R1)', () => {
+  test('shown only on needs_human rows parked on a kind the server resumes; hidden for refused and unknown kinds', () => {
+    for (const kind of ['unrecognized_page', 'captcha', 'assisted_stopped', 'assisted_partial', 'email_verification', 'resume_failed']) {
+      assert.equal(resumeButtonVisible({ state: 'needs_human', pending_kind: kind }), true, kind);
+      assert.equal(resumeButtonVisible({ state: 'needs_human', pending_question: { kind } }), true, kind);
+    }
+    for (const kind of ['question', 'credential', 'awaiting_submit', 'post_submit_uncertain', 'blocked', 'zz', '', null]) {
+      assert.equal(resumeButtonVisible({ state: 'needs_human', pending_kind: kind }), false, String(kind));
+    }
+    for (const s of ['drafting', 'docs_ready', 'approved', 'submitting', 'submitted', 'confirmed', 'failed', 'withdrawn', undefined]) {
+      assert.equal(resumeButtonVisible({ state: s, pending_kind: 'captcha' }), false, String(s));
+    }
+    assert.equal(resumeButtonVisible(null), false);
+  });
+
+  test('RESUME_BUTTON_KINDS and the card warning mirror the server exactly (drift guard)', () => {
+    assert.deepEqual([...RESUME_BUTTON_KINDS].sort(), [...RESUME_APPROVE_KINDS, ...RESUME_REDRAFT_KINDS].sort());
+    assert.equal(PARTIAL_DRAFT_CARD_WARNING, PARTIAL_DRAFT_WARNING);
   });
 });
