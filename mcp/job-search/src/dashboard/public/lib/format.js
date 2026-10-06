@@ -147,7 +147,8 @@ const APPLY_BUTTON_STATE_LABELS = Object.freeze({
  * STALE_ACTIONABLE_MS export exactly (30 minutes) -- public/ code cannot import that server module
  * directly (it pulls in 'pg' and other Node-only packages), same reason pages/jobs.js's SORTS is a
  * mirror rather than an import. test/dashboard-public-format.test.js drift-tests this constant against
- * the real export, same pattern as the SORTS mirror test. */
+ * the real export, same pattern as the SORTS mirror test. Since chain-park A1, applyButtonState() no
+ * longer reads it: the server's application_chain_running flag decides "Drafting in progress". */
 export const STALE_ACTIONABLE_MS = 30 * 60 * 1000;
 
 /** Apply-chain-park fix, spec item 4: mirrors src/core/normalize.js's own DETAIL_MIN_CHARS export
@@ -185,17 +186,17 @@ const APPLY_IN_PROGRESS_REASONS = Object.freeze({
  *      in this PR, but honored here if a caller ever sets it -- "if present in the row").
  *   4. an in-flight application not currently in the restartable 'drafting' stage (docs_ready/approved/
  *      submitting/needs_human/failed/any other non-null, non-drafting state).
- *   5. a 'drafting' application younger than STALE_ACTIONABLE_MS (its own chain is presumably still
- *      running -- mirrors the server's own re-click gate in routes/applications.js exactly). A drafting
- *      row with no `application_created_at` at all cannot be proven stale, so it is treated the same as
- *      "still fresh" here -- the safer default (friction, not silent escape) per this repo's own
- *      total-classification convention.
+ *   5. a 'drafting' application whose Apply now chain is actually running: the server's
+ *      `application_chain_running` (routes/applications.js runningChains, the same signal the apply-now
+ *      route uses since chain-park A1). The row's age plays no part, so a row parked and resumed inside
+ *      30 minutes is actionable. Only an explicit `false` proves no chain is running; true or a missing or
+ *      non-boolean value reads as running (friction, not silent escape).
  *   6. `description_chars` missing/undefined: the listing's description has never been fetched, so a
  *      resume draft attempt would fail the same precheck the server runs.
  *   7. `description_chars` below DETAIL_MIN_CHARS: the posting is too thin to draft a resume from.
  *   8. otherwise: actionable, `disabledReason: null`.
- * @param {{ status?: string|null, application_id?: number|string|null, application_state?: string|null, application_created_at?: string|Date|null, description_chars?: number|null, apply_excluded?: boolean }} row
- * @param {Date} [now]
+ * @param {{ status?: string|null, application_id?: number|string|null, application_state?: string|null, application_created_at?: string|Date|null, application_chain_running?: boolean|null, description_chars?: number|null, apply_excluded?: boolean }} row
+ * @param {Date} [now] kept for call-site compatibility; no branch reads the clock since chain-park A1
  * @returns {{ label: string, actionable: boolean, disabledReason: string|null }}
  */
 export function applyButtonState(row, now = new Date()) {
@@ -223,14 +224,9 @@ export function applyButtonState(row, now = new Date()) {
       ? APPLY_IN_PROGRESS_REASONS[state] : (state ? `Application ${state}.` : 'Application in progress.');
     return { label, actionable: false, disabledReason: reason };
   }
-  // 5. drafting, still within the re-click cooldown (or unprovable freshness -- see doc comment)
-  if (hasApplication && state === 'drafting') {
-    const createdAt = row.application_created_at;
-    const createdMs = createdAt ? new Date(createdAt).getTime() : NaN;
-    const ageMs = Number.isNaN(createdMs) ? NaN : now.getTime() - createdMs;
-    if (Number.isNaN(ageMs) || ageMs < STALE_ACTIONABLE_MS) {
-      return { label, actionable: false, disabledReason: 'Drafting in progress.' };
-    }
+  // 5. drafting with a chain actually running, or no proof that none is (see doc comment)
+  if (hasApplication && state === 'drafting' && row.application_chain_running !== false) {
+    return { label, actionable: false, disabledReason: 'Drafting in progress.' };
   }
   // 6/7. description gates (reached only for "no application yet" or "stale drafting, eligible to retry")
   const descChars = row.description_chars;

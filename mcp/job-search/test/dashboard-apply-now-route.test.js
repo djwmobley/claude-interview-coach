@@ -672,6 +672,53 @@ describe('POST /api/listings/:id/apply-now: D1 total classification of chain fai
   });
 });
 
+describe('GET /api/listings: application_chain_running for the job-row Apply button (A1 client side)', () => {
+  /** @param {number} listingId */
+  async function listRow(listingId) {
+    const r = await req('GET', `/api/listings?source=${encodeURIComponent(`zz-test-applynow-${process.pid}`)}&limit=200`);
+    assert.equal(r.status, 200);
+    return r.json.rows.find((/** @type {any} */ x) => Number(x.id) === listingId);
+  }
+
+  test('true while the chain is actually running, false once it parks, false again after Resume', async () => {
+    /** @type {() => void} */
+    let release = () => {};
+    resumeRunnerImpl = async () => {
+      await new Promise((resolve) => { release = () => resolve(undefined); });
+      return { ok: false, reason: 'no_description' };
+    };
+    const listingId = await seedListing();
+    const first = await req('POST', `/api/listings/${listingId}/apply-now`);
+    const appId = first.json.application_id;
+    const running = await listRow(listingId);
+    assert.equal(running.application_id, appId);
+    assert.equal(running.application_state, 'drafting');
+    assert.equal(running.application_chain_running, true);
+
+    release();
+    await waitForState(appId, ['needs_human']);
+    await new Promise((r) => setTimeout(r, 50));
+    assert.equal((await listRow(listingId)).application_chain_running, false);
+
+    const resumed = await req('POST', `/api/applications/${appId}/resume`);
+    assert.equal(resumed.status, 200);
+    const idle = await listRow(listingId);
+    assert.equal(idle.application_state, 'drafting');
+    assert.equal(idle.application_chain_running, false, 'a fresh drafting row with no chain must read as idle');
+  });
+
+  test('a listing with no application reads false, and the listing detail carries chain_running', async () => {
+    const listingId = await seedListing();
+    const row = await listRow(listingId);
+    assert.equal(row.application_id, null);
+    assert.equal(row.application_chain_running, false);
+    const created = await createApplication(verifyClient, { listingId, actor: 'mcp' });
+    const det = await req('GET', `/api/listings/${listingId}`);
+    assert.equal(det.json.application.id, created.id);
+    assert.equal(det.json.application.chain_running, false);
+  });
+});
+
 describe('POST /api/listings/:id/apply-now: A1 freshness and A2 busy runner', () => {
   test('A1: create, chain parks it, Resume, then Apply Now within 30 minutes starts a new chain', async () => {
     resumeRunnerImpl = async () => ({ ok: false, reason: 'no_description' });

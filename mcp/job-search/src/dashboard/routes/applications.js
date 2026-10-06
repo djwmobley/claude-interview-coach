@@ -78,6 +78,17 @@ export const STALE_ACTIONABLE_MS = 30 * 60 * 1000;
 const runningChains = new Set();
 
 /**
+ * Chain-park A1, client side: whether an Apply now chain for this application is in flight in this
+ * process. GET /api/listings and GET /api/listings/:id expose it so the job-row Apply button keys off a
+ * chain that is actually running, never the row's created_at age. Process-local, like runningChains.
+ * @param {number|string|null|undefined} applicationId
+ */
+export function isApplyChainRunning(applicationId) {
+  if (applicationId === null || applicationId === undefined) return false;
+  return runningChains.has(Number(applicationId));
+}
+
+/**
  * Chain-park spec D1: park an Apply now chain's resume-phase failure into needs_human with kind
  * `resume_failed` (the kind the resume gate redrafts), error = reason, and a human label from
  * humanizeParkReason (apply/resume-gate.js, the one source the legacy `blocked` check also reads).
