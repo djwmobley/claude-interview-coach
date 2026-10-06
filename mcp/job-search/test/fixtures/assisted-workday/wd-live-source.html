@@ -1,0 +1,137 @@
+<!doctype html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<title>Live-shaped Workday How Did You Hear About Us prompt (test fixture)</title>
+<style>
+  body { margin: 0; font: 14px sans-serif; }
+  .portal-list { position: absolute; width: 342px; max-height: 200px; overflow-y: auto; background: #fff; border: 1px solid #999; margin: 0; padding: 0; list-style: none; }
+  .portal-list li { height: 32px; line-height: 32px; }
+  .offscreen { position: absolute; left: -99999px; }
+</style>
+</head>
+<body>
+<!-- Sanitized reproduction of a READ-ONLY probe (2026-10-05) of application 5's live Workday guest tenant,
+     My Information page, "How Did You Hear About Us?" prompt. Kept verbatim from the probe: the trigger's
+     attributes (aria-haspopup, type, value="", aria-label, name, id), the helper text input beside it, the
+     Country Phone Code multiselect whose selected-pill list is itself a visible ul[role=listbox] with one
+     role=option pill (the second listbox that made the old driver park multiple_popups), and the popup:
+     opening sets aria-expanded="true" and aria-controls on the trigger, and a ul[role=listbox] with
+     aria-activedescendant="select-one" mounts in a portal (div > div > ul) at the end of body, holding a
+     disabled Select One placeholder and eight flat options (no categories) with their real ids and
+     data-values. Its scrollHeight (288) exceeded its clientHeight (200). Neither "Job Board" nor
+     "Internet Search" was offered. Styling classes are dropped. The commit on pick is OBSERVED (a second
+     guest-session probe, 2026-10-06, picked Other once, nothing typed, no Next): value attribute and
+     helper input set to the option's data-value at once, aria-expanded and aria-controls removed and the
+     popup unmounted about 150 ms later. ?with=jobboard appends one SYNTHETIC "Job Board" option. -->
+<div data-automation-id="applyFlowPage">
+  <div data-automation-id="applyFlowMyInfoPage">
+    <div role="group" aria-labelledby="source-section">
+      <h3 id="source-section">How Did You Hear About Us?</h3>
+      <div data-automation-id="formField-source" data-fkit-id="source--source">
+        <label for="source--source"><span>How Did You Hear About Us?<abbr aria-hidden="true">*</abbr></span></label>
+        <div><div style="width: 100%; max-width: 344px; min-width: 280px;"><div>
+          <button aria-haspopup="listbox" type="button" value="" aria-label="How Did You Hear About Us? Select One Required" name="source" id="source--source">Select One</button>
+          <input type="text" class="offscreen" value="">
+          <span class="menu-icon"><svg xmlns="http://www.w3.org/2000/svg" width="24" height="24" class="wd-icon-caret-down-small wd-icon" focusable="false" role="presentation" viewBox="0 0 24 24"></svg></span>
+        </div></div></div>
+      </div>
+    </div>
+    <div role="group" aria-labelledby="Phone-section">
+      <h3 id="Phone-section">Phone</h3>
+      <div data-automation-id="formField-countryPhoneCode">
+        <label for="phoneNumber--countryPhoneCode">Country Phone Code*</label>
+        <div dir="ltr" tabindex="-1" data-automation-id="multiSelectContainer" id="d7d4e503-c0b7-468b-a4e4-847e4883e2bd">
+          <div data-automation-id="multiselectInputContainer" dir="ltr">
+            <div data-automation-hiddensearch="false">
+              <input placeholder="Search" aria-required="true" autocomplete="off" id="phoneNumber--countryPhoneCode" value="">
+              <div data-automation-id="promptSelectionLabel"></div>
+            </div>
+            <div tabindex="-1">
+              <ul role="listbox" tabindex="0" data-automation-id="selectedItemList" aria-label="items selected">
+                <li role="presentation" data-automation-id="menuItem" data-automation-selected="false">
+                  <div aria-posinset="1" aria-setsize="1" id="pill-db8d3ca6446c11de98360015c5e6daf6" tabindex="-1" aria-label="United States of America (+1), press delete to clear value." role="option" data-automation-id="selectedItem" dir="ltr">
+                    <div data-automation-id="DELETE_charm" role="presentation" aria-hidden="true" tabindex="-1"><svg class="wd-icon-x-small wd-icon" role="presentation" viewBox="0 0 24 24"></svg></div>
+                    <p data-automation-id="promptOption" data-automation-label="United States of America (+1)">United States of America (+1)</p>
+                  </div>
+                </li>
+              </ul>
+            </div>
+            <span data-automation-id="promptIcon" aria-hidden="true"></span>
+          </div>
+        </div>
+      </div>
+    </div>
+  </div>
+</div>
+<script>
+  window.__clicks = [];
+  const withJobBoard = new URLSearchParams(location.search).get('with') === 'jobboard';
+  const OPTIONS = [
+    ['bb28a009983a1049234feb2027bd7ae8', 'Campus Event'],
+    ['bb28a009983a1049234feb0787b07add', 'Corporate Website'],
+    ['bb28a009983a1049234feade0cbf7acc', 'Current Employee'],
+    ['bb28a009983a1049234feb0206607adb', 'Employee Referral'],
+    ['bb28a009983a1049234feb0e57877ae0', 'Indeed'],
+    ['bb28a009983a1049234feb28cb287aec', 'Invited by Company Recruiter'],
+    ['bb28a009983a1049234feae9dd9b7ad0', 'Linkedin'],
+    ['d5fdc7782a551001a246697edb2f0000', 'Other'],
+  ];
+  if (withJobBoard) OPTIONS.splice(4, 0, ['synthetic-job-board', 'Job Board']);
+  const btn = document.getElementById('source--source');
+  const helper = btn.parentElement.querySelector('input');
+  function close() {
+    const p = document.getElementById('portal');
+    if (p) p.remove();
+    btn.removeAttribute('aria-expanded');
+    btn.removeAttribute('aria-controls');
+  }
+  btn.onclick = () => {
+    window.__clicks.push('listbox');
+    if (btn.getAttribute('aria-expanded') === 'true') { close(); return; }
+    const outer = document.createElement('div');
+    outer.id = 'portal';
+    const inner = document.createElement('div');
+    const ul = document.createElement('ul');
+    ul.setAttribute('role', 'listbox');
+    ul.setAttribute('tabindex', '-1');
+    ul.setAttribute('aria-activedescendant', 'select-one');
+    ul.setAttribute('aria-required', 'true');
+    ul.id = 'nehy5';
+    ul.className = 'portal-list';
+    ul.innerHTML = '<li data-value="" role="option" aria-disabled="true" aria-selected="true" id="select-one"><div>Select One</div></li>';
+    for (const [id, text] of OPTIONS) {
+      const li = document.createElement('li');
+      li.setAttribute('data-value', id);
+      li.setAttribute('role', 'option');
+      li.id = id;
+      const d = document.createElement('div');
+      d.textContent = text;
+      li.appendChild(d);
+      li.onclick = () => {
+        // Replays the OBSERVED commit (2026-10-06 guest-session pick of Other): at once the value
+        // attribute, the helper input, the visible text and the aria-label change while aria-expanded
+        // stays "true"; about 150 ms later aria-expanded and aria-controls are REMOVED and the popup is
+        // unmounted (aria-expanded="false" never appears).
+        window.__clicks.push('option:' + text);
+        btn.setAttribute('value', id);
+        helper.value = id;
+        helper.setAttribute('value', id);
+        btn.textContent = text;
+        btn.setAttribute('aria-label', 'How Did You Hear About Us? ' + text + ' Required');
+        setTimeout(close, 150);
+      };
+      ul.appendChild(li);
+    }
+    const r = btn.getBoundingClientRect();
+    ul.style.top = (r.bottom + window.scrollY + 2) + 'px';
+    ul.style.left = (r.left + window.scrollX) + 'px';
+    inner.appendChild(ul);
+    outer.appendChild(inner);
+    document.body.appendChild(outer);
+    btn.setAttribute('aria-expanded', 'true');
+    btn.setAttribute('aria-controls', 'nehy5');
+  };
+</script>
+</body>
+</html>

@@ -298,6 +298,9 @@ export function makeAssistedApplyTool(seams = {}) {
           if (!r.ok) return stop('fill_refused', { park: { question: f.question, reason: r.reason, bank_key: fillDecision.bankKey, kind: f.kind } });
           const rb = await sess.driver.readField(f.ref);
           readBack = rb.ok ? rb.value : '';
+          // Popup association P3: a listbox pick the driver verified from the COMMITTED value (popup closed,
+          // trigger collapsed) stands even when the visible label is truncated or stale.
+          if (f.kind === 'listbox' && r.verified === true) readBack = want;
         }
         if (!matches(String(readBack ?? ''))) {
           return stop('parked', { park: { question: f.question, reason: 'readback_mismatch_after_two_attempts', bank_key: fillDecision.bankKey, kind: f.kind } });

@@ -171,6 +171,24 @@ describe('assisted_apply, Workday profile, fake driver', () => {
     assert.equal((await getLease(client, s3.leaseId)).finish_result.park.reason, 'readback_mismatch_after_two_attempts');
   });
 
+  test('listbox pick verified by the driver (committed value, popup closed): a truncated visible label does not park', async () => {
+    const s = await setup();
+    const drv = fakeDriver([step({ fields: [listboxField()] })], { pick: (t) => ({ ok: true, picked: t, verified: true }), readBackOverride: () => 'Linked…' });
+    const r = await toolFor(drv, s).handler({ action: 'answer', ref: 'e2-lb' }, deps);
+    assert.equal(r.ok, true, JSON.stringify(r));
+    assert.equal(r.result, 'filled');
+    assert.equal(drv.calls.filter((c) => c[0] === 'pickOption').length, 1, 'picked once');
+  });
+
+  test('listbox driver park reasons (P5) are recorded on the park', async () => {
+    for (const reason of ['multiple_popups', 'popup_unlinked', 'nesting_ambiguous', 'category_unclassified', 'expansion_ambiguous', 'readback_mismatch', 'multiselect_extra_pill', 'list_incomplete', 'no_popup']) {
+      const s = await setup();
+      const r = await toolFor(fakeDriver([step({ fields: [listboxField()] })], { pick: () => ({ ok: false, reason }) }), s).handler({ action: 'answer', ref: 'e2-lb' }, deps);
+      assert.equal(r.stopped, true, reason);
+      assert.equal((await getLease(client, s.leaseId)).finish_result.park.reason, reason);
+    }
+  });
+
   test('answer-fallback F3: a ranked fallback pick records fallback_used and the rank in the ledger', async () => {
     const bank = parseAnswerBank(['## how_did_you_hear', 'type: enum', 'value: Job Board', 'fallback: 2 | Internet Search', 'learned: How Did You Hear About Us?'].join('\n'));
     const s = await setup();

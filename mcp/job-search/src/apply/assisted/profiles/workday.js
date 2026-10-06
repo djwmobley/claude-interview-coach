@@ -80,6 +80,20 @@ export const WORKDAY_RULES = deepFreeze({
     popupSelector: '[role="listbox"]',
     optionSelector: '[role="option"]',
     placeholder: { source: '^\\s*select one\\s*$', flags: 'i' },
+    /**
+     * Popup association spec v2 (P1-P5): the popup read and clicked is the one tied to THIS trigger
+     * (aria-controls/aria-owns while aria-expanded="true", else the single new popup labelled for or
+     * anchored to it), rows are classified category or leaf, long lists are enumerated by bounded
+     * scrolling, and a pick is verified from the committed value. Live 2026-10-05 probe of a guest
+     * tenant: the second visible listbox was the Country Phone Code selected-pill list.
+     */
+    strictAssociation: true,
+    /** A row holding one of these is a category (expands), never a value. */
+    categorySignalSelector: '.wd-icon-chevron-right-small, .wd-icon-chevron-right, [data-automation-id*="chevron" i]',
+    /** The field wrapper searched for a hidden committed-value input when the trigger has no value. */
+    fieldContainerSelector: '[data-automation-id^="formField"]',
+    /** Diff fallback: max pixel gap between trigger and an unlabelled new popup with the same offset parent. */
+    anchorPx: 24,
   },
   /**
    * Multiselect prompts (live: Country Phone Code is one). The server never fills them (clause 3: park in

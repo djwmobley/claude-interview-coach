@@ -57,6 +57,9 @@
   }
   const OPTIONS = mode === 'dup' ? ['LinkedIn', 'Other', 'Other'] : ['LinkedIn', 'LinkedIn Ads', 'Indeed', 'Company Website'];
   const btn = document.getElementById('source-btn');
+  // Live-shaped prompt (2026-10-05 probe): opening sets aria-expanded="true" and aria-controls; a pick
+  // commits the option's data-value to the button's value attribute and collapses the prompt.
+  btn.setAttribute('value', '');
   btn.onclick = () => {
     window.__clicks.push('listbox');
     let pop = document.getElementById('source-pop');
@@ -64,14 +67,18 @@
     pop = document.createElement('ul');
     pop.id = 'source-pop';
     pop.setAttribute('role', 'listbox');
-    for (const t of OPTIONS) {
+    OPTIONS.forEach((t, i) => {
       const li = document.createElement('li');
       li.setAttribute('role', 'option');
+      li.id = 'opt-' + i;
+      li.setAttribute('data-value', 'v-' + i);
       li.textContent = t;
-      li.onclick = () => { window.__clicks.push('option:' + t); btn.textContent = t; pop.remove(); };
+      li.onclick = () => { window.__clicks.push('option:' + t); btn.textContent = t; btn.value = 'v-' + i; btn.setAttribute('aria-expanded', 'false'); pop.remove(); };
       pop.appendChild(li);
-    }
+    });
     document.body.appendChild(pop);
+    btn.setAttribute('aria-expanded', 'true');
+    btn.setAttribute('aria-controls', 'source-pop');
   };
   document.getElementById('resume-input').addEventListener('change', (e) => {
     const f = e.target.files && e.target.files[0];
