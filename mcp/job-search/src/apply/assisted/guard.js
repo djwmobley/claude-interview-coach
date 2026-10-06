@@ -30,6 +30,7 @@
  * @property {string} title
  * @property {string} value the element's value attribute
  * @property {Array<[string, string]>} dataAttrs every data-* attribute as [name, value]
+ * @property {string} [id] the element's id attribute (checked with the data-* deny pattern, v2 A1)
  */
 
 /**
@@ -66,7 +67,7 @@ export function normalizeName(s) {
  * A2 + A3: is this element submit-marked under the profile's deny rules? Used both to refuse an advance
  * click and (A3b) to decide whether a Submit control is visible. Total; a non-object is not marked.
  * Unusable rules mark everything (fail closed: a visible Submit means no clicks).
- * @param {{ ariaLabel?: string, labelledByText?: string, visibleText?: string, textContent?: string, title?: string, value?: string, dataAttrs?: Array<[string, string]> }|null|undefined} d
+ * @param {{ ariaLabel?: string, labelledByText?: string, visibleText?: string, textContent?: string, title?: string, value?: string, dataAttrs?: Array<[string, string]>, id?: string }|null|undefined} d
  * @param {AssistedRules|null|undefined} R
  * @returns {boolean}
  */
@@ -87,6 +88,7 @@ export function isSubmitMarked(d, R) {
   for (const s of [d.ariaLabel, d.labelledByText, d.visibleText, d.textContent, d.title, d.value]) {
     if (typeof s === 'string' && s && (nameDeny.test(s) || nameDeny.test(strip(s)))) return true;
   }
+  if (typeof d.id === 'string' && d.id && (dataDeny.test(d.id) || dataDeny.test(strip(d.id)))) return true;
   const attrs = Array.isArray(d.dataAttrs) ? d.dataAttrs : [];
   for (const pair of attrs) {
     if (!Array.isArray(pair)) continue;
@@ -146,6 +148,7 @@ export function classifyAdvanceButton(d, R) {
   for (const s of [d.ariaLabel, d.labelledByText, d.visibleText, d.textContent, d.title, d.value]) {
     if (typeof s === 'string' && s && (nameDeny.test(s) || nameDeny.test(strip(s)))) return { ok: false, reason: 'denied_term', name: norm(s), kind: null };
   }
+  if (typeof d.id === 'string' && d.id && (dataDeny.test(d.id) || dataDeny.test(strip(d.id)))) return { ok: false, reason: 'denied_term', name: norm(d.id), kind: null };
   for (const pair of Array.isArray(d.dataAttrs) ? d.dataAttrs : []) {
     if (!Array.isArray(pair)) continue;
     for (const s of [String(pair[0] ?? ''), String(pair[1] ?? '')]) {
@@ -196,18 +199,24 @@ export function checkNotLastStep(input) {
 
 /**
  * Classify the page state around the form scope. Total, first match wins:
- *   0. unusable rules -> 'submit_visible' (fail closed: no clicks, no finish).
+ *   0. unusable rules -> 'submit_visible' (fail closed: no clicks, no finish). The optional rules
+ *      (alreadyApplied, sessionTimeout, authLost.text) are skipped when ABSENT and fail closed the same
+ *      way when present but malformed.
  *   1. 'sent'      -- R.sent anywhere (G5: unexpected_submit).
  *   2. 'challenge' -- R.challengeText in page or scope text, or R.challengeUrl on the URL (G11).
- *   3. 'no_dialog' -- no form scope on the page.
- *   4. 'review'    -- an R.reviewHeader header AND a visible Submit control (G3: no clicks).
- *   5. 'submit_visible' -- a visible Submit control without the header (terminal: no clicks).
- *   6. 'form'      -- anything else inside the scope.
+ *   3. 'already_applied' -- R.alreadyApplied in page or scope text (v2 A10).
+ *   4. 'session_timeout' -- R.sessionTimeout in page or scope text (v2 A11).
+ *   5. 'auth_lost' -- a sign-in/create-account panel on the page (s.authGatePresent) or R.authLost.text.
+ *   6. 'password_field' -- a password-like input anywhere on the page (v2 A7: the session stops).
+ *   7. 'no_dialog' -- no form scope on the page.
+ *   8. 'review'    -- an R.reviewHeader header AND a visible Submit control (G3: no clicks).
+ *   9. 'submit_visible' -- a visible Submit control without the header (terminal: no clicks).
+ *  10. 'form'      -- anything else inside the scope.
  * `submitVisible` is computed by the caller with isSubmitMarked over every visible scope button plus any
  * visible scope element carrying a submit-marked data-* attribute (amended A3b).
- * @param {{ dialogPresent: boolean, headerTexts: string[], submitVisible: boolean, dialogText: string, pageText: string, url: string }} s
+ * @param {{ dialogPresent: boolean, headerTexts: string[], submitVisible: boolean, dialogText: string, pageText: string, url: string, authGatePresent?: boolean, passwordPresent?: boolean }} s
  * @param {AssistedRules|null|undefined} R
- * @returns {{ kind: 'sent'|'challenge'|'no_dialog'|'review'|'submit_visible'|'form' }}
+ * @returns {{ kind: 'sent'|'challenge'|'already_applied'|'session_timeout'|'auth_lost'|'password_field'|'no_dialog'|'review'|'submit_visible'|'form' }}
  */
 export function classifyStep(s, R) {
   const rx = (/** @type {any} */ spec) => {
@@ -224,12 +233,23 @@ export function classifyStep(s, R) {
   const challengeUrlRe = rulesOk ? rx(/** @type {any} */ (R).challengeUrl) : null;
   const reviewHeaderRe = rulesOk ? rx(/** @type {any} */ (R).reviewHeader) : null;
   if (!sentRe || !challengeTextRe || !challengeUrlRe || !reviewHeaderRe) return { kind: 'submit_visible' };
+  const anyR = /** @type {any} */ (R);
+  /** Optional rule: undefined when absent, null when present but unusable (fail closed). */
+  const opt = (/** @type {any} */ spec) => (spec === undefined ? undefined : rx(spec));
+  const alreadyRe = opt(anyR.alreadyApplied);
+  const timeoutRe = opt(anyR.sessionTimeout);
+  const authText = anyR.authLost === undefined ? undefined : (anyR.authLost && typeof anyR.authLost === 'object' ? rx(anyR.authLost.text) : null);
+  if (alreadyRe === null || timeoutRe === null || authText === null) return { kind: 'submit_visible' };
   if (!s || typeof s !== 'object') return { kind: 'no_dialog' };
   const dialogText = typeof s.dialogText === 'string' ? s.dialogText : '';
   const pageText = typeof s.pageText === 'string' ? s.pageText : '';
   const url = typeof s.url === 'string' ? s.url : '';
   if (sentRe.test(dialogText) || sentRe.test(pageText)) return { kind: 'sent' };
   if (challengeUrlRe.test(url) || challengeTextRe.test(pageText) || challengeTextRe.test(dialogText)) return { kind: 'challenge' };
+  if (alreadyRe && (alreadyRe.test(pageText) || alreadyRe.test(dialogText))) return { kind: 'already_applied' };
+  if (timeoutRe && (timeoutRe.test(pageText) || timeoutRe.test(dialogText))) return { kind: 'session_timeout' };
+  if (s.authGatePresent === true || (authText && (authText.test(pageText) || authText.test(dialogText)))) return { kind: 'auth_lost' };
+  if (s.passwordPresent === true) return { kind: 'password_field' };
   if (!s.dialogPresent) return { kind: 'no_dialog' };
   const submitVisible = s.submitVisible === true;
   const headers = Array.isArray(s.headerTexts) ? s.headerTexts : [];
@@ -259,5 +279,40 @@ export function verifyResumeCards(cards, expectedName) {
   return { ok: true, reason: null };
 }
 
+/**
+ * Step-bar progress (Workday, spec v1 clause 3, v2 A2): turn the visible step labels and the active step
+ * into the progress value checkNotLastStep consumes. Rule-free and total:
+ *   - no labels -> [] (no progress signal: terminal);
+ *   - one label -> [100] (the only step is the last one: terminal);
+ *   - a readable active index (an integer inside the label list) -> 100 on the last step, otherwise a
+ *     value strictly below 100;
+ *   - no readable active index (A2 fallback) -> the page header must equal exactly one step label after
+ *     the same normalization; that label's position decides as above. No match, or two or more matches,
+ *     -> [] (uncertain_last_step). So Next is only ever allowed with a FOLLOWING step label visible.
+ * @param {{ labels: string[], active: number|null, headerTexts: string[] }} input
+ * @returns {number[]}
+ */
+export function stepBarProgress(input) {
+  const norm = (/** @type {unknown} */ s) => (typeof s !== 'string' ? '' : s.normalize('NFKC')
+    .replace(/[​-‍⁠﻿]/g, '')
+    .replace(/\s+/g, ' ')
+    .toLowerCase()
+    .trim()
+    .replace(/^(?:(?:current|completed) )?step \d+ of \d+\s*/g, '')
+    .replace(/[\s.,;:!?…>›→»*]+$/g, '')
+    .trim());
+  if (!input || typeof input !== 'object') return [];
+  const labels = Array.isArray(input.labels) ? input.labels.map(norm) : [];
+  const n = labels.length;
+  if (n === 0) return [];
+  if (n === 1) return [100];
+  const at = (/** @type {number} */ i) => (i >= n - 1 ? 100 : Math.floor((i * 100) / (n - 1)));
+  if (Number.isInteger(input.active) && /** @type {number} */ (input.active) >= 0 && /** @type {number} */ (input.active) < n) return [at(/** @type {number} */ (input.active))];
+  const headers = (Array.isArray(input.headerTexts) ? input.headerTexts : []).map(norm).filter((h) => h.length > 0);
+  const hits = labels.map((l, i) => (l && headers.includes(l) ? i : -1)).filter((i) => i >= 0);
+  if (hits.length !== 1) return [];
+  return [at(hits[0])];
+}
+
 /** The functions the driver injects into the page by source text (see the module doc comment). */
-export const PAGE_GUARD_FUNCTIONS = Object.freeze([normalizeName, isSubmitMarked, classifyAdvanceButton, checkNotLastStep, classifyStep, verifyResumeCards]);
+export const PAGE_GUARD_FUNCTIONS = Object.freeze([normalizeName, isSubmitMarked, classifyAdvanceButton, checkNotLastStep, classifyStep, verifyResumeCards, stepBarProgress]);

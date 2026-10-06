@@ -1,26 +1,28 @@
 // @ts-check
 /**
- * Workday apply adapter (apply pipeline slice 6, plan section 3: "workday (per-tenant account creation
- * with generated 24-char password stored in Credential Manager under `ic-jobsearch/<tenant-host>`,
- * verify-email via the existing Gmail token, multi-page flow, clears unverifiable parsed roles and
- * re-enters from the bank)"). Unlike Greenhouse/Lever (slice 5, no account needed, single page), Workday
- * needs a per-tenant candidate account and its application flow is a multi-step wizard, not one form.
+ * Workday apply adapter: the SCRIPTED, model-blind half of assisted Workday (spec v1 clause 6, v2 A15).
  *
- * KNOWN LIMITATION (see the PR body's Blind Spots section, and read this before touching SELECTORS): the
- * `data-automation-id` values below are this build's best understanding of Workday's Candidate Experience
- * (CX) UI, written and tested against a SCRIPTED FAKE page (test/workday-adapter.test.js) -- they have NOT
- * been verified against a live *.myworkdayjobs.com tenant in this sandboxed environment (no real
- * Chrome/network available here, and the Google refresh grant needed for live email verification is
- * currently invalid_grant). Every Workday tenant is its own deployment with its own branding and some
- * amount of custom field configuration; the account-creation and multi-step wizard shapes here are the
- * common CX pattern, not a guarantee for any specific tenant. The failure mode on a wrong selector is safe
- * by construction, exactly like greenhouse.js/lever.js: `cap.waitFor(..., {optional: true})` returns null
- * rather than guessing, and every branch below that cannot recognize what it sees parks in needs_human
- * (kind 'unrecognized_page', 'credential', or 'email_verification' as appropriate) instead of proceeding
- * against a page it does not actually recognize.
+ * prepare(cap, ctx) gets from the job-description page to the first wizard step and nothing further:
+ * Apply -> Apply Manually (enterApplyFlow), then the per-tenant account (authenticate: sign in with the
+ * Credential Manager credential, or create the account with a generated 24-char password written to
+ * Credential Manager BEFORE any form interaction), then email verification (verifyEmailIfRequired, via the
+ * existing Gmail token), then a check that the wizard is present. It is deterministic, never sees the
+ * model, and the model never sees a password: src/apply/worker.js runs it under the Playwright route
+ * policy, then hands the tab to the assisted_apply tool (src/apply/assisted/handoff.js), which fills the
+ * wizard pages and stops before Submit. Damian clicks Submit himself.
+ *
+ * run() is the old unattended entry point. It is unreachable (the worker dispatches on `assisted` and calls
+ * prepare); it does nothing and parks, so a caller that ignores `assisted` fails safe. The unattended wizard
+ * walk (screening answers, profile fills, and the Submit click behind recordSubmitRequestSent) was removed
+ * in assisted Workday PR-2 (spec v1 clause 4: answerCustomFields and fillProfileFieldsIfPresent deleted).
+ *
+ * KNOWN LIMITATION: the `data-automation-id` values below are this build's best understanding of Workday's
+ * Candidate Experience UI. The entry and auth ids were verified READ-ONLY on live tenants on 2026-10-05;
+ * account creation, sign-in success, and email verification were never exercised live. Every branch that
+ * cannot recognize what it sees parks in needs_human (kind 'unrecognized_page', 'credential',
+ * 'email_verification', or 'captcha') instead of proceeding.
  */
 import { detectRecaptchaV3Script } from '../../browser/wall.js';
-import { classifyCompensationLabel } from '../answers.js';
 
 // Entry into the apply flow. The apply URL is the job-description page (apply-target.js requires a /job/
 // path); the auth gate only appears after Apply -> Apply Manually. Verified READ-ONLY on 2026-10-05
@@ -67,184 +69,14 @@ export const SELECTORS = Object.freeze({
   verifyCodeInput: '[data-automation-id="verificationCode"], input[name="verificationCode"]',
   verifySubmit: '[data-automation-id="verifyButton"]',
   captcha: '.g-recaptcha, iframe[title*="recaptcha" i], [data-sitekey]',
-  // Each wizard step (My Information / My Experience / Application Questions / Voluntary Disclosures /
-  // Review) renders inside this same page-body container in Workday's CX shell.
-  stepProbe: '[data-automation-id="pageBodyContainer"], [data-automation-id="applyFlowPage"]',
-  // Live My Information ids (talentmanagementsolution.wd3): inputs named legalName--firstName /
-  // legalName--lastName inside formField-legalName--* containers; phone is input[name="phoneNumber"].
-  firstName: '[data-automation-id="legalNameSection_firstName"], input[name="firstName"], input[name="legalName--firstName"]',
-  lastName: '[data-automation-id="legalNameSection_lastName"], input[name="lastName"], input[name="legalName--lastName"]',
-  phone: '[data-automation-id="phone-number"], input[name="phoneNumber"]',
-  // file-upload-input-ref is Workday's common My Experience upload input; NOT observed live (it is past Next).
-  resumeUpload: '[data-automation-id="resumeUpload"] input[type="file"], input[name="resume"], input[data-automation-id="file-upload-input-ref"]',
-  coverLetterUpload: '[data-automation-id="coverLetterUpload"] input[type="file"], input[name="coverLetter"]',
-  customFields: '[data-automation-id="formField"], [data-automation-id$="Question"]',
-  // Live: pageFooterNextButton. On the final step the same button is expected to read Submit, so the
-  // wizard loop checks its label and routes a Submit label through the submit path (see run()).
-  next: '[data-automation-id="bottom-navigation-next-button"], button[data-automation-id="next"], [data-automation-id="pageFooterNextButton"]',
-  submit: '[data-automation-id="bottom-navigation-next-button"][data-automation-id-submit="true"], button[data-automation-id="submit"]',
-  confirmationHeading: '[data-automation-id="applicationConfirmationHeader"], h1, h2',
+  // The wizard: the My Information page id (live, talentmanagementsolution.wd3), its live footer Next
+  // button, or the step bar. applyFlowPage alone is NOT enough (it also wraps the auth gate).
+  wizardProbe: '[data-automation-id="applyFlowMyInfoPage"], [data-automation-id="pageFooterNextButton"], [data-automation-id="progressBar"]',
 });
 
-/** Bounded multi-step wizard loop (My Information / My Experience / Questions / Disclosures / Review, plus slack). Never an unbounded loop. */
-export const MAX_STEPS = 8;
 /** Verify-email poll: attempts and the delay between them (ctx.sleep, test-injectable). */
 export const VERIFY_POLL_ATTEMPTS = 4;
 export const VERIFY_POLL_DELAY_MS = 15000;
-
-/**
- * @param {string|null|undefined} fullName
- */
-function splitName(fullName) {
-  if (!fullName || !String(fullName).trim()) return { first: null, last: null };
-  const parts = String(fullName).trim().split(/\s+/);
-  if (parts.length === 1) return { first: parts[0], last: '' };
-  return { first: parts.slice(0, -1).join(' '), last: parts[parts.length - 1] };
-}
-
-/**
- * Map one enumerated field's DOM shape to answers.js's CONTROL_TYPES vocabulary. Total: an unrecognized
- * tag/type combination maps to `undefined`, which resolveControl() already treats as
- * 'unsupported_control_type' -> parks. Identical to greenhouse.js/lever.js's own helper.
- * @param {{ tagName: string, type: string|null }} f
- */
-function controlTypeFor(f) {
-  if (f.tagName === 'select') return 'radio';
-  if (f.tagName === 'textarea') return 'text';
-  if (f.tagName === 'input') {
-    if (f.type === 'checkbox') return 'checkbox-group';
-    if (f.type === 'radio') return 'radio';
-    if (f.type === null || f.type === 'text' || f.type === 'tel' || f.type === 'email' || f.type === 'number') return 'text';
-  }
-  return undefined;
-}
-
-/** A sibling field's own options read like a pay-unit/currency choice list ("Hourly"/"Annual",
- * "USD"/"GBP", "Per Hour"/"Per Year", ...). */
-const UNIT_OPTION_RE = /\b(hour|hourly|annual|annually|year|yearly|salary|week|weekly|month|monthly|currency|usd|gbp|eur|cad)\b/i;
-/** A sibling field's own label reads as a bare unit/currency/frequency picker rather than a question of
- * its own (empty text, or a generic "Unit"/"Currency"/"Frequency"/"Pay Type"/"Per" label). */
-const UNIT_FIELD_LABEL_RE = /^\s*$|^(unit|currency|frequency|pay\s*type|per)\s*$/i;
-
-/**
- * KNOWN LIMITATION (see the PR body's Blind Spots section): best-effort, UNVERIFIED-against-a-live-tenant
- * detection of Workday's two-step compensation question -- a compensation-family number field immediately
- * next to (either side of, wizard field order is not guaranteed) a 'radio' (rendered `<select>`) sibling
- * whose own label is empty/generic and whose options read like pay-unit/currency choices. When detected,
- * the descriptor's `hasUnitSelector` is set so classifyCompensationLabel's rule 5 parks the pair rather
- * than guessing which unit the sibling selector is currently set to.
- * @param {any[]} fields
- * @param {number} index
- */
-function hasSiblingUnitSelector(fields, index) {
-  const candidates = [fields[index - 1], fields[index + 1]];
-  return candidates.some((sib) => {
-    if (!sib || controlTypeFor(sib) !== 'radio' || !Array.isArray(sib.options) || sib.options.length === 0) return false;
-    const sibLabel = String(sib.text ?? '').trim();
-    return UNIT_FIELD_LABEL_RE.test(sibLabel) && sib.options.some((/** @type {unknown} */ o) => UNIT_OPTION_RE.test(String(o)));
-  });
-}
-
-/**
- * Answer every enumerated custom screening field found on the CURRENT wizard step. Compensation gate
- * (Damian's ruling, spec item B): a compensation-family label (classifyCompensationLabel) is ALWAYS
- * routed through that gate before the generic bank matcher, and every shape but a plain-text BASE ANNUAL
- * figure with a configured floor always parks. Workday's own two-step compensation shape (a number field
- * plus a sibling unit/currency selector) is detected via hasSiblingUnitSelector above and populates the
- * descriptor so rule 5 (salary_unit_selector_present) fires instead of a guessed fill.
- * @param {import('../apply-capability.js').ApplyCapability} cap
- * @param {any} ctx
- */
-async function answerCustomFields(cap, ctx) {
-  const fields = /** @type {any[]} */ (await cap.waitFor(SELECTORS.customFields, { all: true, timeoutMs: 3000 }));
-  const list = fields ?? [];
-  for (let i = 0; i < list.length; i++) {
-    const f = list[i];
-    const label = String(f.text ?? '').trim();
-    if (!label) continue;
-    const controlType = controlTypeFor(f);
-    const selector = f.id ? `#${f.id}` : null;
-
-    const compClass = classifyCompensationLabel(label, {
-      controlType,
-      floor: ctx.answers.bank?.meta?.salary_floor ?? null,
-      hasUnitSelector: hasSiblingUnitSelector(list, i),
-    });
-    if (compClass.category !== 'not_compensation') {
-      if (compClass.category === 'fill' && selector) {
-        await cap.fill(selector, String(compClass.value));
-        continue;
-      }
-      const shot = await cap.screenshot();
-      return {
-        parked: true,
-        pendingQuestion: {
-          kind: 'question', label, page_url: ctx.applyUrl, screenshot: shot.relPath, suggestion: null, tier: null,
-        },
-      };
-    }
-
-    const match = ctx.answers.match(label, controlType, f.options ?? undefined);
-    if (match.outcome === 'auto_answer') {
-      if (!selector) continue;
-      if (controlType === 'text') {
-        await cap.fill(selector, String(match.controlResult?.text ?? match.value ?? ''));
-      } else if (controlType === 'radio' && f.tagName === 'select') {
-        await cap.select(selector, String(match.controlResult?.selectedOption ?? ''));
-      } else {
-        await cap.click(selector);
-      }
-      continue;
-    }
-    if (f.required) {
-      const shot = await cap.screenshot();
-      return {
-        parked: true,
-        pendingQuestion: {
-          kind: 'question', label, page_url: ctx.applyUrl, screenshot: shot.relPath, suggestion: match.suggestion ?? null, tier: match.tier,
-        },
-      };
-    }
-    ctx.log({ evt: 'question_unmatched_optional', label: label.slice(0, 200) });
-  }
-  return { parked: false };
-}
-
-/**
- * Fill whichever profile fields are present on the current step. Every fill is guarded by an optional
- * probe first -- a field simply not being on THIS step of the wizard is normal, not an error.
- * @param {import('../apply-capability.js').ApplyCapability} cap
- * @param {any} ctx
- */
-async function fillProfileFieldsIfPresent(cap, ctx) {
-  const { first, last } = splitName(ctx.profile.fullName);
-  if (first !== null && await cap.waitFor(SELECTORS.firstName, { optional: true, timeoutMs: 1500 })) await cap.fill(SELECTORS.firstName, first);
-  if (last !== null && await cap.waitFor(SELECTORS.lastName, { optional: true, timeoutMs: 1500 })) await cap.fill(SELECTORS.lastName, last);
-  if (ctx.profile.phone && await cap.waitFor(SELECTORS.phone, { optional: true, timeoutMs: 1500 })) await cap.fill(SELECTORS.phone, ctx.profile.phone);
-}
-
-/**
- * Upload the linked resume/cover letter, once (idempotent across steps via `uploaded.resume`/`.cover`,
- * mutated in place). Same "never proceed on an unconfirmed upload" guard as greenhouse.js/lever.js.
- * @param {import('../apply-capability.js').ApplyCapability} cap
- * @param {any} ctx
- * @param {{ resume: boolean, cover: boolean }} uploaded
- * @returns {Promise<{ ok: true } | { ok: false, pendingQuestion: any }>}
- */
-async function uploadDocumentsIfPresent(cap, ctx, uploaded) {
-  if (!uploaded.resume && ctx.documents.resumePath && await cap.waitFor(SELECTORS.resumeUpload, { optional: true, timeoutMs: 2000 })) {
-    const uploadedName = await cap.upload(SELECTORS.resumeUpload, ctx.documents.resumePath);
-    if (!uploadedName) {
-      return { ok: false, pendingQuestion: { kind: 'unrecognized_page', label: 'Resume upload could not be confirmed; the file input did not register a file.', page_url: ctx.applyUrl } };
-    }
-    uploaded.resume = true;
-  }
-  if (!uploaded.cover && ctx.documents.coverletterPath && await cap.waitFor(SELECTORS.coverLetterUpload, { optional: true, timeoutMs: 2000 })) {
-    await cap.upload(SELECTORS.coverLetterUpload, ctx.documents.coverletterPath);
-    uploaded.cover = true;
-  }
-  return { ok: true };
-}
 
 /**
  * Captcha check: a DOM probe plus the reCAPTCHA v3 script-loader heuristic. Never solved, only detected.
@@ -415,90 +247,67 @@ async function enterApplyFlow(cap, ctx) {
   return { outcome: 'ok', gate };
 }
 
+/**
+ * The scripted prelude (spec v1 clause 6): entry, auth, email verification, then confirm the wizard is
+ * on screen. Returns { outcome: 'ok' } with the tab on the first wizard step, or a needs_human outcome.
+ * Never answers a question, never clicks Next, never reaches Submit.
+ * @param {import('../apply-capability.js').ApplyCapability} cap
+ * @param {any} ctx
+ * @returns {Promise<{ outcome: 'ok' } | { outcome: 'needs_human', pendingQuestion: any }>}
+ */
+async function prepare(cap, ctx) {
+  const entered = await enterApplyFlow(cap, ctx);
+  if (entered.outcome === 'needs_human') return entered;
+  const gate = entered.gate;
+
+  // A null gate is a guest wizard: this tenant asks for no account, so no credential is read or written.
+  if (gate) {
+    const captchaAtGate = await checkCaptcha(cap, ctx, gate);
+    if (captchaAtGate) return captchaAtGate;
+
+    const authedAt = new Date();
+    const authResult = await authenticate(cap, ctx);
+    if (authResult.outcome === 'needs_human') return authResult;
+
+    if (authResult.createdAccount) {
+      const verifyResult = await verifyEmailIfRequired(cap, ctx, authedAt);
+      if (verifyResult) return verifyResult;
+    }
+  }
+
+  const wizard = await cap.waitFor(SELECTORS.wizardProbe, { optional: true, timeoutMs: 20000 });
+  if (!wizard) {
+    return { outcome: 'needs_human', pendingQuestion: { kind: 'unrecognized_page', label: 'The Workday application wizard did not appear after sign-in.', page_url: ctx.applyUrl } };
+  }
+  const captchaHit = await checkCaptcha(cap, ctx, wizard);
+  if (captchaHit) return captchaHit;
+  return { outcome: 'ok' };
+}
+
 export const workday = {
   ats: 'workday',
   requires: ['credential'],
   classifyOnly: false,
+  /** src/apply/worker.js routes every Workday application through the assisted handoff (prepare + model). */
+  assisted: true,
   // Workday's own tenant host (e.g. acme.wd5.myworkdayjobs.com) already covers this ATS's application
   // POST traffic under src/browser/session.js's per-page route policy (worker.js always allows
   // ctx.tenantHost itself) -- there is no separate CDN/upload host to widen for, unlike Greenhouse/Lever.
   uploadHosts: [],
+  prepare,
   /**
-   * @param {import('../apply-capability.js').ApplyCapability} cap
-   * @param {any} ctx
+   * The old unattended entry point (spec v2 A15): unreachable, touches nothing, parks.
+   * @param {unknown} _cap
+   * @param {{ applyUrl?: string|null }} ctx
    */
-  async run(cap, ctx) {
-    const entered = await enterApplyFlow(cap, ctx);
-    if (entered.outcome === 'needs_human') return entered;
-    const gate = entered.gate;
-
-    // A null gate is a guest wizard: this tenant asks for no account, so no credential is read or written.
-    if (gate) {
-      const captchaAtGate = await checkCaptcha(cap, ctx, gate);
-      if (captchaAtGate) return captchaAtGate;
-
-      const authedAt = new Date();
-      const authResult = await authenticate(cap, ctx);
-      if (authResult.outcome === 'needs_human') return authResult;
-
-      if (authResult.createdAccount) {
-        const verifyResult = await verifyEmailIfRequired(cap, ctx, authedAt);
-        if (verifyResult) return verifyResult;
-      }
-    }
-
-    // Multi-page wizard: My Information / My Experience / Application Questions / Voluntary Disclosures /
-    // Review -> Submit. Bounded loop, never unbounded: MAX_STEPS caps the number of steps this adapter
-    // will ever walk on one run, regardless of whether a submit control is ever found.
-    const uploaded = { resume: false, cover: false };
-    let submittedThisRun = false;
-    for (let step = 0; step < MAX_STEPS; step++) {
-      const stepInfo = await cap.waitFor(SELECTORS.stepProbe, { optional: true, timeoutMs: 15000 });
-      if (!stepInfo) {
-        return { outcome: 'needs_human', pendingQuestion: { kind: 'unrecognized_page', label: 'Could not find the Workday application wizard on this page.', page_url: ctx.applyUrl } };
-      }
-      const captchaHit = await checkCaptcha(cap, ctx, stepInfo);
-      if (captchaHit) return captchaHit;
-
-      await fillProfileFieldsIfPresent(cap, ctx);
-      const uploadResult = await uploadDocumentsIfPresent(cap, ctx, uploaded);
-      if (!uploadResult.ok) return { outcome: 'needs_human', pendingQuestion: uploadResult.pendingQuestion };
-
-      const questionResult = await answerCustomFields(cap, ctx);
-      if (questionResult.parked) {
-        return { outcome: 'needs_human', pendingQuestion: questionResult.pendingQuestion };
-      }
-
-      const submitButton = await cap.waitFor(SELECTORS.submit, { optional: true, timeoutMs: 3000 });
-      if (submitButton) {
-        await ctx.recordSubmitRequestSent();
-        await cap.click(SELECTORS.submit);
-        submittedThisRun = true;
-        break;
-      }
-      const nextButton = /** @type {any} */ (await cap.waitFor(SELECTORS.next, { optional: true, timeoutMs: 3000 }));
-      if (!nextButton) {
-        return { outcome: 'needs_human', pendingQuestion: { kind: 'unrecognized_page', label: 'Neither a Next nor a Submit control was found on this wizard step.', page_url: ctx.applyUrl } };
-      }
-      // The live footer button doubles as Submit on the last step: a Submit label MUST go through the
-      // submit path so submit_request_sent is recorded before the click (duplicate-application guard).
-      if (/^\s*submit\b/i.test(String(nextButton.text ?? ''))) {
-        await ctx.recordSubmitRequestSent();
-        await cap.click(SELECTORS.next);
-        submittedThisRun = true;
-        break;
-      }
-      await cap.click(SELECTORS.next);
-    }
-    if (!submittedThisRun) {
-      return { outcome: 'needs_human', pendingQuestion: { kind: 'unrecognized_page', label: `The application wizard did not reach a submit step within ${MAX_STEPS} steps.`, page_url: ctx.applyUrl } };
-    }
-
-    const confirmation = await cap.waitFor(SELECTORS.confirmationHeading, { optional: true, timeoutMs: 20000 });
-    const confirmedByHeading = Boolean(confirmation && /thank you|application (received|submitted|complete)|we('| ha)ve received/i.test(String(confirmation.text ?? '')));
-    if (confirmedByHeading) {
-      return { outcome: 'submitted', confirmationRef: null };
-    }
-    return { outcome: 'needs_human', pendingQuestion: { kind: 'post_submit_uncertain', label: 'Submitted, but no confirmation heading was seen; verify manually.', page_url: ctx.applyUrl } };
+  async run(_cap, ctx) {
+    return {
+      outcome: 'needs_human',
+      pendingQuestion: {
+        kind: 'assisted_stopped',
+        label: 'Workday runs only through the assisted flow (Damian submits); this adapter entry point does nothing.',
+        page_url: ctx && ctx.applyUrl ? ctx.applyUrl : null,
+      },
+    };
   },
 };

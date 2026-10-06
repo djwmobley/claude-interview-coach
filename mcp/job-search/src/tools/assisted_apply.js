@@ -37,8 +37,10 @@ import { resolveOutputPath } from '../core/documents.js';
 import {
   ASSISTED_LEASE_ENV, validateLease, closeLease, updateLeaseState, tripBreaker,
 } from '../core/easy-apply-state.js';
+import { recordAssistedNextClick } from '../core/applications.js';
 import { parseAnswerBank } from '../apply/answers.js';
 import { resolveFieldAnswer, sanitizeValue } from '../apply/assisted/answers.js';
+import { preResolvePolicy, sensitivePrefillPolicy, FILLABLE_KINDS } from '../apply/assisted/field-policy.js';
 import { verifyResumeCards } from '../apply/assisted/guard.js';
 import { createAssistedDriver } from '../apply/assisted/driver.js';
 import { profileForAts } from '../apply/assisted/profiles/index.js';
@@ -46,7 +48,10 @@ import { connectCdp } from '../browser/cdp-target.js';
 import { writeApplicationScreenshot } from '../apply/screenshot.js';
 
 const REF_RE = /^e\d{1,4}-[0-9a-z]{1,16}$/;
-const FORM_KINDS = Object.freeze(['text', 'textarea', 'select', 'radio', 'checkbox']);
+/** Field kinds answer() fills ('listbox' only ever appears for a profile with listbox rules: Workday). */
+const FORM_KINDS = FILLABLE_KINDS;
+/** Page kinds that end the session without tripping a breaker (v2 A7, A10, A11). */
+const QUIET_STOP_KINDS = Object.freeze(['already_applied', 'session_timeout', 'auth_lost', 'password_field']);
 
 export const schema = {
   action: z.enum(['snapshot', 'answer', 'upload_resume', 'advance', 'park', 'finish']),
@@ -122,6 +127,7 @@ export function makeAssistedApplyTool(seams = {}) {
           lease, app, profile, driver: opened.driver, close: opened.close, bank: loadBank(),
           ledger: Array.isArray(lease.ledger) ? lease.ledger : [],
           visited: new Set(), snap: null, landedStepKey: lease.state?.landedStepKey ?? null, sawResumeStep: false, resumeUploaded: null,
+          prefilled: new Set(Array.isArray(lease.state?.prefilledUnledgered) ? lease.state.prefilledUnledgered : []),
         };
         sessions.set(lease.id, s);
       }
@@ -129,7 +135,7 @@ export function makeAssistedApplyTool(seams = {}) {
 
       const persist = () => deps.withClient((c) => updateLeaseState(c, sess.lease.id, {
         ledger: sess.ledger,
-        state: { landedStepKey: sess.landedStepKey, resumeUploaded: sess.resumeUploaded, sawResumeStep: sess.sawResumeStep, allVerified: sess.ledger.every((/** @type {any} */ e) => e.verified) },
+        state: { landedStepKey: sess.landedStepKey, resumeUploaded: sess.resumeUploaded, sawResumeStep: sess.sawResumeStep, allVerified: sess.ledger.every((/** @type {any} */ e) => e.verified), prefilledUnledgered: [...sess.prefilled] },
         lastActionAt: now(),
       }));
 
@@ -141,7 +147,7 @@ export function makeAssistedApplyTool(seams = {}) {
        */
       async function stop(stopReason, o = {}) {
         await persist();
-        if (o.trip) await deps.withClient((c) => tripBreaker(c, { reason: stopReason, applicationId: sess.app.id, hours: 24, now: now() }));
+        if (o.trip) await deps.withClient((c) => tripBreaker(c, { reason: stopReason, applicationId: sess.app.id, hours: 24, now: now(), ats: sess.profile.breakerKey }));
         await deps.withClient((c) => closeLease(c, sess.lease.id, { stopReason, finishResult: o.finishResult ?? (o.park ? { ok: false, park: o.park } : { ok: false, reason: stopReason }) }));
         sessions.delete(sess.lease.id);
         try {
@@ -154,9 +160,16 @@ export function makeAssistedApplyTool(seams = {}) {
 
       /** Fresh snapshot with the G5/G11 checks applied. Returns a stop response when it must end. */
       async function freshSnapshot() {
+        // A12: a profile that requires it verifies, on EVERY snapshot, that the attached tab is the leased
+        // one. A driver that cannot report its tab fails the check.
+        if (sess.profile.requireTargetCheck) {
+          const tid = typeof sess.driver.currentTargetId === 'function' ? await sess.driver.currentTargetId() : null;
+          if (typeof tid !== 'string' || !tid || tid !== String(sess.lease.target_id ?? '')) return { stopped: await stop('target_mismatch') };
+        }
         const snap = await sess.driver.snapshot();
         if (snap.step.kind === 'sent') return { stopped: await stop('unexpected_submit', { trip: true, message: 'An application-sent confirmation appeared. Session over.' }) };
         if (snap.step.kind === 'challenge') return { stopped: await stop('challenge', { trip: true }) };
+        if (QUIET_STOP_KINDS.includes(snap.step.kind)) return { stopped: await stop(snap.step.kind) };
         if (snap.stepKey !== sess.snap?.stepKey) sess.visited = new Set();
         sess.snap = snap;
         if (snap.fields.some((/** @type {any} */ f) => f.kind === 'file') || snap.resumeCards.length > 0) sess.sawResumeStep = true;
@@ -191,37 +204,84 @@ export function makeAssistedApplyTool(seams = {}) {
       if (args.action === 'answer') {
         const f = snap.fields.find((/** @type {any} */ x) => x.ref === args.ref);
         if (!f) return { ok: false, code: 'VALIDATION', message: 'ref is not a field in the current step; call snapshot' };
+        // Profile policy before resolution (A3 consent, A6 label limits, unsupported required fields). The
+        // bank key always comes from the field's own label text, never from the model.
+        const pol = preResolvePolicy({ question: f.question, kind: f.kind, required: f.required, filled: f.filled }, { profile: sess.profile, bank: sess.bank });
+        if (pol.action === 'park') return stop('parked', { park: { question: f.question, reason: /** @type {any} */ (pol).reason, bank_key: null, kind: f.kind } });
+        if (pol.action === 'leave_prefilled') {
+          sess.visited.add(f.ref);
+          sess.prefilled.add(String(f.question));
+          await persist();
+          return { ok: true, result: 'leave', reason: 'prefilled_by_site' };
+        }
         if (!FORM_KINDS.includes(f.kind)) return { ok: false, code: 'VALIDATION', message: `ref is a ${f.kind} element, not a form field` };
-        const decision = resolveFieldAnswer({ question: f.question, kind: f.kind, required: f.required, options: f.options }, { bank: sess.bank, accountEmail: sess.app.account_email ?? null, contactLabels: sess.profile.contactLabels });
+        const answerCtx = { bank: sess.bank, accountEmail: sess.app.account_email ?? null, contactLabels: sess.profile.contactLabels };
+        // A listbox's options exist only once it is open, so its value is first resolved as text; it is opened
+        // only when the server has a value to pick.
+        let decision = resolveFieldAnswer({ question: pol.question, kind: f.kind === 'listbox' ? 'text' : f.kind, required: f.required, options: f.options }, answerCtx);
+        const probeWant = decision.action === 'fill' ? (typeof decision.value === 'boolean' ? (decision.value ? 'checked' : '') : sanitizeValue(decision.value)) : '';
+        // A5: a value the SITE prefilled in a sensitive class must equal the bank's, or park.
+        const sp = sensitivePrefillPolicy({ question: f.question, kind: f.kind, filled: f.filled, value: f.value }, decision, probeWant, sess.profile);
+        if (!sp.ok) return stop('parked', { park: { question: f.question, reason: /** @type {any} */ (sp).reason, bank_key: decision.action === 'fill' ? decision.bankKey : null, kind: f.kind } });
         if (decision.action === 'leave' || decision.action === 'skip_optional') {
           sess.visited.add(f.ref);
+          if (f.filled) sess.prefilled.add(String(f.question));
           await persist();
           return { ok: true, result: decision.action, reason: decision.reason };
         }
         if (decision.action === 'park') {
+          // Clause 10: a non-sensitive value the SITE already filled, with no bank answer, is left as it is
+          // and listed on the card (sensitive ones were compared to the bank above and parked).
+          if (f.filled && sess.profile.acceptPrefilledNonSensitive && ['no_exact_match', 'not_exact_learned', 'no_bank_fact'].includes(decision.reason)) {
+            sess.visited.add(f.ref);
+            sess.prefilled.add(String(f.question));
+            await persist();
+            return { ok: true, result: 'leave', reason: 'prefilled_by_site' };
+          }
           return stop('parked', { park: { question: f.question, reason: decision.reason, bank_key: decision.bankKey, kind: f.kind, options: f.options } });
         }
-        const want = typeof decision.value === 'boolean' ? (decision.value ? 'checked' : '') : sanitizeValue(decision.value);
+        let listboxOpen = false;
+        if (f.kind === 'listbox') {
+          if (f.filled && collapse(f.value) === collapse(probeWant)) {
+            decision = { ...decision, value: String(f.value) };
+          } else {
+            const op = await sess.driver.openListbox(f.ref);
+            if (!op.ok) return stop('fill_refused', { park: { question: f.question, reason: op.reason, bank_key: decision.bankKey, kind: f.kind } });
+            listboxOpen = true;
+            const lo = await sess.driver.listOptions();
+            if (!lo.ok) return stop('fill_refused', { park: { question: f.question, reason: lo.reason, bank_key: decision.bankKey, kind: f.kind } });
+            decision = resolveFieldAnswer({ question: pol.question, kind: 'select', required: f.required, options: lo.options }, answerCtx);
+            if (decision.action !== 'fill') {
+              return stop('parked', { park: { question: f.question, reason: decision.reason, bank_key: decision.action === 'park' ? decision.bankKey : null, kind: f.kind, options: lo.options } });
+            }
+          }
+        }
+        const fillDecision = /** @type {{ action: 'fill', value: string|boolean, bankKey: string, source: 'contact'|'learned' }} */ (decision);
+        const want = typeof fillDecision.value === 'boolean' ? (fillDecision.value ? 'checked' : '') : sanitizeValue(fillDecision.value);
         const matches = (/** @type {string} */ v) => (f.kind === 'text' || f.kind === 'textarea' ? v === want : collapse(v) === collapse(want));
         let readBack = f.value;
         for (let attempt = 0; attempt < 2 && !matches(String(readBack ?? '')); attempt++) {
           let r;
           if (f.kind === 'text' || f.kind === 'textarea') r = await sess.driver.typeText(f.ref, want);
-          else if (f.kind === 'select') r = await sess.driver.chooseOption(f.ref, String(decision.value));
-          else if (f.kind === 'radio') r = await sess.driver.chooseRadio(f.ref, String(decision.value));
-          else r = await sess.driver.setCheckbox(f.ref, Boolean(decision.value));
-          if (!r.ok) return stop('fill_refused', { park: { question: f.question, reason: r.reason, bank_key: decision.bankKey, kind: f.kind } });
+          else if (f.kind === 'select') r = await sess.driver.chooseOption(f.ref, String(fillDecision.value));
+          else if (f.kind === 'radio') r = await sess.driver.chooseRadio(f.ref, String(fillDecision.value));
+          else if (f.kind === 'listbox') {
+            r = listboxOpen ? { ok: true } : await sess.driver.openListbox(f.ref);
+            listboxOpen = false;
+            if (r.ok) r = await sess.driver.pickOption(String(fillDecision.value));
+          } else r = await sess.driver.setCheckbox(f.ref, Boolean(fillDecision.value));
+          if (!r.ok) return stop('fill_refused', { park: { question: f.question, reason: r.reason, bank_key: fillDecision.bankKey, kind: f.kind } });
           const rb = await sess.driver.readField(f.ref);
           readBack = rb.ok ? rb.value : '';
         }
         if (!matches(String(readBack ?? ''))) {
-          return stop('parked', { park: { question: f.question, reason: 'readback_mismatch_after_two_attempts', bank_key: decision.bankKey, kind: f.kind } });
+          return stop('parked', { park: { question: f.question, reason: 'readback_mismatch_after_two_attempts', bank_key: fillDecision.bankKey, kind: f.kind } });
         }
         sess.ledger = sess.ledger.filter((/** @type {any} */ e) => !(e.step === snap.stepKey && e.ref === f.ref));
-        sess.ledger.push({ step: snap.stepKey, ref: f.ref, question: f.question, bank_key: decision.bankKey, value: want, kind: f.kind, source: decision.source, verified: false });
+        sess.ledger.push({ step: snap.stepKey, ref: f.ref, question: f.question, bank_key: fillDecision.bankKey, value: want, kind: f.kind, source: fillDecision.source, verified: false });
         sess.visited.add(f.ref);
         await persist();
-        return { ok: true, result: 'filled', bank_key: decision.bankKey };
+        return { ok: true, result: 'filled', bank_key: fillDecision.bankKey };
       }
 
       if (args.action === 'upload_resume') {
@@ -237,8 +297,14 @@ export function makeAssistedApplyTool(seams = {}) {
         if (!up.ok || up.fileName !== expected) return stop('resume_upload_unverified');
         const after = await freshSnapshot();
         if (after.stopped) return after.stopped;
-        const cards = verifyResumeCards(after.snap.resumeCards, expected);
-        if (!cards.ok) return stop('resume_card_unverified', { message: `Resume card check failed: ${cards.reason}` });
+        if (sess.profile.resumeCheck === 'uploadedItem') {
+          // Clause 5 (Workday): exactly one uploaded-file item, named exactly as the file sent.
+          const items = Array.isArray(after.snap.uploadedFiles) ? after.snap.uploadedFiles.filter((/** @type {unknown} */ n) => collapse(n) === collapse(expected)) : [];
+          if (items.length !== 1) return stop('resume_upload_unverified', { message: 'The uploaded-file item did not show the resume exactly once.' });
+        } else {
+          const cards = verifyResumeCards(after.snap.resumeCards, expected);
+          if (!cards.ok) return stop('resume_card_unverified', { message: `Resume card check failed: ${cards.reason}` });
+        }
         sess.resumeUploaded = expected;
         for (const f of after.snap.fields.filter((/** @type {any} */ x) => x.kind === 'file')) sess.visited.add(f.ref);
         await persist();
@@ -255,6 +321,10 @@ export function makeAssistedApplyTool(seams = {}) {
         if (!b) return stop('unknown_button', { message: 'ref is not a button in the current step. Session over.' });
         const unvisited = snap.fields.filter((/** @type {any} */ f) => FORM_KINDS.includes(f.kind) && !sess.visited.has(f.ref) && !/^follow\b/i.test(String(f.question).trim()));
         if (unvisited.length > 0) return stop('unvisited_fields');
+        if (sess.profile.parkUnsupportedRequired) {
+          const blocked = snap.fields.find((/** @type {any} */ f) => !FORM_KINDS.includes(f.kind) && f.kind !== 'file' && f.required && !f.filled);
+          if (blocked) return stop('parked', { park: { question: blocked.question, reason: 'unsupported_required_field', bank_key: null, kind: blocked.kind } });
+        }
         if (sess.sawResumeStep && snap.fields.some((/** @type {any} */ f) => f.kind === 'file') && !sess.resumeUploaded) return stop('resume_not_uploaded');
         for (const e of sess.ledger.filter((/** @type {any} */ x) => x.step === snap.stepKey)) {
           const rb = await sess.driver.readField(e.ref);
@@ -269,6 +339,8 @@ export function makeAssistedApplyTool(seams = {}) {
               : `advance_refused_${String(r.reason)}`;
           return stop(reason);
         }
+        // A10: durable record that this run clicked Next (the site may now hold a draft).
+        await deps.withClient((c) => recordAssistedNextClick(c, sess.app.id));
         const before = snap.stepKey;
         for (let i = 0; i < 20; i++) {
           await new Promise((res) => { setTimeout(res, 500); });
@@ -314,13 +386,18 @@ export function makeAssistedApplyTool(seams = {}) {
       } catch {
         problems.push('screenshot_failed');
       }
+      // Clause 10: questions the SITE filled (resume parse, saved draft) that no server-side answer wrote,
+      // so Damian's card can list them for review.
+      const ledgerQuestions = new Set(sess.ledger.map((/** @type {any} */ e) => String(e.question)));
+      for (const f of snap.fields) if (f.filled && FORM_KINDS.includes(f.kind) && !ledgerQuestions.has(String(f.question))) sess.prefilled.add(String(f.question));
+      const prefilledUnledgered = [...sess.prefilled].filter((q) => !ledgerQuestions.has(q));
       if (problems.length > 0) {
         return stop('finish_failed', { finishResult: { ok: false, problems, screenshot_rel_path: screenshotRelPath }, message: `Finish did not verify: ${problems.join(', ')}` });
       }
       await persist();
       await deps.withClient((c) => closeLease(c, sess.lease.id, {
         stopReason: 'finished',
-        finishResult: { ok: true, screenshot_rel_path: screenshotRelPath, ledger: sess.ledger, verified_at: now().toISOString() },
+        finishResult: { ok: true, screenshot_rel_path: screenshotRelPath, ledger: sess.ledger, verified_at: now().toISOString(), prefilled_unledgered: prefilledUnledgered },
       }));
       sessions.delete(sess.lease.id);
       try {

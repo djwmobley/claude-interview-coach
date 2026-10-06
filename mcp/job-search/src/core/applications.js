@@ -766,6 +766,56 @@ export async function hasSubmitRequestSentThisAttempt(client, applicationId) {
   return r.rowCount > 0;
 }
 
+/** ATS types that run through the assisted (model-driven, stop-before-Submit) flow. */
+export const ASSISTED_ATS_TYPES = Object.freeze(['linkedin_easy', 'workday']);
+
+/** Progress-event note an assisted run writes after every Next click it made (spec v2 A10). */
+export const ASSISTED_NEXT_CLICK_NOTE = 'assisted_next_clicked';
+
+/**
+ * Durable marker that an assisted run clicked a Next/Continue button (spec v2 A10): from then on the ATS
+ * may hold a saved draft, so a crash or a stale reconcile parks the application for a human instead of
+ * leaving it retryable. Written on its own (not inside a transaction), like recordSubmitRequestSent.
+ * @param {import('pg').ClientBase} client
+ * @param {number} applicationId
+ */
+export async function recordAssistedNextClick(client, applicationId) {
+  await client.query(
+    `INSERT INTO ic_job_application_events (application_id, kind, actor, note) VALUES ($1, 'progress', 'apply', $2)`,
+    [applicationId, ASSISTED_NEXT_CLICK_NOTE],
+  );
+}
+
+/**
+ * Whether an assisted run clicked Next during the CURRENT attempt (events at or after the latest
+ * transition into 'submitting'). When no such transition event exists at all, ANY recorded Next click
+ * counts (the conservative branch: a human looks before anything is retried).
+ * @param {import('pg').ClientBase} client
+ * @param {number} applicationId
+ * @returns {Promise<boolean>}
+ */
+export async function hasAssistedNextClickThisAttempt(client, applicationId) {
+  const since = await client.query(
+    `SELECT created_at FROM ic_job_application_events WHERE application_id = $1 AND kind = 'state' AND to_state = 'submitting' ORDER BY created_at DESC, id DESC LIMIT 1`,
+    [applicationId],
+  );
+  const r = await client.query(
+    `SELECT 1 FROM ic_job_application_events WHERE application_id = $1 AND kind = 'progress' AND note = $2 AND ($3::timestamptz IS NULL OR created_at >= $3) LIMIT 1`,
+    [applicationId, ASSISTED_NEXT_CLICK_NOTE, since.rowCount ? since.rows[0].created_at : null],
+  );
+  return (r.rowCount ?? 0) > 0;
+}
+
+/** pending_question for a run that clicked Next and then ended without a verified finish (spec v2 A10). */
+export function assistedPartialQuestion(/** @type {string|null} */ pageUrl, /** @type {string} */ why) {
+  return {
+    kind: 'assisted_partial',
+    label: `The assisted run clicked Next at least once and then stopped (${why}). The site may hold a saved draft. Check it before retrying, or finish by hand.`,
+    page_url: pageUrl,
+    requires_human_retry: true,
+  };
+}
+
 /**
  * Moves every application stuck in 'submitting' for longer than `maxAgeMinutes` on (A13). Amended by
  * apply pipeline slice 5's duplicate-application guard: a stale row whose CURRENT attempt already recorded
@@ -783,16 +833,23 @@ export async function reconcileStale(client, opts = {}) {
   const maxAgeMinutes = opts.maxAgeMinutes ?? 10;
   return withTransaction(client, async (c) => {
     const stale = await c.query(
-      // Assisted LinkedIn Easy Apply runs legitimately stay in 'submitting' for up to 15 minutes (the
-      // headless fill session), so a linkedin_easy row is only stale after 20 minutes.
-      `SELECT id FROM ic_job_applications WHERE state = 'submitting' AND updated_at < now() - ($1 || ' minutes')::interval
-         AND NOT (ats_type = 'linkedin_easy' AND updated_at >= now() - interval '20 minutes') FOR UPDATE`,
-      [maxAgeMinutes],
+      // Assisted runs (LinkedIn Easy Apply, Workday) legitimately stay in 'submitting' for up to 15 minutes
+      // (scripted entry plus the headless fill session), so an assisted row is only stale after 20 minutes
+      // (spec v2 A8: the exemption is per ATS, and covers a crash between prepare and lease).
+      `SELECT id, apply_url FROM ic_job_applications WHERE state = 'submitting' AND updated_at < now() - ($1 || ' minutes')::interval
+         AND NOT (ats_type = ANY($2::text[]) AND updated_at >= now() - interval '20 minutes') FOR UPDATE`,
+      [maxAgeMinutes, ASSISTED_ATS_TYPES],
     );
     const results = [];
     for (const staleRow of stale.rows) {
       const sent = await hasSubmitRequestSentThisAttempt(c, staleRow.id);
-      if (sent) {
+      if (!sent && await hasAssistedNextClickThisAttempt(c, staleRow.id)) {
+        results.push(await transitionUnwrapped(c, staleRow.id, 'needs_human', {
+          actor: 'apply',
+          note: 'stale submitting reconciled after an assisted Next click; a human checks the saved draft before any retry',
+          pending_question: assistedPartialQuestion(staleRow.apply_url ?? null, 'stale reconcile'),
+        }, {}));
+      } else if (sent) {
         results.push(await transitionUnwrapped(c, staleRow.id, 'needs_human', {
           actor: 'apply',
           note: 'stale submitting reconciled after submit request was sent; verify manually before retrying',

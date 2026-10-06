@@ -16,15 +16,16 @@ export const AWAITING_SUBMIT_KIND = 'awaiting_submit';
 /** pending_question.kind after its tab is known gone (Chrome restarted, tab closed). */
 export const ABANDONED_TAB_KIND = 'abandoned_tab';
 
-const AWAITING_WHERE = `ats_type = 'linkedin_easy' AND state = 'needs_human' AND pending_question->>'kind' = '${AWAITING_SUBMIT_KIND}'`;
+/** The assisted ATS types whose awaiting_submit tabs this set protects (LinkedIn Easy Apply and Workday). */
+const AWAITING_WHERE = `ats_type IN ('linkedin_easy', 'workday') AND state = 'needs_human' AND pending_question->>'kind' = '${AWAITING_SUBMIT_KIND}'`;
 
 /**
  * @param {import('pg').ClientBase} client
- * @returns {Promise<Array<{ applicationId: number, targetId: string|null }>>}
+ * @returns {Promise<Array<{ applicationId: number, targetId: string|null, ats: string }>>}
  */
 export async function listAwaitingTargets(client) {
-  const r = await client.query(`SELECT id, pending_question->>'target_id' AS target_id FROM ic_job_applications WHERE ${AWAITING_WHERE} ORDER BY id`);
-  return r.rows.map((row) => ({ applicationId: Number(row.id), targetId: typeof row.target_id === 'string' && row.target_id ? row.target_id : null }));
+  const r = await client.query(`SELECT id, ats_type, pending_question->>'target_id' AS target_id FROM ic_job_applications WHERE ${AWAITING_WHERE} ORDER BY id`);
+  return r.rows.map((row) => ({ applicationId: Number(row.id), targetId: typeof row.target_id === 'string' && row.target_id ? row.target_id : null, ats: String(row.ats_type) }));
 }
 
 /**
@@ -42,7 +43,7 @@ export async function demoteAbandonedTabs(client, opts) {
   const demoted = [];
   for (const row of rows) {
     if (opts.aliveTargetIds && row.targetId && opts.aliveTargetIds.has(row.targetId)) continue;
-    const label = 'The LinkedIn tab holding this filled Easy Apply form is gone (the scan Chrome restarted or the tab was closed). Check LinkedIn for an Applied badge; if it is not there, retry or apply by hand.';
+    const label = 'The browser tab holding this filled application form is gone (the scan Chrome restarted or the tab was closed). Check the site for an applied confirmation; if it is not there, retry or apply by hand.';
     const upd = await client.query(
       `UPDATE ic_job_applications
           SET pending_question = jsonb_build_object('kind', '${ABANDONED_TAB_KIND}', 'label', $2::text, 'previous_target_id', pending_question->>'target_id', 'reason', $3::text, 'page_url', pending_question->>'page_url'),

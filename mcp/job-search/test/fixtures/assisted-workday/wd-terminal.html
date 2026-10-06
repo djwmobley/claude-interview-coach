@@ -1,0 +1,70 @@
+<!doctype html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<title>Synthetic Workday terminal and stop pages (test fixture)</title>
+<style>[hidden] { display: none !important; }</style>
+</head>
+<body>
+<!-- SYNTHETIC fixture. Modes (?mode=):
+     review     last step active, header Review, footer Submit with data-automation-id-submit (finish only)
+     label      mid step, footer button labeled Submit
+     localized  mid step, footer button labeled Soumettre
+     data       mid step, footer button labeled Next carrying data-automation-id-submit="true"
+     single     no step bar, header Apply, footer Next (a single-page tenant where Next would submit)
+     gate       a Workday sign-in panel with a password field (auth lost)
+     password   a bare password input on the wizard page
+     timeout    a session-timeout banner
+     already    already-applied text
+     sent       a thank-you confirmation -->
+<div data-automation-id="applyFlowPage">
+  <div data-automation-id="progressBar" id="bar">
+    <ol>
+      <li data-automation-id="progressBarCompletedStep">My Information</li>
+      <li data-automation-id="progressBarActiveStep" id="s2" aria-current="step">Application Questions</li>
+      <li data-automation-id="progressBarInactiveStep" id="s3">Review</li>
+    </ol>
+  </div>
+  <h2 id="header">Application Questions</h2>
+  <div id="extra"></div>
+  <div>
+    <label for="city">City</label>
+    <input id="city" type="text" value="Houston">
+  </div>
+</div>
+<div data-automation-id="pageFooter">
+  <button type="button" data-automation-id="pageFooterNextButton" id="next">Next</button>
+</div>
+<script>
+  window.__clicks = [];
+  const mode = new URLSearchParams(location.search).get('mode') || 'label';
+  const next = document.getElementById('next');
+  next.onclick = () => { window.__clicks.push('next'); };
+  const extra = document.getElementById('extra');
+  if (mode === 'review') {
+    document.getElementById('s2').setAttribute('data-automation-id', 'progressBarCompletedStep');
+    document.getElementById('s2').removeAttribute('aria-current');
+    document.getElementById('s3').setAttribute('data-automation-id', 'progressBarActiveStep');
+    document.getElementById('s3').setAttribute('aria-current', 'step');
+    document.getElementById('header').textContent = 'Review';
+    next.textContent = 'Submit';
+    next.setAttribute('data-automation-id-submit', 'true');
+    extra.innerHTML = '<p>City Houston</p><p>Phone Number 713-555-0100</p><p>Resume Damian Mobley - CTO.docx</p>';
+  }
+  if (mode === 'label') next.textContent = 'Submit';
+  if (mode === 'localized') next.textContent = 'Soumettre';
+  if (mode === 'data') next.setAttribute('data-automation-id-submit', 'true');
+  if (mode === 'single') {
+    document.getElementById('bar').remove();
+    document.getElementById('header').textContent = 'Apply';
+  }
+  if (mode === 'gate') {
+    extra.innerHTML = '<div data-automation-id="signInContent"><label for="pw">Password</label><input id="pw" type="password" data-automation-id="password" value="hunter2-secret"></div>';
+  }
+  if (mode === 'password') extra.innerHTML = '<label for="pc">Passcode</label><input id="pc" type="text" name="passcode" value="pc-secret-123">';
+  if (mode === 'timeout') extra.innerHTML = '<div role="alert">Your session has expired. Please sign in again.</div>';
+  if (mode === 'already') extra.innerHTML = '<p>You\'ve already applied for this job.</p>';
+  if (mode === 'sent') extra.innerHTML = '<h1>Thank you for applying!</h1>';
+</script>
+</body>
+</html>

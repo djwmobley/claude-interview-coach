@@ -1,0 +1,91 @@
+<!doctype html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<title>Synthetic Workday wizard step (test fixture)</title>
+<style>
+  [hidden] { display: none !important; }
+  [role="listbox"] { position: absolute; top: 200px; left: 20px; background: #fff; border: 1px solid #999; }
+</style>
+</head>
+<body>
+<!-- SYNTHETIC fixture shaped after Workday Candidate Experience markup. Modes (?mode=): default (readable
+     step bar, My Experience active), unreadable (no active marker, header matches step 3), unknown (no active
+     marker, header matches nothing), dup (listbox with two identical options), two (two apply flow pages). -->
+<div data-automation-id="applyFlowPage" id="flow">
+  <div data-automation-id="progressBar">
+    <ol>
+      <li data-automation-id="progressBarCompletedStep">My Information</li>
+      <li data-automation-id="progressBarActiveStep" aria-current="step" id="active-step">My Experience</li>
+      <li data-automation-id="progressBarInactiveStep" id="step-3">Application Questions</li>
+      <li data-automation-id="progressBarInactiveStep">Review</li>
+    </ol>
+  </div>
+  <h2 id="page-header">My Experience</h2>
+  <div data-automation-id="formField-phone">
+    <label for="phone">Phone Number<abbr>*</abbr></label>
+    <input id="phone" type="text" name="phoneNumber" aria-required="true">
+  </div>
+  <div data-automation-id="formField-source">
+    <label for="source-btn">How Did You Hear About Us?<abbr>*</abbr></label>
+    <button id="source-btn" type="button" aria-haspopup="listbox" aria-required="true">Select One</button>
+  </div>
+  <div data-automation-id="resumeUpload">
+    <label for="resume-input">Resume/CV</label>
+    <input id="resume-input" type="file" data-automation-id="file-upload-input-ref">
+    <ul id="uploaded"></ul>
+  </div>
+</div>
+<div data-automation-id="pageFooter">
+  <button type="button" data-automation-id="pageFooterBackButton" id="back">Back</button>
+  <button type="button" data-automation-id="pageFooterNextButton" id="next">Save and Continue</button>
+</div>
+<script>
+  window.__clicks = [];
+  const mode = new URLSearchParams(location.search).get('mode') || 'default';
+  if (mode === 'unreadable' || mode === 'unknown') {
+    const a = document.getElementById('active-step');
+    a.setAttribute('data-automation-id', 'progressBarCompletedStep');
+    a.removeAttribute('aria-current');
+    document.getElementById('page-header').textContent = mode === 'unreadable' ? 'Application Questions' : 'Something Else';
+  }
+  if (mode === 'two') {
+    const extra = document.createElement('div');
+    extra.setAttribute('data-automation-id', 'applyFlowPage');
+    extra.textContent = 'second flow';
+    document.body.appendChild(extra);
+  }
+  const OPTIONS = mode === 'dup' ? ['LinkedIn', 'Other', 'Other'] : ['LinkedIn', 'LinkedIn Ads', 'Indeed', 'Company Website'];
+  const btn = document.getElementById('source-btn');
+  btn.onclick = () => {
+    window.__clicks.push('listbox');
+    let pop = document.getElementById('source-pop');
+    if (pop) pop.remove();
+    pop = document.createElement('ul');
+    pop.id = 'source-pop';
+    pop.setAttribute('role', 'listbox');
+    for (const t of OPTIONS) {
+      const li = document.createElement('li');
+      li.setAttribute('role', 'option');
+      li.textContent = t;
+      li.onclick = () => { window.__clicks.push('option:' + t); btn.textContent = t; pop.remove(); };
+      pop.appendChild(li);
+    }
+    document.body.appendChild(pop);
+  };
+  document.getElementById('resume-input').addEventListener('change', (e) => {
+    const f = e.target.files && e.target.files[0];
+    if (!f) return;
+    const li = document.createElement('li');
+    li.setAttribute('data-automation-id', 'file-upload-item');
+    const n = document.createElement('span');
+    n.setAttribute('data-automation-id', 'file-upload-item-name');
+    n.textContent = f.name;
+    li.appendChild(n);
+    document.getElementById('uploaded').appendChild(li);
+  });
+  document.getElementById('next').onclick = () => { window.__clicks.push('next'); };
+  document.getElementById('back').onclick = () => { window.__clicks.push('back'); };
+</script>
+</body>
+</html>

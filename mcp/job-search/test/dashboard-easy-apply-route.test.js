@@ -32,7 +32,7 @@ let port;
 let outputRoot;
 /** @type {number[]} */
 const listingIds = [];
-const tab = { live: true, badge: 'applied', calls: /** @type {any[]} */ ([]) };
+const tab = { live: true, badge: 'applied', calls: /** @type {any[]} */ ([]), profiles: /** @type {any[]} */ ([]) };
 /** @type {any[]} */
 const starts = [];
 
@@ -46,7 +46,7 @@ function fakeConnect() {
   });
 }
 
-async function seed(/** @type {string} */ state, /** @type {any} */ pq) {
+async function seed(/** @type {string} */ state, /** @type {any} */ pq, ats = 'linkedin_easy') {
   const n = Math.floor(Math.random() * 1e9);
   const r = await c.query(
     `INSERT INTO ic_job_listings (title, company, source, external_id, record_kind, company_norm, title_norm, location_norm, dedup_hash, last_seen)
@@ -54,7 +54,7 @@ async function seed(/** @type {string} */ state, /** @type {any} */ pq) {
     [CO, `zz-easyroute-${process.pid}:${n}`, `easy route co ${n}`, `zz-easyroute-hash-${n}`],
   );
   listingIds.push(Number(r.rows[0].id));
-  const a = await createApplication(c, { listingId: Number(r.rows[0].id), atsType: 'linkedin_easy', applyUrl: `https://www.linkedin.com/jobs/view/${n}/`, actor: 'mcp' });
+  const a = await createApplication(c, { listingId: Number(r.rows[0].id), atsType: ats, applyUrl: ats === 'workday' ? `https://acme.wd5.myworkdayjobs.com/careers/job/${n}` : `https://www.linkedin.com/jobs/view/${n}/`, actor: 'mcp' });
   await c.query('UPDATE ic_job_applications SET state = $2, pending_question = $3::jsonb WHERE id = $1', [a.id, state, pq ? JSON.stringify(pq) : null]);
   return a.id;
 }
@@ -85,7 +85,13 @@ before(async () => {
     applyRunner: { async start(/** @type {number} */ id, /** @type {any} */ opts) { starts.push([id, opts]); return { applicationId: id, pid: 1 }; }, status() { return { running: false }; }, armCancelBackstop() { return { forced_kill_available: false }; } },
     credentials: { read: async () => null, write: async () => {}, delete: async () => false, list: async () => [] },
     outputRoot, version: 'test', startedAt: new Date().toISOString(), healthBanner: [],
-    easyApplyTab: { connect: fakeConnect(), createDriver: () => ({ async attach() {}, async detach() {}, async appliedBadge() { return { state: tab.badge, evidence: tab.badge === 'applied' ? 'Applied 1 minute ago' : null }; } }) },
+    easyApplyTab: {
+      connect: fakeConnect(),
+      createDriver: (/** @type {any} */ _cdp, /** @type {string} */ _t, /** @type {any} */ profile) => {
+        tab.profiles.push(profile ? profile.ats : null);
+        return { async attach() {}, async detach() {}, async appliedBadge() { return { state: tab.badge, evidence: tab.badge === 'applied' ? 'Applied 1 minute ago' : null }; } };
+      },
+    },
   }));
   await app.listen(0, '127.0.0.1');
   port = app.server.address().port;
@@ -101,6 +107,7 @@ beforeEach(async () => {
   tab.live = true;
   tab.badge = 'applied';
   tab.calls = [];
+  tab.profiles = [];
   starts.length = 0;
 });
 
@@ -170,6 +177,40 @@ describe('assisted Easy Apply dashboard routes', () => {
   });
   test('Retry on a linkedin_easy application kicks the runner with the longer Easy Apply hard timeout', async () => {
     const id = await seed('failed', null);
+    const r = await req('POST', `/api/applications/${id}/retry`, {});
+    assert.equal(r.status, 200);
+    await new Promise((res) => { setTimeout(res, 100); });
+    assert.equal(starts.length, 1);
+    assert.ok(starts[0][1] && starts[0][1].hardTimeoutMs >= 15 * 60000, JSON.stringify(starts));
+  });
+});
+
+describe('assisted Workday on the same dashboard routes (spec v1 clause 10)', () => {
+  const wdAwaiting = () => seed('needs_human', { kind: 'awaiting_submit', target_id: 'TAB-1', label: 'x', ats_label: 'Workday', ledger: [], prefilled_unledgered: ['Phone Extension'], awaiting_since: new Date().toISOString() }, 'workday');
+  test('"I submitted" reads the WORKDAY profile\'s applied evidence (not LinkedIn\'s badge)', async () => {
+    const id = await wdAwaiting();
+    const r = await req('POST', `/api/applications/${id}/assisted-apply/submitted`, {});
+    assert.equal(r.body.outcome, 'submitted', JSON.stringify(r.body));
+    assert.deepEqual(tab.profiles, ['workday']);
+  });
+  test('without evidence it stays needs_human with a Workday message', async () => {
+    const id = await wdAwaiting();
+    tab.badge = 'not_applied';
+    const r = await req('POST', `/api/applications/${id}/assisted-apply/submitted`, {});
+    assert.equal(r.body.outcome, 'badge_not_found');
+    assert.match(r.body.message, /Workday/);
+    assert.doesNotMatch(r.body.message, /LinkedIn/);
+  });
+  test('status lists the Workday awaiting card and both breakers', async () => {
+    await tripBreaker(c, { reason: 'unexpected_submit', applicationId: null, hours: 24, ats: 'workday' });
+    const id = await wdAwaiting();
+    const r = await req('GET', '/api/assisted-apply/status');
+    assert.ok(r.body.awaiting.some((/** @type {any} */ x) => x.application_id === id && x.ats === 'workday'));
+    assert.equal(r.body.breakers.workday.tripped, true);
+    assert.equal(r.body.breakers.linkedin_easy.tripped, false);
+  });
+  test('Retry on a workday application kicks the runner with the longer assisted hard timeout', async () => {
+    const id = await seed('failed', null, 'workday');
     const r = await req('POST', `/api/applications/${id}/retry`, {});
     assert.equal(r.status, 200);
     await new Promise((res) => { setTimeout(res, 100); });

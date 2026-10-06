@@ -307,8 +307,11 @@ export function applicationCard(opts) {
         },
       },
     });
+    // Assisted Workday (spec v1 clause 10): the same card, named for the application's own site, plus the
+    // fields the site itself prefilled (resume parse, saved draft) that no server-side answer wrote.
+    const prefilled = Array.isArray(pq.prefilled_unledgered) ? pq.prefilled_unledgered.filter((/** @type {unknown} */ q) => typeof q === 'string') : [];
     return h('div', { className: 'credential-prompt' }, [
-      h('h4', { text: 'LinkedIn Easy Apply: ready for your review' }),
+      h('h4', { text: `${typeof pq.ats_label === 'string' && pq.ats_label ? pq.ats_label : 'LinkedIn Easy Apply'}: ready for your review` }),
       h('p', { className: 'application-card__note', text: pq.label ? String(pq.label) : '' }),
       pq.stale ? h('p', { className: 'application-card__note', text: 'Waiting more than 24 hours. It stays open until you act on it.' }) : null,
       statusLine,
@@ -318,6 +321,8 @@ export function applicationCard(opts) {
         : h('ul', { className: 'application-card__ledger' }, ledger.map((/** @type {any} */ e) => h('li', {
           text: `${String(e.question ?? '')} = ${String(e.value ?? '')}${e.bank_key ? ` (bank: ${String(e.bank_key)})` : ''}`,
         }))),
+      prefilled.length === 0 ? null : h('h4', { text: 'Prefilled by the site (check these)' }),
+      prefilled.length === 0 ? null : h('ul', { className: 'application-card__ledger' }, prefilled.map((/** @type {string} */ q) => h('li', { text: q }))),
       checkMessage,
       h('div', { className: 'application-card__actions' }, [focusButton, submittedButton, confirmAnyway, abandonButton]),
     ]);

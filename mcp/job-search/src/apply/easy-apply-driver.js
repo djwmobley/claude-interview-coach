@@ -74,12 +74,65 @@ function pageMain(req, G) {
   }
   function findDialog() {
     const sc = R && R.scope && typeof R.scope === 'object' ? R.scope : null;
-    const classRe = sc ? toRe(sc.classPattern) : null;
-    const headerRe = sc ? toRe(sc.headerPattern) : null;
-    if (!sc || typeof sc.containerSelector !== 'string' || !sc.containerSelector || !classRe || !headerRe) return null;
+    if (!sc || typeof sc.containerSelector !== 'string' || !sc.containerSelector) return null;
     const all = Array.from(document.querySelectorAll(sc.containerSelector)).filter(isVisible);
+    // anyContainer (Workday): the selector itself identifies the scope; anything but exactly one visible
+    // match is no scope at all (no fields, no clicks).
+    if (sc.anyContainer === true) return all.length === 1 ? all[0] : null;
+    const classRe = toRe(sc.classPattern);
+    const headerRe = toRe(sc.headerPattern);
+    if (!classRe || !headerRe) return null;
     const easy = all.filter((d) => classRe.test(d.className) || headerRe.test(headerOf(d)));
     return easy.length === 1 ? easy[0] : (easy.length === 0 ? null : easy[0]);
+  }
+  /** The profile's footer (Workday's Next/Back bar lives outside the flow container), or null. */
+  function findFooter(/** @type {Element|null} */ dialog) {
+    const sc = R && R.scope && typeof R.scope === 'object' ? R.scope : null;
+    if (!dialog || !sc || typeof sc.footerSelector !== 'string' || !sc.footerSelector) return null;
+    const all = Array.from(document.querySelectorAll(sc.footerSelector)).filter((f) => isVisible(f) && !dialog.contains(f));
+    return all.length === 1 ? all[0] : null;
+  }
+  function inScope(/** @type {Element} */ el, /** @type {Element|null} */ dialog) {
+    if (!dialog) return false;
+    if (dialog.contains(el)) return true;
+    const footer = findFooter(dialog);
+    return Boolean(footer && footer.contains(el));
+  }
+  function isListbox(/** @type {Element} */ el) {
+    const L = R && R.listbox && typeof R.listbox === 'object' ? R.listbox : null;
+    return Boolean(L && typeof L.triggerSelector === 'string' && L.triggerSelector && el.matches(L.triggerSelector));
+  }
+  /** A7: password-like inputs are never listed, read, or written. */
+  function isPasswordLike(/** @type {Element} */ el) {
+    if (!(el instanceof HTMLInputElement)) return false;
+    if ((el.type || '').toLowerCase() === 'password') return true;
+    const names = [el.name, el.id, el.getAttribute('aria-label'), el.getAttribute('autocomplete'), el.getAttribute('data-automation-id')].map((x) => String(x || '')).join(' ');
+    return /pass(?:word|code|phrase)|\bpwd\b/i.test(names);
+  }
+  function stepBar(/** @type {string[]} */ headerTexts) {
+    const P = R && R.progress && typeof R.progress === 'object' ? R.progress : null;
+    const out = { labels: /** @type {string[]} */ ([]), active: /** @type {number|null} */ (null), headerTexts };
+    if (!P || typeof P.containerSelector !== 'string' || typeof P.stepSelector !== 'string' || typeof P.activeSelector !== 'string') return out;
+    const bars = Array.from(document.querySelectorAll(P.containerSelector)).filter(isVisible);
+    if (bars.length !== 1) return out;
+    const steps = Array.from(bars[0].querySelectorAll(P.stepSelector)).filter(isVisible);
+    // Live Workday (2026-10-05 read-only probe): each step holds a screen-reader label ("current step 1
+    // of 6") and the visible step name in separate <label>s; the step name is what the header matches.
+    const stepName = (/** @type {Element} */ s) => {
+      const names = Array.from(s.querySelectorAll('label')).map((l) => clip(l.textContent, 200)).filter((t) => t && !/^(?:(?:current|completed)\s+)?step\s+\d+\s+of\s+\d+$/i.test(t));
+      return names.length > 0 ? names.join(' ') : clip(s.textContent, 200);
+    };
+    out.labels = steps.map(stepName);
+    const act = steps.map((s, i) => (s.matches(P.activeSelector) ? i : -1)).filter((i) => i >= 0);
+    out.active = act.length === 1 ? act[0] : null;
+    return out;
+  }
+  function popupItems() {
+    const L = R && R.listbox && typeof R.listbox === 'object' ? R.listbox : null;
+    if (!L || typeof L.popupSelector !== 'string' || typeof L.optionSelector !== 'string') return { ok: false, reason: 'no_listbox_rules', items: [] };
+    const pops = Array.from(document.querySelectorAll(L.popupSelector)).filter(isVisible);
+    if (pops.length !== 1) return { ok: false, reason: pops.length === 0 ? 'no_popup' : 'multiple_popups', items: [] };
+    return { ok: true, reason: null, items: Array.from(pops[0].querySelectorAll(L.optionSelector)).filter(isVisible) };
   }
   function headerOf(/** @type {Element} */ d) {
     const id = d.getAttribute('aria-labelledby');
@@ -112,7 +165,16 @@ function pageMain(req, G) {
     if (wrap) return clip(wrap.textContent, 500);
     const lb = labelledBy(el);
     if (lb.trim()) return clip(lb, 500);
-    return clip(el.getAttribute('aria-label') || '', 500);
+    const aria = clip(el.getAttribute('aria-label') || '', 500);
+    // Live Workday listbox buttons carry "<question> <current value> Required" as their aria-label; the
+    // question is what is left once the button's own text and the trailing Required are removed.
+    if (aria && isListbox(el)) {
+      const shown = clip(innerTextOf(el), 300);
+      let q = aria.replace(/\s+required\s*$/i, '');
+      if (shown && q.endsWith(shown)) q = q.slice(0, q.length - shown.length);
+      return clip(q, 500);
+    }
+    return aria;
   }
   function optionLabel(/** @type {HTMLInputElement} */ radio) {
     if (radio.id) {
@@ -127,10 +189,12 @@ function pageMain(req, G) {
     /** @type {Array<string[]>} */
     const dataAttrs = [...dataAttrsOf(el)];
     for (const d of Array.from(el.querySelectorAll('*'))) dataAttrs.push(...dataAttrsOf(d));
-    for (let a = el.parentElement; a && a !== dialog; a = a.parentElement) dataAttrs.push(...dataAttrsOf(a));
+    const footer = dialog ? findFooter(dialog) : null;
+    for (let a = el.parentElement; a && a !== dialog && a !== footer; a = a.parentElement) dataAttrs.push(...dataAttrsOf(a));
     return {
       tag: el.tagName.toLowerCase(),
-      inDialog: Boolean(dialog && dialog.contains(el)),
+      inDialog: inScope(el, dialog),
+      id: el.getAttribute('id') || '',
       disabled: Boolean(/** @type {any} */ (el).disabled) || el.getAttribute('aria-disabled') === 'true',
       ariaLabel: el.getAttribute('aria-label') || '',
       labelledByText: labelledBy(el),
@@ -147,11 +211,14 @@ function pageMain(req, G) {
   }
   function fingerprint(/** @type {Element} */ el) {
     const anyEl = /** @type {any} */ (el);
-    const text = el.tagName === 'BUTTON' ? buttonName(el) : fieldLabel(el);
+    // A listbox prompt's button text IS its value, so its fingerprint uses the field label instead.
+    const text = el.tagName === 'BUTTON' && !isListbox(el) ? buttonName(el) : fieldLabel(el);
     return hash([el.tagName, anyEl.type || '', anyEl.id || '', anyEl.name || '', text].join('|'));
   }
   function elements(/** @type {Element|null} */ dialog) {
-    return dialog ? Array.from(dialog.querySelectorAll(ELEMENT_SELECTOR)) : [];
+    if (!dialog) return [];
+    const footer = findFooter(dialog);
+    return [...Array.from(dialog.querySelectorAll(ELEMENT_SELECTOR)), ...(footer ? Array.from(footer.querySelectorAll(ELEMENT_SELECTOR)) : [])];
   }
   function resolveRef(/** @type {Element|null} */ dialog, /** @type {unknown} */ ref) {
     const m = /^e(\d+)-([0-9a-z]+)$/.exec(String(ref || ''));
@@ -164,8 +231,9 @@ function pageMain(req, G) {
   function refOf(/** @type {Element} */ el, /** @type {number} */ i) {
     return `e${i}-${fingerprint(el)}`;
   }
-  function progressValues(/** @type {Element|null} */ dialog) {
+  function progressValues(/** @type {Element|null} */ dialog, /** @type {string[]} */ headerTexts) {
     if (!dialog) return [];
+    if (R && R.progress && typeof R.progress === 'object' && R.progress.mode === 'stepBar') return G.stepBarProgress(stepBar(headerTexts));
     /** @type {number[]} */
     const out = [];
     for (const p of Array.from(dialog.querySelectorAll('progress'))) {
@@ -179,7 +247,15 @@ function pageMain(req, G) {
     }
     return out;
   }
+  /** Workday multiselect prompt container of a field, or null (its value is the selected-item chips). */
+  function multiselectOf(/** @type {Element} */ el) {
+    const M = R && R.multiselect && typeof R.multiselect === 'object' ? R.multiselect : null;
+    return M && typeof M.containerSelector === 'string' && M.containerSelector ? el.closest(M.containerSelector) : null;
+  }
   function fieldKind(/** @type {Element} */ el) {
+    if (isListbox(el)) return 'listbox';
+    if (isPasswordLike(el)) return 'password';
+    if (multiselectOf(el)) return 'multiselect';
     if (el instanceof HTMLSelectElement) return 'select';
     if (el instanceof HTMLTextAreaElement) return 'textarea';
     if (el instanceof HTMLInputElement) {
@@ -195,6 +271,7 @@ function pageMain(req, G) {
   function isRequired(/** @type {Element} */ el) {
     const anyEl = /** @type {any} */ (el);
     if (anyEl.required || el.getAttribute('aria-required') === 'true') return true;
+    if (isListbox(el) && /\brequired\s*$/i.test(el.getAttribute('aria-label') || '')) return true;
     if (el instanceof HTMLInputElement && el.type === 'radio') {
       const fs = el.closest('fieldset');
       if (fs && (fs.getAttribute('aria-required') === 'true' || fs.querySelector('input[required]'))) return true;
@@ -210,6 +287,17 @@ function pageMain(req, G) {
     return Array.from(scope.querySelectorAll('input[type="radio"]')).filter((x) => /** @type {HTMLInputElement} */ (x).name === r.name);
   }
   function currentValue(/** @type {Element} */ el, /** @type {Element} */ dialog) {
+    if (isPasswordLike(el)) return '';
+    const ms = multiselectOf(el);
+    if (ms) {
+      const sel = R.multiselect.selectedSelector;
+      return typeof sel === 'string' && sel ? Array.from(ms.querySelectorAll(sel)).filter(isVisible).map((x) => clip(x.textContent, 200)).filter(Boolean).join('; ') : '';
+    }
+    if (isListbox(el)) {
+      const t = clip(innerTextOf(el), 300);
+      const ph = toRe(R && R.listbox ? R.listbox.placeholder : null);
+      return ph && ph.test(t) ? '' : t;
+    }
     if (el instanceof HTMLSelectElement) {
       const o = el.selectedOptions[0];
       return o && o.value !== '' && !/^select an option$/i.test(o.text.trim()) ? o.text.trim() : '';
@@ -246,7 +334,7 @@ function pageMain(req, G) {
     const seenRadioNames = new Set();
     for (let i = 0; i < els.length; i++) {
       const el = els[i];
-      if (el.tagName === 'BUTTON') {
+      if (el.tagName === 'BUTTON' && !isListbox(el)) {
         if (!isVisible(el)) continue;
         const desc = buttonDesc(el, dialog);
         const verdict = G.classifyAdvanceButton(desc, R);
@@ -254,7 +342,13 @@ function pageMain(req, G) {
         continue;
       }
       const kind = fieldKind(el);
+      // A7: a password-like input is never listed (its value never leaves the page); passwordPresent
+      // below stops the session instead.
+      if (kind === 'password') continue;
       if (!fieldVisible(el)) continue;
+      // Workday renders unlabeled, invisible helper inputs inside its prompt widgets (2026-10-05 probe);
+      // they are not questions, so a profile can drop them.
+      if (R && R.skipUnlabeledHidden === true && !isVisible(el) && !fieldLabel(el).trim()) continue;
       if (el instanceof HTMLInputElement && el.type === 'hidden') continue;
       if (kind === 'radio') {
         const name = /** @type {HTMLInputElement} */ (el).name;
@@ -269,15 +363,27 @@ function pageMain(req, G) {
     const buttonNames = buttons.map((b) => b.name);
     // A3b: a Submit control is visible when any visible dialog button is submit-marked (A2 + A3), or any
     // visible dialog element carries a submit-marked data-* attribute.
-    const markedElement = dialog ? Array.from(dialog.querySelectorAll('*')).some((x) => G.isSubmitMarked({ dataAttrs: dataAttrsOf(x) }, R) && isVisible(x)) : false;
+    const footer = findFooter(dialog);
+    const scopeAll = dialog ? [...Array.from(dialog.querySelectorAll('*')), ...(footer ? Array.from(footer.querySelectorAll('*')) : [])] : [];
+    const markedElement = scopeAll.some((x) => G.isSubmitMarked({ dataAttrs: dataAttrsOf(x) }, R) && isVisible(x));
     const submitVisible = buttons.some((b) => b.submitMarked) || markedElement;
-    const dialogText = dialog ? clip(/** @type {HTMLElement} */ (dialog).innerText, 4000) : '';
+    const dialogText = dialog ? clip(`${/** @type {HTMLElement} */ (dialog).innerText}${footer ? ` ${/** @type {HTMLElement} */ (footer).innerText}` : ''}`, 20000) : '';
     const pageText = clip(document.body ? document.body.innerText : '', 5000);
     const headerTexts = dialog ? Array.from(dialog.querySelectorAll('h1, h2, h3')).filter(isVisible).map((h) => clip(h.textContent, 200)) : [];
-    const step = G.classifyStep({ dialogPresent: Boolean(dialog), headerTexts, submitVisible, dialogText, pageText, url: location.href }, R);
+    const authSel = R && R.authLost && typeof R.authLost === 'object' && typeof R.authLost.selector === 'string' ? R.authLost.selector : '';
+    const authGatePresent = authSel ? Array.from(document.querySelectorAll(authSel)).some(isVisible) : false;
+    const passwordPresent = Array.from(document.querySelectorAll('input')).some((x) => isPasswordLike(x) && fieldVisible(x));
+    const step = G.classifyStep({ dialogPresent: Boolean(dialog), headerTexts, submitVisible, dialogText, pageText, url: location.href, authGatePresent, passwordPresent }, R);
+    const U = R && R.upload && typeof R.upload === 'object' ? R.upload : null;
+    const uploadedFiles = U && typeof U.itemSelector === 'string'
+      ? Array.from(document.querySelectorAll(U.itemSelector)).filter((x) => isVisible(x) && inScope(x, dialog)).map((x) => {
+        const n = typeof U.nameSelector === 'string' ? x.querySelector(U.nameSelector) : null;
+        return clip(n ? n.textContent : x.textContent, 300);
+      })
+      : [];
     return {
       url: location.href, dialogPresent: Boolean(dialog), header: dialog ? headerOf(dialog) : '', headerTexts, step, submitVisible,
-      progressValues: progressValues(dialog), buttons, fields, alerts: alerts(dialog), resumeCards: resumeCards(dialog), dialogText,
+      progressValues: progressValues(dialog, headerTexts), buttons, fields, alerts: alerts(dialog), resumeCards: resumeCards(dialog), uploadedFiles, dialogText,
       stepKey: hash([headerTexts.join('|'), fields.map((f) => f.question).join('|'), buttonNames.join('|')].join('#')),
     };
   }
@@ -331,7 +437,7 @@ function pageMain(req, G) {
       const r = resolveRef(dialog, req.ref);
       if (!r.el) return { ok: false, reason: r.reason };
       if (!isVisible(r.el)) return { ok: false, reason: 'not_visible' };
-      if (!(r.el instanceof HTMLInputElement || r.el instanceof HTMLTextAreaElement) || fieldKind(r.el) === 'radio' || fieldKind(r.el) === 'checkbox' || fieldKind(r.el) === 'file' || fieldKind(r.el) === 'unsupported') return { ok: false, reason: 'not_text_field' };
+      if (!(r.el instanceof HTMLInputElement || r.el instanceof HTMLTextAreaElement) || fieldKind(r.el) !== (r.el instanceof HTMLTextAreaElement ? 'textarea' : 'text')) return { ok: false, reason: 'not_text_field' };
       const v = String(req.value ?? '').replace(/\r\n|\r|\n/g, ' ');
       setNativeValue(r.el, v);
       r.el.dispatchEvent(new Event('input', { bubbles: true }));
@@ -373,7 +479,34 @@ function pageMain(req, G) {
     case 'read_field': {
       const r = resolveRef(dialog, req.ref);
       if (!r.el) return { ok: false, reason: r.reason };
+      if (isPasswordLike(r.el)) return { ok: false, reason: 'password_field' };
       return { ok: true, value: currentValue(r.el, /** @type {Element} */ (dialog)), kind: fieldKind(r.el), question: fieldLabel(r.el), required: isRequired(r.el) };
+    }
+    case 'open_listbox': {
+      // Opens a listbox prompt (a button that pops an option list). No timers here: the popup renders
+      // after this call returns, and list_options / pick_option are separate calls (spec v1 clause 3).
+      const r = resolveRef(dialog, req.ref);
+      if (!r.el) return { ok: false, reason: r.reason };
+      if (!isListbox(r.el)) return { ok: false, reason: 'not_listbox' };
+      if (!isVisible(r.el)) return { ok: false, reason: 'not_visible' };
+      if (G.isSubmitMarked(buttonDesc(r.el, dialog), R)) return { ok: false, reason: 'denied_term' };
+      HTMLElement.prototype.click.call(r.el);
+      return { ok: true };
+    }
+    case 'list_options': {
+      const p = popupItems();
+      if (!p.ok) return { ok: false, reason: p.reason };
+      return { ok: true, options: p.items.map((o) => clip(innerTextOf(o), 300)) };
+    }
+    case 'pick_option': {
+      // A4: normalized exact match only; zero or two-plus matches refuse without clicking.
+      const p = popupItems();
+      if (!p.ok) return { ok: false, reason: p.reason };
+      const want = G.normalizeName(String(req.optionText ?? ''));
+      const hits = want ? p.items.filter((o) => G.normalizeName(innerTextOf(o)) === want) : [];
+      if (hits.length !== 1) return { ok: false, reason: hits.length === 0 ? 'no_exact_option' : 'ambiguous_option' };
+      HTMLElement.prototype.click.call(hits[0]);
+      return { ok: true, picked: clip(innerTextOf(hits[0]), 300) };
     }
     case 'file_input': {
       const files = dialog ? Array.from(dialog.querySelectorAll('input[type="file"]')).filter((f) => fieldVisible(f)) : [];
@@ -562,6 +695,41 @@ export function createAssistedDriver(deps) {
         return { ok: true, fileName: String(nameRes.result.value ?? '') };
       } finally {
         await deps.cdp.send('Runtime.releaseObjectGroup', { objectGroup: h.group }, /** @type {string} */ (sessionId)).catch(() => {});
+      }
+    },
+    /**
+     * Open a listbox prompt (Workday). The popup renders after this returns; listOptions/pickOption are
+     * separate calls, with a short server-side wait between them.
+     * @param {string} ref
+     */
+    async openListbox(ref) {
+      await pace();
+      const r = await call({ op: 'open_listbox', ref });
+      await sleep(400);
+      return r;
+    },
+    /** @returns {Promise<{ ok: boolean, reason?: string, options?: string[] }>} */
+    listOptions() {
+      return call({ op: 'list_options' });
+    },
+    /** @param {string} optionText */
+    async pickOption(optionText) {
+      await pace();
+      const r = await call({ op: 'pick_option', optionText });
+      await sleep(300);
+      return r;
+    },
+    /**
+     * The CDP target id of the tab this driver's session is attached to, read from Chrome (A12), or null.
+     * @returns {Promise<string|null>}
+     */
+    async currentTargetId() {
+      if (!sessionId) return null;
+      try {
+        const r = await deps.cdp.send('Target.getTargetInfo', {}, sessionId);
+        return r && r.targetInfo && typeof r.targetInfo.targetId === 'string' ? r.targetInfo.targetId : null;
+      } catch {
+        return null;
       }
     },
     /** @returns {Promise<{ state: 'applied'|'not_applied'|'unknown', evidence: string|null }>} */

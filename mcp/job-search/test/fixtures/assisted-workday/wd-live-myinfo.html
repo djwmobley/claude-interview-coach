@@ -1,0 +1,82 @@
+<!doctype html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<title>Synthetic Workday My Information page (test fixture)</title>
+<style>.sr { position: absolute; width: 1px; height: 1px; overflow: hidden; } .gone { display: none; }</style>
+</head>
+<body>
+<!-- SYNTHETIC fixture whose STRUCTURE follows a read-only probe of a live Workday tenant's first wizard page
+     (2026-10-05: Apply -> Apply Manually on a guest tenant, nothing typed or clicked further). No real
+     content: the step bar is an <ol data-automation-id="progressBar"> whose steps carry a screen-reader
+     label plus the step name; the footer Next sits INSIDE applyFlowPage; listbox prompts are buttons with
+     aria-haspopup="listbox" whose aria-label is "<question> <value> Required"; Country Phone Code is a
+     multiselect prompt with a selected chip; unlabeled invisible helper inputs sit inside the widgets; the
+     cookie banner, language menu, and Sign In button live outside the flow container. -->
+<div data-automation-id="legalNotice">
+  <p>We use cookies.</p>
+  <button data-automation-id="legalNoticeDeclineButton">Decline</button>
+  <button data-automation-id="legalNoticeAcceptButton">Accept Cookies</button>
+</div>
+<header data-automation-id="header">
+  <button id="languageSelectorButton" aria-haspopup="listbox" data-automation-id="utilityMenuButton">English</button>
+  <button data-automation-id="utilityButtonSignIn">Sign In</button>
+</header>
+<div data-automation-id="applyFlowPage">
+  <button data-automation-id="backToJobPosting">Back to Job Posting</button>
+  <h2 data-automation-id="jobTitleHeading">Synthetic Executive Role</h2>
+  <ol data-automation-id="progressBar">
+    <li data-automation-id="progressBarActiveStep"><label aria-live="polite">current step 1 of 6</label><label>My Information</label></li>
+    <li data-automation-id="progressBarInactiveStep"><label aria-live="polite">step 2 of 6</label><label>My Experience</label></li>
+    <li data-automation-id="progressBarInactiveStep"><label aria-live="polite">step 3 of 6</label><label>Application Questions</label></li>
+    <li data-automation-id="progressBarInactiveStep"><label aria-live="polite">step 4 of 6</label><label>Voluntary Disclosures</label></li>
+    <li data-automation-id="progressBarInactiveStep"><label aria-live="polite">step 5 of 6</label><label>Self Identify</label></li>
+    <li data-automation-id="progressBarInactiveStep"><label aria-live="polite">step 6 of 6</label><label>Review</label></li>
+  </ol>
+  <div data-automation-id="applyFlowMyInfoPage">
+    <h3>My Information</h3>
+    <div data-automation-id="formField-source">
+      <button id="source--source" aria-haspopup="listbox" aria-label="How Did You Hear About Us? Select One Required">Select One</button>
+      <input type="text" class="sr gone">
+    </div>
+    <div data-automation-id="formField-country">
+      <label for="country--country">Country*</label>
+      <button id="country--country" aria-haspopup="listbox" aria-label="Country United States of America Required">United States of America</button>
+    </div>
+    <div data-automation-id="formField-legalName--firstName">
+      <label for="name--legalName--firstName">First Name*</label>
+      <input type="text" id="name--legalName--firstName" name="legalName--firstName" aria-required="true">
+    </div>
+    <div data-automation-id="formField-preferredCheck">
+      <input type="checkbox" id="name--preferredCheck" name="preferredCheck" aria-required="false">
+      <label for="name--preferredCheck">I have a preferred name</label>
+    </div>
+    <div data-automation-id="formField-city">
+      <label for="address--city">City*</label>
+      <input type="text" id="address--city" name="city" aria-required="true">
+    </div>
+    <div data-automation-id="formField-countryPhoneCode">
+      <label for="phoneNumber--countryPhoneCode">Country Phone Code*</label>
+      <div data-automation-id="multiSelectContainer">
+        <ul data-automation-id="selectedItemList"><li data-automation-id="selectedItem">United States of America (+1)</li></ul>
+        <div data-automation-id="multiselectInputContainer"><input type="text" id="phoneNumber--countryPhoneCode" aria-required="true"></div>
+      </div>
+    </div>
+    <div data-automation-id="formField-phoneNumber">
+      <label for="phoneNumber--phoneNumber">Phone Number*</label>
+      <input type="text" id="phoneNumber--phoneNumber" name="phoneNumber" aria-required="true">
+      <input type="checkbox" data-automation-id="phone-sms-opt-in" class="gone">
+    </div>
+  </div>
+  <div data-automation-id="pageFooter">
+    <div data-automation-id="footerContainer">
+      <button data-automation-id="pageFooterNextButton" id="next">Next</button>
+    </div>
+  </div>
+</div>
+<script>
+  window.__clicks = [];
+  document.getElementById('next').onclick = () => { window.__clicks.push('next'); };
+</script>
+</body>
+</html>
