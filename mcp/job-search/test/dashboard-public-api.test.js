@@ -104,6 +104,12 @@ describe('classify(): resume refusals (resume gate R1)', () => {
     assert.equal(r.reason, 'unknown_kind');
     assert.equal(r.message, 'm');
   });
+
+  test('409 RETRY_REFUSED maps to the same resume_refused toast branch', () => {
+    const r = /** @type {any} */ (classify(409, { ok: false, code: 'RETRY_REFUSED', reason: 'partial_draft_ack_required', message: 'w' }));
+    assert.equal(r.kind, 'resume_refused');
+    assert.equal(r.reason, 'partial_draft_ack_required');
+  });
 });
 
 describe('classify(): assisted Easy Apply conflicts', () => {

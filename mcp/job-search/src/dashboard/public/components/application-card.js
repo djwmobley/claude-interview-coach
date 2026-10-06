@@ -18,6 +18,7 @@ import { chipClassName, applicationStateChip } from './chips.js';
 import { credentialPrompt } from './credential-prompt.js';
 import { withdrawControl } from './withdraw-control.js';
 import { resumeControl, partialDraftWarning } from './resume-control.js';
+import { confirmButton } from './confirm-button.js';
 import { withdrawButtonVisible, resumeButtonVisible } from '../lib/format.js';
 
 /** Apply exclusion gate (src/apply/exclusions.js): branches that are never overridable from the dashboard. */
@@ -173,20 +174,28 @@ export function applicationCard(opts) {
     },
   });
 
-  const retryButton = h('button', {
-    className: 'btn btn--primary',
-    attrs: { type: 'button' },
-    text: 'Retry',
-    on: {
-      click: async () => {
-        const outcome = handleOutcome(await postJson(`/api/applications/${application.id}/retry`, {}));
-        if (outcome.kind === 'ok') {
-          showToast({ message: 'Retrying.' });
-          opts.onChanged();
-        }
-      },
-    },
-  });
+  const doRetry = async (/** @type {boolean} */ ack) => {
+    const outcome = handleOutcome(await postJson(`/api/applications/${application.id}/retry`, ack ? { acknowledge_partial_draft: true } : {}));
+    if (outcome.kind === 'ok') {
+      showToast({ message: 'Retrying.' });
+      const warning = /** @type {any} */ (outcome).body?.warning;
+      if (typeof warning === 'string' && warning) showToast({ message: warning, tone: 'error' });
+      opts.onChanged();
+    }
+  };
+  // Resume gate R3: a failed row an assisted run ever clicked Next on shows the partial-draft warning and
+  // a two-click confirm; confirming sends the acknowledgment the server requires and records.
+  const retryButton = application.partial_draft === true
+    ? h('div', { className: 'approval-row__resume' }, [
+      partialDraftWarning(),
+      confirmButton({ label: 'Retry', confirmLabel: 'Confirm: I checked the draft', className: 'btn--primary', onConfirm: () => { doRetry(true); } }),
+    ])
+    : h('button', {
+      className: 'btn btn--primary',
+      attrs: { type: 'button' },
+      text: 'Retry',
+      on: { click: () => { doRetry(false); } },
+    });
 
   const screenshotEl = h('div', { className: 'application-card__screenshot' }, [
     hApplicationScreenshot({ src: `/api/applications/${application.id}/screenshot`, alt: 'Latest apply-run screenshot', className: 'application-card__screenshot-img' }),

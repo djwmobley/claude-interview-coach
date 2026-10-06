@@ -466,10 +466,24 @@ export function register(router, deps, streamHub) {
   router.register('POST', '/api/applications/:id/retry', async (ctx) => {
     const id = Number(ctx.params.id);
     if (!Number.isInteger(id) || id <= 0) throw new JobSearchError('VALIDATION', 'id must be a positive integer');
-    const row = await deps.withClient((c) => retry(c, id, { actor: 'dashboard', note: 'retried from dashboard' }));
+    // Resume gate R3: when an assisted run ever clicked Next for this application, the retry needs
+    // `acknowledge_partial_draft: true` (409 RETRY_REFUSED partial_draft_ack_required otherwise), checked
+    // under the row lock inside retry(); the acknowledgment is recorded on the event.
+    const b = /** @type {any} */ (ctx.body) ?? {};
+    const ack = b.acknowledge_partial_draft === true;
+    let row;
+    try {
+      row = await deps.withClient((c) => retry(c, id, { actor: 'dashboard', note: 'retried from dashboard', partialDraftPolicy: 'require_ack', acknowledgePartialDraft: ack }));
+    } catch (err) {
+      if (err instanceof JobSearchError && /** @type {any} */ (err).details?.reason === 'partial_draft_ack_required') {
+        return sendJson(ctx.res, 409, { ok: false, code: 'RETRY_REFUSED', reason: 'partial_draft_ack_required', message: `${PARTIAL_DRAFT_WARNING} Confirm you have seen this to retry.` });
+      }
+      throw err;
+    }
+    const partialDraft = await deps.withClient((c) => hasAssistedNextClickEver(c, id));
     streamHub?.notifyChanged('events');
     kickApplyRunner(deps, id, row);
-    sendJson(ctx.res, 200, { ok: true, row });
+    sendJson(ctx.res, 200, { ok: true, row, warning: partialDraft ? PARTIAL_DRAFT_WARNING : null });
   }, { allowEmptyBody: true });
 
   // Withdraw from the dashboard: closes an application parked, failed, or stuck in drafting (any state

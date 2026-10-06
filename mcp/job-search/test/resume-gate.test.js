@@ -475,6 +475,32 @@ describe('routes', () => {
     assert.equal(det.application.partial_draft, true);
   });
 
+  test('POST /api/applications/:id/retry: an unmarked failed row retries with no acknowledgment and no warning', async () => {
+    const id = await seed('failed', null);
+    const out = await post(`/api/applications/${id}/retry`);
+    assert.equal(out.status, 200);
+    assert.equal(out.body.row.state, 'approved');
+    assert.equal(out.body.warning, null);
+  });
+
+  test('POST /api/applications/:id/retry with the marker: 409 partial_draft_ack_required without the acknowledgment, then 200 with it, recorded on the event', async () => {
+    const id = await seed('failed', null, { ats: 'workday' });
+    await recordAssistedNextClick(c, id);
+    const refused = await post(`/api/applications/${id}/retry`);
+    assert.equal(refused.status, 409);
+    assert.equal(refused.body.code, 'RETRY_REFUSED');
+    assert.equal(refused.body.reason, 'partial_draft_ack_required');
+    assert.equal((await getApplication(c, id)).state, 'failed');
+    const ok = await post(`/api/applications/${id}/retry`, { acknowledge_partial_draft: true });
+    assert.equal(ok.status, 200);
+    assert.equal(ok.body.row.state, 'approved');
+    assert.equal(ok.body.warning, PARTIAL_DRAFT_WARNING);
+    const ev = (await listApplicationEvents(c, id)).find((e) => e.to_state === 'approved');
+    assert.equal(ev.meta.partial_draft, true);
+    assert.equal(ev.meta.partial_draft_acknowledged, true);
+    assert.match(ev.note, /acknowledged/);
+  });
+
   test('the dashboard credential auto-resume tick leaves a marked application parked', async () => {
     const id = await seed('needs_human', { kind: 'credential', target: 'ic-jobsearch/auto.example', username: 'u' }, { ats: 'workday' });
     await recordAssistedNextClick(c, id);

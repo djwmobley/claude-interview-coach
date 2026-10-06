@@ -1015,6 +1015,26 @@ describe('runSingleApplication: --application re-drive (submit-on-resume spec se
     }
   });
 
+  test('resume gate R3 race: a marker recorded after the pre-check is caught under the row lock (failed, needs_human, docs_ready)', async () => {
+    for (const [state, pq] of /** @type {[string, any][]} */ ([['failed', null], ['needs_human', { kind: 'resume_failed', label: 'x' }], ['docs_ready', null]])) {
+      const listingId = await insertListing();
+      const appId = await seedApplication(listingId, { state, pendingQuestion: pq ?? undefined });
+      let workerCalled = false;
+      let resumeCalled = false;
+      const r = await runSingleApplication(appId, baseSingleDeps({
+        // The pre-check reads "no marker", then the marker lands before the mutation takes the row lock.
+        hasPartialDraftFn: async () => { await recordAssistedNextClick(client, appId); return false; },
+        resumeRunner: { run: async () => { resumeCalled = true; return { ok: false, reason: 'not expected' }; } },
+        runWorker: async () => { workerCalled = true; return { ok: true, status: 'submitted' }; },
+      }));
+      assert.equal(r.outcome, 'refused', state);
+      assert.equal(r.reason, 'requires_human_retry', state);
+      assert.equal(workerCalled, false, state);
+      assert.equal(resumeCalled, false, state);
+      assert.equal((await getApplication(client, appId)).state, state, `${state} never transitioned`);
+    }
+  });
+
   test('the apply exclusion gate refuses a blocked-employer listing (amendment A1), excludeApplicationId set so it is never "already applied" against itself', async () => {
     const listingId = await insertListing({ company: 'Immunotec Research', companyNorm: 'immunotec research' });
     const appId = await seedApplication(listingId, { state: 'drafting' });

@@ -505,16 +505,71 @@ export async function resume(client, id, opts = {}) {
 }
 
 /**
+ * Partial-draft gate (resume gate R3), run inside the caller's transaction AFTER the row lock so a Next
+ * click recorded while the caller waited is seen. `policy`:
+ *   undefined       no check (returns whether the marker is set)
+ *   'refuse'        an automatic caller: marker set -> VALIDATION, details.reason 'requires_human_retry'
+ *   'require_ack'   a human caller: marker set and not acknowledged -> VALIDATION, details.reason
+ *                   'partial_draft_ack_required'
+ * @param {import('pg').ClientBase} c already inside a transaction
+ * @param {number} id
+ * @param {'refuse'|'require_ack'|undefined} policy
+ * @param {boolean} acknowledged
+ * @returns {Promise<boolean>} whether the marker is set
+ */
+async function partialDraftGateLocked(c, id, policy, acknowledged) {
+  await c.query('SELECT id FROM ic_job_applications WHERE id = $1 FOR UPDATE', [id]);
+  const marked = await hasAssistedNextClickEver(c, id);
+  if (!marked || !policy) return marked;
+  if (policy === 'refuse') {
+    throw new JobSearchError('VALIDATION', `application ${id} had an assisted Next click; only a human can resume it`, {
+      details: { application_id: id, reason: 'requires_human_retry' },
+    });
+  }
+  if (!acknowledged) {
+    throw new JobSearchError('VALIDATION', PARTIAL_DRAFT_WARNING, { details: { application_id: id, reason: 'partial_draft_ack_required' } });
+  }
+  return marked;
+}
+
+/**
  * failed -> approved ("Retry" in the dashboard), incrementing `attempt`. Rejects with VALIDATION if the
- * application is not currently 'failed'.
+ * application is not currently 'failed'. `partialDraftPolicy` (resume gate R3): the dashboard passes
+ * 'require_ack' (with `acknowledgePartialDraft` from the request), the CLI re-drive passes 'refuse'; the
+ * check runs under the row lock, and an acknowledged retry records it in the event's note and meta.
  * @param {import('pg').ClientBase} client
  * @param {number} id
- * @param {{ actor?: string, note?: string|null, meta?: unknown }} [opts]
+ * @param {{ actor?: string, note?: string|null, meta?: unknown, partialDraftPolicy?: 'refuse'|'require_ack', acknowledgePartialDraft?: boolean }} [opts]
  */
 export async function retry(client, id, opts = {}) {
-  return withTransaction(client, (c) => transitionUnwrapped(c, id, 'approved', opts, {
-    incrementAttempt: true, expectedFromState: 'failed', helperName: 'retry',
-  }));
+  const { partialDraftPolicy, acknowledgePartialDraft, ...transitionOpts } = opts;
+  return withTransaction(client, async (c) => {
+    const ack = acknowledgePartialDraft === true;
+    const marked = await partialDraftGateLocked(c, id, partialDraftPolicy, ack);
+    const withAck = marked && partialDraftPolicy === 'require_ack'
+      ? {
+        ...transitionOpts,
+        note: `${transitionOpts.note ?? 'retried'}; human acknowledged a possible partial draft on the site`,
+        meta: { ...(transitionOpts.meta && typeof transitionOpts.meta === 'object' ? transitionOpts.meta : {}), partial_draft: true, partial_draft_acknowledged: ack },
+      }
+      : transitionOpts;
+    return transitionUnwrapped(c, id, 'approved', withAck, { incrementAttempt: true, expectedFromState: 'failed', helperName: 'retry' });
+  });
+}
+
+/**
+ * transition() that first refuses, under the row lock, an application carrying the durable A10 marker
+ * (resume gate R3). For automatic re-drives (bin/auto-apply.js) that move a row toward submission.
+ * @param {import('pg').ClientBase} client
+ * @param {number} id
+ * @param {string} toState
+ * @param {{ actor?: string, note?: string|null, meta?: unknown, pending_question?: unknown, error?: string|null }} [opts]
+ */
+export async function transitionRefusingPartialDraft(client, id, toState, opts = {}) {
+  return withTransaction(client, async (c) => {
+    await partialDraftGateLocked(c, id, 'refuse', false);
+    return transitionUnwrapped(c, id, toState, opts, {});
+  });
 }
 
 /**
@@ -1098,7 +1153,7 @@ export async function checkApplicationBlockers(client, application, opts = {}) {
  * own and break the "same transaction" requirement for the hash writes.
  * @param {import('pg').ClientBase} client
  * @param {number} id
- * @param {{ outputRoot: string, actor?: string, note?: string|null, exclusionConfig?: import('../apply/exclusions.js').ExclusionConfig, configDir?: string }} opts
+ * @param {{ outputRoot: string, actor?: string, note?: string|null, exclusionConfig?: import('../apply/exclusions.js').ExclusionConfig, configDir?: string, refuseIfPartialDraft?: boolean }} opts
  *   `exclusionConfig`/`configDir` are a test seam only (mirrors createApplication's own `floors` param) --
  *   production callers never set them, letting checkApplicationBlockers load config/apply-exclusions.json
  *   fresh from disk as usual.
@@ -1114,6 +1169,8 @@ export async function approve(client, id, opts) {
         details: { from: row.state, expected: 'docs_ready' },
       });
     }
+    // Resume gate R3: an automatic re-drive (bin/auto-apply.js) refuses a marked row under this lock.
+    if (opts.refuseIfPartialDraft) await partialDraftGateLocked(c, id, 'refuse', false);
     if (!row.resume_doc_id) {
       throw new JobSearchError('VALIDATION', `approve() requires application ${id} to have a linked resume document`);
     }
