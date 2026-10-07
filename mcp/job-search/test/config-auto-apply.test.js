@@ -49,6 +49,7 @@ describe('shipped config/triage.json (unblock Item 4)', () => {
     assert.equal(t.model.backlogPerRun, 1500);
     assert.equal(t.model.maxListingsPerRun, 1500);
     assert.equal(t.model.maxBatchesPerRun, 100);
+    assert.equal(t.model.backlogMaxAgeDays, 14, 'rolling 14-day window for the backlog and reskip sweeps');
     assert.equal(t.deterministic.floor, 40, 'the deterministic floor (sticky-skip, scope) is unchanged');
   });
   test('the shipped triage.json passes triageSchema (no schema max blocks the shipped values)', () => {

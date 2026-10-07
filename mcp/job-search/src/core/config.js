@@ -658,6 +658,10 @@ export const triageSchema = z.object({
     // max is 5000 so one run can drain an accumulated unscored backlog, while staying bounded.
     scoreFloor: z.number().int().min(0).max(100).optional(),
     backlogPerRun: z.number().int().min(0).max(5000).default(0),
+    // Rolling window (days) for the backlog sweep and the automatic-skip_low reskip sweep: only rows whose
+    // first_seen is on or after current_date - N are swept. null (the default) means no age limit. This
+    // run's own rows are triaged regardless of age.
+    backlogMaxAgeDays: z.number().int().positive().nullable().default(null),
   }).default({}),
 });
 

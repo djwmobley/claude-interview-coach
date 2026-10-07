@@ -1454,6 +1454,40 @@ describe('runTriage: model_low, backlog sweep, rescore, coverage (Item 4, A2, A9
     assert.ok(!(await loadAutoSkipLowIds(client, null, 5000, { deterministic: { floor: 40 }, model: { scoreFloor: 0 } })).includes(autoLow));
   });
 
+  test('backlogMaxAgeDays 14: a row first seen 13 days ago is swept, 15 days ago is not (backlog and reskip)', async () => {
+    await cleanup();
+    const oldRun = await insertRun();
+    const backlog13 = await insertListing({ prescore: 55 });
+    const backlog15 = await insertListing({ prescore: 55 });
+    const reskip13 = await insertListing({ prescore: 10 });
+    const reskip15 = await insertListing({ prescore: 10 });
+    for (const id of [backlog13, backlog15, reskip13, reskip15]) await recordRunItem(oldRun, id, 'greenhouse');
+    // Deterministic pass under scoreFloor 20 auto-skips the prescore-10 rows; band rows stay untriaged.
+    await runTriage(client, oldRun, { ...testConfig(), configDir, triage: triageCfg({ backlogPerRun: 0 }) }, { keywords: [] }, { execFile: async () => { throw Object.assign(new Error('x'), { code: 1 }); } });
+    await client.query('UPDATE ic_job_listings SET triage_model_failures = 0 WHERE id = ANY($1::int[])', [[backlog13, backlog15]]);
+    await client.query(`UPDATE ic_job_listings SET first_seen = now() - interval '13 days' WHERE id = ANY($1::int[])`, [[backlog13, reskip13]]);
+    await client.query(`UPDATE ic_job_listings SET first_seen = now() - interval '15 days' WHERE id = ANY($1::int[])`, [[backlog15, reskip15]]);
+    const cfg14 = { deterministic: { floor: 40 }, model: { scoreFloor: 0, backlogMaxAgeDays: 14 } };
+    const reskip = await loadAutoSkipLowIds(client, null, 100000, cfg14);
+    assert.ok(reskip.includes(reskip13), '13 days old is reswept');
+    assert.ok(!reskip.includes(reskip15), '15 days old is not');
+    const unlimited = await loadAutoSkipLowIds(client, null, 100000, { deterministic: { floor: 40 }, model: { scoreFloor: 0 } });
+    assert.ok(unlimited.includes(reskip15), 'no backlogMaxAgeDays means no age limit');
+
+    const seen = /** @type {number[]} */ ([]);
+    await runTriage(client, await insertRun(), { ...testConfig(), configDir, triage: triageCfg({ scoreFloor: 0, backlogPerRun: 5000, backlogMaxAgeDays: 14 }) }, { keywords: [] }, { execFile: execFor(seen) });
+    assert.ok(seen.includes(backlog13), 'untriaged 13-day row is swept');
+    assert.ok(!seen.includes(backlog15), 'untriaged 15-day row is not');
+    assert.ok(seen.includes(reskip13));
+    assert.ok(!seen.includes(reskip15));
+  });
+
+  test('triageSchema: backlogMaxAgeDays defaults to null (no limit) and accepts 14', () => {
+    assert.equal(triageSchema.parse({}).model.backlogMaxAgeDays, null);
+    assert.equal(triageSchema.parse({ model: { backlogMaxAgeDays: 14 } }).model.backlogMaxAgeDays, 14);
+    assert.equal(triageSchema.safeParse({ model: { backlogMaxAgeDays: 0 } }).success, false);
+  });
+
   test('reskip apply guard: a row a human re-marked between selection and apply is not overwritten', async () => {
     await cleanup();
     const id = await insertListing({ prescore: 10, status: 'skip' });

@@ -384,9 +384,11 @@ export async function loadModelIdsByBand(client, runId, cfg) {
  * @param {import('pg').ClientBase} client
  * @param {number} runId
  * @param {number} limit
+ * @param {number|null} [maxAgeDays] cfg.model.backlogMaxAgeDays: only rows first seen on or after
+ *   current_date - N (a NULL first_seen is then excluded); null means no age limit.
  * @returns {Promise<number[]>}
  */
-export async function loadBacklogIds(client, runId, limit) {
+export async function loadBacklogIds(client, runId, limit, maxAgeDays = null) {
   if (!(limit > 0)) return [];
   const r = await client.query(
     `SELECT l.id FROM ic_job_listings l
@@ -394,9 +396,10 @@ export async function loadBacklogIds(client, runId, limit) {
         AND coalesce(l.stale, false) = false AND l.status IS NULL AND l.triage_model_failures < $3
         AND NOT EXISTS (SELECT 1 FROM ic_job_review_queue q WHERE q.candidate_id = l.id AND q.resolved_at IS NULL)
         AND NOT EXISTS (SELECT 1 FROM ic_scan_run_items i WHERE i.listing_id = l.id AND i.run_id = $1)
+        AND ($4::int IS NULL OR l.first_seen >= current_date - $4::int)
       ORDER BY l.first_seen DESC NULLS LAST, l.id DESC
       LIMIT $2`,
-    [runId, limit, BACKLOG_MAX_MODEL_FAILURES],
+    [runId, limit, BACKLOG_MAX_MODEL_FAILURES, maxAgeDays],
   );
   return r.rows.map((row) => Number(row.id));
 }
@@ -438,6 +441,7 @@ export async function loadAutoSkipLowIds(client, runId, limit, cfg) {
         AND l.triage_model_failures < $5
         AND NOT EXISTS (SELECT 1 FROM ic_job_review_queue q WHERE q.candidate_id = l.id AND q.resolved_at IS NULL)
         AND ($1::int IS NULL OR NOT EXISTS (SELECT 1 FROM ic_scan_run_items i WHERE i.listing_id = l.id AND i.run_id = $1))
+        AND ($7::int IS NULL OR l.first_seen >= current_date - $7::int)
         AND EXISTS (
           SELECT 1 FROM (
             SELECT e.actor, e.to_status, e.note FROM ic_job_events e
@@ -448,7 +452,7 @@ export async function loadAutoSkipLowIds(client, runId, limit, cfg) {
         )
       ORDER BY l.first_seen DESC NULLS LAST, l.id DESC
       LIMIT $2`,
-    [runId, limit, scoreFloor, cfg.deterministic.floor, BACKLOG_MAX_MODEL_FAILURES, AUTO_SKIP_LOW_NOTE_RE],
+    [runId, limit, scoreFloor, cfg.deterministic.floor, BACKLOG_MAX_MODEL_FAILURES, AUTO_SKIP_LOW_NOTE_RE, cfg.model?.backlogMaxAgeDays ?? null],
   );
   return r.rows.map((row) => Number(row.id));
 }
@@ -953,7 +957,7 @@ export async function runTriage(client, runId, config, profile, deps = {}) {
   let backlog = null;
   const backlogPerRun = cfg.model.backlogPerRun ?? 0;
   if (cfg.model.enabled && cfg.deterministic.enabled && backlogPerRun > 0) {
-    const swept = (await loadBacklogIds(client, runId, backlogPerRun)).filter((id) => !taken.has(id));
+    const swept = (await loadBacklogIds(client, runId, backlogPerRun, cfg.model.backlogMaxAgeDays ?? null)).filter((id) => !taken.has(id));
     const r = await deterministicTriageIds(client, swept, cfg, { now: deps.now });
     backlog = { ...r.counts, swept: swept.length };
     const keep = new Set([...r.modelIds, ...r.autoNewIds]);
