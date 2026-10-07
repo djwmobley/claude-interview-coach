@@ -172,7 +172,9 @@ export async function persistLinkedInApplyState(client, listing, state, opts) {
  *   tripBreaker?: typeof defaultTripBreaker,
  *   markListingApplied?: (c: import('pg').ClientBase, id: number, now: Date) => Promise<void>,
  * }} deps
- * @returns {Promise<{ outcome: string, branch: string|null, reason?: string }>}
+ * @returns {Promise<{ outcome: string, branch: string|null, reason?: string, clicked?: boolean }>} `clicked` is
+ *   true when the external Apply button was clicked (a second page load: the click probe's new tab), so a
+ *   caller that reserved budget for that load can tell whether it was used.
  */
 export async function prepareLinkedInListing(client, listing, deps) {
   const url = listing.url_normalized ?? listing.url;
@@ -190,6 +192,7 @@ export async function prepareLinkedInListing(client, listing, deps) {
   let reason = verdict.reason;
   /** @type {import('../core/apply-target-persist.js').ApplyDetail|null} */
   let applyDetail = null;
+  let clicked = false;
 
   if (branch === 'external' && verdict.control) {
     if (verdict.control.href) {
@@ -198,6 +201,7 @@ export async function prepareLinkedInListing(client, listing, deps) {
       branch = 'unknown';
       reason = 'external_button_no_probe_session';
     } else {
+      clicked = true;
       const probe = await probeLinkedInButtonApply(deps.probeSession.page, deps.probeSession.session, {
         control: { path: verdict.control.path, name: verdict.control.name }, timeoutMs: deps.probeTimeoutMs ?? 15000, sleep: deps.sleep,
       });
@@ -215,7 +219,7 @@ export async function prepareLinkedInListing(client, listing, deps) {
     now: deps.now, countAttempt: true, resolveExternal: true, probeRegistry: deps.probeRegistry, reprobeAfterHours: deps.reprobeAfterHours,
     fetch: deps.fetch, lookup: deps.lookup, tripBreaker: deps.tripBreaker, markListingApplied: deps.markListingApplied,
   });
-  return { ...persisted, reason };
+  return { ...persisted, reason, clicked };
 }
 
 /**

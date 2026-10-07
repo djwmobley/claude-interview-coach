@@ -101,9 +101,18 @@ export function shuffle(arr) {
   return arr;
 }
 
-/** @param {Date} [now] */
-export function budgetDay(now = new Date()) {
-  return now.toISOString().slice(0, 10);
+/**
+ * The budget day of `now`: the UTC date by default (every scan and LinkedIn pool, the submit cap), or the
+ * local date in `timezone` when one is given (unblock-auto-apply Item 5, A7: only the workday_assisted
+ * pool passes America/Chicago, so an evening attempt never consumes the next local morning's cap).
+ * @param {Date} [now]
+ * @param {string|null} [timezone] IANA zone; omitted or null means UTC
+ */
+export function budgetDay(now = new Date(), timezone = null) {
+  if (!timezone) return now.toISOString().slice(0, 10);
+  const parts = new Intl.DateTimeFormat('en-CA', { timeZone: timezone, year: 'numeric', month: '2-digit', day: '2-digit' }).formatToParts(now);
+  const get = (/** @type {string} */ t) => parts.find((p) => p.type === t)?.value ?? '';
+  return `${get('year')}-${get('month')}-${get('day')}`;
 }
 
 /**
@@ -112,9 +121,10 @@ export function budgetDay(now = new Date()) {
  * @param {string} source
  * @param {{ dailyPages: number, dailyDetails: number }} caps
  * @param {Date} [now]
+ * @param {string|null} [timezone] see budgetDay; omitted means the UTC day
  */
-export async function remainingBudget(client, source, caps, now = new Date()) {
-  const r = await client.query('SELECT pages, details FROM ic_scan_budget WHERE source = $1 AND day = $2', [source, budgetDay(now)]);
+export async function remainingBudget(client, source, caps, now = new Date(), timezone = null) {
+  const r = await client.query('SELECT pages, details FROM ic_scan_budget WHERE source = $1 AND day = $2', [source, budgetDay(now, timezone)]);
   const used = r.rows[0] ?? { pages: 0, details: 0 };
   return { pages: Math.max(0, caps.dailyPages - used.pages), details: Math.max(0, caps.dailyDetails - used.details), usedPages: used.pages, usedDetails: used.details };
 }
@@ -128,12 +138,13 @@ export async function remainingBudget(client, source, caps, now = new Date()) {
  * @param {{ pages?: number, details?: number }} want
  * @param {{ dailyPages: number, dailyDetails: number }} caps
  * @param {Date} [now]
+ * @param {string|null} [timezone] see budgetDay; omitted means the UTC day
  * @returns {Promise<{ ok: boolean, remainingPages: number, remainingDetails: number }>}
  */
-export async function reserveBudget(client, source, want, caps, now = new Date()) {
+export async function reserveBudget(client, source, want, caps, now = new Date(), timezone = null) {
   const p = Math.max(0, want.pages ?? 0);
   const d = Math.max(0, want.details ?? 0);
-  const day = budgetDay(now);
+  const day = budgetDay(now, timezone);
   await client.query('INSERT INTO ic_scan_budget (source, day) VALUES ($1, $2) ON CONFLICT (source, day) DO NOTHING', [source, day]);
   const r = await client.query(
     `UPDATE ic_scan_budget SET pages = pages + $3, details = details + $4
@@ -144,6 +155,22 @@ export async function reserveBudget(client, source, want, caps, now = new Date()
   if (r.rowCount === 1) {
     return { ok: true, remainingPages: caps.dailyPages - r.rows[0].pages, remainingDetails: caps.dailyDetails - r.rows[0].details };
   }
-  const rem = await remainingBudget(client, source, caps, now);
+  const rem = await remainingBudget(client, source, caps, now, timezone);
   return { ok: false, remainingPages: rem.pages, remainingDetails: rem.details };
+}
+
+/**
+ * Give back part of a reservation made the same budget day (a reserved page load that never happened).
+ * Never takes a counter below zero.
+ * @param {import('pg').ClientBase} client
+ * @param {string} source
+ * @param {{ pages?: number, details?: number }} give
+ * @param {Date} [now] the reservation's own clock reading
+ * @param {string|null} [timezone] see budgetDay
+ */
+export async function refundBudget(client, source, give, now = new Date(), timezone = null) {
+  await client.query(
+    'UPDATE ic_scan_budget SET pages = GREATEST(pages - $3, 0), details = GREATEST(details - $4, 0) WHERE source = $1 AND day = $2',
+    [source, budgetDay(now, timezone), Math.max(0, give.pages ?? 0), Math.max(0, give.details ?? 0)],
+  );
 }

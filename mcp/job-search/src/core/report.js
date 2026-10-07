@@ -18,6 +18,7 @@ import { repoRoot, DEFAULT_REPORT_HOME_MIN_PRESCORE } from './config.js';
 import { normalizeLocation } from './normalize.js';
 import { JobSearchError } from './errors.js';
 import { UNCONFIRMED_SUBMIT_KINDS } from './applications.js';
+import { collectGmailManualApply } from './gmail-detail.js';
 
 /** Directory the markdown report is written to (spec R1.3), relative to the repo root; covered by the existing `/output/` .gitignore entry. */
 export const REPORTS_DIR = path.join('output', 'reports');
@@ -569,6 +570,144 @@ export async function collectReviewQueueSummary(client, since) {
   return { total: total.rows[0].n, topReasons: reasons.rows.map((r) => ({ reason: r.reason, count: r.n })), bulkToday };
 }
 
+/**
+ * Latched sources (unblock-auto-apply Item 6): every ic_source_state row with manual_disable=true. A wall
+ * breaker that latched (src/browser/wall.js) stays off until someone re-enables it on the dashboard Scans
+ * page, so both reports open with one headline per latched source, every run, until then. `since` is the
+ * last wall's time (null when none was recorded); `reason` names the wall count, or "manual disable" when
+ * the latch did not come from walls.
+ * @param {import('pg').ClientBase} client
+ * @returns {Promise<Array<{ source: string, since: string|null, reason: string }>>}
+ */
+export async function collectLatchedSources(client) {
+  const r = await client.query('SELECT source, last_wall_at, consecutive_walls FROM ic_source_state WHERE manual_disable = true ORDER BY source');
+  return r.rows.map((row) => {
+    const walls = Number(row.consecutive_walls ?? 0);
+    return {
+      source: String(row.source),
+      since: row.last_wall_at ? new Date(row.last_wall_at).toISOString() : null,
+      reason: walls > 0 ? `${walls} consecutive wall${walls === 1 ? '' : 's'}` : 'manual disable',
+    };
+  });
+}
+
+/**
+ * Headline lines for latched sources (Item 6). Total over its input: a non-array gives no lines.
+ * @param {Array<{ source: string, since: string|null, reason: string }>|null|undefined} latched
+ * @returns {string[]}
+ */
+export function latchedSourceLines(latched) {
+  if (!Array.isArray(latched)) return [];
+  return latched.map((s) => `SOURCE DISABLED: ${s.source} since ${s.since ?? 'unknown'} (${s.reason}); re-enable on dashboard Scans`);
+}
+
+/** Per-sender counters summed across every run in the report (Gmail intake addendum). */
+const GMAIL_COUNTERS = Object.freeze(['emails', 'ok', 'partial', 'parse_empty', 'no_job_markers', 'parse_error', 'no_body', 'fetch_error', 'listings', 'matched', 'markers', 'incomplete']);
+
+/**
+ * Sum stats.gmail over the report's runs. Null when no run carries stats.gmail (gmail skipped, or an auth
+ * failure stopped it before the end; the auth line covers that case).
+ * @param {any[]} runs
+ * @returns {{ bySender: Record<string, any>, unhandled: Record<string, number>, discovery: string|null, details: any|null }|null}
+ */
+export function aggregateGmailStats(runs) {
+  /** @type {Record<string, any>} */
+  const bySender = {};
+  /** @type {Record<string, number>} */
+  const unhandled = {};
+  let discovery = null;
+  let details = null;
+  let any = false;
+  for (const r of runs ?? []) {
+    const g = r && r.stats ? r.stats.gmail : null;
+    if (!g || typeof g !== 'object') continue;
+    any = true;
+    for (const [addr, s] of Object.entries(g.by_sender ?? {})) {
+      const t = bySender[addr] ?? (bySender[addr] = { parser: s.parser ?? null, parser_version: s.parser_version ?? null });
+      for (const k of GMAIL_COUNTERS) t[k] = (t[k] ?? 0) + Number(s[k] ?? 0);
+    }
+    for (const [addr, n] of Object.entries(g.unhandled_senders ?? {})) unhandled[addr] = (unhandled[addr] ?? 0) + Number(n);
+    if (g.discovery && g.discovery.outcome) discovery = String(g.discovery.outcome);
+    const d = r.stats.gmail_detail;
+    if (d && typeof d === 'object') details = d;
+  }
+  return any ? { bySender, unhandled, discovery, details } : null;
+}
+
+/**
+ * Gmail health lines (G4 with B7). Hard: a registered sender with parse_empty or parse_error > 0 in at least
+ * `minEmails` emails -> "PARSER BROKEN: ..." (also the subject prefix). Soft info: emails with no job markers
+ * (news, resume reports). Ratio warning: listings under half of the job markers.
+ * @param {ReturnType<typeof aggregateGmailStats>} g
+ * @param {number} [minEmails]
+ */
+export function gmailHealthLines(g, minEmails = 1) {
+  /** @type {{ broken: string[], soft: string[] }} */
+  const out = { broken: [], soft: [] };
+  if (!g) return out;
+  for (const [addr, s] of Object.entries(g.bySender).sort(([a], [b]) => a.localeCompare(b))) {
+    if ((s.emails ?? 0) >= minEmails && ((s.parse_empty ?? 0) > 0 || (s.parse_error ?? 0) > 0)) {
+      out.broken.push(`PARSER BROKEN: ${addr} ${s.emails} email${s.emails === 1 ? '' : 's'}, ${s.listings} listings (parse_empty ${s.parse_empty}, parse_error ${s.parse_error})`);
+    }
+    if ((s.no_job_markers ?? 0) > 0) out.soft.push(`gmail info: ${addr} ${s.no_job_markers} email${s.no_job_markers === 1 ? '' : 's'} with no job markers`);
+    if ((s.markers ?? 0) > 0 && (s.listings ?? 0) > 0 && s.listings < s.markers * 0.5) {
+      out.soft.push(`gmail warning: ${addr} parsed ${s.listings} listing${s.listings === 1 ? '' : 's'} from ${s.markers} job markers (under 50%)`);
+    }
+  }
+  return out;
+}
+
+/**
+ * The per-report gmail lines (all runs): the totals line, then one sub-line per sender whose outcomes are
+ * not all ok/no_job_markers, then the gmail details line when the description phase ran.
+ * @param {ReturnType<typeof aggregateGmailStats>} g
+ * @returns {string[]}
+ */
+export function gmailReportLines(g) {
+  if (!g) return [];
+  const sum = (/** @type {string} */ k) => Object.values(g.bySender).reduce((n, s) => n + Number(s[k] ?? 0), 0);
+  const unhandledTotal = Object.values(g.unhandled).reduce((n, v) => n + v, 0);
+  const top = Object.entries(g.unhandled).sort((a, b) => b[1] - a[1] || a[0].localeCompare(b[0])).slice(0, 5).map(([a, n]) => `${a}:${n}`);
+  const lines = [
+    `gmail: ${sum('emails')} emails; listings ${sum('listings')} (matched ${sum('matched')}); ok ${sum('ok')}, partial ${sum('partial')}, parse_empty ${sum('parse_empty')}, no_job_markers ${sum('no_job_markers')}, parse_error ${sum('parse_error')}, no_body ${sum('no_body')}, fetch_error ${sum('fetch_error')}; unhandled senders ${unhandledTotal}${top.length ? ` [${top.join(', ')}]` : ''}; discovery ${g.discovery ?? 'not run'}`,
+  ];
+  for (const [addr, s] of Object.entries(g.bySender).sort(([a], [b]) => a.localeCompare(b))) {
+    const clean = (s.emails ?? 0) === (s.ok ?? 0) + (s.no_job_markers ?? 0);
+    if (!clean) lines.push(`  ${addr} (${s.parser ?? '?'} v${s.parser_version ?? '?'}): ${s.emails} emails, ${s.listings} listings, parse_empty ${s.parse_empty}, partial ${s.partial}`);
+  }
+  if (g.details) lines.push(gmailDetailLine(g.details));
+  return lines;
+}
+
+/**
+ * "gmail details: candidates C; fetched F (linkedin a, indeed b, ats c, generic d); deduped D; empty E;
+ * unwrap failed U [reason:n]; denied X; no_link N; unknown T; deferred B [reason:n]; stuck ineligible S"
+ * (G3, B2).
+ * @param {any} d stats.gmail_detail
+ */
+export function gmailDetailLine(d) {
+  const f = d.fetched_by ?? {};
+  const fetched = (f.linkedin ?? 0) + (f.indeed ?? 0) + (f.ats ?? 0) + (f.generic ?? 0);
+  const br = (/** @type {Record<string, number>|undefined} */ m) => {
+    const e = Object.entries(m ?? {}).filter(([, n]) => n);
+    return e.length ? ` [${e.map(([k, n]) => `${k}:${n}`).join(', ')}]` : '';
+  };
+  const unwrapFailed = Object.values(d.unwrap_failed ?? {}).reduce((n, v) => n + Number(v), 0);
+  const deferred = Object.values(d.deferred ?? {}).reduce((n, v) => n + Number(v), 0);
+  return `gmail details: candidates ${d.candidates ?? 0}; fetched ${fetched} (linkedin ${f.linkedin ?? 0}, indeed ${f.indeed ?? 0}, ats ${f.ats ?? 0}, generic ${f.generic ?? 0}); deduped ${d.deduped ?? 0}; empty ${d.empty ?? 0}; unwrap failed ${unwrapFailed}${br(d.unwrap_failed)}; denied ${d.denied ?? 0}; no_link ${d.no_link ?? 0}; unknown ${d.unknown ?? 0}; deferred ${deferred}${br(d.deferred)}; stuck ineligible ${d.stuck_ineligible ?? 0}`;
+}
+
+/**
+ * B2 manual-apply list: a blank line, a heading line, then one line per item. Empty when there are none.
+ * @param {Array<{ id: number, title: string|null, company: string|null, fit: number|null, link: string|null, outcome: string }>|undefined} items
+ * @returns {string[]}
+ */
+export function gmailManualApplyLines(items) {
+  if (!Array.isArray(items) || items.length === 0) return [];
+  return ['', `== Gmail jobs to apply to by hand (${items.length}) ==`,
+    ...items.map((x) => `  #${x.id} | ${x.title ?? 'n/a'} | ${x.company ?? 'n/a'} | fit ${x.fit ?? '?'} | ${x.outcome}${x.link ? ` | ${x.link}` : ''}`)];
+}
+
 /** @param {import('pg').ClientBase} client */
 export async function collectDisabledSources(client) {
   const r = await client.query(`SELECT source, disabled_until, manual_disable FROM ic_source_state WHERE manual_disable = true OR disabled_until > now() ORDER BY source`);
@@ -615,6 +754,9 @@ export async function buildScanReport(client, opts = {}) {
   const homeLocations = await collectHomeLocations(client, since, homeLocationNorms, homeMinPrescore);
   const reviewQueue = await collectReviewQueueSummary(client, effectiveSince ? since : null);
   const disabledSources = await collectDisabledSources(client);
+  const latchedSources = await collectLatchedSources(client);
+  // Gmail intake addendum B2: gmail rows that cannot get a description automatically, worth a human look.
+  const gmailManualApply = await collectGmailManualApply(client);
   const worstStatus = runs.reduce((worst, r) => (REPORT_STATUS_PRIORITY[r.status] ?? 0) > (REPORT_STATUS_PRIORITY[worst] ?? 0) ? r.status : worst, 'ok');
   return {
     now,
@@ -630,6 +772,8 @@ export async function buildScanReport(client, opts = {}) {
     homeLocations,
     reviewQueue,
     disabledSources,
+    latchedSources,
+    gmailManualApply,
     lastRunIdIncluded: runs.length ? runs[runs.length - 1].run_id : state.lastRunIdIncluded,
   };
 }
@@ -653,6 +797,8 @@ export function buildReportSubject(data, extra = {}) {
   if (data.lockMismatch) prefixes.push(warningBannerLabel(data.lockMismatch.code));
   else if (data.noScan) prefixes.push('[NO SCAN]');
   else if (data.worstStatus !== 'ok') prefixes.push(`[SCAN ${String(data.worstStatus).toUpperCase()}]`);
+  // Gmail intake addendum B7: the hard case only (a registered sender parsed empty or threw).
+  if (gmailHealthLines(aggregateGmailStats(data.runs), /** @type {any} */ (data).parserBrokenMinEmails ?? 1).broken.length) prefixes.push('[PARSER BROKEN]');
   const parts = [`Job scan report ${data.dayKey}`];
   const newCount = data.lookAtThese.rows.length;
   parts.push(`${newCount} to look at`);
@@ -746,6 +892,7 @@ export function renderTriageLine(triage) {
   if (!triage) return null;
   if (triage.error) return `triage: failed (${triage.error})`;
   if (!triage.configured) return 'triage: not configured (no config/triage.json; deterministic and model triage are off)';
+  if (triage.coverage && typeof triage.coverage === 'object') return renderCoverageTriageLine(triage);
   const d = triage.deterministic ?? {};
   const m = triage.model ?? {};
   const autoSkipped = (d.skip_noise ?? 0) + (d.skip_low ?? 0);
@@ -768,6 +915,32 @@ export function renderTriageLine(triage) {
     return `${base}, ${sentToModel} sent to model, ${m.scored ?? 0} scored, ${m.batches_zero_scored} of ${m.batches_sent} batches scored nothing (check the prompt)${suffix}`;
   }
   return `${base}, ${sentToModel} sent to model, ${m.scored ?? 0} scored${suffix}`;
+}
+
+/**
+ * Coverage triage line (unblock-auto-apply Item 4), for a run whose stats.triage carries `coverage` (every
+ * run since that change; older runs keep renderTriageLine's original wording):
+ * "triage: sent M (band a, low b, auto_new c, review d, backlog e); scored S; unscored U; capped C;
+ * skip_low K; noise J", with ", rescore r" inside the parentheses only when nonzero, then the model step's
+ * failure or disabled reason when there is one. skip_low and noise include the backlog sweep's own marks.
+ * @param {any} triage
+ */
+function renderCoverageTriageLine(triage) {
+  const cov = triage.coverage;
+  const d = triage.deterministic ?? {};
+  const b = triage.backlog ?? {};
+  const m = triage.model ?? {};
+  const k = cov.by_kind ?? {};
+  const kinds = [`band ${k.band ?? 0}`, `low ${k.low ?? 0}`, `auto_new ${k.auto_new ?? 0}`, `review ${k.review ?? 0}`, `backlog ${k.backlog ?? 0}`];
+  if (k.rescore) kinds.push(`rescore ${k.rescore}`);
+  const parts = [
+    `sent ${cov.sent ?? 0} (${kinds.join(', ')})`, `scored ${cov.scored ?? 0}`, `unscored ${cov.failed ?? 0}`, `capped ${cov.capped ?? 0}`,
+    `skip_low ${(d.skip_low ?? 0) + (b.skip_low ?? 0)}`, `noise ${(d.skip_noise ?? 0) + (b.skip_noise ?? 0)}`,
+  ];
+  let line = `triage: ${parts.join('; ')}`;
+  if (!m.enabled) line += m.reason === 'candidate_summary_missing' ? ' (model scoring disabled: candidate summary missing)' : ' (model scoring disabled)';
+  else if (m.batches_failed > 0) line += `; claude -p ${triageFailureText(m.last_failure_reason)}`;
+  return line;
 }
 
 /**
@@ -811,6 +984,9 @@ function detailsBySourceLines(stats) {
  */
 export function renderReportText(data, registry, googleAuthState, dashboardHealthState) {
   const lines = [];
+  // Item 6: a latched source opens the report, every run, until re-enabled.
+  const latched = latchedSourceLines(/** @type {any} */ (data).latchedSources);
+  if (latched.length) lines.push(...latched, '');
   lines.push(`Job scan report for ${data.dayKey} (times ${data.timezone})`);
   lines.push('');
   if (data.lockMismatch) {
@@ -821,6 +997,9 @@ export function renderReportText(data, registry, googleAuthState, dashboardHealt
     lines.push('NO SCAN: no scan run has completed since the last report, on a day one was expected.');
     lines.push('');
   }
+  const gmailAgg = aggregateGmailStats(data.runs);
+  const gmailHealth = gmailHealthLines(gmailAgg, /** @type {any} */ (data).parserBrokenMinEmails ?? 1);
+  if (gmailHealth.broken.length) lines.push(...gmailHealth.broken, '');
   if (googleAuthState !== undefined) {
     lines.push(googleAuthLineText(googleAuthState));
     lines.push('');
@@ -843,6 +1022,12 @@ export function renderReportText(data, registry, googleAuthState, dashboardHealt
     if (triageLine) lines.push(`  ${triageLine}`);
     for (const e of r.errors.slice(0, 5)) lines.push(`  error: ${e.source ?? 'run'} ${e.code}: ${errorLineMessage(e).slice(0, 200)}`);
   }
+  if (gmailAgg) {
+    lines.push('');
+    lines.push('== Gmail intake ==');
+    lines.push(...gmailReportLines(gmailAgg), ...gmailHealth.soft);
+  }
+  for (const l of gmailManualApplyLines(/** @type {any} */ (data).gmailManualApply)) lines.push(l);
   lines.push('');
   lines.push(`== Look at these (top ${data.lookAtThese.rows.length}) ==`);
   if (data.lookAtThese.excludedCount) lines.push(`(${data.lookAtThese.excludedCount} noise-classified row(s) excluded from this list; they are still in the database)`);
@@ -896,11 +1081,15 @@ export function renderReportHtml(data, registry, googleAuthState, dashboardHealt
     return `<li>#${r.id} ${linkOrText(r)} at ${esc(r.company)}, ${esc(r.location ?? 'n/a')}, ${esc(salaryText(r))}, ps ${r.prescore ?? 0}, ${esc(r.source)}${also}${alsoPosted}</li>`;
   };
   const parts = [];
+  for (const line of latchedSourceLines(/** @type {any} */ (data).latchedSources)) parts.push(`<p><strong>${esc(line)}</strong></p>`);
   parts.push(`<h2>Job scan report for ${esc(data.dayKey)} (times ${esc(data.timezone)})</h2>`);
   if (data.lockMismatch) {
     const label = data.lockMismatch.code === 'RUBRIC_UNLOCKED' ? 'RUBRIC UNLOCKED' : 'LOCK MISMATCH';
     parts.push(`<p><strong>${esc(label)}</strong>: ${esc(data.lockMismatch.message)}</p>`);
   } else if (data.noScan) parts.push('<p><strong>NO SCAN</strong>: no scan run has completed since the last report, on a day one was expected.</p>');
+  const gmailAgg = aggregateGmailStats(data.runs);
+  const gmailHealth = gmailHealthLines(gmailAgg, /** @type {any} */ (data).parserBrokenMinEmails ?? 1);
+  for (const l of gmailHealth.broken) parts.push(`<p><strong>${esc(l)}</strong></p>`);
   if (googleAuthState !== undefined) parts.push(`<p>${esc(googleAuthLineText(googleAuthState))}</p>`);
   const dashboardLineHtml = dashboardHealthLineText(dashboardHealthState ?? null);
   if (dashboardLineHtml) parts.push(`<p>${esc(dashboardLineHtml)}</p>`);
@@ -919,6 +1108,12 @@ export function renderReportHtml(data, registry, googleAuthState, dashboardHealt
     }
     parts.push('</ul>');
   }
+  if (gmailAgg) {
+    parts.push('<h3>Gmail intake</h3>');
+    parts.push(`<ul>${[...gmailReportLines(gmailAgg), ...gmailHealth.soft].map((l) => `<li>${esc(l.trim())}</li>`).join('')}</ul>`);
+  }
+  const manual = gmailManualApplyLines(/** @type {any} */ (data).gmailManualApply);
+  if (manual.length) parts.push(`<h3>${esc(manual[1].replace(/^== | ==$/g, ''))}</h3><ul>${manual.slice(2).map((l) => `<li>${esc(l.trim())}</li>`).join('')}</ul>`);
   parts.push(`<h3>Look at these (top ${data.lookAtThese.rows.length})</h3>`);
   if (data.lookAtThese.excludedCount) parts.push(`<p>(${data.lookAtThese.excludedCount} noise-classified row(s) excluded from this list; they are still in the database)</p>`);
   parts.push(data.lookAtThese.rows.length ? `<ul>${data.lookAtThese.rows.map((r) => rowLi(r, true)).join('')}</ul>` : '<p>(none)</p>');
@@ -946,6 +1141,8 @@ export function renderReportHtml(data, registry, googleAuthState, dashboardHealt
 export function renderReportMarkdown(data, registry, googleAuthState, dashboardHealthState) {
   const reg = registry ?? { entries: [], httpAllowedHosts: new Set() };
   const lines = [];
+  const latched = latchedSourceLines(/** @type {any} */ (data).latchedSources);
+  if (latched.length) lines.push(...latched.map((l) => `**${l}**`), '');
   lines.push(`# Job scan report for ${data.dayKey}`);
   lines.push('');
   lines.push(`Times shown in ${data.timezone}.`);
@@ -958,6 +1155,9 @@ export function renderReportMarkdown(data, registry, googleAuthState, dashboardH
     lines.push('**NO SCAN**: no scan run has completed since the last report, on a day one was expected.');
     lines.push('');
   }
+  const gmailAgg = aggregateGmailStats(data.runs);
+  const gmailHealth = gmailHealthLines(gmailAgg, /** @type {any} */ (data).parserBrokenMinEmails ?? 1);
+  if (gmailHealth.broken.length) lines.push(...gmailHealth.broken.map((l) => `**${l}**`), '');
   if (googleAuthState !== undefined) {
     lines.push(googleAuthLineText(googleAuthState));
     lines.push('');
@@ -980,6 +1180,17 @@ export function renderReportMarkdown(data, registry, googleAuthState, dashboardH
     const triageLine = renderTriageLine(s.triage);
     if (triageLine) lines.push(`  ${triageLine}`);
     for (const e of r.errors.slice(0, 5)) lines.push(`  error: ${e.source ?? 'run'} ${e.code}: ${errorLineMessage(e).slice(0, 200)}`);
+  }
+  if (gmailAgg) {
+    lines.push('');
+    lines.push('## Gmail intake');
+    lines.push('');
+    for (const l of [...gmailReportLines(gmailAgg), ...gmailHealth.soft]) lines.push(`- ${l.trim()}`);
+  }
+  const manualMd = gmailManualApplyLines(/** @type {any} */ (data).gmailManualApply);
+  if (manualMd.length) {
+    lines.push('', `## ${manualMd[1].replace(/^== | ==$/g, '')}`, '');
+    for (const l of manualMd.slice(2)) lines.push(`- ${l.trim()}`);
   }
   lines.push('');
   lines.push(`## Look at these (top ${data.lookAtThese.rows.length})`);
@@ -1124,10 +1335,79 @@ const FUNNEL_LINE_STAGES = Object.freeze([
  */
 function funnelLine(data) {
   if (!data.funnel || typeof data.funnel !== 'object') return null;
+  if (/** @type {any} */ (data.funnel).version === 2) return funnelLineV2(/** @type {any} */ (data.funnel), data);
   const parts = [`considered ${data.funnel.considered ?? 0}`];
   for (const stage of FUNNEL_LINE_STAGES) parts.push(`${stage} ${data.funnel[stage] ?? 0}`);
   const cap = data.dailyCap ?? '?';
   return `funnel: ${parts.join(' > ')}, applied ${data.appliedCount} of cap ${cap}`;
+}
+
+/** Reasons each multi-reason gate breaks down into on the v2 funnel line (mirrors auto-apply-select.js GATES). */
+const FUNNEL_GATE_REASONS = Object.freeze({
+  fit: Object.freeze(['not_scored', 'below_fit', 'human_fit_override', 'fit_unverified']),
+  easy_apply_only: Object.freeze(['easy_apply_only', 'easy_apply_assisted']),
+});
+
+/**
+ * Version 2 funnel line (unblock-auto-apply Item 4): "funnel: considered N; eliminated <gate> n, fit n
+ * (not_scored a, below_fit b), ...; eligible E; applied A of cap C". Only nonzero eliminations are listed,
+ * in gate order, then any eliminated key the gate list does not know (never dropped). "eliminated none"
+ * when nothing was eliminated.
+ * @param {{ considered?: number, eliminated?: Record<string, number>, reasons?: Record<string, number>, eligible?: number }} f
+ * @param {AutoApplyReportData} data
+ */
+function funnelLineV2(f, data) {
+  const eliminated = f.eliminated ?? {};
+  const reasons = f.reasons ?? {};
+  const order = [...FUNNEL_LINE_STAGES.filter((s) => s !== 'eligible'), ...Object.keys(eliminated).filter((k) => !FUNNEL_LINE_STAGES.includes(k))];
+  const items = [];
+  for (const gate of order) {
+    const n = eliminated[gate] ?? 0;
+    if (!n) continue;
+    const sub = /** @type {Record<string, readonly string[]>} */ (FUNNEL_GATE_REASONS)[gate];
+    const breakdown = sub ? sub.filter((r) => reasons[r]).map((r) => `${r} ${reasons[r]}`) : [];
+    items.push(breakdown.length > 1 ? `${gate} ${n} (${breakdown.join(', ')})` : `${gate} ${n}`);
+  }
+  const cap = data.dailyCap ?? '?';
+  return `funnel: considered ${f.considered ?? 0}; eliminated ${items.length ? items.join(', ') : 'none'}; eligible ${f.eligible ?? 0}; applied ${data.appliedCount} of cap ${cap}`;
+}
+
+/** @param {Record<string, number>|undefined|null} m */
+function bracketCounts(m) {
+  const entries = Object.entries(m ?? {}).filter(([, n]) => n);
+  return entries.length ? ` [${entries.map(([k, n]) => `${k}:${n}`).join(', ')}]` : '';
+}
+
+/**
+ * Approved-driver line (unblock-auto-apply Item 1): "approved: N; drove K (ok a, parked b, deferred c
+ * [reason:n]); parked P [reason:n]; reroute R; easy_apply_path E", plus every other outcome by name. Null
+ * when the run recorded no driver phase (older summaries); a driver failure is a visible line.
+ * @param {AutoApplyReportData} data
+ */
+function approvedDriverText(data) {
+  const ad = /** @type {any} */ (data).approvedDriver;
+  if (!ad || typeof ad !== 'object') return null;
+  if (ad.error) return `approved: driver failed (${ad.error})`;
+  const c = ad.counts ?? {};
+  let line = `approved: ${c.approved ?? 0}; drove ${c.drove ?? 0} (ok ${c.drove_ok ?? 0}, parked ${c.drove_parked ?? 0}, deferred ${c.drove_deferred ?? 0}${bracketCounts(c.deferred_reasons)})`
+    + `; parked ${c.parked ?? 0}${bracketCounts(c.parked_reasons)}; reroute ${c.reroute ?? 0}; easy_apply_path ${c.easy_apply_path ?? 0}`;
+  if (c.other) line += `; other ${c.other}${bracketCounts(c.other_outcomes)}`;
+  if (ad.dry_run) line += ' (dry run: classified only)';
+  return line;
+}
+
+/**
+ * Reroute line (unblock-auto-apply Item 2): "reroute: N; rerouted K [ats:n]; parked P [reason:n]; deferred
+ * D [reason:n]", plus every other outcome by name. Null when the run recorded no reroute.
+ * @param {AutoApplyReportData} data
+ */
+function rerouteText(data) {
+  const r = /** @type {any} */ (data).reroute;
+  if (!r || typeof r !== 'object') return null;
+  if (r.error) return `reroute: failed (${r.error})`;
+  let line = `reroute: ${r.attempted ?? 0}; rerouted ${r.rerouted ?? 0}${bracketCounts(r.by_ats)}; parked ${r.parked ?? 0}${bracketCounts(r.parked_reasons)}; deferred ${r.deferred ?? 0}${bracketCounts(r.deferred_reasons)}`;
+  if (r.other) line += `; other ${r.other}${bracketCounts(r.other_outcomes)}`;
+  return line;
 }
 
 /**
@@ -1211,6 +1491,9 @@ export async function collectAutoApply(client, summary) {
     funnel: /** @type {any} */ (summary).select?.funnel && typeof /** @type {any} */ (summary).select.funnel === 'object' ? /** @type {any} */ (summary).select.funnel : null,
     dailyCap: typeof /** @type {any} */ (summary).select?.dailyCap === 'number' ? /** @type {any} */ (summary).select.dailyCap : null,
     prepare: summary.prepare && typeof summary.prepare === 'object' ? /** @type {any} */ (summary.prepare) : null,
+    // Unblock-auto-apply Items 1-2: the approved-driver and reroute phase summaries, passed through as-is.
+    approvedDriver: /** @type {any} */ (summary).approved_driver && typeof /** @type {any} */ (summary).approved_driver === 'object' ? /** @type {any} */ (summary).approved_driver : null,
+    reroute: /** @type {any} */ (summary).reroute && typeof /** @type {any} */ (summary).reroute === 'object' ? /** @type {any} */ (summary).reroute : null,
     unresolved: unresolvedRows.map((r) => {
       const url = r.url_normalized ?? r.url ?? null;
       const isLinkedin = typeof r.source === 'string' && r.source === 'linkedin';
@@ -1360,7 +1643,59 @@ function prepareStatsText(data) {
     `skipped ${p.skipped ?? 0}${reasons.length ? ` (${reasons.join(', ')})` : ''}`,
   ];
   if (p.stoppedBy) parts.push(`stopped_by=${p.stoppedBy} remaining=${p.remaining ?? 0}`);
+  // Unblock-auto-apply Item 3: never-probed rows go first; the line says how many got a probe this run.
+  if (typeof p.neverProbedSeen === 'number') {
+    parts.push(`never_probed attempted ${p.neverProbedAttempted ?? 0} of ${p.neverProbedSeen}`);
+    parts.push(`not_us_location ${p.skippedByReason?.not_us_location ?? 0}`);
+  }
   return `prepare: ${parts.join(', ')}`;
+}
+
+/**
+ * Item 6: prefix a rendered auto-apply section with one SOURCE DISABLED headline per latched source (the
+ * caller attaches `latchedSources` to the data; see src/core/remind.js). Total: no data or no latched
+ * sources leaves the section unchanged.
+ * @param {any} data
+ * @param {string} rendered
+ * @param {'text'|'markdown'|'html'} format
+ */
+function withLatchedHeadline(data, rendered, format) {
+  const lines = latchedSourceLines(data && typeof data === 'object' ? data.latchedSources : null);
+  if (!lines.length) return rendered;
+  if (format === 'html') return `${lines.map((l) => `<p><strong>${escapeHtml(l)}</strong></p>`).join('\n')}\n${rendered}`;
+  if (format === 'markdown') return `${lines.map((l) => `**${l}**`).join('\n')}\n\n${rendered}`;
+  return `${lines.join('\n')}\n${rendered}`;
+}
+
+/**
+ * Plain-text auto-apply section, opened by any SOURCE DISABLED headline (Item 6). See
+ * renderAutoApplyTextBody for the section itself.
+ * @param {any} data
+ * @param {import('./urlguard.js').Registry} [registry]
+ * @returns {string}
+ */
+export function renderAutoApplyText(data, registry) {
+  return withLatchedHeadline(data, renderAutoApplyTextBody(data, registry), 'text');
+}
+
+/**
+ * HTML auto-apply section, opened by any SOURCE DISABLED headline (Item 6).
+ * @param {any} data
+ * @param {import('./urlguard.js').Registry} [registry]
+ * @returns {string}
+ */
+export function renderAutoApplyHtml(data, registry) {
+  return withLatchedHeadline(data, renderAutoApplyHtmlBody(data, registry), 'html');
+}
+
+/**
+ * Markdown auto-apply section, opened by any SOURCE DISABLED headline (Item 6).
+ * @param {any} data
+ * @param {import('./urlguard.js').Registry} [registry]
+ * @returns {string}
+ */
+export function renderAutoApplyMarkdown(data, registry) {
+  return withLatchedHeadline(data, renderAutoApplyMarkdownBody(data, registry), 'markdown');
 }
 
 /**
@@ -1371,7 +1706,7 @@ function prepareStatsText(data) {
  * @param {import('./urlguard.js').Registry} [registry]
  * @returns {string}
  */
-export function renderAutoApplyText(data, registry) {
+function renderAutoApplyTextBody(data, registry) {
   if (data && !data.hasRun && data.noApply) {
     return `== Auto-apply ==\n[NO APPLY]: config/apply-exclusions.json is missing or invalid (${data.noApply.file}): ${data.noApply.message}`;
   }
@@ -1395,6 +1730,7 @@ export function renderAutoApplyText(data, registry) {
   if (fLine) lines.push(fLine);
   const pLine = prepareStatsText(data);
   if (pLine) lines.push(pLine);
+  for (const extra of [rerouteText(data), approvedDriverText(data)]) if (extra) lines.push(extra);
   lines.push(`applied ${data.appliedCount} | capped ${data.cappedCount} | cap used ${data.capUsed ?? '?'} | cap remaining ${data.capRemaining ?? '?'}`);
   const advisoryLine = submittedAdvisoryText(data);
   if (advisoryLine) lines.push(advisoryLine);
@@ -1432,7 +1768,7 @@ export function renderAutoApplyText(data, registry) {
  * @param {import('./urlguard.js').Registry} [registry]
  * @returns {string}
  */
-export function renderAutoApplyHtml(data, registry) {
+function renderAutoApplyHtmlBody(data, registry) {
   const esc = escapeHtml;
   if (data && !data.hasRun && data.noApply) {
     return `<h3>Auto-apply</h3><p><strong>[NO APPLY]</strong>: config/apply-exclusions.json is missing or invalid (${esc(data.noApply.file)}): ${esc(data.noApply.message)}</p>`;
@@ -1457,6 +1793,7 @@ export function renderAutoApplyHtml(data, registry) {
   if (fLine) parts.push(`<p>${esc(fLine)}</p>`);
   const pLine = prepareStatsText(data);
   if (pLine) parts.push(`<p>${esc(pLine)}</p>`);
+  for (const extra of [rerouteText(data), approvedDriverText(data)]) if (extra) parts.push(`<p>${esc(extra)}</p>`);
   parts.push(`<p>applied ${data.appliedCount}, capped ${data.cappedCount}, cap used ${data.capUsed ?? '?'}, cap remaining ${data.capRemaining ?? '?'}</p>`);
   const advisoryLine = submittedAdvisoryText(data);
   if (advisoryLine) parts.push(`<p>${esc(advisoryLine)}</p>`);
@@ -1520,7 +1857,7 @@ export function renderAutoApplyHtml(data, registry) {
  * @param {import('./urlguard.js').Registry} [registry]
  * @returns {string}
  */
-export function renderAutoApplyMarkdown(data, registry) {
+function renderAutoApplyMarkdownBody(data, registry) {
   if (data && !data.hasRun && data.noApply) {
     return `## Auto-apply\n\n**[NO APPLY]**: config/apply-exclusions.json is missing or invalid (${data.noApply.file}): ${data.noApply.message}`;
   }
@@ -1546,6 +1883,7 @@ export function renderAutoApplyMarkdown(data, registry) {
   if (fLine) { lines.push(fLine); lines.push(''); }
   const pLine = prepareStatsText(data);
   if (pLine) { lines.push(pLine); lines.push(''); }
+  for (const extra of [rerouteText(data), approvedDriverText(data)]) if (extra) { lines.push(extra); lines.push(''); }
   lines.push(`applied ${data.appliedCount}, capped ${data.cappedCount}, cap used ${data.capUsed ?? '?'}, cap remaining ${data.capRemaining ?? '?'}`);
   lines.push('');
   const advisoryLine = submittedAdvisoryText(data);

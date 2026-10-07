@@ -272,6 +272,19 @@ const adapterSchema = z.object({
   maxPagesPerRun: z.number().int().positive().optional(),
   /** Hard cap on DETAIL fetches queued+attempted for this source within a single scan run (detail-pacing fix), independent of the daily dailyDetails pool; null (the default) means no per-run cap. Ignored by bin/backfill-detail.js (bounded by --limit and the daily pool instead). */
   maxDetailsPerRun: z.number().int().positive().nullable().default(null),
+  /** Gmail intake addendum G3 (gmail only): description routing for gmail-sourced rows. Per-run and
+   * per-day caps per branch (per-day counted on ic_scan_budget pseudo-sources gmail-route:<branch>), the
+   * tracker unwrap hop limit, and the unwrap hop daily cap (B10, gmail-route:unwrap). */
+  detailRouting: z.object({
+    enabled: z.boolean().default(true),
+    detailMaxAttempts: z.number().int().positive().default(3),
+    maxHops: z.number().int().min(1).max(10).default(5),
+    unwrapPerDay: z.number().int().min(0).default(300),
+    linkedin: z.object({ perDay: z.number().int().min(0).default(40), perRun: z.number().int().min(0).default(20) }).default({}),
+    indeed: z.object({ perDay: z.number().int().min(0).default(20), perRun: z.number().int().min(0).default(10) }).default({}),
+    ats: z.object({ perDay: z.number().int().min(0).default(20), perRun: z.number().int().min(0).default(10) }).default({}),
+    generic: z.object({ perDay: z.number().int().min(0).default(60), perRun: z.number().int().min(0).default(30) }).default({}),
+  }).optional(),
 });
 
 /**
@@ -483,6 +496,18 @@ export const autoApplySchema = z.object({
     breakerHours: z.number().positive().default(24),
     runTimeoutMinutes: z.number().int().min(8).max(30).default(15),
   }).default({}),
+  // Unblock-auto-apply Item 1: the morning driver for approved rows (src/apply/approved-driver.js). Off by
+  // default so a config without the block never drives anything; maxPerRun bounds worker runs per morning.
+  approvedDriver: z.object({
+    enabled: z.boolean().default(false),
+    maxPerRun: z.number().int().min(0).max(25).default(5),
+  }).default({}),
+  // Unblock-auto-apply Item 2: reroute LinkedIn listings that apply on the company site to that ATS.
+  // maxPerRun bounds LinkedIn probe page loads for rerouting per run (two details reserved per probe).
+  reroute: z.object({
+    enabled: z.boolean().default(true),
+    maxPerRun: z.number().int().min(0).max(25).default(5),
+  }).default({}),
   // Unattended submit (spec item 6, v2 C1): read FRESH from disk at click time by
   // src/apply/submit-gate.js. `enabled: false` is the kill switch for every ATS at once; `ats` turns each
   // ATS on individually (a missing key is off); dailySubmitCap counts submit markers (clicks), not
@@ -554,9 +579,26 @@ export const noiseRulesSchema = z.object({
 });
 
 /** Closed enum: every alert-senders.json entry must map to a parser that exists (src/adapters/gmail-parsers.js). */
-export const GMAIL_PARSER_NAMES = Object.freeze(['linkedin', 'indeed-alert', 'indeed-match', 'lensa', 'ladders']);
+export const GMAIL_PARSER_NAMES = Object.freeze(['linkedin', 'indeed-alert', 'indeed-match', 'lensa', 'ladders', 'dice', 'efinancialcareers', 'remotehunter', 'jobs2web']);
 
 const emailAddress = z.string().min(3).max(200).regex(/^[a-z0-9._%+-]+@[a-z0-9.-]+\.[a-z]{2,}$/, 'address must be a lowercase email address');
+
+/**
+ * The ONE keyword list unhandled-sender discovery uses for both its Gmail `subject:(...)` query and its
+ * subject classification (Gmail intake addendum B8), so the two can never drift apart.
+ */
+export const DISCOVERY_DEFAULT_KEYWORDS = Object.freeze([
+  'job', 'jobs', 'hiring', 'opening', 'openings', 'opportunity', 'opportunities', 'position', 'positions', 'role', 'roles', 'career', 'careers',
+]);
+
+/**
+ * Word-boundary, case-insensitive subject matcher built from the discovery keyword list (B8).
+ * @param {readonly string[]} keywords
+ */
+export function discoverySubjectRegex(keywords) {
+  const words = keywords.map((k) => String(k).replace(/[.*+?^${}()|[\]\\]/g, '\\$&')).filter(Boolean);
+  return new RegExp(`\\b(?:${words.join('|') || '(?!)'})\\b`, 'i');
+}
 
 export const alertSendersSchema = z.object({
   senders: z.array(z.object({
@@ -564,7 +606,24 @@ export const alertSendersSchema = z.object({
     parser: z.enum(/** @type {[string, ...string[]]} */ (GMAIL_PARSER_NAMES)),
     enabled: z.boolean().default(true),
     comment: z.string().optional(),
+    // Gmail intake addendum G2: a jobs2web job agent names no company in its cards, so the entry carries it.
+    company: z.string().min(1).optional(),
+  }).superRefine((s, ctx) => {
+    if (s.parser === 'jobs2web' && !s.company) ctx.addIssue({ code: z.ZodIssueCode.custom, message: 'a jobs2web sender needs "company"' });
+    if (s.parser !== 'jobs2web' && s.company !== undefined) ctx.addIssue({ code: z.ZodIssueCode.custom, message: '"company" is only for jobs2web senders' });
   })),
+  // Unhandled-sender discovery (G2, B8): metadata-only, nothing parsed or stored. maxMessages bounds the
+  // metadata reads per run; perSenderMax caps how many messages one unregistered address may use, so one
+  // noisy sender never hides the rest (the address is then excluded from the next list query).
+  discovery: z.object({
+    enabled: z.boolean().default(true),
+    maxMessages: z.number().int().min(0).max(200).default(40),
+    perSenderMax: z.number().int().min(1).max(20).default(3),
+    keywords: z.array(z.string().min(2)).min(1).default([...DISCOVERY_DEFAULT_KEYWORDS]),
+    ignoredSenders: z.array(emailAddress).default([]),
+  }).default({}),
+  // G4/B7: a registered sender with at least this many emails in a run is checked for PARSER BROKEN.
+  health: z.object({ parserBrokenMinEmails: z.number().int().min(1).default(1) }).default({}),
 });
 
 /**
@@ -590,6 +649,13 @@ export const triageSchema = z.object({
     maxListingsPerRun: z.number().int().positive().default(200),
     maxBatchesPerRun: z.number().int().positive().default(15),
     descriptionTruncateChars: z.number().int().positive().default(1200),
+    // Unblock-auto-apply Item 4: scoreFloor opens a model_low band, prescore in [scoreFloor,
+    // deterministic.floor), sent to the model with a full status decision instead of auto-skipped. Absent
+    // means deterministic.floor (no model_low band at all, unchanged behavior). Sticky-skip and the scope
+    // gate keep deterministic.floor regardless. backlogPerRun bounds the backlog sweep (untriaged rows from
+    // earlier runs, newest first); 0 turns it off.
+    scoreFloor: z.number().int().min(0).max(100).optional(),
+    backlogPerRun: z.number().int().min(0).max(500).default(0),
   }).default({}),
 });
 
@@ -636,6 +702,8 @@ const TRIAGE_CANDIDATE_LOCK_FILE = 'triage-candidate.lock';
  * @property {z.infer<typeof execBoardsSchema>} execBoards
  * @property {Record<string, string>} companyAliases
  * @property {z.infer<typeof alertSendersSchema>['senders']} alertSenders
+ * @property {{ discovery: z.infer<typeof alertSendersSchema>['discovery'], health: z.infer<typeof alertSendersSchema>['health'] }} [alertIntake]
+ *   Gmail intake addendum: unhandled-sender discovery and the PARSER BROKEN threshold (alert-senders.json)
  * @property {z.infer<typeof noiseRulesSchema>} noiseRules
  * @property {z.infer<typeof triageSchema> & { present: boolean }} triage present=false means no
  *   config/triage.json was found at all (schema defaults applied silently); present=true with both
@@ -814,6 +882,7 @@ export function loadConfig(opts = {}) {
     execBoards,
     companyAliases: aliasesFile.aliases,
     alertSenders: alertSendersFile.senders,
+    alertIntake: { discovery: alertSendersFile.discovery, health: alertSendersFile.health },
     noiseRules,
     triage: { ...triageFile.data, present: triageFile.present },
     configDir: dir,

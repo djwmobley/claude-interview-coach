@@ -946,6 +946,42 @@ export async function recordApplicationEvent(client, input) {
   );
 }
 
+/** Timezone of the "local day" recordDeferral dedups on (the operator's day, like every report). */
+export const DEFERRAL_DAY_TIMEZONE = 'America/Chicago';
+
+/**
+ * Visible deferral (unblock-auto-apply Item 1, the app 5 fix; A10): a worker start-gate refusal (or a
+ * driver-side lock refusal) leaves the application 'approved', so without an event the deferral was only
+ * a log line. Writes ONE progress event per application per reason per America/Chicago local day:
+ * note "deferred: <reason>; stays approved, the next morning run retries", meta { deferred_reason,
+ * local_day }. Callers hold the per-application advisory lock (the worker holds it on this same client
+ * for its whole run), so the read-then-insert below cannot race another writer for the same row.
+ * @param {import('pg').ClientBase} client
+ * @param {number} applicationId
+ * @param {string} reason
+ * @param {{ now?: Date, actor?: string }} [opts]
+ * @returns {Promise<boolean>} true when an event was written, false when today's event already exists
+ */
+export async function recordDeferral(client, applicationId, reason, opts = {}) {
+  const now = opts.now ?? new Date();
+  const parts = new Intl.DateTimeFormat('en-CA', { timeZone: DEFERRAL_DAY_TIMEZONE, year: 'numeric', month: '2-digit', day: '2-digit' }).formatToParts(now);
+  const get = (/** @type {string} */ t) => parts.find((p) => p.type === t)?.value ?? '';
+  const localDay = `${get('year')}-${get('month')}-${get('day')}`;
+  const reasonText = String(reason ?? 'unknown') || 'unknown';
+  const seen = await client.query(
+    `SELECT 1 FROM ic_job_application_events WHERE application_id = $1 AND kind = 'progress'
+       AND meta->>'deferred_reason' = $2 AND meta->>'local_day' = $3 LIMIT 1`,
+    [applicationId, reasonText, localDay],
+  );
+  if ((seen.rowCount ?? 0) > 0) return false;
+  await recordApplicationEvent(client, {
+    applicationId, kind: 'progress', actor: opts.actor ?? 'apply',
+    note: `deferred: ${reasonText}; stays approved, the next morning run retries`,
+    meta: { deferred_reason: reasonText, local_day: localDay },
+  });
+  return true;
+}
+
 /**
  * Whether recordSubmitRequestSent() fired during the application's CURRENT 'submitting' attempt --
  * scoped to events created at or after the most recent state-transition-into-submitting event, so a stale
@@ -1068,6 +1104,123 @@ export async function resumeAutomatic(client, id, opts = {}) {
     }
     return transitionUnwrapped(c, id, 'approved', opts, { incrementAttempt: true, expectedFromState: 'needs_human', helperName: 'resumeAutomatic' });
   });
+}
+
+/**
+ * Whether an application carrying the A10 marker may be driven unattended (unblock-auto-apply F3, A5).
+ * Total: `marked` false means there is no marker at all (nothing to decide). With the marker, `allowed` is
+ * true ONLY when the latest move into 'approved' was a dashboard approval with partial_draft_acknowledged
+ * true, made at or after the latest Next-click marker; any later automated re-approval (it would be the
+ * latest approval and is not a dashboard one) or a Next click after the acknowledgement refuses.
+ * @param {import('pg').ClientBase} client
+ * @param {number} applicationId
+ * @returns {Promise<{ marked: boolean, allowed: boolean }>}
+ */
+export async function partialDraftDriveStatus(client, applicationId) {
+  const r = await client.query(
+    `SELECT (SELECT max(created_at) FROM ic_job_application_events WHERE application_id = $1 AND kind = 'progress' AND note = $2) AS marker_at,
+            a.created_at AS approved_at, a.actor AS approved_actor, a.meta AS approved_meta
+       FROM (SELECT 1) one
+       LEFT JOIN LATERAL (SELECT created_at, actor, meta FROM ic_job_application_events
+                           WHERE application_id = $1 AND kind = 'state' AND to_state = 'approved'
+                           ORDER BY created_at DESC, id DESC LIMIT 1) a ON true`,
+    [applicationId, ASSISTED_NEXT_CLICK_NOTE],
+  );
+  const row = r.rows[0] ?? {};
+  if (!row.marker_at) return { marked: false, allowed: true };
+  const acked = row.approved_actor === 'dashboard' && row.approved_meta && row.approved_meta.partial_draft_acknowledged === true;
+  const ordered = row.approved_at && new Date(row.marker_at).getTime() <= new Date(row.approved_at).getTime();
+  return { marked: true, allowed: Boolean(acked && ordered) };
+}
+
+/** States rerouteAts may move an application out of the LinkedIn Easy Apply ATS from (unblock Item 2). */
+export const REROUTE_FROM_STATES = Object.freeze(['approved', 'needs_human']);
+
+/**
+ * Reroute an application to the external ATS its LinkedIn listing really applies through (unblock-auto-apply
+ * Item 2, A1, A3). Runs INSIDE the caller's transaction (the reroute module also runs the exclusion gate
+ * with the new URL in the same transaction, before calling this). Under the row lock: the state must be
+ * approved or needs_human (and `expectedFromState` when given: A1), and neither the durable submit marker
+ * nor the A10 marker may be set; then ats_type and apply_url change, the listing's own apply target is
+ * written in the same transaction when `listingTarget` is given (A3), and one note event records the move.
+ * The state itself never changes here. Every refusal is VALIDATION with details.reason one of
+ * state_not_reroutable | state_changed | submit_request_sent | requires_human_retry.
+ * @param {import('pg').ClientBase} c already inside a transaction
+ * @param {number} id
+ * @param {{ atsType: string, applyUrl: string, actor?: string, note?: string|null, expectedFromState?: string|null, listingTarget?: { applyUrl: string, applyAts: string }|null }} o
+ */
+export async function rerouteAtsUnwrapped(c, id, o) {
+  if (!ATS_TYPES.includes(o.atsType)) throw new JobSearchError('VALIDATION', `ats_type must be one of ${ATS_TYPES.join(', ')}`, { details: { reason: 'ats_type_invalid' } });
+  const actor = o.actor ?? 'auto';
+  if (!EVENT_ACTORS.includes(actor)) throw new JobSearchError('VALIDATION', `application event actor must be one of ${EVENT_ACTORS.join(', ')}`);
+  const cur = await c.query(`SELECT ${APPLICATION_COLS} FROM ic_job_applications WHERE id = $1 FOR UPDATE`, [id]);
+  if (cur.rowCount === 0) throw new JobSearchError('NOT_FOUND', `application ${id} not found`);
+  const row = cur.rows[0];
+  if (!REROUTE_FROM_STATES.includes(row.state)) {
+    throw new JobSearchError('VALIDATION', `rerouteAts() refuses application ${id} in state "${row.state}"`, { details: { reason: 'state_not_reroutable', from: row.state } });
+  }
+  if (o.expectedFromState && row.state !== o.expectedFromState) {
+    throw new JobSearchError('VALIDATION', `rerouteAts() expected application ${id} in "${o.expectedFromState}", it is "${row.state}"`, { details: { reason: 'state_changed', from: row.state } });
+  }
+  if (await hasSubmitRequestSentEver(c, id)) {
+    throw new JobSearchError('VALIDATION', `application ${id} already had a submit request sent; it is never rerouted`, { details: { reason: 'submit_request_sent' } });
+  }
+  if (await hasAssistedNextClickEver(c, id)) {
+    throw new JobSearchError('VALIDATION', `application ${id} had an assisted Next click; only a human can move it on`, { details: { reason: 'requires_human_retry' } });
+  }
+  const r = await c.query(
+    `UPDATE ic_job_applications SET ats_type = $2, apply_url = $3, updated_at = now() WHERE id = $1 RETURNING ${APPLICATION_COLS}`,
+    [id, o.atsType, o.applyUrl],
+  );
+  if (o.listingTarget) {
+    await c.query(
+      `UPDATE ic_job_listings SET apply_url = $2, apply_ats = $3, apply_ats_confidence = 'exact', apply_easy_only = false WHERE id = $1`,
+      [row.listing_id, o.listingTarget.applyUrl, o.listingTarget.applyAts],
+    );
+  }
+  await insertApplicationEvent(c, {
+    applicationId: id, kind: 'note', actor, note: o.note ?? `rerouted from ${row.ats_type} to ${o.atsType}`,
+    meta: { from_ats: row.ats_type, to_ats: o.atsType, apply_url: o.applyUrl, from_apply_url: row.apply_url ?? null },
+  });
+  return r.rows[0];
+}
+
+/**
+ * rerouteAtsUnwrapped in its own transaction.
+ * @param {import('pg').ClientBase} client
+ * @param {number} id
+ * @param {Parameters<typeof rerouteAtsUnwrapped>[2]} o
+ */
+export async function rerouteAts(client, id, o) {
+  return withTransaction(client, (c) => rerouteAtsUnwrapped(c, id, o));
+}
+
+/** pending_question.kind of every park the morning approved driver and reroute make (unblock Items 1-2). */
+export const MORNING_DRIVER_PARK_KIND = 'morning_driver_park';
+
+/**
+ * approved -> needs_human for the morning driver or reroute (A1): one transaction, the row lock, and
+ * expectedFromState 'approved', so a row that moved on since it was read is refused (VALIDATION) and left
+ * alone. pending_question kind morning_driver_park with the closed `reason` and a human `label`.
+ * @param {import('pg').ClientBase} client
+ * @param {number} id
+ * @param {{ reason: string, label: string, note?: string, extra?: Record<string, unknown> }} o
+ */
+export async function parkApproved(client, id, o) {
+  return withTransaction(client, (c) => transitionUnwrapped(c, id, 'needs_human', {
+    actor: 'auto', note: o.note ?? `morning driver parked: ${o.reason}`,
+    pending_question: { kind: MORNING_DRIVER_PARK_KIND, reason: o.reason, label: o.label, ...(o.extra ?? {}) },
+  }, { expectedFromState: 'approved', helperName: 'parkApproved' }));
+}
+
+/**
+ * True when an error is the expected-from-state refusal transitionUnwrapped raises (A1: maps to
+ * drove_state_changed).
+ * @param {unknown} err
+ */
+export function isStateChangedRefusal(err) {
+  const d = err instanceof JobSearchError ? /** @type {any} */ (err).details : null;
+  return Boolean(d && (d.reason === 'state_changed' || d.reason === 'state_not_reroutable' || (typeof d.expected === 'string' && typeof d.from === 'string' && d.expected !== d.from)));
 }
 
 /** pending_question for a run that clicked Next and then ended without a verified finish (spec v2 A10). */

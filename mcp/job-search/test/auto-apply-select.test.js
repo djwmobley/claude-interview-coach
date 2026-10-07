@@ -128,6 +128,7 @@ describe('classifyCandidate: one reason per test, closed enum', () => {
       classifyCandidate(row({ fitScore: null }), CTX),
       classifyCandidate(row({ fitScore: 50, fitActor: 'auto' }), CTX),
       classifyCandidate(row({ fitScore: 50, fitActor: 'dashboard' }), CTX),
+      classifyCandidate(row({ fitBasis: 'no_description' }), CTX),
       classifyCandidate(row({ duplicateOf: 42 }), CTX),
       classifyCandidate(row({ locationNorm: 'country-de' }), CTX),
       classifyCandidate(row({ locationNorm: 'denver-co', salaryMax: 100000 }), CTX),
@@ -370,19 +371,21 @@ describe('computeFunnel: sequential funnel derived from a single classify() pass
     assert.deepEqual([...covered].sort(), [...expected].sort());
   });
 
-  test('a single row failing at gate 1 (exclusions) reduces funnel.exclusions by exactly one, every later gate matches (no recovery)', () => {
+  test('v2 shape: version 2, considered, eliminated per gate, reasons per reason, eligible', () => {
     const classified = [
       { row: row({ listingId: 1 }), reason: 'exclusion_blocked_company' },
       { row: row({ listingId: 2 }), reason: 'eligible' },
     ];
     const funnel = computeFunnel(classified);
+    assert.equal(funnel.version, 2);
     assert.equal(funnel.considered, 2);
-    assert.equal(funnel.exclusions, 1);
-    for (const stage of FUNNEL_STAGES.slice(1)) assert.equal(funnel[stage], 1, `stage ${stage}`);
+    assert.equal(funnel.eliminated.exclusions, 1);
+    for (const gate of GATES.slice(1)) assert.equal(funnel.eliminated[gate.name], 0, `gate ${gate.name}`);
+    assert.equal(funnel.reasons.exclusion_blocked_company, 1);
     assert.equal(funnel.eligible, 1);
   });
 
-  test('first step = considered minus fails at gate 1; each subsequent step = previous minus fails at that gate; final = eligible', () => {
+  test('one row eliminated at every gate: each gate counts exactly one; eliminated + eligible = considered', () => {
     const classified = [
       { row: row({ listingId: 1 }), reason: 'exclusion_blocked_company' },
       { row: row({ listingId: 2 }), reason: 'not_scored' },
@@ -401,34 +404,41 @@ describe('computeFunnel: sequential funnel derived from a single classify() pass
     ];
     const funnel = computeFunnel(classified);
     assert.equal(funnel.considered, 14);
-    let remaining = 14;
-    for (const gate of GATES) {
-      remaining -= 1; // exactly one row fails at each gate in this fixture
-      assert.equal(funnel[gate.name], remaining, `gate ${gate.name}`);
-    }
+    for (const gate of GATES) assert.equal(funnel.eliminated[gate.name], 1, `gate ${gate.name}`);
     assert.equal(funnel.eligible, 2);
+    const eliminated = Object.values(funnel.eliminated).reduce((a, b) => a + b, 0);
+    assert.equal(eliminated + funnel.eligible, funnel.considered);
   });
 
-  test('funnel totals equal considered: considered minus every non-eligible reason equals funnel.eligible', () => {
+  test('fit reasons are broken out (not_scored, below_fit, fit_unverified) under one fit gate', () => {
     const classified = [
       { row: row({ listingId: 1 }), reason: 'below_fit' },
       { row: row({ listingId: 2 }), reason: 'human_fit_override' },
       { row: row({ listingId: 3 }), reason: 'not_scored' },
-      { row: row({ listingId: 4 }), reason: 'exclusion_unknown_company' },
-      { row: row({ listingId: 5 }), reason: 'eligible' },
+      { row: row({ listingId: 4 }), reason: 'fit_unverified' },
+      { row: row({ listingId: 5 }), reason: 'exclusion_unknown_company' },
       { row: row({ listingId: 6 }), reason: 'eligible' },
-      { row: row({ listingId: 7 }), reason: 'eligible' },
     ];
     const funnel = computeFunnel(classified);
-    const totalFails = classified.filter((c) => c.reason !== 'eligible').length;
-    assert.equal(funnel.considered - totalFails, funnel.eligible);
-    assert.equal(funnel.eligible, 3);
+    assert.equal(funnel.eliminated.fit, 4);
+    assert.deepEqual(
+      { below_fit: funnel.reasons.below_fit, human_fit_override: funnel.reasons.human_fit_override, not_scored: funnel.reasons.not_scored, fit_unverified: funnel.reasons.fit_unverified },
+      { below_fit: 1, human_fit_override: 1, not_scored: 1, fit_unverified: 1 },
+    );
+    assert.equal(funnel.considered - 5, funnel.eligible);
   });
 
-  test('an empty classified list is total: every stage is zero, never throws', () => {
+  test('an empty classified list is total: every count is zero, never throws', () => {
     const funnel = computeFunnel([]);
     assert.equal(funnel.considered, 0);
-    for (const stage of FUNNEL_STAGES) assert.equal(funnel[stage], 0);
+    assert.equal(funnel.eligible, 0);
+    for (const gate of GATES) assert.equal(funnel.eliminated[gate.name], 0);
+  });
+
+  test('an unknown reason is never dropped: it is eliminated under its own name', () => {
+    const funnel = computeFunnel([{ row: row(), reason: 'something_new' }, { row: row(), reason: 'eligible' }]);
+    assert.equal(funnel.eliminated.something_new, 1);
+    assert.equal(funnel.eligible, 1);
   });
 
   test('multiple rows failing the SAME gate all count against that one gate', () => {
@@ -439,9 +449,24 @@ describe('computeFunnel: sequential funnel derived from a single classify() pass
       { row: row({ listingId: 4 }), reason: 'eligible' },
     ];
     const funnel = computeFunnel(classified);
-    assert.equal(funnel.exclusions, 4); // nothing failed the exclusions/fit gates
-    assert.equal(funnel.fit, 4);
-    assert.equal(funnel.not_us, 1); // three rows fell out here
+    assert.equal(funnel.eliminated.exclusions, 0);
+    assert.equal(funnel.eliminated.fit, 0);
+    assert.equal(funnel.eliminated.not_us, 3);
     assert.equal(funnel.eligible, 1);
+  });
+});
+
+describe('fit_unverified (unblock-auto-apply A2)', () => {
+  test('a model fit made without a description is ineligible until a description-based rescore', () => {
+    assert.equal(classifyCandidate(row({ fitScore: 85, fitBasis: 'no_description' }), CTX), 'fit_unverified');
+    assert.equal(classifyCandidate(row({ fitScore: 85, fitBasis: 'description' }), CTX), 'eligible');
+    assert.equal(classifyCandidate(row({ fitScore: 85, fitBasis: null }), CTX), 'eligible');
+  });
+  test('a below-floor fit still reports below_fit first', () => {
+    assert.equal(classifyCandidate(row({ fitScore: 20, fitBasis: 'no_description' }), CTX), 'below_fit');
+  });
+  test('fit_unverified is a closed reason inside the fit gate', () => {
+    assert.ok(CLOSED_REASONS.includes('fit_unverified'));
+    assert.ok(GATES.find((g) => g.name === 'fit')?.reasons.includes('fit_unverified'));
   });
 });

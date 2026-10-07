@@ -39,7 +39,8 @@ let tmpConfigDir;
  * (triage-output-schema.json, triage-mcp-empty.json, copied from the real, shipped mcp/job-search/config/
  * dir), and a non-blank triage-candidate.md so model scoring is never disabled with
  * candidate_summary_missing.
- * @param {{ deterministicEnabled: boolean, modelEnabled: boolean }} o
+ * @param {{ deterministicEnabled: boolean, modelEnabled: boolean, triage?: any }} o `triage` replaces the
+ *   whole triage.json when given
  */
 function buildTriageConfigDir(o) {
   const dir = fs.mkdtempSync(path.join(os.tmpdir(), 'triage-cli-config-'));
@@ -47,7 +48,7 @@ function buildTriageConfigDir(o) {
   fs.copyFileSync(path.join(PKG, 'config', 'triage-output-schema.json'), path.join(dir, 'triage-output-schema.json'));
   fs.copyFileSync(path.join(PKG, 'config', 'triage-mcp-empty.json'), path.join(dir, 'triage-mcp-empty.json'));
   fs.writeFileSync(path.join(dir, 'triage-candidate.md'), 'A CTO with 20 years of experience across e-commerce and payments.');
-  fs.writeFileSync(dir + '/triage.json', JSON.stringify({
+  fs.writeFileSync(dir + '/triage.json', JSON.stringify(o.triage ?? {
     deterministic: { enabled: o.deterministicEnabled, floor: 0, ceiling: 100 },
     model: { enabled: o.modelEnabled },
   }));
@@ -150,6 +151,48 @@ describe('bin/scan.js with slice 3 auto-triage enabled', () => {
     const events = await client.query(`SELECT actor, note FROM ic_job_events WHERE listing_id = $1 AND kind = 'status' ORDER BY id DESC LIMIT 1`, [scoredId]);
     assert.equal(events.rows[0].actor, 'auto');
     assert.equal(events.rows[0].note, 'fake auto-triage score');
+  });
+
+  test('unblock-auto-apply Item 4: a row below the deterministic floor (model_low) ends with a model fit_score, end to end', async () => {
+    // The previous test's run already triaged the fixture listings; return them to untriaged so this run's
+    // candidate query sees them again.
+    await client.query(
+      `UPDATE ic_job_listings SET status = NULL, fit_score = NULL, fit_basis = NULL
+        WHERE id IN (SELECT i.listing_id FROM ic_scan_run_items i JOIN ic_scan_runs r ON r.id = i.run_id WHERE r.profile = $1)`,
+      [PROFILE],
+    );
+    await cleanupScan(client, { profile: PROFILE });
+    await upsertTestProfile(client, PROFILE, { sources: ['greenhouse'], keywords: ['Chief', 'Vice President'], phrases: [], locations: ['Houston, TX'] });
+    // floor 100 puts every fixture row (prescore < 100) below the deterministic floor; scoreFloor 0 sends
+    // them to the model as model_low instead of auto-skipping them.
+    const dir = buildTriageConfigDir({
+      deterministicEnabled: true, modelEnabled: true,
+      triage: { deterministic: { enabled: true, floor: 100, ceiling: 100 }, model: { enabled: true, scoreFloor: 0 } },
+    });
+    const lockPath = writeLockFor(dir);
+    const env = {
+      ...process.env,
+      JOBSEARCH_FIXTURE_MAP: MAP,
+      JOBSEARCH_FIXTURE_NOW: FIXTURE_NOW.toISOString(),
+      JOBSEARCH_CONFIG_DIR: dir,
+      JOBSEARCH_CONFIG_LOCK: lockPath,
+      JOBSEARCH_LOG_DIR: logDir,
+      JOBSEARCH_TRIAGE_CLAUDE_BIN: process.execPath,
+      JOBSEARCH_TRIAGE_CLAUDE_SCRIPT: FAKE_CLAUDE_JS,
+    };
+    const r = await runCliWaiting(['--profile', PROFILE, '--sources', 'greenhouse'], env);
+    const summary = JSON.parse((r.out.trim().split('\n').pop()) ?? '{}');
+    assert.ok(summary.run_id > 0, `stdout=${r.out} stderr=${r.err}`);
+    const triage = summary.stats.triage;
+    assert.ok(triage.deterministic.model_low >= 1, JSON.stringify(triage.deterministic));
+    assert.equal(triage.deterministic.skip_low, 0, 'nothing below the floor was auto-skipped');
+    assert.ok(triage.coverage && triage.coverage.sent >= 1, JSON.stringify(triage.coverage));
+    const low = await client.query(
+      `SELECT l.prescore, l.fit_score FROM ic_job_listings l JOIN ic_scan_run_items i ON i.listing_id = l.id
+        WHERE i.run_id = $1 AND l.prescore < 100 AND l.fit_score = 62`,
+      [summary.run_id],
+    );
+    assert.ok((low.rowCount ?? 0) >= 1, 'a sub-floor row was scored by the (fake) model');
   });
 
   test('--dry-run never writes stats.triage at all (no triage rows or events)', async () => {

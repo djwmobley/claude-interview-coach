@@ -7,6 +7,18 @@
     { "address": "jobalert@lensa.com", "parser": "lensa", "enabled": true, "comment": "Lensa job alert digest" },
     { "address": "aggregated@lensa.com", "parser": "lensa", "enabled": true, "comment": "Lensa Aggregated multi-job-board digest" },
     { "address": "lensa24@lensa.com", "parser": "lensa", "enabled": true, "comment": "Lensa 24 recent-postings digest" },
-    { "address": "jobs@my.theladders.com", "parser": "ladders", "enabled": true, "comment": "Ladders new-jobs digest" }
-  ]
+    { "address": "jobs@my.theladders.com", "parser": "ladders", "enabled": true, "comment": "Ladders new-jobs digest (templates A, B, C)" },
+    { "address": "dice@connect.dice.com", "parser": "dice", "enabled": true, "comment": "Dice IntelliSearch and newsletter job cards" },
+    { "address": "emails@efinancialcareers.com", "parser": "efinancialcareers", "enabled": true, "comment": "eFinancialCareers daily jobs (news mails have no job markers)" },
+    { "address": "hello@mail.remotehunter.com", "parser": "remotehunter", "enabled": true, "comment": "RemoteHunter weekly rundown; apply-with-ai links are never fetched" },
+    { "address": "blackveatch-jobnotification@noreply12.jobs2web.com", "parser": "jobs2web", "enabled": true, "company": "Black & Veatch", "comment": "Black & Veatch SuccessFactors job agent" }
+  ],
+  "discovery": {
+    "enabled": true,
+    "maxMessages": 40,
+    "perSenderMax": 3,
+    "keywords": ["job", "jobs", "hiring", "opening", "openings", "opportunity", "opportunities", "position", "positions", "role", "roles", "career", "careers"],
+    "ignoredSenders": []
+  },
+  "health": { "parserBrokenMinEmails": 1 }
 }

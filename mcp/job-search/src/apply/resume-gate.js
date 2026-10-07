@@ -47,7 +47,7 @@ import {
   SUBMIT_UNCONFIRMED_KIND, UNCONFIRMED_SUBMIT_KINDS, submitUnconfirmedQuestion, recordApplicationEvent,
 } from '../core/applications.js';
 import { SUBMIT_GATE_KIND, SUBMIT_ERROR_KIND } from './submit-gate.js';
-import { breakerStatus, EASY_APPLY_BUDGET_SOURCE, WORKDAY_ASSISTED_BUDGET_SOURCE } from '../core/easy-apply-state.js';
+import { breakerStatus, EASY_APPLY_BUDGET_SOURCE, WORKDAY_ASSISTED_BUDGET_SOURCE, WORKDAY_BUDGET_TIMEZONE } from '../core/easy-apply-state.js';
 import { AWAITING_SUBMIT_KIND } from '../core/easy-apply-tabs.js';
 import { workdayAssistedConfig } from './assisted/gate.js';
 import { EASY_APPLY_DEFAULTS } from './easy-apply-policy.js';
@@ -253,7 +253,8 @@ export function classifyResume(row, ctx = {}) {
 async function isBudgetExhausted(client, ats, config, now) {
   if (ats === 'workday') {
     const cfg = workdayAssistedConfig(config);
-    const r = await remainingBudget(client, WORKDAY_ASSISTED_BUDGET_SOURCE, { dailyPages: cfg.assistedDaily, dailyDetails: 1_000_000_000 }, now);
+    // A7: the Workday pool counts by the America/Chicago local day, the same day its reservation charges.
+    const r = await remainingBudget(client, WORKDAY_ASSISTED_BUDGET_SOURCE, { dailyPages: cfg.assistedDaily, dailyDetails: 1_000_000_000 }, now, WORKDAY_BUDGET_TIMEZONE);
     return r.pages < 1;
   }
   if (ats === 'linkedin_easy') {

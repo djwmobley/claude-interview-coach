@@ -82,7 +82,7 @@ export const CLOSED_REASONS = Object.freeze([
   // prefixed reason per non-eligible EXCLUSION_BRANCHES entry (its own 'eligible' branch simply falls
   // through to the checks below, never adding a reason of its own).
   ...EXCLUSION_BRANCHES.filter((b) => b !== 'eligible').map((b) => `exclusion_${b}`),
-  'not_scored', 'below_fit', 'human_fit_override', 'duplicate_of', 'not_us', 'salary_below_floor',
+  'not_scored', 'below_fit', 'human_fit_override', 'fit_unverified', 'duplicate_of', 'not_us', 'salary_below_floor',
   'active_application', 'no_description', 'apply_target_unresolved', 'easy_apply_only', 'easy_apply_assisted', 'ats_not_allowed',
   'confidence_not_exact', 'hourly_pay', 'daily_cap', 'eligible',
 ]);
@@ -98,7 +98,7 @@ export const CLOSED_REASONS = Object.freeze([
  */
 export const GATES = Object.freeze([
   { name: 'exclusions', reasons: Object.freeze(EXCLUSION_BRANCHES.filter((b) => b !== 'eligible').map((b) => `exclusion_${b}`)) },
-  { name: 'fit', reasons: Object.freeze(['not_scored', 'below_fit', 'human_fit_override']) },
+  { name: 'fit', reasons: Object.freeze(['not_scored', 'below_fit', 'human_fit_override', 'fit_unverified']) },
   { name: 'duplicate_of', reasons: Object.freeze(['duplicate_of']) },
   { name: 'not_us', reasons: Object.freeze(['not_us']) },
   { name: 'salary_below_floor', reasons: Object.freeze(['salary_below_floor']) },
@@ -118,28 +118,32 @@ export const GATES = Object.freeze([
 export const FUNNEL_STAGES = Object.freeze([...GATES.map((g) => g.name), 'eligible']);
 
 /**
- * Pure, total, sequential funnel: `considered` (input length), then one non-increasing count per GATES
- * entry (each gate's count = the previous stage's count minus however many rows' reason falls in THIS
- * gate's reason set), ending in `eligible` = the count of rows whose reason is literally 'eligible'. No
- * second classification pass -- every count here is derived purely from the `reason` each row already
- * carries from a single classify() call.
+ * Pure, total funnel (version 2, unblock-auto-apply Item 4 "funnel labels"): `considered` (input length),
+ * `eliminated[gate]` (how many rows' reason falls in that GATES entry), `reasons[reason]` (the per-reason
+ * count, so a gate like fit can be broken down), and `eligible`. Every GATES name is present in
+ * `eliminated`, even at 0. A reason no gate claims (never expected, since GATES partitions CLOSED_REASONS)
+ * is still eliminated under its own name rather than dropped, so eliminated + eligible = considered always
+ * holds. No second classification pass: every count comes from the reason a single classify() call gave.
+ * Version-less summaries written before this change are rendered by report.js as the old "remaining after
+ * each gate" line.
  * @param {Array<{ row: CandidateRow, reason: string }>} classified rows already classified (pre-dedup, pre-cap)
- * @returns {Record<'considered'|typeof FUNNEL_STAGES[number], number>}
+ * @returns {{ version: 2, considered: number, eliminated: Record<string, number>, reasons: Record<string, number>, eligible: number }}
  */
 export function computeFunnel(classified) {
   /** @type {Record<string, number>} */
-  const reasonCounts = {};
-  for (const entry of classified) reasonCounts[entry.reason] = (reasonCounts[entry.reason] ?? 0) + 1;
+  const reasons = {};
+  for (const entry of classified) reasons[entry.reason] = (reasons[entry.reason] ?? 0) + 1;
   /** @type {Record<string, number>} */
-  const funnel = { considered: classified.length };
-  let remaining = classified.length;
+  const eliminated = {};
+  const claimed = new Set(['eligible']);
   for (const gate of GATES) {
-    const failedHere = gate.reasons.reduce((sum, r) => sum + (reasonCounts[r] ?? 0), 0);
-    remaining -= failedHere;
-    funnel[gate.name] = remaining;
+    eliminated[gate.name] = gate.reasons.reduce((sum, r) => sum + (reasons[r] ?? 0), 0);
+    for (const r of gate.reasons) claimed.add(r);
   }
-  funnel.eligible = remaining;
-  return /** @type {any} */ (funnel);
+  for (const [reason, n] of Object.entries(reasons)) {
+    if (!claimed.has(reason)) eliminated[reason] = (eliminated[reason] ?? 0) + n;
+  }
+  return { version: 2, considered: classified.length, eliminated, reasons, eligible: reasons.eligible ?? 0 };
 }
 
 /**
@@ -149,6 +153,8 @@ export function computeFunnel(classified) {
  * @property {string|null} fitActor actor of the most recent ic_job_events kind='fit' row for this
  *   listing, or null when no fit event has ever been recorded (a listing whose fit_score was set some
  *   other way, or never scored at all)
+ * @property {string|null} [fitBasis] ic_job_listings.fit_basis (sql/021): 'no_description' marks a model fit
+ *   made without a description (reason fit_unverified); 'description' or null is trusted as before
  * @property {number|null} duplicateOf ic_job_listings.duplicate_of
  * @property {string|null} locationNorm
  * @property {string|null} remoteMode
@@ -193,6 +199,9 @@ export function classifyCandidate(row, ctx) {
     // candidate identically.
     return row.fitActor && row.fitActor !== 'auto' ? 'human_fit_override' : 'below_fit';
   }
+  // Unblock-auto-apply A2: a model fit computed without a description is not trusted for an unattended
+  // submit until a description exists and src/core/triage.js rescored it (fit_basis becomes 'description').
+  if (row.fitBasis === 'no_description') return 'fit_unverified';
   if (!isUsLocation(row.locationNorm)) return 'not_us';
   const floor = resolveFloor({ locationNorm: row.locationNorm, remoteMode: row.remoteMode }, ctx.floors);
   if (typeof row.salaryMax === 'number' && row.salaryMax < floor) return 'salary_below_floor';
@@ -341,7 +350,7 @@ export async function countAutoApprovedToday(client, now, timezone) {
 export async function fetchCandidateRows(client) {
   const r = await client.query(`
     SELECT
-      l.id AS listing_id, l.fit_score, l.duplicate_of, l.location_norm, l.remote_mode,
+      l.id AS listing_id, l.fit_score, l.fit_basis, l.duplicate_of, l.location_norm, l.remote_mode,
       l.salary_max, l.salary_period, l.salary_raw, l.description, l.apply_url, l.apply_ats, l.apply_ats_confidence, l.apply_easy_only,
       l.company, l.company_norm, l.title, l.title_norm, coalesce(l.url_normalized, l.url) AS source_url, l.source,
       (SELECT actor FROM ic_job_events e WHERE e.listing_id = l.id AND e.kind = 'fit' ORDER BY e.at DESC, e.id DESC LIMIT 1) AS fit_actor,
@@ -357,6 +366,7 @@ export async function fetchCandidateRows(client) {
     listingId: Number(row.listing_id),
     fitScore: row.fit_score === null ? null : Number(row.fit_score),
     fitActor: row.fit_actor ?? null,
+    fitBasis: row.fit_basis ?? null,
     duplicateOf: row.duplicate_of === null ? null : Number(row.duplicate_of),
     locationNorm: row.location_norm ?? null,
     remoteMode: row.remote_mode ?? null,

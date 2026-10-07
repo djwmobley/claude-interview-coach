@@ -43,6 +43,8 @@ export const STALE_LIMIT = 3;
  * @property {(ev: import('../adapters/base.js').PageEvent) => Promise<void>} [onBatch]
  * @property {(ev: import('../adapters/base.js').WarningEvent) => Promise<void>} [onWarning]
  * @property {(ev: import('../adapters/base.js').WallEvent) => Promise<{ stopSource: boolean }>} [onWall]
+ * @property {(ev: { kind: 'source_stats', stats: any }) => Promise<void>} [onSourceStats] a source's own
+ *   end-of-search counters (Gmail intake addendum: stats.gmail)
  */
 
 /**
@@ -116,6 +118,13 @@ export async function runSearch(adapter, profile, ctx, handlers, opts) {
           return result;
         }
         directive = { stopQuery: true };
+      } else if (ev.kind === 'source_stats') {
+        // Gmail intake addendum: a source's own end-of-search counters (gmail by_sender, discovery).
+        if (handlers.onSourceStats) await handlers.onSourceStats(ev);
+      } else {
+        // Total: an event kind this scheduler does not know is counted and logged, never silently dropped.
+        result.warnings++;
+        if (handlers.onWarning) await handlers.onWarning({ kind: 'warning', code: 'ADAPTER_EVENT_UNKNOWN', message: `${adapter.name}: unknown adapter event kind "${String(/** @type {any} */ (ev).kind)}"`, query: '' });
       }
     }
     result.completed = true;

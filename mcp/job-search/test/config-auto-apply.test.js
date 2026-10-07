@@ -21,10 +21,35 @@ describe('shipped config/auto-apply.json fit floors (operator decision 2026-10-0
     assert.equal(shipped.probeFitFloor, 60);
   });
 
-  test('probeRowCap is 10: the LinkedIn per-run cap now counts only real page loads (spec v1 F2.2)', () => {
+  test('unblock Item 3: probeRowCap 30 and probeTimeBudgetMs 900000; probeFitFloor stays 60', () => {
     const shippedPath = path.join(path.dirname(fileURLToPath(import.meta.url)), '..', 'config', 'auto-apply.json');
     const shipped = autoApplySchema.parse(JSON.parse(fs.readFileSync(shippedPath, 'utf8')));
-    assert.equal(shipped.probeRowCap, 10);
+    assert.equal(shipped.probeRowCap, 30);
+    assert.equal(shipped.probeTimeBudgetMs, 900000);
+    assert.equal(shipped.probeFitFloor, 60);
+  });
+
+  test('unblock Items 1-2: approvedDriver ships enabled (schema default off), reroute on, both maxPerRun 5', () => {
+    const shippedPath = path.join(path.dirname(fileURLToPath(import.meta.url)), '..', 'config', 'auto-apply.json');
+    const shipped = autoApplySchema.parse(JSON.parse(fs.readFileSync(shippedPath, 'utf8')));
+    assert.deepEqual(shipped.approvedDriver, { enabled: true, maxPerRun: 5 });
+    assert.deepEqual(shipped.reroute, { enabled: true, maxPerRun: 5 });
+    const defaults = autoApplySchema.parse({});
+    assert.deepEqual(defaults.approvedDriver, { enabled: false, maxPerRun: 5 });
+    assert.deepEqual(defaults.reroute, { enabled: true, maxPerRun: 5 });
+    assert.equal(defaults.dailyCap, 5, 'dailyCap untouched');
+  });
+});
+
+describe('shipped config/triage.json (unblock Item 4)', () => {
+  test('scoreFloor 20, backlogPerRun 60, maxListingsPerRun 200, maxBatchesPerRun 15', () => {
+    const p = path.join(path.dirname(fileURLToPath(import.meta.url)), '..', 'config', 'triage.json');
+    const t = JSON.parse(fs.readFileSync(p, 'utf8'));
+    assert.equal(t.model.scoreFloor, 20);
+    assert.equal(t.model.backlogPerRun, 60);
+    assert.equal(t.model.maxListingsPerRun, 200);
+    assert.equal(t.model.maxBatchesPerRun, 15);
+    assert.equal(t.deterministic.floor, 40, 'the deterministic floor (sticky-skip, scope) is unchanged');
   });
 });
 

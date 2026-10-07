@@ -8,6 +8,7 @@ import assert from 'node:assert/strict';
 import { planPages, assertPlanWithinCap, reserveBudget, remainingBudget, budgetDay, shuffle } from '../src/core/budget.js';
 import { newClient, testConfig } from './helpers/scan-fixtures.js';
 import { ADAPTERS } from '../src/adapters/index.js';
+import { reserveWorkdayAttempt, refundWorkdayAttempt } from '../src/core/easy-apply-state.js';
 
 const SRC = `zz-test-budget-${process.pid}`;
 /** @type {import('pg').Client} */
@@ -103,5 +104,45 @@ describe('reserveBudget (real DB)', () => {
     const r = await reserveBudget(client, SRC, { pages: 1 }, { dailyPages: 1, dailyDetails: 0 }, tomorrow);
     assert.equal(r.ok, true);
     assert.equal(r.remainingPages, 0);
+  });
+});
+
+describe('budgetDay with a timezone (unblock-auto-apply Item 5, A7)', () => {
+  test('without a timezone it stays the UTC date', () => {
+    assert.equal(budgetDay(new Date('2026-10-08T01:00:00Z')), '2026-10-08');
+  });
+  test('with America/Chicago, 20:00 Central on 10-07 is still the 10-07 local day', () => {
+    assert.equal(budgetDay(new Date('2026-10-08T01:00:00Z'), 'America/Chicago'), '2026-10-07');
+    assert.equal(budgetDay(new Date('2026-10-08T05:30:00Z'), 'America/Chicago'), '2026-10-08');
+  });
+});
+
+describe('workday_assisted pool counts by the America/Chicago local day (A7)', () => {
+  const WD = 'workday_assisted';
+  test('an attempt at 20:00 Central does not reduce the next local day\'s cap; the refund uses the stored day', async () => {
+    await client.query('DELETE FROM ic_scan_budget WHERE source = $1', [WD]);
+    try {
+      const evening = new Date('2026-10-08T01:00:00Z'); // 20:00 CDT on 2026-10-07, already 10-08 in UTC
+      const r = await reserveWorkdayAttempt(client, { daily: 1, now: evening });
+      assert.equal(r.ok, true);
+      assert.equal(/** @type {any} */ (r).day, '2026-10-07', 'the charge records the local day it was made on');
+      const nextMorning = new Date('2026-10-08T12:00:00Z'); // 07:00 CDT on 2026-10-08
+      const rem = await remainingBudget(client, WD, { dailyPages: 1, dailyDetails: 1 }, nextMorning, 'America/Chicago');
+      assert.equal(rem.pages, 1, 'the next local morning still has the whole cap');
+      const morning = await reserveWorkdayAttempt(client, { daily: 1, now: nextMorning });
+      assert.equal(morning.ok, true);
+      // Refund the evening charge against its stored day, even though "now" is already the next day.
+      await refundWorkdayAttempt(client, { day: '2026-10-07' });
+      const rows = (await client.query('SELECT day::text AS day, pages FROM ic_scan_budget WHERE source = $1 ORDER BY day', [WD])).rows;
+      assert.deepEqual(rows.map((x) => [x.day, x.pages]), [['2026-10-07', 0], ['2026-10-08', 1]]);
+    } finally {
+      await client.query('DELETE FROM ic_scan_budget WHERE source = $1', [WD]);
+    }
+  });
+  test('LinkedIn pools stay on the UTC day', async () => {
+    const evening = new Date('2026-10-08T01:00:00Z');
+    await reserveBudget(client, SRC, { details: 1 }, { dailyPages: 5, dailyDetails: 5 }, evening);
+    const row = await client.query('SELECT day::text AS day FROM ic_scan_budget WHERE source = $1 AND details > 0 ORDER BY day DESC LIMIT 1', [SRC]);
+    assert.equal(row.rows[0].day, '2026-10-08');
   });
 });

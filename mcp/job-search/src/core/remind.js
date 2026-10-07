@@ -196,6 +196,9 @@ export async function runRemind(opts) {
   // collectAutoApply/renderAutoApply* contract.
   const autoApplySummary = opts.autoApplySummaryFile ? readAutoApplySummary(opts.autoApplySummaryFile) : null;
   const autoApplyData = await collectAutoApply(opts.client, autoApplySummary);
+  // Unblock-auto-apply Item 6: the auto-apply section opens with the same SOURCE DISABLED headline as the
+  // scan report (buildScanReport already collected it), every run until the source is re-enabled.
+  /** @type {any} */ (autoApplyData).latchedSources = report.latchedSources ?? [];
 
   const followupsDigest = buildDigest(rows, now);
   const followupsHtml = buildDigestHtml(rows, now);

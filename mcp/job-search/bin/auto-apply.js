@@ -61,7 +61,12 @@
  *     'apply', so the ordinary dailyCap is untouched), then runs the worker only inside 09:00-19:00
  *     America/Chicago with 20-40 minute jittered spacing, stopping while one Easy Apply is in flight or
  *     awaiting Damian's own Submit. The worker fills the form and stops at LinkedIn's Review screen; it
- *     never submits. This phase can keep the process alive until the window opens.
+ *     never submits. This phase can keep the process alive until the window opens. A page that turns out
+ *     to apply on the company site is rerouted to that ATS (src/apply/reroute.js) instead of parked.
+ *   approved driver (unblock-auto-apply Items 1-2, A4) -- after the Easy Apply phase: a reroute pre-pass,
+ *     then every approved application classified once and, when clean, driven through runApplyWorker
+ *     (src/apply/approved-driver.js). config/auto-apply.json approvedDriver.enabled; dry run classifies only.
+ *     `--application <id>` on an approved row runs this driver for that one id.
  *
  * Lock: one pg_try_advisory_lock on src/core/scan-run.js's own LOCK_KEY (730193001), polled every
  * config/auto-apply.json's pollSeconds up to (hardDeadline - now) minutes -- NEVER the configured
@@ -112,6 +117,8 @@ import { launchChrome } from './scan.js';
 import { runningMarkerPath, writeRunningMarker, deleteRunningMarker } from '../src/core/running-marker.js';
 import { runEasyApplyMorning, defaultMorningDeps } from '../src/apply/easy-apply-morning.js';
 import { markStaleAwaiting, breakerStatus } from '../src/core/easy-apply-state.js';
+import { runApprovedDriver } from '../src/apply/approved-driver.js';
+import { rerouteApplication, summarizeReroute } from '../src/apply/reroute.js';
 
 const USAGE = 'usage: node bin/auto-apply.js [--dry-run] [--json [out]] [--application <id>]';
 
@@ -383,13 +390,15 @@ export async function acquireLockWithPoll(client, opts) {
  *   sleep?: (ms: number) => Promise<void>,
  *   rand?: () => number,
  * }} opts
- * @returns {Promise<{ attempted: number, resolved: number, unresolved: number, skipped: number, skippedByReason: Record<string, number>, stoppedBy: string|null, remaining: number, linkedinTaken: number, linkedinHalt: string|null, linkedinBranches: Record<string, number> }>}
+ * @returns {Promise<{ attempted: number, resolved: number, unresolved: number, skipped: number, skippedByReason: Record<string, number>, stoppedBy: string|null, remaining: number, linkedinTaken: number, linkedinHalt: string|null, linkedinBranches: Record<string, number>, neverProbedSeen: number, neverProbedAttempted: number }>}
  */
 export async function runPrepare(client, config, opts) {
   const probeRegistry = buildProbeRegistryFromAtsApply(config.atsApply, INTERMEDIARY_HOSTS);
   const stats = {
     attempted: 0, resolved: 0, unresolved: 0, skipped: 0, skippedByReason: /** @type {Record<string, number>} */ ({}), stoppedBy: /** @type {string|null} */ (null), remaining: 0,
     linkedinTaken: 0, linkedinHalt: /** @type {string|null} */ (null), linkedinBranches: /** @type {Record<string, number>} */ ({}),
+    // Unblock Item 3: never-probed rows sort first; the report says how many of them got a probe.
+    neverProbedSeen: 0, neverProbedAttempted: 0,
   };
   const bumpSkip = (/** @type {string} */ reason) => {
     stats.skipped++;
@@ -415,7 +424,7 @@ export async function runPrepare(client, config, opts) {
        AND apply_ats_confidence IS DISTINCT FROM 'exact'
        AND (apply_probed_at IS NULL OR apply_probed_at < now() - ($2 || ' hours')::interval)
        AND fit_score >= $3
-     ORDER BY fit_score DESC NULLS LAST, apply_probed_at ASC NULLS FIRST, id ASC
+     ORDER BY (apply_probed_at IS NULL) DESC, fit_score DESC NULLS LAST, apply_probed_at ASC NULLS FIRST, id ASC
      LIMIT $4`,
     [LIFETIME_PROBE_ATTEMPTS, config.autoApply.reprobeAfterHours, probeFitFloor, fetchLimit],
   );
@@ -428,7 +437,11 @@ export async function runPrepare(client, config, opts) {
   let otherTaken = 0;
   let linkedinSeen = 0;
   for (const row of cur.rows) {
-    if (!isUsLocation(row.location_norm)) continue;
+    // Unblock Item 3: a row with no usable US location is counted, never silently dropped.
+    if (!isUsLocation(row.location_norm)) {
+      bumpSkip('not_us_location');
+      continue;
+    }
     if (row.source === 'linkedin') {
       linkedinSeen++;
     } else {
@@ -436,6 +449,7 @@ export async function runPrepare(client, config, opts) {
       otherTaken++;
     }
     selectedRows.push(row);
+    if (!row.apply_probed_at) stats.neverProbedSeen++;
   }
 
   const classifyExcl = opts.classifyExclusion ?? ((listingLike, ctx) => classifyExclusion(listingLike, ctx));
@@ -545,6 +559,7 @@ export async function runPrepare(client, config, opts) {
     if (isLinkedIn) stats.linkedinTaken++;
 
     stats.attempted++;
+    if (!row.apply_probed_at) stats.neverProbedAttempted++;
     try {
       /** @type {{ outcome: string, branch?: string|null }} */
       let result;
@@ -645,6 +660,47 @@ export async function ensureScanChrome(env, log, launchChromeFn = launchChrome) 
 }
 
 /**
+ * Production wiring for src/apply/reroute.js (unblock-auto-apply Item 2): dedicated connections, fresh
+ * config at decision time, and a LinkedIn probe page from the scan Chrome WITHOUT reconciling other
+ * processes' pages (this does not hold the shared scan lock).
+ * @param {{ config: any, env: any, log: (f: any) => void, exclusionConfig: any, rerouteBudget: { used: number, max: number }, scanRanToday: boolean }} o
+ * @returns {import('../src/apply/reroute.js').RerouteDeps}
+ */
+export function defaultRerouteDeps(o) {
+  return {
+    connectDedicated, config: o.config, freshConfig: () => loadConfig({ fresh: true, dir: o.config.configDir }),
+    exclusionConfig: o.exclusionConfig, now: () => new Date(), log: o.log, runBudget: o.rerouteBudget, scanRanToday: o.scanRanToday,
+    openBrowser: () => openLinkedInProbeBrowser(defaultConnectSession, o.env, o.config, o.log, { reconcile: false }),
+    probeRegistry: buildProbeRegistryFromAtsApply(o.config.atsApply, INTERMEDIARY_HOSTS),
+  };
+}
+
+/**
+ * Production wiring for src/apply/approved-driver.js (unblock-auto-apply Item 1). The reroute pre-pass is
+ * wired when config.autoApply.reroute.enabled; its results join `rerouteResults` when given.
+ * @param {{ config: any, env: any, log: (f: any) => void, exclusionConfig: any, dryRun: boolean, onlyId?: number, scanRanToday?: boolean,
+ *   rerouteBudget?: { used: number, max: number }, rerouteResults?: any[] }} o
+ * @returns {import('../src/apply/approved-driver.js').DriverDeps}
+ */
+export function defaultDriverDeps(o) {
+  const rerouteCfg = o.config.autoApply.reroute ?? { enabled: true, maxPerRun: 5 };
+  const rerouteBudget = o.rerouteBudget ?? { used: 0, max: rerouteCfg.maxPerRun };
+  const rerouteDeps = defaultRerouteDeps({ config: o.config, env: o.env, log: o.log, exclusionConfig: o.exclusionConfig, rerouteBudget, scanRanToday: o.scanRanToday === true });
+  return {
+    connectDedicated, freshConfig: () => loadConfig({ fresh: true, dir: o.config.configDir }), exclusionConfig: o.exclusionConfig,
+    now: () => new Date(), log: o.log, dryRun: o.dryRun, maxPerRun: o.config.autoApply.approvedDriver?.maxPerRun ?? 5, onlyId: o.onlyId,
+    runWorker: (id, opts) => runApplyWorker(id, { env: o.env, log: o.log, ...opts }),
+    reroute: rerouteCfg.enabled ? {
+      run: async (id, readState) => {
+        const r = await rerouteApplication(id, readState, rerouteDeps);
+        if (o.rerouteResults) o.rerouteResults.push(r);
+        return r;
+      },
+    } : null,
+  };
+}
+
+/**
  * The apply phase for ONE selected candidate: createApplication -> resume -> review (ADVISORY, never a
  * submit gate -- submit-on-resume spec section 1) -> approve (actor:'auto') -> runApplyWorker. Never
  * throws -- every phase's own failure is caught and reported as a closed outcome so the caller's loop
@@ -735,7 +791,7 @@ export async function applyOneCandidate(row, deps) {
 /** States runSingleApplication() (below) will re-drive; anything else is refused with `state_<state>`.
  * 'failed' (single-path-chrome fix): re-drives via retry(), never resume/review -- see this function's own
  * doc comment. */
-const RE_DRIVE_ALLOWED_STATES = Object.freeze(['drafting', 'needs_human', 'docs_ready', 'failed']);
+const RE_DRIVE_ALLOWED_STATES = Object.freeze(['drafting', 'needs_human', 'docs_ready', 'failed', 'approved']);
 
 /**
  * `--application <id>` re-drive (submit-on-resume spec section 4, amendments A1/A2/A3): re-runs the apply
@@ -803,7 +859,8 @@ const RE_DRIVE_ALLOWED_STATES = Object.freeze(['drafting', 'needs_human', 'docs_
  *   retryFn?: typeof retry,
  *   launchChromeFn?: typeof launchChrome,
  *   hasPartialDraftFn?: typeof hasAssistedNextClickEver,
- * }} deps `classifyExclusionFn`/`classifyCandidateFn`/`checkApplicationBlockersFn`/
+ *   runApprovedDriverFn?: (o: { onlyId: number }) => Promise<any>,
+ * }} deps `runApprovedDriverFn` (unblock Item 1) is a test seam for the approved path. `classifyExclusionFn`/`classifyCandidateFn`/`checkApplicationBlockersFn`/
  *   `countAutoApprovedTodayFn`/`retryFn`/`launchChromeFn`/`hasPartialDraftFn` are test seams ONLY (never
  *   set by production wiring -- main() below leaves every one at its real default), matching this file's
  *   own `opts.classifyExclusion` seam on runPrepare. `hasPartialDraftFn` replaces only the early marker
@@ -826,6 +883,15 @@ export async function runSingleApplication(id, deps) {
 
   if (!RE_DRIVE_ALLOWED_STATES.includes(app.state)) {
     return { outcome: 'refused', applicationId: id, listingId: app.listing_id, reason: `state_${app.state}` };
+  }
+
+  // Unblock-auto-apply Item 1: an approved application is driven by the morning approved driver for this
+  // one id (its own total classification, A1 lock, A5 partial-draft rule, and the worker), never by the
+  // resume/review/approve chain below.
+  if (app.state === 'approved') {
+    const runDriver = deps.runApprovedDriverFn ?? ((/** @type {any} */ o) => runApprovedDriver(defaultDriverDeps({ ...o, config: deps.config, env: deps.env, log: deps.log, exclusionConfig: deps.exclusionConfig, dryRun: false })));
+    const driver = await runDriver({ onlyId: id });
+    return { outcome: 'approved_driver', applicationId: id, listingId: app.listing_id, driver };
   }
 
   // Resume gate R3 (A10 enforcement): once an assisted run clicked Next for this application, on any
@@ -861,7 +927,7 @@ export async function runSingleApplication(id, deps) {
   }
 
   const listingRes = await deps.withClientFn((c) => c.query(
-    `SELECT l.id, l.fit_score, l.duplicate_of, l.location_norm, l.remote_mode, l.salary_max, l.salary_period,
+    `SELECT l.id, l.fit_score, l.fit_basis, l.duplicate_of, l.location_norm, l.remote_mode, l.salary_max, l.salary_period,
             l.salary_raw, l.description, l.apply_url, l.apply_ats, l.apply_ats_confidence, l.apply_easy_only,
             l.company, l.company_norm, l.title, l.title_norm, coalesce(l.url_normalized, l.url) AS source_url, l.source,
             (SELECT actor FROM ic_job_events e WHERE e.listing_id = l.id AND e.kind = 'fit' ORDER BY e.at DESC, e.id DESC LIMIT 1) AS fit_actor
@@ -886,7 +952,7 @@ export async function runSingleApplication(id, deps) {
 
   const candidateRow = {
     listingId: Number(app.listing_id), fitScore: l.fit_score === null ? null : Number(l.fit_score),
-    fitActor: l.fit_actor ?? null, duplicateOf: l.duplicate_of === null ? null : Number(l.duplicate_of),
+    fitActor: l.fit_actor ?? null, fitBasis: l.fit_basis ?? null, duplicateOf: l.duplicate_of === null ? null : Number(l.duplicate_of),
     locationNorm: l.location_norm ?? null, remoteMode: l.remote_mode ?? null,
     salaryMax: l.salary_max === null ? null : Number(l.salary_max), salaryPeriod: l.salary_period ?? null,
     salaryRaw: l.salary_raw ?? null,
@@ -1352,6 +1418,19 @@ async function main() {
       }
     }
 
+    // Unblock-auto-apply Item 2: one reroute budget and one result list for the whole run, shared by the
+    // Easy Apply phase (an 'external' page at its pre-worker check) and the approved driver's pre-pass.
+    const rerouteBudget = { used: 0, max: config.autoApply.reroute?.maxPerRun ?? 5 };
+    /** @type {any[]} */
+    const rerouteResults = [];
+    const morningReroute = config.autoApply.reroute?.enabled && !dryRun
+      ? async (/** @type {number} */ id) => {
+        const r = await rerouteApplication(id, 'approved', defaultRerouteDeps({ config, env, log, exclusionConfig, rerouteBudget, scanRanToday: scanState.state === 'finished_today' }));
+        rerouteResults.push(r);
+        return r;
+      }
+      : null;
+
     // Assisted LinkedIn Easy Apply (see the module doc comment's "easy apply" phase). Runs even when the
     // ordinary eligible list is empty, so leftover approved linkedin_easy applications are re-driven.
     if (!dryRun) {
@@ -1368,6 +1447,7 @@ async function main() {
           withClientFn: withClient, resumeRunner: createResumeRunner(runnerDeps), reviewRunner: createReviewRunner(runnerDeps),
           runApplyWorker, outputRoot, env, log, config, timezone,
           liveCheck: createLinkedInLiveCheck({ env, config, log, withClient }),
+          reroute: morningReroute,
         }));
         summary.easy_apply = easy;
         const easyHalt = easy.stopReason === 'linkedin_challenge' ? 'challenge'
@@ -1381,6 +1461,24 @@ async function main() {
         summary.easy_apply = { results: [], stopReason: 'error' };
       }
     }
+
+    // Unblock-auto-apply Items 1-2 (A4): the approved driver runs AFTER the Easy Apply phase, so rows the
+    // Easy Apply phase rerouted (or anything approved earlier in this run) are driven in this same run. Its
+    // reroute pre-pass shares the run's reroute budget with the Easy Apply phase. A dry run classifies only.
+    if (config.autoApply.approvedDriver?.enabled) {
+      summary.phase = 'approved_driver';
+      persist();
+      try {
+        const drv = await runApprovedDriver(defaultDriverDeps({
+          config, env, log, exclusionConfig, dryRun, scanRanToday: scanState.state === 'finished_today', rerouteBudget, rerouteResults,
+        }));
+        summary.approved_driver = { counts: drv.counts, results: drv.results, dry_run: drv.dry_run };
+      } catch (err) {
+        log({ evt: 'auto_apply_approved_driver_failed', ...errFields(err) });
+        summary.approved_driver = { error: String(errFields(err).err_message ?? 'error') };
+      }
+    }
+    if (rerouteResults.length || config.autoApply.reroute?.enabled) summary.reroute = summarizeReroute(rerouteResults);
 
     summary.ok = true;
     summary.outcome = 'ok';

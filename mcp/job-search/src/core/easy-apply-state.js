@@ -239,23 +239,35 @@ export async function hasEasyApplyInFlight(client) {
 }
 
 /**
- * Consume one assisted Workday attempt against its own daily cap (spec v1 clause 9).
+ * Local day the workday_assisted pool counts by (unblock-auto-apply Item 5, A7). Every other pool, the
+ * LinkedIn ones and the unattended submit cap included, stays on the UTC day.
+ */
+export const WORKDAY_BUDGET_TIMEZONE = 'America/Chicago';
+
+/**
+ * Consume one assisted Workday attempt against its own daily cap (spec v1 clause 9), counted by the
+ * America/Chicago local day (A7), so an evening attempt never uses the next local morning's slot. The
+ * charged day is returned so a refund goes back to the same day even after midnight.
  * @param {import('pg').ClientBase} client
  * @param {{ daily: number, now?: Date }} o
- * @returns {Promise<{ ok: true } | { ok: false, reason: 'workday_daily_cap' }>}
+ * @returns {Promise<{ ok: true, day: string } | { ok: false, reason: 'workday_daily_cap' }>}
  */
 export async function reserveWorkdayAttempt(client, o) {
-  const r = await reserveBudget(client, WORKDAY_ASSISTED_BUDGET_SOURCE, { pages: 1 }, { dailyPages: o.daily, dailyDetails: 1_000_000_000 }, o.now ?? new Date());
-  return r.ok ? { ok: true } : { ok: false, reason: 'workday_daily_cap' };
+  const now = o.now ?? new Date();
+  const r = await reserveBudget(client, WORKDAY_ASSISTED_BUDGET_SOURCE, { pages: 1 }, { dailyPages: o.daily, dailyDetails: 1_000_000_000 }, now, WORKDAY_BUDGET_TIMEZONE);
+  return r.ok ? { ok: true, day: budgetDay(now, WORKDAY_BUDGET_TIMEZONE) } : { ok: false, reason: 'workday_daily_cap' };
 }
 
 /**
- * Undo one reserveWorkdayAttempt for the same day (a refused claim: no attempt ran). Never below zero.
+ * Undo one reserveWorkdayAttempt (a refused claim: no attempt ran) against the day the charge was made on
+ * (A7: the stored day, never "today"). Never below zero. `now` is accepted for a charge recorded before the
+ * day was stored and maps to its local day.
  * @param {import('pg').ClientBase} client
- * @param {{ now: Date }} o
+ * @param {{ day?: string, now?: Date }} o
  */
 export async function refundWorkdayAttempt(client, o) {
-  await client.query('UPDATE ic_scan_budget SET pages = GREATEST(pages - 1, 0) WHERE source = $1 AND day = $2', [WORKDAY_ASSISTED_BUDGET_SOURCE, budgetDay(o.now)]);
+  const day = o.day ?? budgetDay(o.now ?? new Date(), WORKDAY_BUDGET_TIMEZONE);
+  await client.query('UPDATE ic_scan_budget SET pages = GREATEST(pages - 1, 0) WHERE source = $1 AND day = $2', [WORKDAY_ASSISTED_BUDGET_SOURCE, day]);
 }
 
 /**

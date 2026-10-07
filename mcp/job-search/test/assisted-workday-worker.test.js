@@ -315,3 +315,50 @@ describe('Workday start gate (own breaker, slot, budget)', () => {
     assert.equal((await getApplication(c, id)).state, 'approved');
   });
 });
+
+describe('deferral events (unblock-auto-apply Item 1, A10: the app 5 fix)', () => {
+  /** @param {number} id */
+  const deferralEvents = async (id) => (await c.query(
+    `SELECT note, meta FROM ic_job_application_events WHERE application_id = $1 AND kind = 'progress' AND meta ? 'deferred_reason' ORDER BY id`, [id],
+  )).rows;
+
+  test('a start-gate refusal writes one visible deferral event; a repeat the same local day writes none', async () => {
+    await tripBreaker(c, { reason: 'unexpected_submit', applicationId: null, hours: 24, ats: 'workday' });
+    const id = await seedApproved();
+    const r = await runApplyWorker(id, harness().deps());
+    assert.equal(r.status, 'deferred');
+    let ev = await deferralEvents(id);
+    assert.equal(ev.length, 1);
+    assert.equal(ev[0].meta.deferred_reason, 'breaker');
+    assert.match(ev[0].note, /^deferred: breaker; stays approved, the next morning run retries/);
+    const again = await runApplyWorker(id, harness().deps());
+    assert.equal(again.status, 'deferred');
+    ev = await deferralEvents(id);
+    assert.equal(ev.length, 1, 'a repeat inside the same local day (and inside 60 minutes) writes none');
+    assert.equal((await getApplication(c, id)).state, 'approved');
+  });
+
+  test('a different reason on the same day writes its own event', async () => {
+    await tripBreaker(c, { reason: 'unexpected_submit', applicationId: null, hours: 24, ats: 'workday' });
+    const id = await seedApproved();
+    await runApplyWorker(id, harness().deps());
+    await clearBreakerForTests(c);
+    const busy = await seedApproved();
+    await c.query(`UPDATE ic_job_applications SET state = 'needs_human', pending_question = '{"kind":"awaiting_submit","target_id":"OLD"}'::jsonb WHERE id = $1`, [busy]);
+    await runApplyWorker(id, harness().deps());
+    const reasons = (await deferralEvents(id)).map((e) => e.meta.deferred_reason);
+    assert.deepEqual(reasons, ['breaker', 'assisted_in_flight']);
+  });
+
+  test('an Easy Apply start-gate refusal is recorded the same way', async () => {
+    await tripBreaker(c, { reason: 'challenge', applicationId: null, hours: 24 });
+    const id = await seedApproved('linkedin_easy');
+    const r = await runApplyWorker(id, harness().deps());
+    assert.equal(r.status, 'deferred');
+    const ev = await deferralEvents(id);
+    assert.equal(ev.length, 1);
+    assert.equal(typeof ev[0].meta.deferred_reason, 'string');
+    await runApplyWorker(id, harness().deps());
+    assert.equal((await deferralEvents(id)).length, 1);
+  });
+});

@@ -159,6 +159,27 @@ describe('runEasyApplyMorning', () => {
     assert.equal(out.stopReason, 'verify_check_error');
   });
 
+  test('unblock Item 2: an external page at the pre-worker check is rerouted, never parked or run', async () => {
+    const h = harness({ start: '10:00', leftover: [77], inFlightAfterRun: false, workerStatus: 'needs_human', verify: (t) => (t.applicationId === 77 ? { branch: 'external' } : { branch: 'easy_apply' }) });
+    /** @type {number[]} */
+    const rerouted = [];
+    /** @type {any} */ (h.deps).reroute = async (/** @type {number} */ id) => { rerouted.push(id); return { outcome: 'rerouted', reason: null, ats: 'greenhouse' }; };
+    const out = await runEasyApplyMorning(/** @type {any} */ ([]), /** @type {any} */ (h.deps));
+    assert.deepEqual(rerouted, [77]);
+    assert.ok(!h.log.some((x) => x[0] === 'park'));
+    assert.ok(!h.log.some((x) => x[0] === 'worker'));
+    assert.deepEqual(out.results[0], { listingId: null, applicationId: 77, outcome: 'rerouted', branch: 'external', reason: null });
+    assert.equal(out.stopReason, null);
+  });
+
+  test('a reroute that hits a challenge stops the phase', async () => {
+    const h = harness({ start: '10:00', leftover: [77, 78], verify: () => ({ branch: 'external' }) });
+    /** @type {any} */ (h.deps).reroute = async () => ({ outcome: 'halted', reason: 'challenge' });
+    const out = await runEasyApplyMorning(/** @type {any} */ ([]), /** @type {any} */ (h.deps));
+    assert.equal(out.results.length, 1);
+    assert.equal(out.stopReason, 'linkedin_challenge');
+  });
+
   test('a deferred worker result stops the loop', async () => {
     const h = harness({ start: '10:00', inFlightAfterRun: false, workerStatus: 'deferred' });
     const out = await runEasyApplyMorning(/** @type {any} */ (rows), /** @type {any} */ (h.deps));

@@ -100,8 +100,11 @@ export function execFileWithStdin(bin, args, opts = {}) {
  */
 export const TRIAGE_BRANCHES = Object.freeze([
   'not_listing', 'duplicate', 'expired', 'review_band', 'review_other', 'already_marked', 'has_open_review',
-  'skip_noise', 'model_band', 'skip_low', 'auto_new',
+  'skip_noise', 'model_band', 'model_low', 'skip_low', 'auto_new',
 ]);
+
+/** Most model failures (a failed batch or an omitted id) a backlog row may carry and still be swept (A9). */
+export const BACKLOG_MAX_MODEL_FAILURES = 2;
 
 /** Valid model-step status recommendations (spec section 4, item 1: "score fit, choose new/maybe/skip"). */
 export const TRIAGE_MODEL_STATUSES = Object.freeze(['new', 'maybe', 'skip']);
@@ -158,8 +161,12 @@ export const TRIAGE_CANDIDATE_QUERY = `
  * lands in `review_other`, counted, never scored. Neither branch ever writes `status` -- a review row's
  * status is owned by the dedup review workflow (src/tools/review.js's resolveItem()), never by
  * auto-triage.
+ *
+ * Unblock-auto-apply Item 4: with `cfg.model.scoreFloor` set, a noise-ok row whose prescore is in
+ * [scoreFloor, floor) is `model_low` (action none: left untriaged for the model's full status decision,
+ * exactly like model_band) instead of skip_low. Without scoreFloor the table is unchanged.
  * @param {{ status?: string|null, noise_class?: string|null, prescore?: number|null, record_kind?: string|null, duplicate_of?: number|null, expired_at?: string|Date|null, has_open_review?: boolean }} row
- * @param {{ deterministic: { floor: number, ceiling: number } }} cfg
+ * @param {{ deterministic: { floor: number, ceiling: number }, model?: { scoreFloor?: number } }} cfg
  * @returns {{ branch: string, action: 'skip'|'new'|'fit_only'|'none', reason?: string }}
  */
 export function classifyForTriage(row, cfg) {
@@ -180,7 +187,11 @@ export function classifyForTriage(row, cfg) {
   if (!noiseOk) return { branch: 'skip_noise', action: 'skip', reason: `auto-triage: noise_class=${row.noise_class ?? 'null'}` };
   if (row.prescore === null || row.prescore === undefined) return { branch: 'model_band', action: 'none' };
   const { floor, ceiling } = cfg.deterministic;
-  if (row.prescore < floor) return { branch: 'skip_low', action: 'skip', reason: `auto-triage: prescore ${row.prescore} < floor ${floor}` };
+  if (row.prescore < floor) {
+    const scoreFloor = cfg.model?.scoreFloor;
+    if (typeof scoreFloor === 'number' && row.prescore >= scoreFloor) return { branch: 'model_low', action: 'none' };
+    return { branch: 'skip_low', action: 'skip', reason: `auto-triage: prescore ${row.prescore} < floor ${floor}` };
+  }
   if (row.prescore >= ceiling) return { branch: 'auto_new', action: 'new', reason: `auto-triage: prescore ${row.prescore} >= ceiling ${ceiling}` };
   return { branch: 'model_band', action: 'none' };
 }
@@ -230,7 +241,7 @@ export async function loadTriageCandidates(client, runId, cfg) {
 export async function runDeterministicTriage(client, runId, cfg, opts = {}) {
   const now = opts.now ?? new Date();
   const counts = {
-    skip_noise: 0, skip_low: 0, auto_new: 0, model_band: 0, has_open_review: 0, review_band: 0, review_other: 0,
+    skip_noise: 0, skip_low: 0, auto_new: 0, model_band: 0, model_low: 0, has_open_review: 0, review_band: 0, review_other: 0,
     autoNewIds: /** @type {number[]} */ ([]), reviewBandIds: /** @type {number[]} */ ([]),
   };
   if (!cfg.deterministic.enabled) return counts;
@@ -241,8 +252,8 @@ export async function runDeterministicTriage(client, runId, cfg, opts = {}) {
         counts.has_open_review++;
         continue;
       }
-      if (result.branch === 'model_band') {
-        counts.model_band++;
+      if (result.branch === 'model_band' || result.branch === 'model_low') {
+        counts[result.branch]++;
         continue;
       }
       // review_band/review_other (Change 1): never written by this step, same as model_band above --
@@ -283,11 +294,27 @@ export async function runDeterministicTriage(client, runId, cfg, opts = {}) {
  * @returns {Promise<Record<string, number>>} count per classifyForTriage branch, plus `marked`
  */
 export async function runDeterministicTriageForIds(client, ids, cfg, opts = {}) {
+  return (await deterministicTriageIds(client, ids, cfg, opts)).counts;
+}
+
+/**
+ * runDeterministicTriageForIds's body, also reporting which ids are left for the model, in the INPUT order
+ * (the backlog sweep passes newest-first): `modelIds` (model_band and model_low, still untriaged) and
+ * `autoNewIds` (just marked 'new' here, so the model step can fit-score them).
+ * @param {import('pg').ClientBase} client
+ * @param {number[]} ids
+ * @param {{ deterministic: { enabled: boolean, floor: number, ceiling: number }, model?: { scoreFloor?: number } }} cfg
+ * @param {{ now?: Date }} [opts]
+ * @returns {Promise<{ counts: Record<string, number>, modelIds: number[], autoNewIds: number[] }>}
+ */
+async function deterministicTriageIds(client, ids, cfg, opts = {}) {
   const now = opts.now ?? new Date();
   /** @type {Record<string, number>} */
   const counts = { marked: 0 };
+  /** @type {Map<number, 'model'|'auto_new'>} */
+  const forModel = new Map();
   const list = [...new Set((ids ?? []).map(Number).filter(Number.isInteger))];
-  if (!cfg.deterministic.enabled || list.length === 0) return counts;
+  if (!cfg.deterministic.enabled || list.length === 0) return { counts, modelIds: [], autoNewIds: [] };
   await withTransaction(client, async (c) => {
     const rows = (await c.query(
       `SELECT l.id, l.status, l.noise_class, l.prescore, l.record_kind, l.duplicate_of, l.expired_at,
@@ -298,14 +325,21 @@ export async function runDeterministicTriageForIds(client, ids, cfg, opts = {}) 
     for (const row of rows) {
       const result = classifyForTriage(row, cfg);
       counts[result.branch] = (counts[result.branch] ?? 0) + 1;
+      if (result.branch === 'model_band' || result.branch === 'model_low') forModel.set(Number(row.id), 'model');
       if (result.action !== 'skip' && result.action !== 'new') continue;
       const cur = await c.query('SELECT status FROM ic_job_listings WHERE id = $1 FOR UPDATE', [row.id]);
       if (cur.rowCount === 0 || cur.rows[0].status !== null) continue;
       await applyMark(c, { id: row.id, status: result.action === 'skip' ? 'skip' : 'new', statusNote: result.reason }, { now, explicit: true, actor: 'auto', runId: null });
       counts.marked++;
+      if (result.action === 'new') forModel.set(Number(row.id), 'auto_new');
     }
   });
-  return counts;
+  const ordered = list.filter((id) => forModel.has(id));
+  return {
+    counts,
+    modelIds: ordered.filter((id) => forModel.get(id) === 'model'),
+    autoNewIds: ordered.filter((id) => forModel.get(id) === 'auto_new'),
+  };
 }
 
 /**
@@ -322,9 +356,72 @@ export async function runDeterministicTriageForIds(client, ids, cfg, opts = {}) 
  * @returns {Promise<number[]>}
  */
 export async function loadModelBandIdsUncapped(client, runId, cfg) {
-  if (!cfg.deterministic.enabled) return [];
+  const { band, low } = await loadModelIdsByBand(client, runId, cfg);
+  return [...band, ...low];
+}
+
+/**
+ * This run's still-untriaged model ids split by band (unblock-auto-apply Item 4): `band` (model_band) and
+ * `low` (model_low). loadModelBandIdsUncapped() returns them model_band first, then model_low.
+ * @param {import('pg').ClientBase} client
+ * @param {number} runId
+ * @param {{ deterministic: { enabled: boolean, floor: number, ceiling: number }, model?: { scoreFloor?: number } }} cfg
+ * @returns {Promise<{ band: number[], low: number[] }>}
+ */
+export async function loadModelIdsByBand(client, runId, cfg) {
+  if (!cfg.deterministic.enabled) return { band: [], low: [] };
   const candidates = await loadTriageCandidates(client, runId, cfg);
-  return candidates.filter((c) => c.result.branch === 'model_band').map((c) => c.row.id);
+  return {
+    band: candidates.filter((c) => c.result.branch === 'model_band').map((c) => Number(c.row.id)),
+    low: candidates.filter((c) => c.result.branch === 'model_low').map((c) => Number(c.row.id)),
+  };
+}
+
+/**
+ * Backlog sweep candidates (unblock-auto-apply Item 4, A9): untriaged rows from EARLIER runs (never one this
+ * run touched), still live, with no open review item, that the model has not already failed on
+ * BACKLOG_MAX_MODEL_FAILURES times. Newest first_seen first, at most `limit`.
+ * @param {import('pg').ClientBase} client
+ * @param {number} runId
+ * @param {number} limit
+ * @returns {Promise<number[]>}
+ */
+export async function loadBacklogIds(client, runId, limit) {
+  if (!(limit > 0)) return [];
+  const r = await client.query(
+    `SELECT l.id FROM ic_job_listings l
+      WHERE coalesce(l.record_kind,'listing') = 'listing' AND l.duplicate_of IS NULL AND l.expired_at IS NULL
+        AND coalesce(l.stale, false) = false AND l.status IS NULL AND l.triage_model_failures < $3
+        AND NOT EXISTS (SELECT 1 FROM ic_job_review_queue q WHERE q.candidate_id = l.id AND q.resolved_at IS NULL)
+        AND NOT EXISTS (SELECT 1 FROM ic_scan_run_items i WHERE i.listing_id = l.id AND i.run_id = $1)
+      ORDER BY l.first_seen DESC NULLS LAST, l.id DESC
+      LIMIT $2`,
+    [runId, limit, BACKLOG_MAX_MODEL_FAILURES],
+  );
+  return r.rows.map((row) => Number(row.id));
+}
+
+/**
+ * Rescore candidates (unblock-auto-apply A2): a model fit computed without a description
+ * (fit_basis 'no_description') whose listing now HAS one (the detail fit sweep fetched it). Live rows in the
+ * pipeline group only, highest fit first, at most `limit`.
+ * @param {import('pg').ClientBase} client
+ * @param {number} limit
+ * @returns {Promise<number[]>}
+ */
+export async function loadRescoreIds(client, limit) {
+  if (!(limit > 0)) return [];
+  const r = await client.query(
+    `SELECT l.id FROM ic_job_listings l
+      WHERE l.fit_basis = 'no_description' AND l.description IS NOT NULL AND btrim(l.description) <> ''
+        AND coalesce(l.record_kind,'listing') = 'listing' AND l.duplicate_of IS NULL AND l.expired_at IS NULL
+        AND (l.status IS NULL OR l.status IN ('new', 'maybe', 'shortlisted'))
+        AND l.triage_model_failures < $2
+      ORDER BY l.fit_score DESC NULLS LAST, l.id ASC
+      LIMIT $1`,
+    [limit, BACKLOG_MAX_MODEL_FAILURES],
+  );
+  return r.rows.map((row) => Number(row.id));
 }
 
 /**
@@ -566,16 +663,28 @@ export function validateModelOutput(outcome, requestedIds, cfg) {
  *   Disjoint from `autoNewIds` in every real caller (runTriage() builds the combined list from three
  *   disjoint branches), but if an id somehow appeared in both, `autoNewSet` is checked first so it would
  *   be treated as auto_new -- never double-counted.
+ * @param {number[]} [rescoreIds] (unblock-auto-apply A2) subset of `ids` whose existing fit was computed
+ *   without a description (fit_basis 'no_description') and whose listing now has one: fit-only, and the
+ *   ONLY fit-only kind allowed to replace an existing fit_score, guarded under FOR UPDATE on fit_basis
+ *   still being 'no_description' (a human or another pass that already replaced it wins). Status is never
+ *   touched. Counters rescore_scored / rescore_skipped / rescore_unscored.
+ *
+ * Every applied fit (any kind) also records fit_basis: 'description' when the listing sent to the model
+ * had a non-empty description, 'no_description' when it did not (A2). Every id that ends a batch unscored
+ * (a failed batch, an omitted id, a vanished row) gets triage_model_failures + 1 (A9), which the backlog
+ * sweep reads.
  */
-export async function runModelTriage(client, runId, ids, cfg, configDir, candidateSummary, profile, deps = {}, autoNewIds = [], reviewBandIds = []) {
+export async function runModelTriage(client, runId, ids, cfg, configDir, candidateSummary, profile, deps = {}, autoNewIds = [], reviewBandIds = [], rescoreIds = []) {
   const autoNewSet = new Set(autoNewIds);
   const reviewBandSet = new Set(reviewBandIds);
+  const rescoreSet = new Set(rescoreIds);
   const stats = {
     enabled: false, reason: /** @type {string|null} */ (null),
     batches_sent: 0, batches_ok: 0, batches_failed: 0, batches_zero_scored: 0,
     scored: 0, unscored: 0, downgraded: 0, capped: 0,
     fit_only_scored: 0, fit_only_already_scored: 0, fit_only_unscored: 0,
     review_fit_scored: 0, review_fit_already_scored: 0, review_fit_unscored: 0,
+    rescore_scored: 0, rescore_skipped: 0, rescore_unscored: 0,
     last_failure_reason: /** @type {string|null} */ (null),
   };
   if (!cfg.model.enabled) {
@@ -603,6 +712,10 @@ export async function runModelTriage(client, runId, ids, cfg, configDir, candida
   for (const batchIds of usable) {
     stats.batches_sent++;
     const listings = await loadListingsForBatch(client, batchIds, cfg);
+    // A2: what each fit in this batch is based on, from exactly what the model was sent.
+    const basisOf = new Map(listings.map((l) => [l.id, l.description.trim().length > 0 ? 'description' : 'no_description']));
+    /** @param {import('pg').ClientBase} c @param {number} id */
+    const setBasis = (c, id) => c.query('UPDATE ic_job_listings SET fit_basis = $2 WHERE id = $1', [id, basisOf.get(id) ?? 'no_description']);
     const prompt = buildTriagePrompt({ candidateSummary, profile, listings });
     const realArgs = [
       '-p', '--model', cfg.model.modelName, '--output-format', 'json',
@@ -625,6 +738,7 @@ export async function runModelTriage(client, runId, ids, cfg, configDir, candida
     const scoredIds = new Set(); // model_band ids fully applied (status + fit_score) this batch
     const autoNewHandled = new Set(); // auto_new ids resolved this batch, in any of the three fit-only buckets
     const reviewBandHandled = new Set(); // review_band ids resolved this batch, in any of the three fit-only buckets
+    const rescoreHandled = new Set(); // rescore ids resolved this batch (scored or skipped)
     if (!validated.ok) {
       stats.batches_failed++;
       stats.last_failure_reason = validated.reason;
@@ -634,7 +748,21 @@ export async function runModelTriage(client, runId, ids, cfg, configDir, candida
       if (validated.entries.length) {
         await withTransaction(client, async (c) => {
           for (const entry of validated.entries) {
-            if (autoNewSet.has(entry.id)) {
+            if (rescoreSet.has(entry.id)) {
+              // A2 rescore: replaces a no-description fit, and only while it is still one; status untouched.
+              const guard = await c.query('SELECT fit_basis FROM ic_job_listings WHERE id = $1 FOR UPDATE', [entry.id]);
+              if (guard.rowCount === 0) {
+                // Row vanished mid-run; counted unscored below.
+              } else if (guard.rows[0].fit_basis !== 'no_description' || basisOf.get(entry.id) !== 'description') {
+                stats.rescore_skipped++;
+                rescoreHandled.add(entry.id);
+              } else {
+                await applyMark(c, { id: entry.id, fit_score: entry.fit_score }, { now: new Date(), explicit: true, actor: 'auto', runId });
+                await setBasis(c, entry.id);
+                stats.rescore_scored++;
+                rescoreHandled.add(entry.id);
+              }
+            } else if (autoNewSet.has(entry.id)) {
               const guard = await c.query('SELECT fit_score FROM ic_job_listings WHERE id = $1 FOR UPDATE', [entry.id]);
               if (guard.rowCount === 0) {
                 // MUST-FIX B6: row vanished mid-run; skip gracefully, never throw, never abort the batch.
@@ -643,6 +771,7 @@ export async function runModelTriage(client, runId, ids, cfg, configDir, candida
                 autoNewHandled.add(entry.id);
               } else {
                 await applyMark(c, { id: entry.id, fit_score: entry.fit_score }, { now: new Date(), explicit: true, actor: 'auto', runId });
+                await setBasis(c, entry.id);
                 stats.fit_only_scored++;
                 autoNewHandled.add(entry.id);
               }
@@ -663,11 +792,13 @@ export async function runModelTriage(client, runId, ids, cfg, configDir, candida
                 // overwrite this fit_score (that apply below carries no fit_score guard): accepted,
                 // documented behavior, not a bug.
                 await applyMark(c, { id: entry.id, fit_score: entry.fit_score }, { now: new Date(), explicit: true, actor: 'auto', runId });
+                await setBasis(c, entry.id);
                 stats.review_fit_scored++;
                 reviewBandHandled.add(entry.id);
               }
             } else {
               await applyMark(c, { id: entry.id, status: entry.status, fit_score: entry.fit_score, statusNote: entry.reason }, { now: new Date(), explicit: true, actor: 'auto', runId });
+              await setBasis(c, entry.id);
               if (entry.downgraded) stats.downgraded++; // MUST-FIX B4: model_band applies only.
               stats.scored++;
               scoredIds.add(entry.id);
@@ -679,14 +810,23 @@ export async function runModelTriage(client, runId, ids, cfg, configDir, candida
     // MUST-FIX B2/B3 (extended for review_band): total classification over every id in this batch,
     // success or failure alike, so a failed or partially-scored batch's ids are always counted
     // somewhere, never silently nowhere.
+    /** @type {number[]} */
+    const failedIds = [];
     for (const id of batchIds) {
-      if (autoNewSet.has(id)) {
-        if (!autoNewHandled.has(id)) stats.fit_only_unscored++;
+      if (rescoreSet.has(id)) {
+        if (!rescoreHandled.has(id)) { stats.rescore_unscored++; failedIds.push(id); }
+      } else if (autoNewSet.has(id)) {
+        if (!autoNewHandled.has(id)) { stats.fit_only_unscored++; failedIds.push(id); }
       } else if (reviewBandSet.has(id)) {
-        if (!reviewBandHandled.has(id)) stats.review_fit_unscored++;
+        if (!reviewBandHandled.has(id)) { stats.review_fit_unscored++; failedIds.push(id); }
       } else if (!scoredIds.has(id)) {
         stats.unscored++;
+        failedIds.push(id);
       }
+    }
+    // A9: per-row failure counter, read by the backlog sweep (a row at BACKLOG_MAX_MODEL_FAILURES is skipped).
+    if (failedIds.length) {
+      await client.query('UPDATE ic_job_listings SET triage_model_failures = triage_model_failures + 1 WHERE id = ANY($1::int[])', [failedIds]);
     }
   }
   return stats;
@@ -719,18 +859,69 @@ export async function runModelTriage(client, runId, ids, cfg, configDir, candida
 export async function runTriage(client, runId, config, profile, deps = {}) {
   const cfg = config.triage;
   const { autoNewIds, reviewBandIds, ...deterministic } = await runDeterministicTriage(client, runId, cfg, { now: deps.now });
-  const modelBandAll = await loadModelBandIdsUncapped(client, runId, cfg);
-  const combined = [...modelBandAll, ...autoNewIds, ...reviewBandIds];
+  const { band, low } = await loadModelIdsByBand(client, runId, cfg);
+  const taken = new Set([...band, ...low, ...autoNewIds, ...reviewBandIds]);
+
+  // Unblock-auto-apply A2: no-description fits whose listing now has a description (the detail fit sweep
+  // fetched it) are rescored, fit-only, ahead of the backlog.
+  const rescoreIds = cfg.model.enabled && cfg.deterministic.enabled
+    ? (await loadRescoreIds(client, cfg.model.maxListingsPerRun)).filter((id) => !taken.has(id))
+    : [];
+  for (const id of rescoreIds) taken.add(id);
+
+  // Unblock-auto-apply Item 4: the backlog sweep. Untriaged rows from earlier runs (newest first, at most
+  // backlogPerRun) get the same deterministic pass first; what is left for the model joins the list after
+  // this run's own auto_new ids and before review_band, so the backlog starves before this run's rows.
+  /** @type {number[]} */
+  let backlogIds = [];
+  /** @type {number[]} */
+  let backlogAutoNew = [];
+  /** @type {Record<string, number>|null} */
+  let backlog = null;
+  const backlogPerRun = cfg.model.backlogPerRun ?? 0;
+  if (cfg.model.enabled && cfg.deterministic.enabled && backlogPerRun > 0) {
+    const swept = (await loadBacklogIds(client, runId, backlogPerRun)).filter((id) => !taken.has(id));
+    const r = await deterministicTriageIds(client, swept, cfg, { now: deps.now });
+    backlog = { ...r.counts, swept: swept.length };
+    const keep = new Set([...r.modelIds, ...r.autoNewIds]);
+    backlogIds = swept.filter((id) => keep.has(id));
+    backlogAutoNew = r.autoNewIds;
+  }
+
+  const combined = [...band, ...low, ...autoNewIds, ...rescoreIds, ...backlogIds, ...reviewBandIds];
   const ids = combined.slice(0, cfg.model.maxListingsPerRun);
   const capped = Math.max(0, combined.length - ids.length);
   const idsSet = new Set(ids);
-  const autoNewInBatch = autoNewIds.filter((id) => idsSet.has(id));
+  const autoNewInBatch = [...autoNewIds, ...backlogAutoNew].filter((id) => idsSet.has(id));
   const reviewBandInBatch = reviewBandIds.filter((id) => idsSet.has(id));
+  const rescoreInBatch = rescoreIds.filter((id) => idsSet.has(id));
   // Read once per triage invocation, reused verbatim for every batch this run sends (spec section 3,
   // finding 17): never re-read mid-run, so a file edited partway through a long run cannot produce a
   // self-inconsistent run.
   const candidateSummary = loadTriageCandidateSummary(config.configDir);
-  const model = await runModelTriage(client, runId, ids, cfg, config.configDir, candidateSummary, profile, deps, autoNewInBatch, reviewBandInBatch);
+  const model = await runModelTriage(client, runId, ids, cfg, config.configDir, candidateSummary, profile, deps, autoNewInBatch, reviewBandInBatch, rescoreInBatch);
   model.capped += capped;
-  return { configured: Boolean(cfg.present), deterministic, model };
+
+  // Coverage (Item 4): eligible = every id the model step wanted this run, sent = what actually went out
+  // in a batch (the per-run and per-batch caps both applied), scored/failed = the outcome of what was sent.
+  const sentIds = model.enabled ? ids.slice(0, cfg.model.maxBatchesPerRun * cfg.model.batchSize) : [];
+  const kindOf = new Map();
+  for (const id of band) kindOf.set(id, 'band');
+  for (const id of low) kindOf.set(id, 'low');
+  for (const id of autoNewIds) kindOf.set(id, 'auto_new');
+  for (const id of rescoreIds) kindOf.set(id, 'rescore');
+  for (const id of backlogIds) kindOf.set(id, 'backlog');
+  for (const id of reviewBandIds) kindOf.set(id, 'review');
+  /** @type {Record<string, number>} */
+  const byKind = { band: 0, low: 0, auto_new: 0, rescore: 0, backlog: 0, review: 0 };
+  for (const id of sentIds) byKind[kindOf.get(id)] += 1;
+  const coverage = {
+    eligible: combined.length,
+    sent: sentIds.length,
+    scored: model.scored + model.fit_only_scored + model.review_fit_scored + model.rescore_scored,
+    capped: model.capped,
+    failed: model.unscored + model.fit_only_unscored + model.review_fit_unscored + model.rescore_unscored,
+    by_kind: byKind,
+  };
+  return { configured: Boolean(cfg.present), deterministic, ...(backlog ? { backlog } : {}), model, coverage };
 }

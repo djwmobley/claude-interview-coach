@@ -17,7 +17,7 @@ import { connectDedicated } from '../src/core/db.js';
 import { ensureAuxSchema } from '../src/core/schema.js';
 import {
   classifyForTriage, loadTriageCandidates, runDeterministicTriage, loadModelBandIds, loadModelBandIdsUncapped,
-  validateModelOutput, runModelTriage, runTriage, buildTriagePrompt, describeTriageFailure,
+  validateModelOutput, runModelTriage, runTriage, buildTriagePrompt, describeTriageFailure, TRIAGE_BRANCHES,
 } from '../src/core/triage.js';
 import { triageSchema } from '../src/core/config.js';
 import { runScan } from '../src/core/scan-run.js';
@@ -405,7 +405,7 @@ describe('runDeterministicTriage', () => {
     await recordRunItem(runId, id, 'greenhouse');
     const counts = await runDeterministicTriage(client, runId, cfgFor({ deterministic: { enabled: false } }));
     assert.deepEqual(counts, {
-      skip_noise: 0, skip_low: 0, auto_new: 0, model_band: 0, has_open_review: 0, review_band: 0, review_other: 0,
+      skip_noise: 0, skip_low: 0, auto_new: 0, model_band: 0, model_low: 0, has_open_review: 0, review_band: 0, review_other: 0,
       autoNewIds: [], reviewBandIds: [],
     });
     const row = await client.query('SELECT status FROM ic_job_listings WHERE id = $1', [id]);
@@ -1213,5 +1213,209 @@ describe('a dry run never calls either triage step', () => {
     } finally {
       await cleanupScan(client, { profile: PROFILE });
     }
+  });
+});
+
+// ---------------------------------------------------------------------------
+// unblock-auto-apply Item 4: model_low, the backlog sweep, coverage, fit_basis (A2), failure counter (A9)
+// ---------------------------------------------------------------------------
+
+describe('classifyForTriage: model.scoreFloor opens a model_low band below the deterministic floor (Item 4)', () => {
+  const low = { deterministic: { floor: 40, ceiling: 70 }, model: { scoreFloor: 20 } };
+  const at = (/** @type {number} */ prescore, /** @type {any} */ cfg = low) => classifyForTriage({ status: null, noise_class: 'ok', prescore, duplicate_of: null, expired_at: null }, cfg);
+  test('prescore 19 -> skip_low; 20 and 39 -> model_low (sent to the model, never auto-marked); 40 -> model_band', () => {
+    assert.equal(at(19).branch, 'skip_low');
+    assert.equal(at(20).branch, 'model_low');
+    assert.equal(at(20).action, 'none');
+    assert.equal(at(39).branch, 'model_low');
+    assert.equal(at(40).branch, 'model_band');
+  });
+  test('without scoreFloor the classification is identical to today', () => {
+    const plain = { deterministic: { floor: 40, ceiling: 70 } };
+    assert.equal(at(25, plain).branch, 'skip_low');
+    assert.equal(at(25, { deterministic: { floor: 40, ceiling: 70 }, model: {} }).branch, 'skip_low');
+  });
+  test('model_low is a declared branch', () => {
+    assert.ok(TRIAGE_BRANCHES.includes('model_low'));
+  });
+  test('triageSchema: scoreFloor is optional, backlogPerRun defaults to 0', () => {
+    const r = triageSchema.safeParse({});
+    assert.equal(r.success && r.data.model.scoreFloor, undefined);
+    assert.equal(r.success && r.data.model.backlogPerRun, 0);
+    const s = triageSchema.safeParse({ model: { scoreFloor: 20, backlogPerRun: 60 } });
+    assert.equal(s.success && s.data.model.scoreFloor, 20);
+  });
+});
+
+describe('runTriage: model_low, backlog sweep, rescore, coverage (Item 4, A2, A9)', () => {
+  /** @type {string} */
+  let configDir;
+  before(() => {
+    configDir = buildRunTriageConfigDir();
+  });
+  after(() => {
+    fs.rmSync(configDir, { recursive: true, force: true });
+  });
+
+  /** @param {any} [model] */
+  const triageCfg = (model = {}) => ({
+    present: true,
+    deterministic: { enabled: true, floor: 40, ceiling: 70 },
+    model: { enabled: true, modelName: 'x', batchSize: 10, skipMaxFit: 30, timeoutMs: 5000, maxListingsPerRun: 50, maxBatchesPerRun: 5, descriptionTruncateChars: 1200, scoreFloor: 20, backlogPerRun: 10, ...model },
+  });
+  /**
+   * @param {number[]} seen
+   * @param {(id: number) => any} [result] per-id result; return null to omit the id
+   */
+  const execFor = (seen, result) => async (/** @type {string} */ _bin, /** @type {string[]} */ _args, /** @type {any} */ opts) => {
+    const requested = JSON.parse(String(opts.input).split('\n').pop());
+    seen.push(...requested.listings.map((/** @type {any} */ l) => l.id));
+    const results = requested.listings.map((/** @type {any} */ l) => (result ? result(l.id) : { id: l.id, fit_score: 64, status: 'maybe', reason: 'ok' })).filter(Boolean);
+    return { stdout: JSON.stringify({ type: 'result', is_error: false, structured_output: { results } }) };
+  };
+  /** @param {number} id */
+  const listing = async (id) => (await client.query('SELECT status, fit_score, fit_basis, triage_model_failures FROM ic_job_listings WHERE id = $1', [id])).rows[0];
+
+  test('a prescore-25 row in this run is sent to the model and gets the model status and fit_score', async () => {
+    await cleanup();
+    const runId = await insertRun();
+    const lowId = await insertListing({ prescore: 25 });
+    const skipId = await insertListing({ prescore: 10 });
+    for (const id of [lowId, skipId]) await recordRunItem(runId, id, 'greenhouse');
+    const seen = /** @type {number[]} */ ([]);
+    const stats = await runTriage(client, runId, { ...testConfig(), configDir, triage: triageCfg({ backlogPerRun: 0 }) }, { keywords: [] }, { execFile: execFor(seen, (id) => ({ id, fit_score: 66, status: 'new', reason: 'fits' })) });
+    assert.deepEqual(seen, [lowId]);
+    const row = await listing(lowId);
+    assert.equal(row.status, 'new');
+    assert.equal(row.fit_score, 66);
+    assert.equal(row.fit_basis, 'description', 'the row had a description when it was scored');
+    assert.equal((await listing(skipId)).status, 'skip');
+    assert.equal(stats.deterministic.model_low, 1);
+    assert.equal(stats.coverage.eligible, 1);
+    assert.equal(stats.coverage.sent, 1);
+    assert.equal(stats.coverage.scored, 1);
+    assert.equal(stats.coverage.capped, 0);
+    assert.equal(stats.coverage.failed, 0);
+    assert.equal(stats.coverage.by_kind.low, 1);
+  });
+
+  test('a fit scored without a description is tagged no_description (A2)', async () => {
+    await cleanup();
+    const runId = await insertRun();
+    const id = await insertListing({ prescore: 55 });
+    await client.query('UPDATE ic_job_listings SET description = NULL WHERE id = $1', [id]);
+    await recordRunItem(runId, id, 'greenhouse');
+    await runTriage(client, runId, { ...testConfig(), configDir, triage: triageCfg({ backlogPerRun: 0 }) }, { keywords: [] }, { execFile: execFor([]) });
+    assert.equal((await listing(id)).fit_basis, 'no_description');
+  });
+
+  test('the backlog sweep picks untriaged rows from earlier runs, never this run\'s rows twice, newest first, after auto_new and before review_band', async () => {
+    await cleanup();
+    const oldRun = await insertRun();
+    const backlogOld = await insertListing({ prescore: 55 });
+    const backlogNew = await insertListing({ prescore: 30 });
+    const backlogSkip = await insertListing({ prescore: 5 });
+    // first_seen in the future keeps these ahead of any stray untriaged row another test file left behind.
+    await client.query(`UPDATE ic_job_listings SET first_seen = now() + interval '10 days' WHERE id = $1`, [backlogOld]);
+    await client.query(`UPDATE ic_job_listings SET first_seen = now() + interval '20 days' WHERE id = $1`, [backlogNew]);
+    await client.query(`UPDATE ic_job_listings SET first_seen = now() + interval '30 days' WHERE id = $1`, [backlogSkip]);
+    for (const id of [backlogOld, backlogNew, backlogSkip]) await recordRunItem(oldRun, id, 'greenhouse');
+    const runId = await insertRun();
+    const bandId = await insertListing({ prescore: 55 });
+    const autoId = await insertListing({ prescore: 90 });
+    const reviewId = await insertListing({ status: 'review', prescore: 55 });
+    await enqueueOpenReview(reviewId);
+    for (const id of [bandId, autoId, reviewId]) await recordRunItem(runId, id, 'greenhouse');
+    const seen = /** @type {number[]} */ ([]);
+    const stats = await runTriage(client, runId, { ...testConfig(), configDir, triage: triageCfg() }, { keywords: [] }, { execFile: execFor(seen) });
+    const mine = new Set([bandId, autoId, backlogNew, backlogOld, backlogSkip, reviewId]);
+    assert.deepEqual(seen.filter((x) => mine.has(x)), [bandId, autoId, backlogNew, backlogOld, reviewId]);
+    assert.equal((await listing(backlogSkip)).status, 'skip', 'the backlog sweep runs deterministic triage first');
+    assert.equal((await listing(backlogOld)).status, 'maybe');
+    // >= rather than ==: a stray untriaged row another test file left behind may also be swept.
+    assert.ok(stats.coverage.by_kind.backlog >= 2, JSON.stringify(stats.coverage));
+    assert.ok(stats.coverage.eligible >= 5);
+    assert.equal(stats.coverage.by_kind.band, 1);
+    assert.equal(stats.coverage.by_kind.auto_new, 1);
+    assert.equal(stats.coverage.by_kind.review, 1);
+  });
+
+  test('when capped, the backlog starves before this run\'s own rows; backlogPerRun bounds the sweep', async () => {
+    await cleanup();
+    const oldRun = await insertRun();
+    const backlog = [];
+    for (let i = 0; i < 3; i++) backlog.push(await insertListing({ prescore: 55 }));
+    for (const id of backlog) await recordRunItem(oldRun, id, 'greenhouse');
+    await client.query(`UPDATE ic_job_listings SET first_seen = now() + interval '30 days' WHERE id = ANY($1::int[])`, [backlog]);
+    const runId = await insertRun();
+    const bandId = await insertListing({ prescore: 55 });
+    await recordRunItem(runId, bandId, 'greenhouse');
+    const seen = /** @type {number[]} */ ([]);
+    const stats = await runTriage(client, runId, { ...testConfig(), configDir, triage: triageCfg({ maxListingsPerRun: 2, backlogPerRun: 2 }) }, { keywords: [] }, { execFile: execFor(seen) });
+    assert.equal(seen[0], bandId);
+    assert.equal(seen.length, 2);
+    assert.equal(stats.coverage.capped, 1, 'two backlog ids were eligible (backlogPerRun 2), one fit under the cap');
+  });
+
+  test('backlogPerRun 0 (the schema default) means no sweep at all', async () => {
+    await cleanup();
+    const oldRun = await insertRun();
+    const backlogId = await insertListing({ prescore: 55 });
+    await recordRunItem(oldRun, backlogId, 'greenhouse');
+    const runId = await insertRun();
+    const seen = /** @type {number[]} */ ([]);
+    await runTriage(client, runId, { ...testConfig(), configDir, triage: triageCfg({ backlogPerRun: 0 }) }, { keywords: [] }, { execFile: execFor(seen) });
+    assert.ok(!seen.includes(backlogId));
+    assert.equal((await listing(backlogId)).status, null);
+  });
+
+  test('a row the model leaves unscored counts a failure; at 2 failures the backlog sweep skips it (A9)', async () => {
+    await cleanup();
+    const oldRun = await insertRun();
+    const poison = await insertListing({ prescore: 55 });
+    await recordRunItem(oldRun, poison, 'greenhouse');
+    await client.query(`UPDATE ic_job_listings SET first_seen = now() + interval '30 days' WHERE id = $1`, [poison]);
+    const cfg = { ...testConfig(), configDir, triage: triageCfg() };
+    const omit = execFor([], () => null);
+    for (let i = 0; i < 2; i++) await runTriage(client, await insertRun(), cfg, { keywords: [] }, { execFile: omit });
+    assert.equal((await listing(poison)).triage_model_failures, 2);
+    const seen = /** @type {number[]} */ ([]);
+    await runTriage(client, await insertRun(), cfg, { keywords: [] }, { execFile: execFor(seen) });
+    assert.ok(!seen.includes(poison), 'a row with 2 failures is excluded from the backlog sweep');
+  });
+
+  test('a failed batch counts a failure for every id in it', async () => {
+    await cleanup();
+    const runId = await insertRun();
+    const id = await insertListing({ prescore: 55 });
+    await recordRunItem(runId, id, 'greenhouse');
+    const fail = async () => { const e = /** @type {any} */ (new Error('exit 1')); e.code = 1; throw e; };
+    const stats = await runTriage(client, runId, { ...testConfig(), configDir, triage: triageCfg({ backlogPerRun: 0 }) }, { keywords: [] }, { execFile: fail });
+    assert.equal((await listing(id)).triage_model_failures, 1);
+    assert.equal(stats.coverage.failed, 1);
+  });
+
+  test('a no_description fit whose listing now has a description is rescored and becomes description-based (A2)', async () => {
+    await cleanup();
+    const id = await insertListing({ prescore: 55, status: 'maybe' });
+    await client.query(`UPDATE ic_job_listings SET fit_score = 72, fit_basis = 'no_description' WHERE id = $1`, [id]);
+    const runId = await insertRun();
+    const seen = /** @type {number[]} */ ([]);
+    const stats = await runTriage(client, runId, { ...testConfig(), configDir, triage: triageCfg() }, { keywords: [] }, { execFile: execFor(seen, (x) => ({ id: x, fit_score: 58, status: 'skip', reason: 'weaker with the full text' })) });
+    assert.ok(seen.includes(id));
+    const row = await listing(id);
+    assert.equal(row.fit_score, 58, 'the rescore replaces the no-description fit');
+    assert.equal(row.fit_basis, 'description');
+    assert.equal(row.status, 'maybe', 'a rescore never changes the status');
+    assert.equal(stats.coverage.by_kind.rescore, 1);
+  });
+
+  test('a no_description fit with still no description is not rescored', async () => {
+    await cleanup();
+    const id = await insertListing({ prescore: 55, status: 'maybe' });
+    await client.query(`UPDATE ic_job_listings SET fit_score = 72, fit_basis = 'no_description', description = NULL WHERE id = $1`, [id]);
+    const seen = /** @type {number[]} */ ([]);
+    await runTriage(client, await insertRun(), { ...testConfig(), configDir, triage: triageCfg() }, { keywords: [] }, { execFile: execFor(seen) });
+    assert.ok(!seen.includes(id));
   });
 });

@@ -34,6 +34,7 @@ import { log as defaultLog } from '../core/logger.js';
 import {
   getApplication, transition, transitionUnwrapped, markSubmitted, hasSubmitRequestSentEver,
   hasAssistedNextClickEver, assistedPartialQuestion, submitUnconfirmedQuestion, APPLICATION_LOCK_NAMESPACE,
+  recordDeferral,
 } from '../core/applications.js';
 import { runGuardedSubmit, clickTimeExclusionCheck } from './unattended-submit.js';
 import { SUBMIT_GATE_KIND } from './submit-gate.js';
@@ -299,6 +300,19 @@ export async function runApplyWorker(applicationId, deps = {}) {
       return { ok: true, status: 'skipped', state: app.state };
     }
 
+    // Unblock-auto-apply Item 1 (the app 5 fix, A10): every deferral leaves the row 'approved', so it is
+    // also written as an application event (one per reason per local day), under the per-application lock
+    // this client holds. A failed write is logged and never turns the deferral into a crash.
+    /** @param {string} reason */
+    const deferred = async (reason) => {
+      try {
+        await recordDeferral(client, applicationId, reason);
+      } catch (err) {
+        log({ evt: 'apply_deferral_event_failed', application_id: applicationId, reason, ...errFields(err) });
+      }
+      return { ok: true, status: 'deferred', reason, state: 'approved' };
+    };
+
     // Assisted LinkedIn Easy Apply (operator decision 2026-10-04): breaker, window/spacing, the single
     // in-flight slot, and the daily cap are all checked BEFORE the claim, so a refusal leaves the
     // application 'approved' for a later run. The cap reservation (last) is made here and kept only when
@@ -315,7 +329,7 @@ export async function runApplyWorker(applicationId, deps = {}) {
         : assistedProfile && typeof adapters[app.ats_type].prepare === 'function' ? 'prelude' : 'unsupported';
     if (assistedKind === 'unsupported') {
       log({ evt: 'assisted_deferred', application_id: applicationId, reason: 'no_assisted_path' });
-      return { ok: true, status: 'deferred', reason: 'no_assisted_path', state: 'approved' };
+      return deferred('no_assisted_path');
     }
     /** @type {import('./easy-apply-flow.js').EasyApplyDeps} */
     const easyApplyDeps = deps.easyApply ?? {};
@@ -326,14 +340,14 @@ export async function runApplyWorker(applicationId, deps = {}) {
       const gate = await easyApplyStartGate(client, { config, easyApply: easyApplyDeps });
       if (!gate.ok) {
         log({ evt: 'easy_apply_deferred', application_id: applicationId, reason: gate.reason });
-        return { ok: true, status: 'deferred', reason: gate.reason, state: 'approved' };
+        return deferred(gate.reason);
       }
       easyApplyCharge = gate.charge;
     } else if (assistedKind === 'prelude') {
       const gate = await workdayStartGate(client, { config, now: (workdayDeps.now ?? (() => new Date()))() });
       if (!gate.ok) {
         log({ evt: 'assisted_deferred', application_id: applicationId, reason: gate.reason });
-        return { ok: true, status: 'deferred', reason: gate.reason, state: 'approved' };
+        return deferred(gate.reason);
       }
       easyApplyCharge = gate.charge;
     }
@@ -364,7 +378,7 @@ export async function runApplyWorker(applicationId, deps = {}) {
       // G9: the unique partial index refused a second linkedin_easy row in submitting/awaiting_submit.
       if (assisted && isUniqueViolationLike(err)) {
         log({ evt: 'easy_apply_deferred', application_id: applicationId, reason: 'easy_apply_in_flight' });
-        return { ok: true, status: 'deferred', reason: 'easy_apply_in_flight', state: 'approved' };
+        return deferred('easy_apply_in_flight');
       }
       // The row moved on between the read above and the claim (the dashboard withdrew it, say): the
       // claim transaction rolled back, nothing was submitted, and the row keeps whatever state the other
