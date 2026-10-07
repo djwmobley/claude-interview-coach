@@ -68,7 +68,10 @@
  */
 import { connectDedicated } from '../src/core/db.js';
 import { loadConfig, loadTriageCandidateSummary } from '../src/core/config.js';
-import { runTriage, loadTriageCandidates, runModelTriage } from '../src/core/triage.js';
+import { runTriage, loadTriageCandidates, runModelTriage, loadAutoSkipLowIds } from '../src/core/triage.js';
+
+/** Reskip pass selection cap; runModelTriage's own maxBatchesPerRun still bounds what is sent per invocation. */
+const RESKIP_PASS_LIMIT = 100000;
 import { errFields, JobSearchError } from '../src/core/errors.js';
 
 /** Every historical run that still has at least one live, non-duplicate, untriaged listing attached. */
@@ -324,6 +327,23 @@ async function main() {
       const candidateSummary = loadTriageCandidateSummary(config.configDir);
       const leftoverReviewStats = await runModelTriage(client, null, leftoverReviewIds, config.triage, config.configDir, candidateSummary, profile, {}, [], leftoverReviewIds);
       process.stdout.write(`triage-backfill: review-band leftover fit-scoring pass stats: ${JSON.stringify(leftoverReviewStats)}\n`);
+    }
+
+    // Reskip pass (score-everything, 2026-10-07), LAST: rows an earlier deterministic pass auto-skipped as
+    // skip_low that today's scoreFloor puts in model_low, still with no fit. The selection (latest status
+    // event is the exact automatic skip_low note) lives in loadAutoSkipLowIds(); every id takes runModelTriage's
+    // reskip path (full status decision, guarded on status still 'skip' and fit still NULL). --dry-run
+    // prints the candidates and performs zero writes, exactly like the passes above.
+    const reskipIds = await loadAutoSkipLowIds(client, null, RESKIP_PASS_LIMIT, config.triage);
+    process.stdout.write(`triage-backfill: reskip pass: ${reskipIds.length} candidate(s): ${JSON.stringify(reskipIds)}\n`);
+    if (args.dryRun) {
+      process.stdout.write('triage-backfill: reskip pass: dry-run, no writes performed.\n');
+    } else if (reskipIds.length === 0) {
+      process.stdout.write('triage-backfill: reskip pass: nothing to do.\n');
+    } else {
+      const candidateSummary = loadTriageCandidateSummary(config.configDir);
+      const reskipStats = await runModelTriage(client, null, reskipIds, config.triage, config.configDir, candidateSummary, profile, {}, [], [], [], reskipIds);
+      process.stdout.write(`triage-backfill: reskip pass stats: ${JSON.stringify(reskipStats)}\n`);
     }
   } catch (err) {
     const f = errFields(err);

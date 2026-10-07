@@ -921,7 +921,8 @@ export function renderTriageLine(triage) {
  * Coverage triage line (unblock-auto-apply Item 4), for a run whose stats.triage carries `coverage` (every
  * run since that change; older runs keep renderTriageLine's original wording):
  * "triage: sent M (band a, low b, auto_new c, review d, backlog e); scored S; unscored U; capped C;
- * skip_low K; noise J", with ", rescore r" inside the parentheses only when nonzero, then the model step's
+ * skip_low K; noise J", with ", rescore r" and ", reskip s" (earlier automatic skip_low rows re-sent)
+ * inside the parentheses only when nonzero, then the model step's
  * failure or disabled reason when there is one. skip_low and noise include the backlog sweep's own marks.
  * @param {any} triage
  */
@@ -933,6 +934,7 @@ function renderCoverageTriageLine(triage) {
   const k = cov.by_kind ?? {};
   const kinds = [`band ${k.band ?? 0}`, `low ${k.low ?? 0}`, `auto_new ${k.auto_new ?? 0}`, `review ${k.review ?? 0}`, `backlog ${k.backlog ?? 0}`];
   if (k.rescore) kinds.push(`rescore ${k.rescore}`);
+  if (k.reskip) kinds.push(`reskip ${k.reskip}`);
   const parts = [
     `sent ${cov.sent ?? 0} (${kinds.join(', ')})`, `scored ${cov.scored ?? 0}`, `unscored ${cov.failed ?? 0}`, `capped ${cov.capped ?? 0}`,
     `skip_low ${(d.skip_low ?? 0) + (b.skip_low ?? 0)}`, `noise ${(d.skip_noise ?? 0) + (b.skip_noise ?? 0)}`,

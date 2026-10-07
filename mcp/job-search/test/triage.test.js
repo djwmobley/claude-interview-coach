@@ -18,7 +18,10 @@ import { ensureAuxSchema } from '../src/core/schema.js';
 import {
   classifyForTriage, loadTriageCandidates, runDeterministicTriage, loadModelBandIds, loadModelBandIdsUncapped,
   validateModelOutput, runModelTriage, runTriage, buildTriagePrompt, describeTriageFailure, TRIAGE_BRANCHES,
+  loadAutoSkipLowIds,
 } from '../src/core/triage.js';
+import { applyMark } from '../src/tools/mark_jobs.js';
+import { withTransaction } from '../src/core/db.js';
 import { triageSchema } from '../src/core/config.js';
 import { runScan } from '../src/core/scan-run.js';
 import { offlineDeps, upsertTestProfile, cleanupScan, testConfig, FIXTURE_NOW } from './helpers/scan-fixtures.js';
@@ -1245,6 +1248,26 @@ describe('classifyForTriage: model.scoreFloor opens a model_low band below the d
     const s = triageSchema.safeParse({ model: { scoreFloor: 20, backlogPerRun: 60 } });
     assert.equal(s.success && s.data.model.scoreFloor, 20);
   });
+  test('scoreFloor 0: skip_low never fires for a noise-ok row with any clamped prescore in [0, floor)', () => {
+    const zero = { deterministic: { floor: 40, ceiling: 70 }, model: { scoreFloor: 0 } };
+    for (let p = 0; p < 40; p++) {
+      const r = at(p, zero);
+      assert.equal(r.branch, 'model_low', `prescore ${p}`);
+      assert.equal(r.action, 'none', `prescore ${p} is never auto-marked`);
+    }
+    assert.equal(at(40, zero).branch, 'model_band');
+    assert.equal(at(70, zero).branch, 'auto_new');
+    // Noise-class rows stay deterministic skip_noise: scoring them is not the model's job.
+    const noisy = classifyForTriage({ status: null, noise_class: 'noise', prescore: 0, duplicate_of: null, expired_at: null }, zero);
+    assert.equal(noisy.branch, 'skip_noise');
+  });
+  test('triageSchema: scoreFloor 0 is accepted, and backlogPerRun 1500 is within the schema max', () => {
+    const r = triageSchema.safeParse({ model: { scoreFloor: 0, backlogPerRun: 1500, maxListingsPerRun: 1500, maxBatchesPerRun: 100 } });
+    assert.equal(r.success, true, r.success ? '' : JSON.stringify(r.error.issues));
+    assert.equal(r.success && r.data.model.scoreFloor, 0);
+    assert.equal(r.success && r.data.model.backlogPerRun, 1500);
+    assert.equal(triageSchema.safeParse({ model: { backlogPerRun: 5001 } }).success, false, 'the backlog sweep stays bounded');
+  });
 });
 
 describe('runTriage: model_low, backlog sweep, rescore, coverage (Item 4, A2, A9)', () => {
@@ -1382,6 +1405,99 @@ describe('runTriage: model_low, backlog sweep, rescore, coverage (Item 4, A2, A9
     const seen = /** @type {number[]} */ ([]);
     await runTriage(client, await insertRun(), cfg, { keywords: [] }, { execFile: execFor(seen) });
     assert.ok(!seen.includes(poison), 'a row with 2 failures is excluded from the backlog sweep');
+  });
+
+  test('reskip sweep: an automatic skip_low row with a null fit is re-sent for a full status decision; human, noise, sticky and fitted rows are not', async () => {
+    await cleanup();
+    // Earlier run under scoreFloor 20: prescore 10 rows are auto skip_low, a noise row is auto skip_noise.
+    const oldRun = await insertRun();
+    const autoLow = await insertListing({ prescore: 10 });
+    const autoLowFitted = await insertListing({ prescore: 12 });
+    const humanSkip = await insertListing({ prescore: 10 });
+    const noiseRow = await insertListing({ prescore: 10, noiseClass: 'aggregator_repost' });
+    const stickyRow = await insertListing({ prescore: 10 });
+    const humanAfterAuto = await insertListing({ prescore: 11 });
+    for (const id of [autoLow, autoLowFitted, noiseRow, humanAfterAuto]) await recordRunItem(oldRun, id, 'greenhouse');
+    // first_seen in the future keeps autoLow ahead of any stray auto-skipped row another test file left behind.
+    await client.query(`UPDATE ic_job_listings SET first_seen = now() + interval '40 days' WHERE id = $1`, [autoLow]);
+    await runTriage(client, oldRun, { ...testConfig(), configDir, triage: triageCfg({ backlogPerRun: 0 }) }, { keywords: [] }, { execFile: execFor([]) });
+    assert.equal((await listing(autoLow)).status, 'skip', 'precondition: automatic skip_low');
+    assert.equal((await listing(noiseRow)).status, 'skip', 'precondition: automatic skip_noise');
+    await client.query('UPDATE ic_job_listings SET fit_score = 15 WHERE id = $1', [autoLowFitted]);
+    // A human skip from the dashboard, and a sticky skip (actor auto, note 'sticky skip').
+    await withTransaction(client, (c) => applyMark(c, { id: humanSkip, status: 'skip' }, { now: new Date(), explicit: true, actor: 'dashboard' }));
+    await client.query(`UPDATE ic_job_listings SET status = 'skip' WHERE id = $1`, [stickyRow]);
+    await client.query(`INSERT INTO ic_job_events (listing_id, kind, from_status, to_status, note, actor) VALUES ($1, 'status', NULL, 'skip', 'sticky skip', 'auto')`, [stickyRow]);
+    // Auto skip_low, then a human moved it to maybe and back to skip: the latest status event is human.
+    await withTransaction(client, (c) => applyMark(c, { id: humanAfterAuto, status: 'maybe' }, { now: new Date(), explicit: true, actor: 'dashboard' }));
+    await withTransaction(client, (c) => applyMark(c, { id: humanAfterAuto, status: 'skip' }, { now: new Date(), explicit: true, actor: 'dashboard' }));
+
+    const all = [autoLow, autoLowFitted, humanSkip, noiseRow, stickyRow, humanAfterAuto];
+    const picked = await loadAutoSkipLowIds(client, null, 5000, { deterministic: { floor: 40 }, model: { scoreFloor: 0 } });
+    assert.deepEqual(picked.filter((id) => all.includes(id)), [autoLow]);
+    assert.deepEqual(await loadAutoSkipLowIds(client, null, 5000, { deterministic: { floor: 40 }, model: { scoreFloor: 20 } }).then((ids) => ids.filter((id) => all.includes(id))), [],
+      'a row below the current scoreFloor is a current skip_low, never re-sent');
+    assert.deepEqual(await loadAutoSkipLowIds(client, null, 5000, { deterministic: { floor: 40 }, model: {} }), [], 'no scoreFloor, no reskip sweep');
+
+    const seen = /** @type {number[]} */ ([]);
+    const stats = await runTriage(client, await insertRun(), { ...testConfig(), configDir, triage: triageCfg({ scoreFloor: 0 }) }, { keywords: [] },
+      { execFile: execFor(seen, (id) => ({ id, fit_score: 62, status: 'maybe', reason: 'worth a look' })) });
+    assert.deepEqual(seen.filter((id) => all.includes(id)), [autoLow]);
+    const row = await listing(autoLow);
+    assert.equal(row.status, 'maybe', 'full status decision, like model_low');
+    assert.equal(row.fit_score, 62);
+    assert.ok(stats.coverage.by_kind.reskip >= 1, JSON.stringify(stats.coverage));
+    assert.ok(stats.model.reskip_scored >= 1, JSON.stringify(stats.model));
+    for (const id of [humanSkip, noiseRow, stickyRow, humanAfterAuto]) assert.equal((await listing(id)).fit_score, null, `row ${id} untouched`);
+    assert.equal((await listing(autoLowFitted)).fit_score, 15);
+    // Once scored, the row is no longer a candidate.
+    assert.ok(!(await loadAutoSkipLowIds(client, null, 5000, { deterministic: { floor: 40 }, model: { scoreFloor: 0 } })).includes(autoLow));
+  });
+
+  test('backlogMaxAgeDays 14: a row first seen 13 days ago is swept, 15 days ago is not (backlog and reskip)', async () => {
+    await cleanup();
+    const oldRun = await insertRun();
+    const backlog13 = await insertListing({ prescore: 55 });
+    const backlog15 = await insertListing({ prescore: 55 });
+    const reskip13 = await insertListing({ prescore: 10 });
+    const reskip15 = await insertListing({ prescore: 10 });
+    for (const id of [backlog13, backlog15, reskip13, reskip15]) await recordRunItem(oldRun, id, 'greenhouse');
+    // Deterministic pass under scoreFloor 20 auto-skips the prescore-10 rows; band rows stay untriaged.
+    await runTriage(client, oldRun, { ...testConfig(), configDir, triage: triageCfg({ backlogPerRun: 0 }) }, { keywords: [] }, { execFile: async () => { throw Object.assign(new Error('x'), { code: 1 }); } });
+    await client.query('UPDATE ic_job_listings SET triage_model_failures = 0 WHERE id = ANY($1::int[])', [[backlog13, backlog15]]);
+    await client.query(`UPDATE ic_job_listings SET first_seen = now() - interval '13 days' WHERE id = ANY($1::int[])`, [[backlog13, reskip13]]);
+    await client.query(`UPDATE ic_job_listings SET first_seen = now() - interval '15 days' WHERE id = ANY($1::int[])`, [[backlog15, reskip15]]);
+    const cfg14 = { deterministic: { floor: 40 }, model: { scoreFloor: 0, backlogMaxAgeDays: 14 } };
+    const reskip = await loadAutoSkipLowIds(client, null, 100000, cfg14);
+    assert.ok(reskip.includes(reskip13), '13 days old is reswept');
+    assert.ok(!reskip.includes(reskip15), '15 days old is not');
+    const unlimited = await loadAutoSkipLowIds(client, null, 100000, { deterministic: { floor: 40 }, model: { scoreFloor: 0 } });
+    assert.ok(unlimited.includes(reskip15), 'no backlogMaxAgeDays means no age limit');
+
+    const seen = /** @type {number[]} */ ([]);
+    await runTriage(client, await insertRun(), { ...testConfig(), configDir, triage: triageCfg({ scoreFloor: 0, backlogPerRun: 5000, backlogMaxAgeDays: 14 }) }, { keywords: [] }, { execFile: execFor(seen) });
+    assert.ok(seen.includes(backlog13), 'untriaged 13-day row is swept');
+    assert.ok(!seen.includes(backlog15), 'untriaged 15-day row is not');
+    assert.ok(seen.includes(reskip13));
+    assert.ok(!seen.includes(reskip15));
+  });
+
+  test('triageSchema: backlogMaxAgeDays defaults to null (no limit) and accepts 14', () => {
+    assert.equal(triageSchema.parse({}).model.backlogMaxAgeDays, null);
+    assert.equal(triageSchema.parse({ model: { backlogMaxAgeDays: 14 } }).model.backlogMaxAgeDays, 14);
+    assert.equal(triageSchema.safeParse({ model: { backlogMaxAgeDays: 0 } }).success, false);
+  });
+
+  test('reskip apply guard: a row a human re-marked between selection and apply is not overwritten', async () => {
+    await cleanup();
+    const id = await insertListing({ prescore: 10, status: 'skip' });
+    await withTransaction(client, (c) => applyMark(c, { id, status: 'shortlisted' }, { now: new Date(), explicit: true, actor: 'dashboard' }));
+    const stats = await runModelTriage(client, null, [id], triageCfg({ scoreFloor: 0 }), configDir, 'Candidate summary.', { keywords: [] },
+      { execFile: execFor([], (x) => ({ id: x, fit_score: 10, status: 'skip', reason: 'no' })) }, [], [], [], [id]);
+    assert.equal((await listing(id)).status, 'shortlisted');
+    assert.equal((await listing(id)).fit_score, null);
+    assert.equal(stats.reskip_skipped, 1);
+    assert.equal(stats.reskip_scored, 0);
   });
 
   test('a failed batch counts a failure for every id in it', async () => {
