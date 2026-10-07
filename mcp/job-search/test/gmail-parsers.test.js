@@ -20,7 +20,7 @@ import { readGmailFixture } from './helpers/scan-fixtures.js';
 describe('gmail-parsers: PARSERS / PARSER_INPUT registry', () => {
   test('every parser name in PARSERS has an input-shape entry and vice versa', () => {
     assert.deepEqual(Object.keys(PARSERS).sort(), Object.keys(PARSER_INPUT).sort());
-    assert.deepEqual(Object.keys(PARSERS).sort(), ['indeed-alert', 'indeed-match', 'ladders', 'lensa', 'linkedin']);
+    assert.deepEqual(Object.keys(PARSERS).sort(), ['dice', 'efinancialcareers', 'indeed-alert', 'indeed-match', 'jobs2web', 'ladders', 'lensa', 'linkedin', 'remotehunter']);
   });
 });
 

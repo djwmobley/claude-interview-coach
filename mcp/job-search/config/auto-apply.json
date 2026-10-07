@@ -8,7 +8,7 @@
     "relocation": 275000
   },
   "probeCapPerSource": 10,
-  "probeRowCap": 10,
+  "probeRowCap": 30,
   "reprobeAfterHours": 48,
   "lockMinutes": 40,
   "pollSeconds": 30,
@@ -19,9 +19,17 @@
   "waitStaleHeartbeatMinutes": 10,
   "probeFitFloor": 60,
   "probeRowCapWithBrowser": 40,
-  "probeTimeBudgetMs": 600000,
+  "probeTimeBudgetMs": 900000,
   "workday": {
     "submitMode": "unattended"
+  },
+  "approvedDriver": {
+    "enabled": true,
+    "maxPerRun": 5
+  },
+  "reroute": {
+    "enabled": true,
+    "maxPerRun": 5
   },
   "unattendedSubmit": {
     "enabled": true,

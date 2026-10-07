@@ -232,3 +232,24 @@ describe('adapter base helpers', () => {
     assert.equal(decodeEntities('&lt;p&gt;A &amp; B &#39;x&#39; &#x41;&lt;/p&gt;'), "<p>A & B 'x' A</p>");
   });
 });
+
+describe('scheduler: source_stats and unknown event kinds (Gmail intake addendum)', () => {
+  /** @param {any[]} events */
+  const adapterOf = (events) => defineAdapter({
+    name: 'fake2', needsBrowser: false, dateOrdered: false, domains: ['fake.test'], pathPatterns: ['^/'], blindSpots: [],
+    async *search() { for (const e of events) yield e; },
+  });
+  test('source_stats reaches onSourceStats; an unknown kind is counted and reported as a warning, never dropped', async () => {
+    /** @type {any[]} */
+    const stats = [];
+    /** @type {any[]} */
+    const warnings = [];
+    const r = await runSearch(adapterOf([{ kind: 'source_stats', stats: { a: 1 } }, { kind: 'mystery' }]), profile, ctx(), {
+      onListing: async () => {}, onSourceStats: async (ev) => { stats.push(ev.stats); }, onWarning: async (ev) => { warnings.push(ev); },
+    }, { maxPages: 3, windowStart: WINDOW });
+    assert.deepEqual(stats, [{ a: 1 }]);
+    assert.equal(r.warnings, 1);
+    assert.equal(warnings[0].code, 'ADAPTER_EVENT_UNKNOWN');
+    assert.match(warnings[0].message, /mystery/);
+  });
+});

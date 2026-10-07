@@ -48,7 +48,8 @@ import { prescore } from './prescore.js';
 import { classifyNoise, weightedPrescore, getDefaultNoiseRules } from './noise.js';
 import { embedSafe, embeddingText } from './embed.js';
 import { compactRows, capResponse, MAX_ROWS, MAX_RESPONSE_CHARS, untrustedRows, ROWS_WRAP_OVERHEAD_CHARS } from './compact.js';
-import { buildRegistry, guardedFetch } from './urlguard.js';
+import { buildRegistry, guardedFetch, guardUrl } from './urlguard.js';
+import { runGmailDetail } from './gmail-detail.js';
 import { planPages, assertPlanWithinCap, reserveBudget } from './budget.js';
 import { makeRateLimiter } from './ratelimit.js';
 import { runSearch } from './scheduler.js';
@@ -1409,6 +1410,11 @@ async function executeRun(p) {
             }
             log({ evt: 'adapter_warning', source: s.name, code: ev.code, message: ev.message.slice(0, 300) });
           },
+          // Gmail intake addendum: the gmail source's per-sender outcome counters and discovery result,
+          // stored at stats.<source> (stats.gmail) for the report's gmail line and PARSER BROKEN headline.
+          async onSourceStats(ev) {
+            /** @type {any} */ (stats)[s.name] = ev.stats;
+          },
           async onWall(ev) {
             const verdict = classifyPage(ev.signals);
             log({ evt: 'page_classified', source: s.name, kind: verdict.kind, reason: verdict.reason, status: ev.signals.status ?? null });
@@ -1589,6 +1595,34 @@ async function executeRun(p) {
   // dedicated connection itself throwing, or runDeterministicTriage's first query failing before any row
   // is processed) never changes this run's own status/exit code -- only stats.triage describes the
   // failure, and the scan's own rows/response are written normally either way.
+  // Gmail intake addendum G3: the description phase for gmail-sourced rows, after every source's detail
+  // pass and BEFORE triage, so this run's triage scores (or A2-rescores) what it fetched. Same isolation as
+  // triage: a dedicated connection after the lock released; a total failure only shows in stats.gmail_detail.
+  if (!dryRun && sources.some((s) => s.name === 'gmail') && config.adapters.adapters.gmail?.detailRouting?.enabled) {
+    try {
+      const gdClient = await (deps.connectDedicated ?? defaultConnectDedicated)();
+      try {
+        const registry = buildRegistry(config);
+        const fetchImpl = deps.fetch ?? fetch;
+        /** @type {import('./gmail-detail.js').FetchOnce} */
+        const fetchOnce = async (url) => {
+          const g = await guardUrl(url, registry, { source: 'gmail-detail', lookup: deps.lookup });
+          const res = await fetchImpl(g.url.toString(), { method: 'GET', headers: { 'user-agent': USER_AGENT }, redirect: 'manual', signal: AbortSignal.timeout(30000) });
+          return { status: res.status, location: res.headers.get('location'), text: res.status === 200 ? await res.text() : '' };
+        };
+        const gd = await runGmailDetail(gdClient, { config, now, log, fetchOnce });
+        /** @type {any} */ (stats).gmail_detail = gd;
+        await gdClient.query('UPDATE ic_scan_runs SET stats = stats || $2::jsonb WHERE id = $1', [runId, JSON.stringify({ gmail_detail: gd })]);
+      } finally {
+        await gdClient.end().catch(() => {});
+      }
+    } catch (err) {
+      const f = errFields(err);
+      log({ evt: 'gmail_detail_failed', run_id: runId, ...f });
+      /** @type {any} */ (stats).gmail_detail = { enabled: true, error: f.err_code ?? 'error' };
+    }
+  }
+
   if (!dryRun) {
     /** @type {any} */
     let triageStats = { configured: Boolean(config.triage && config.triage.present) };

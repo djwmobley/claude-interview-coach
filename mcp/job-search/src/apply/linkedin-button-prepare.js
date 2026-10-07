@@ -22,7 +22,7 @@
  *                    status vocabulary markSubmitted uses, actor 'apply')               attempt counted
  *   no_control       apply_easy_only=false                                               attempt counted
  *   unknown          apply_easy_only=false                                               attempt counted
- *   load_failure     apply_probed_at only (cooldown retry), NO attempt (spec v2 B7)
+ *   load_failure     apply_probed_at (cooldown retry), attempt counted (unblock A12)
  *   challenge        nothing on the listing, NO attempt; trips the breaker
  *   auth_wall        nothing on the listing; trips the breaker
  *
@@ -123,7 +123,9 @@ export async function persistLinkedInApplyState(client, listing, state, opts) {
       await trip(client, { reason: `linkedin_probe_${branch}`, applicationId: null, hours: LINKEDIN_PROBE_BREAKER_HOURS, ats: 'linkedin_easy', now: opts.now });
       return { outcome: `halted_${branch}`, branch };
     case 'load_failure':
-      if (opts.countAttempt) await client.query('UPDATE ic_job_listings SET apply_probed_at = $2 WHERE id = $1', [listing.id, opts.now]);
+      // Unblock-auto-apply A12: a failed page load counts as a lifetime probe attempt, so a page that
+      // never loads is retired by the lifetime cap instead of taking a per-run probe slot every day.
+      if (opts.countAttempt) await client.query('UPDATE ic_job_listings SET apply_probed_at = $2, probe_attempts = probe_attempts + 1 WHERE id = $1', [listing.id, opts.now]);
       return { outcome: 'skipped_load_failure', branch };
     case 'easy_apply':
       await update(`apply_easy_only = true, apply_url = NULL, apply_ats = 'linkedin_easy', apply_ats_confidence = 'inferred', apply_ats_hint = NULL`);
@@ -172,7 +174,9 @@ export async function persistLinkedInApplyState(client, listing, state, opts) {
  *   tripBreaker?: typeof defaultTripBreaker,
  *   markListingApplied?: (c: import('pg').ClientBase, id: number, now: Date) => Promise<void>,
  * }} deps
- * @returns {Promise<{ outcome: string, branch: string|null, reason?: string }>}
+ * @returns {Promise<{ outcome: string, branch: string|null, reason?: string, clicked?: boolean }>} `clicked` is
+ *   true when the external Apply button was clicked (a second page load: the click probe's new tab), so a
+ *   caller that reserved budget for that load can tell whether it was used.
  */
 export async function prepareLinkedInListing(client, listing, deps) {
   const url = listing.url_normalized ?? listing.url;
@@ -190,6 +194,7 @@ export async function prepareLinkedInListing(client, listing, deps) {
   let reason = verdict.reason;
   /** @type {import('../core/apply-target-persist.js').ApplyDetail|null} */
   let applyDetail = null;
+  let clicked = false;
 
   if (branch === 'external' && verdict.control) {
     if (verdict.control.href) {
@@ -198,6 +203,7 @@ export async function prepareLinkedInListing(client, listing, deps) {
       branch = 'unknown';
       reason = 'external_button_no_probe_session';
     } else {
+      clicked = true;
       const probe = await probeLinkedInButtonApply(deps.probeSession.page, deps.probeSession.session, {
         control: { path: verdict.control.path, name: verdict.control.name }, timeoutMs: deps.probeTimeoutMs ?? 15000, sleep: deps.sleep,
       });
@@ -215,7 +221,7 @@ export async function prepareLinkedInListing(client, listing, deps) {
     now: deps.now, countAttempt: true, resolveExternal: true, probeRegistry: deps.probeRegistry, reprobeAfterHours: deps.reprobeAfterHours,
     fetch: deps.fetch, lookup: deps.lookup, tripBreaker: deps.tripBreaker, markListingApplied: deps.markListingApplied,
   });
-  return { ...persisted, reason };
+  return { ...persisted, reason, clicked };
 }
 
 /**

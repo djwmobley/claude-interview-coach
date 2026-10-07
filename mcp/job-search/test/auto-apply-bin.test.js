@@ -1156,6 +1156,19 @@ describe('runSingleApplication: --application re-drive (submit-on-resume spec se
     assert.equal(r.reason, 'state_submitted');
   });
 
+  test('unblock Item 1: an approved application routes through the approved driver for that one id', async () => {
+    const listingId = await insertListing();
+    const appId = await seedApplication(listingId, { state: 'approved' });
+    /** @type {any[]} */
+    const calls = [];
+    const r = await runSingleApplication(appId, baseSingleDeps({
+      runApprovedDriverFn: async (/** @type {any} */ o) => { calls.push(o.onlyId); return { results: [{ applicationId: appId, outcome: 'drove_ok' }], counts: {}, reroute: null }; },
+    }));
+    assert.deepEqual(calls, [appId]);
+    assert.equal(r.outcome, 'approved_driver');
+    assert.equal(/** @type {any} */ (r).driver.results[0].outcome, 'drove_ok');
+  });
+
   test('needs_human with a non-resume_failed kind is refused pointing at /apply-answer, never re-runs the resume runner', async () => {
     const listingId = await insertListing();
     const appId = await seedApplication(listingId, { state: 'needs_human', pendingQuestion: { kind: 'question', label: 'What is your notice period?' } });
@@ -1457,3 +1470,75 @@ describe('runSingleApplication: --application re-drive (submit-on-resume spec se
   });
 });
 
+
+describe('runPrepare: unblock Item 3 (probe order, cap 30, counted not_us) and A12', () => {
+  test('a row with no usable US location is counted not_us_location, never silently dropped', async () => {
+    const r = await runLinkedInPrepare({ rows: [liRow(1, { location_norm: 'absent' }), liRow(2)] });
+    assert.equal(r.stats.skippedByReason.not_us_location, 1);
+    assert.deepEqual(r.probed, [2]);
+  });
+
+  test('cap 30 holds: 40 eligible LinkedIn rows give exactly 30 page loads', async () => {
+    const rows = Array.from({ length: 40 }, (_, i) => liRow(i + 1));
+    const r = await runLinkedInPrepare({ rows, probeRowCap: 30 });
+    assert.equal(r.stats.linkedinTaken, 30);
+    assert.equal(r.probed.length, 30);
+    assert.equal(r.stats.skippedByReason.linkedin_cap, 10);
+  });
+
+  test('never-probed rows are counted: never_probed attempted N of M', async () => {
+    const rows = [liRow(1), liRow(2, { apply_probed_at: '2026-10-01T00:00:00Z', probe_attempts: 1 }), liRow(3)];
+    const r = await runLinkedInPrepare({ rows, probeRowCap: 1 });
+    assert.equal(r.stats.neverProbedSeen, 2);
+    assert.equal(r.stats.neverProbedAttempted, 1);
+  });
+
+  // A12's lifetime-count half (probe_attempts + 1 on load_failure) is asserted in
+  // test/linkedin-button-prepare.test.js and test/linkedin-apply-persist-db.test.js; this is the per-run half.
+  test('A12: a probe load failure still counts as a page load against the run cap and the budget', async () => {
+    const r = await runLinkedInPrepare({ rows: [liRow(1), liRow(2)], probeRowCap: 1, probe: async () => ({ outcome: 'skipped_load_failure', branch: 'load_failure' }) });
+    assert.equal(r.stats.attempted, 1);
+    assert.equal(r.stats.linkedinTaken, 1, 'the failed load used the one slot; the second row is capped');
+    assert.equal(r.reserves.length, 1, 'its detail was reserved before the load');
+    assert.equal(r.stats.skippedByReason.skipped_load_failure, 1);
+    assert.equal(r.stats.skippedByReason.linkedin_cap, 1);
+  });
+
+  test('the candidate query puts never-probed rows first, ahead of a higher-fit re-probe (real DB)', async () => {
+    const client = new pg.Client(pgConnectionConfig());
+    await client.connect();
+    const co = `ZZ-PROBE-ORDER-${process.pid}`;
+    /** @type {number[]} */
+    const ids = [];
+    try {
+      for (const [fit, probedAt] of /** @type {Array<[number, string|null]>} */ ([[100, '2026-09-01T00:00:00Z'], [99, null]])) {
+        const n = Math.floor(Math.random() * 1e9);
+        const r = await client.query(
+          `INSERT INTO ic_job_listings (title, company, source, external_id, record_kind, company_norm, title_norm, location_norm, dedup_hash, last_seen, url, url_normalized, fit_score, apply_probed_at)
+           VALUES ('Probe Order', $1, 'linkedin', $2, 'listing', $3, 'probe order', 'country-us', $4, now(), $5, $5, $6, $7) RETURNING id`,
+          [co, `zz-probe-order:${n}`, `zz probe order ${n}`, `zz-probe-order-${n}`, `https://www.linkedin.com/jobs/view/${n}/`, fit, probedAt],
+        );
+        ids.push(Number(r.rows[0].id));
+      }
+      /** @type {number[]} */
+      const probed = [];
+      const config = {
+        atsApply: { greenhouse: { hosts: ['boards.greenhouse.io'] }, lever: { hosts: [] }, smartrecruiters: { hosts: [] }, icims: { hostSuffix: 'icims.com' }, dayforce: { hostSuffix: 'dayforcehcm.com' } },
+        autoApply: { reprobeAfterHours: 48, probeRowCap: 1, probeRowCapWithBrowser: 0, probeFitFloor: 99 },
+        adapters: { adapters: { linkedin: { dailyPages: 40, dailyDetails: 200, maxDetailsPerRun: 60, detailDelayMs: [0, 0] } } },
+      };
+      await runPrepare(/** @type {any} */ (client), /** @type {any} */ (config), {
+        now: new Date('2026-10-07T12:00:00Z'), dryRun: false, log: () => {}, linkedInBrowser: /** @type {any} */ ({ cap: {}, probeSession: null }),
+        classifyExclusion: async () => ({ branch: 'eligible' }),
+        prepareLinkedIn: async (/** @type {any} */ _c, /** @type {any} */ listing) => { probed.push(listing.id); return { outcome: 'resolved', branch: 'easy_apply' }; },
+        reserveBudget: async () => ({ ok: true, remainingPages: 1, remainingDetails: 1 }),
+        remainingBudget: async () => ({ details: 100, pages: 100, usedPages: 0, usedDetails: 0 }),
+        breakerStatus: async () => ({ tripped: false }), sleep: async () => {},
+      });
+      assert.deepEqual(probed.filter((id) => ids.includes(id)), [ids[1]], 'the never-probed fit-99 row goes before the fit-100 re-probe');
+    } finally {
+      if (ids.length) await client.query('DELETE FROM ic_job_listings WHERE id = ANY($1::int[])', [ids]);
+      await client.end();
+    }
+  });
+});

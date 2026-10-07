@@ -1,4 +1,4 @@
 {
   "deterministic": { "enabled": true, "floor": 40, "ceiling": 70 },
-  "model": { "enabled": true }
+  "model": { "enabled": true, "scoreFloor": 20, "backlogPerRun": 60, "maxListingsPerRun": 200, "maxBatchesPerRun": 15 }
 }

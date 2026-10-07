@@ -3,7 +3,7 @@
  * src/apply/linkedin-button-prepare.js's persistLinkedInApplyState against the real isolated test DB (spec
  * v1 F1.1, v2 B4/B6/B7): the SQL each branch writes actually runs, the closed branch sets expired_at, the
  * already_applied branch marks a pre-application listing 'applied' with a status event (and leaves a later
- * status alone), easy_apply clears stale target fields, and load_failure never increments probe_attempts.
+ * status alone), easy_apply clears stale target fields, and load_failure counts a lifetime probe attempt (unblock A12).
  */
 import { test, describe, before, after } from 'node:test';
 import assert from 'node:assert/strict';
@@ -90,12 +90,12 @@ describe('persistLinkedInApplyState (real DB)', () => {
     assert.equal((await row(later.id)).status, 'interviewing');
   });
 
-  test('load_failure: apply_probed_at set, probe_attempts unchanged (spec v2 B7)', async () => {
+  test('load_failure: apply_probed_at set and the lifetime probe attempt counted (unblock A12)', async () => {
     const l = await seed();
     await persistLinkedInApplyState(client, l, { branch: 'load_failure' }, /** @type {any} */ (OPTS));
     const x = await row(l.id);
     assert.ok(x.apply_probed_at);
-    assert.equal(x.probe_attempts, 0);
+    assert.equal(x.probe_attempts, 1);
   });
 
   test('unknown and no_control: apply_easy_only false, attempt counted', async () => {

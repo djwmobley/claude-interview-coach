@@ -222,9 +222,48 @@
         200,
         400
       ],
-      "dailyPages": 300,
+      "dailyPages": 600,
       "dailyDetails": 0,
-      "maxPagesPerQuery": 5
+      "maxPagesPerQuery": 5,
+      "detailRouting": {
+        "enabled": true,
+        "detailMaxAttempts": 3,
+        "maxHops": 5,
+        "unwrapPerDay": 300,
+        "linkedin": { "perDay": 40, "perRun": 20 },
+        "indeed": { "perDay": 20, "perRun": 10 },
+        "ats": { "perDay": 20, "perRun": 10 },
+        "generic": { "perDay": 60, "perRun": 30 }
+      }
+    },
+    "gmail-detail": {
+      "transport": "fetch",
+      "domains": [
+        "lensa.com",
+        "sg3email.lensa.com",
+        "email.lensa.com",
+        "email.mg1.lensa.com",
+        "email.mg3.lensa.com",
+        "sli.lensa.com",
+        "t.ladders.co",
+        "www.theladders.com",
+        "post.spmailtechnolo.com",
+        "elinks.dice.com",
+        "www.dice.com",
+        "www.efinancialcareers.com",
+        "careers.bv.com",
+        "e.customeriomail.com"
+      ],
+      "pathPatterns": [
+        "^/"
+      ],
+      "delayMs": [
+        1500,
+        3000
+      ],
+      "dailyPages": 1,
+      "dailyDetails": 60,
+      "maxPagesPerQuery": 1
     }
   },
   "run": {

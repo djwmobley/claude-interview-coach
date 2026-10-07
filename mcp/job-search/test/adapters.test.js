@@ -802,7 +802,9 @@ describe('gmail', () => {
   test(
     'a known sender whose parser finds zero listings yields PARSE_EMPTY, not silence',
     withFakeAuth(async () => {
-      const emptyBody = Buffer.from('nothing job-shaped here, no View job: line', 'utf8').toString('base64').replace(/\+/g, '-').replace(/\//g, '_');
+      // Gmail intake addendum: PARSE_EMPTY now means "job markers present, zero listings" (a mail with no
+      // job markers at all is no_job_markers, counted, not a warning) -- so this body carries one marker.
+      const emptyBody = Buffer.from('View job: https://www.linkedin.com/comm/jobs/view/1234567/?x=1', 'utf8').toString('base64').replace(/\+/g, '-').replace(/\//g, '_');
       const map = [
         { prefix: 'https://gmail.googleapis.com/gmail/v1/users/me/messages?', body: JSON.stringify({ messages: [{ id: 'fedcba98765401' }] }) },
         { prefix: 'https://gmail.googleapis.com/gmail/v1/users/me/messages/fedcba98765401', body: JSON.stringify({ id: 'fedcba98765401', internalDate: String(NOW.getTime()), payload: { headers: [{ name: 'From', value: 'jobalerts-noreply@linkedin.com' }], mimeType: 'text/plain', body: { data: emptyBody } } }) },

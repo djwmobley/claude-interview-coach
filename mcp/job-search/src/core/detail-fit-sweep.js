@@ -90,7 +90,10 @@ export function fitSweepPredicateSql(o) {
     `coalesce(stale, false) = false`,
     `NOT EXISTS (SELECT 1 FROM ic_job_applications a WHERE a.listing_id = ic_job_listings.id AND a.state <> 'withdrawn')`,
   ];
-  if (o.source) clauses.push(`source = ${next(o.source)}`);
+  // Gmail intake addendum G3: a gmail-sourced row whose own external_id is canonical for this source
+  // (linkedin:<id>, indeed:<jk>, greenhouse:..., workday:..., dayforce:...) is fetched by THIS source's
+  // sweep, through this source's own guard, browser, and detail budget; gmail itself never fetches it.
+  if (o.source) clauses.push(`(source = ${next(o.source)} OR (source = 'gmail' AND external_id LIKE ${next(`${o.source}:%`)}))`);
   return { sql: `(${clauses.join(' AND ')})`, params };
 }
 

@@ -74,6 +74,15 @@ describe('src/core/detail-fit-sweep.js', () => {
     return r.rows.map((row) => Number(row.id));
   }
 
+  test('Gmail intake G3: a gmail row whose own external_id is canonical for the source is in that source\'s sweep only', async () => {
+    const gm = await seedRow({ source: 'gmail' });
+    await client.query(`UPDATE ic_job_listings SET external_id = $2 WHERE id = $1`, [gm, `greenhouse:zztest/${gm}`]);
+    const other = await seedRow({ source: 'gmail' });
+    assert.ok((await runQuery({ source: 'greenhouse' })).includes(gm));
+    assert.ok(!(await runQuery({ source: 'greenhouse' })).includes(other), 'a gmail row with a gmail-only id is never swept');
+    assert.ok(!(await runQuery({ source: 'lever' })).includes(gm));
+  });
+
   test('positive control: a fresh, empty-description, at-floor, new-status row is selected', async () => {
     const included = await seedRow();
     const ids = await runQuery();

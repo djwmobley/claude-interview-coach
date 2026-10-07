@@ -97,7 +97,8 @@ import { normalizeListing, DETAIL_MIN_CHARS } from '../src/core/normalize.js';
 import { prescore } from '../src/core/prescore.js';
 import { classifyNoise, weightedPrescore, getDefaultNoiseRules } from '../src/core/noise.js';
 import { updateListing } from '../src/core/upsert.js';
-import { buildRegistry, guardedFetch } from '../src/core/urlguard.js';
+import { buildRegistry, guardedFetch, guardUrl } from '../src/core/urlguard.js';
+import { runGmailDetail } from '../src/core/gmail-detail.js';
 import { reserveBudget as defaultReserveBudget } from '../src/core/budget.js';
 import { makeRateLimiter } from '../src/core/ratelimit.js';
 import { connectSession as defaultConnectSession } from '../src/browser/session.js';
@@ -263,6 +264,21 @@ export async function runBackfill(args, deps, client) {
   const config = deps.config;
   const env = deps.env;
   const log = deps.log ?? (() => {});
+  // Gmail intake addendum G3: --source=gmail runs the gmail description phase (src/core/gmail-detail.js),
+  // the same module a scan runs, over the existing gmail backlog. A dry run reads nothing over the network.
+  if (args.source === 'gmail') {
+    if (args.dryRun) return { ok: true, code: 0, source: 'gmail', dry_run: true, gmail_detail: null, note: 'dry run: the gmail description phase makes network requests, so nothing ran' };
+    const registry = buildRegistry(config);
+    const fetchImpl = deps.fetch ?? fetch;
+    /** @type {import('../src/core/gmail-detail.js').FetchOnce} */
+    const fetchOnce = async (url) => {
+      const g = await guardUrl(url, registry, { source: 'gmail-detail', lookup: deps.lookup });
+      const res = await fetchImpl(g.url.toString(), { method: 'GET', headers: { 'user-agent': USER_AGENT }, redirect: 'manual', signal: AbortSignal.timeout(30000) });
+      return { status: res.status, location: res.headers.get('location'), text: res.status === 200 ? await res.text() : '' };
+    };
+    const gd = await runGmailDetail(client, { config, now: new Date(), log, fetchOnce, reserveBudget: deps.reserveBudget, limit: Number.isFinite(args.limit) ? args.limit : undefined });
+    return { ok: true, code: 0, source: 'gmail', dry_run: false, gmail_detail: gd };
+  }
   const reserve = deps.reserveBudget ?? defaultReserveBudget;
   const connectSession = deps.connectSession ?? defaultConnectSession;
   const launchChromeFn = deps.launchChrome ?? ((e, l) => defaultLaunchChrome(e, l));

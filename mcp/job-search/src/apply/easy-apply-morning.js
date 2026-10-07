@@ -51,6 +51,9 @@ import { createApplication, approve, transition } from '../core/applications.js'
  *   the live LinkedIn page-state check (by listing for a new row, by application for an existing one)
  * @property {(applicationId: number, branch: string) => Promise<void>} parkUnverified approved -> needs_human,
  *   kind easy_apply_unverified
+ * @property {((applicationId: number) => Promise<{ outcome: string, reason?: string|null }>)|null} [reroute]
+ *   unblock-auto-apply Item 2: called instead of parkUnverified when the pre-worker check says 'external'
+ *   (src/apply/reroute.js rerouteApplication with read state 'approved'); absent or null keeps the park
  */
 
 /** Kind of the visible park when the page does not show exactly one Easy Apply control (spec v2 B1). */
@@ -151,6 +154,15 @@ export async function runEasyApplyMorning(rows, deps) {
     if (v.branch !== 'easy_apply') {
       deps.log({ evt: 'easy_apply_morning_unverified', severity: 'warning', application_id: applicationId, listing_id: listingId, branch: v.branch, reason: v.reason ?? null });
       if (GATE_BRANCHES.includes(v.branch)) return { results, stopReason: `verify_${v.branch}` };
+      if (v.branch === 'external' && deps.reroute) {
+        // Unblock-auto-apply Item 2: the page applies on the company site, so the application is rerouted
+        // to that ATS (src/apply/reroute.js) instead of parked; the approved driver later in this run
+        // drives it. The Easy Apply dialog is never opened.
+        const rr = await deps.reroute(applicationId);
+        results.push({ listingId, applicationId, outcome: rr.outcome, branch: v.branch, reason: rr.reason ?? null });
+        if (rr.outcome === 'halted') return { results, stopReason: `linkedin_${rr.reason ?? 'challenge'}` };
+        continue;
+      }
       await deps.parkUnverified(applicationId, v.branch);
       results.push({ listingId, applicationId, outcome: 'parked_unverified', branch: v.branch });
       if (HALT_BRANCHES.includes(v.branch)) return { results, stopReason: `linkedin_${v.branch}` };
@@ -174,6 +186,7 @@ export async function runEasyApplyMorning(rows, deps) {
  *   runApplyWorker: (id: number, deps: any) => Promise<any>,
  *   outputRoot: string, env: any, log: (f: any) => void, config: any, timezone: string,
  *   liveCheck: (listingId: number) => Promise<{ branch: string, reason?: string }>,
+ *   reroute?: ((applicationId: number) => Promise<{ outcome: string, reason?: string|null }>)|null,
  * }} o
  *   liveCheck: src/apply/linkedin-button-prepare.js's createLinkedInLiveCheck(...) in production.
  * @returns {MorningDeps}
@@ -181,6 +194,7 @@ export async function runEasyApplyMorning(rows, deps) {
 export function defaultMorningDeps(o) {
   const cfg = easyApplyConfig(o.config);
   return {
+    reroute: o.reroute ?? null,
     now: () => new Date(),
     sleep: (ms) => new Promise((r) => { setTimeout(r, ms); }),
     rand: Math.random,
