@@ -29,6 +29,7 @@ import { register as registerSources } from './routes/sources.js';
 import { register as registerGoogle } from './routes/google.js';
 import { register as registerGoogleReauth } from './routes/google-reauth.js';
 import { register as registerEasyApply } from './routes/easy-apply.js';
+import { register as registerReady } from './routes/ready.js';
 
 /**
  * @typedef {Object} RouteContext
@@ -292,6 +293,7 @@ export function createDashboardServer(deps, opts = {}) {
   registerDocuments(router, deps);
   registerApplications(router, deps, streamHub);
   registerEasyApply(router, deps, streamHub);
+  registerReady(router, deps, streamHub);
   registerCredentials(router, deps, streamHub);
   registerMemory(router, deps);
   registerAnalytics(router, deps);

@@ -78,7 +78,13 @@ function looksQuestionShaped(text) {
  * @property {typeof import('node:child_process').spawn} spawn
  * @property {typeof execFile} [execFile]
  * @property {(fields: Record<string, string|number|boolean|null>) => void} [log]
+ * @property {{ acquire: (o: { waitMs: number }) => Promise<{ release: () => Promise<void> }|null> }} [spawnLock] the shared
+ *   cross-process resume spawn lock (src/core/resume-spawn-lock.js); production always wires it
+ * @property {number} [spawnLockWaitMs] how long to wait for it (default DEFAULT_SPAWN_LOCK_WAIT_MS)
  */
+
+/** Default bounded wait for the shared resume spawn lock. */
+export const DEFAULT_SPAWN_LOCK_WAIT_MS = 10 * 60 * 1000;
 
 /**
  * @param {ResumeRunnerDeps} deps
@@ -221,6 +227,39 @@ export function createResumeRunner(deps) {
         return await fail(applicationId, 'no_description');
       }
 
+      // Ready to apply list A5: ONE cross-process lock covers every resume spawn (this application-mode
+      // runner in the dashboard and in bin/auto-apply.js, and the listing-mode runner), so
+      // findNewestMarkdown's "newest file" inference can never pick up another process's draft. Bounded
+      // wait; a lock that never frees fails visibly (resume_spawn_busy), never a silent second spawn.
+      /** @type {{ release: () => Promise<void> }|null} */
+      let held = null;
+      if (deps.spawnLock) {
+        held = await deps.spawnLock.acquire({ waitMs: deps.spawnLockWaitMs ?? DEFAULT_SPAWN_LOCK_WAIT_MS });
+        if (!held) {
+          say({ evt: 'resume_runner_spawn_busy', application_id: applicationId, listing_id: listingId });
+          return await fail(applicationId, 'resume_spawn_busy');
+        }
+      }
+      try {
+        return await spawnAndVerify(applicationId, listingId);
+      } finally {
+        if (held) await held.release().catch(() => {});
+      }
+    } finally {
+      current = null;
+    }
+  }
+
+  /**
+   * @param {number} applicationId
+   * @param {number} listingId
+   * @returns {Promise<{ ok: boolean, reason?: string, markdownPath?: string }>}
+   */
+  async function spawnAndVerify(applicationId, listingId) {
+    {
+      // Taken AFTER the spawn lock is held: a draft another process wrote while this run waited is older
+      // than this cutoff (less the 2 s mtime buffer), so findNewestMarkdown cannot pick it up.
+      const startedAt = new Date();
       const mcpConfigPath = writeMcpConfig(applicationId);
       const argv = [
         '-p', `Run the /write-resume skill with argument ${listingId} application:${applicationId}`,
@@ -307,7 +346,7 @@ export function createResumeRunner(deps) {
         const docRes = await deps.withClient((c) => c.query('SELECT listing_id FROM ic_job_documents WHERE id = $1', [app.resume_doc_id]));
         const docListingId = docRes.rowCount ? Number(docRes.rows[0].listing_id) : null;
         if (docListingId === Number(listingId)) {
-          const markdownPath = findNewestMarkdown(current.startedAt);
+          const markdownPath = findNewestMarkdown(startedAt);
           if (!markdownPath) {
             return await fail(applicationId, 'markdown_not_found');
           }
@@ -337,8 +376,6 @@ export function createResumeRunner(deps) {
         return await fail(applicationId, 'model_asked');
       }
       return await fail(applicationId, 'no_docs_ready');
-    } finally {
-      current = null;
     }
   }
 

@@ -9,6 +9,7 @@
 const ROUTES = Object.freeze([
   { name: 'home', shape: [] },
   { name: 'jobs', shape: ['jobs'] },
+  { name: 'ready', shape: ['ready'] },
   { name: 'job-detail', shape: ['jobs', ':id'] },
   { name: 'pipeline', shape: ['pipeline'] },
   { name: 'followups', shape: ['followups'] },

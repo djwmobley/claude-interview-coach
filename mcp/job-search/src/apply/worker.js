@@ -49,6 +49,7 @@ import { ADAPTERS } from './adapters/index.js';
 import { credentialTarget, readCredential, writeCredential, generatePassword } from '../core/credentials.js';
 import { findVerificationMessage } from './gmail-verify.js';
 import { easyApplyStartGate, runAssistedEasyApply, easyApplyConfig, refundEasyApplyCharge } from './easy-apply-flow.js';
+import { findManualLock } from '../core/manual-lock.js';
 import { createEasyApplyRunner } from './easy-apply-runner.js';
 import { parkAwaitingSubmit } from '../core/easy-apply-state.js';
 import { profileForAts } from './assisted/profiles/index.js';
@@ -337,6 +338,14 @@ export async function runApplyWorker(applicationId, deps = {}) {
     /** @type {any} */
     let easyApplyCharge = null;
     if (assistedKind === 'linkedin') {
+      // Ready to apply list R8/A4: a listing already shown on the Ready list is manual only; the assisted
+      // Easy Apply run never starts on it (nothing reserved yet, so nothing to refund) until Damian hands it
+      // back on the dashboard.
+      const lock = await findManualLock(client, app.listing_id);
+      if (lock) {
+        log({ evt: 'easy_apply_deferred', application_id: applicationId, reason: 'manual_only_lockout', lock_listing_id: lock.listingId });
+        return deferred('manual_only_lockout');
+      }
       const gate = await easyApplyStartGate(client, { config, easyApply: easyApplyDeps });
       if (!gate.ok) {
         log({ evt: 'easy_apply_deferred', application_id: applicationId, reason: gate.reason });

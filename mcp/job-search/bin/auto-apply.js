@@ -108,6 +108,7 @@ import { selectCandidates, isUsLocation, isHourlyPaySignal, classifyCandidate, c
 import { exclusionConfigPath, loadExclusionConfig, classifyExclusion } from '../src/apply/exclusions.js';
 import { createApplication, approve, getApplication, transition, retry, checkApplicationBlockers, hasAssistedNextClickEver, transitionRefusingPartialDraft } from '../src/core/applications.js';
 import { createResumeRunner } from '../src/dashboard/resume-runner.js';
+import { createAdvisoryLock, RESUME_SPAWN_LOCK_KEY } from '../src/core/resume-spawn-lock.js';
 import { createReviewRunner } from '../src/dashboard/review-runner.js';
 import { runApplyWorker } from '../src/apply/worker.js';
 import { connectSession as defaultConnectSession } from '../src/browser/session.js';
@@ -1238,7 +1239,7 @@ async function main() {
     if (args.applicationId !== undefined) {
       summary.phase = 'applying';
       persist();
-      const runnerDeps = { env, logDir: env.JOBSEARCH_LOG_DIR, repoRoot: repoRoot(), withClient, spawn };
+      const runnerDeps = { env, logDir: env.JOBSEARCH_LOG_DIR, repoRoot: repoRoot(), withClient, spawn, spawnLock: createAdvisoryLock({ key: RESUME_SPAWN_LOCK_KEY }) };
       const resumeRunner = createResumeRunner(runnerDeps);
       const reviewRunner = createReviewRunner(runnerDeps);
       const outputRoot = path.join(repoRoot(), 'output');
@@ -1402,7 +1403,7 @@ async function main() {
     if (!dryRun && selection.eligible.length) {
       summary.phase = 'applying';
       persist();
-      const runnerDeps = { env, logDir: env.JOBSEARCH_LOG_DIR, repoRoot: repoRoot(), withClient, spawn };
+      const runnerDeps = { env, logDir: env.JOBSEARCH_LOG_DIR, repoRoot: repoRoot(), withClient, spawn, spawnLock: createAdvisoryLock({ key: RESUME_SPAWN_LOCK_KEY }) };
       const resumeRunner = createResumeRunner(runnerDeps);
       const reviewRunner = createReviewRunner(runnerDeps);
       for (const row of selection.eligible) {
@@ -1442,7 +1443,7 @@ async function main() {
       summary.phase = 'easy_apply';
       persist();
       try {
-        const runnerDeps = { env, logDir: env.JOBSEARCH_LOG_DIR, repoRoot: repoRoot(), withClient, spawn };
+        const runnerDeps = { env, logDir: env.JOBSEARCH_LOG_DIR, repoRoot: repoRoot(), withClient, spawn, spawnLock: createAdvisoryLock({ key: RESUME_SPAWN_LOCK_KEY }) };
         const easy = await runEasyApplyMorning(selection.easyApplyEligible ?? [], defaultMorningDeps({
           withClientFn: withClient, resumeRunner: createResumeRunner(runnerDeps), reviewRunner: createReviewRunner(runnerDeps),
           runApplyWorker, outputRoot, env, log, config, timezone,

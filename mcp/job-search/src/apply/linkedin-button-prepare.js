@@ -103,7 +103,8 @@ export async function markListingAppliedByHand(client, listingId, now) {
  * Persist one classified LinkedIn page. Never resolves a target for the listing's own LinkedIn URL.
  * @param {import('pg').ClientBase} client
  * @param {{ id: number, url: string|null, url_normalized: string|null, apply_probed_at: string|Date|null, probe_attempts: number }} listing
- * @param {{ branch: string, reason?: string, applyDetail?: import('../core/apply-target-persist.js').ApplyDetail|null }} state
+ * @param {{ branch: string, reason?: string, applyDetail?: import('../core/apply-target-persist.js').ApplyDetail|null, manualOrigin?: string }} state
+ *   manualOrigin: 'linkedin_href' (the control carried an href) or 'linkedin_click' (the click probe's new tab)
  * @param {{ now: Date, countAttempt: boolean, resolveExternal: boolean, probeRegistry?: any, reprobeAfterHours?: number, fetch?: typeof fetch, lookup?: any,
  *   tripBreaker?: typeof defaultTripBreaker, markListingApplied?: (c: import('pg').ClientBase, id: number, now: Date) => Promise<void> }} opts
  * @returns {Promise<{ outcome: string, branch: string }>}
@@ -117,6 +118,10 @@ export async function persistLinkedInApplyState(client, listing, state, opts) {
     ? client.query(`UPDATE ic_job_listings SET ${sets}${attempt} WHERE id = $1`, [listing.id, opts.now])
     : client.query(`UPDATE ic_job_listings SET ${sets} WHERE id = $1`, [listing.id]));
 
+  // Ready to apply list (spec 7.3): every branch that describes the JOB (all but challenge/auth_wall, which
+  // describe the session) also records the page state, AFTER the branch's own write.
+  const recordPage = (/** @type {string} */ b) => recordApplyPageState(client, listing.id, b, state.reason ?? null, opts.now);
+
   switch (branch) {
     case 'challenge':
     case 'auth_wall':
@@ -126,31 +131,68 @@ export async function persistLinkedInApplyState(client, listing, state, opts) {
       // Unblock-auto-apply A12: a failed page load counts as a lifetime probe attempt, so a page that
       // never loads is retired by the lifetime cap instead of taking a per-run probe slot every day.
       if (opts.countAttempt) await client.query('UPDATE ic_job_listings SET apply_probed_at = $2, probe_attempts = probe_attempts + 1 WHERE id = $1', [listing.id, opts.now]);
+      await recordPage(branch);
       return { outcome: 'skipped_load_failure', branch };
     case 'easy_apply':
       await update(`apply_easy_only = true, apply_url = NULL, apply_ats = 'linkedin_easy', apply_ats_confidence = 'inferred', apply_ats_hint = NULL`);
+      await recordPage(branch);
       return { outcome: 'resolved', branch };
     case 'closed':
       await update('apply_easy_only = false, expired_at = coalesce(expired_at, $2)');
+      await recordPage(branch);
       return { outcome: 'resolved', branch };
     case 'already_applied':
       await update('apply_easy_only = false');
       await (opts.markListingApplied ?? markListingAppliedByHand)(client, listing.id, opts.now);
+      await recordPage(branch);
       return { outcome: 'resolved', branch };
     case 'external':
       if (opts.resolveExternal && state.applyDetail) {
         const r = await persistApplyTargetForListing(client, listing, state.applyDetail, {
           probeRegistry: opts.probeRegistry, reprobeAfterHours: opts.reprobeAfterHours ?? 0, now: opts.now, dryRun: false, fetch: opts.fetch, lookup: opts.lookup,
+          manualOrigin: state.manualOrigin,
         });
-        if (r.outcome === 'resolved' || r.outcome === 'unresolved') return { outcome: r.outcome, branch };
+        if (r.outcome === 'resolved' || r.outcome === 'unresolved') {
+          await recordPage(branch);
+          return { outcome: r.outcome, branch };
+        }
       }
       await update('apply_easy_only = false');
+      await recordPage(branch);
       return { outcome: opts.countAttempt ? 'unresolved' : 'checked', branch };
-    default:
+    default: {
       // no_control, unknown, and anything unrecognized: never Easy Apply.
       await update('apply_easy_only = false');
-      return { outcome: 'unresolved', branch: branch === 'no_control' ? 'no_control' : 'unknown' };
+      const b = branch === 'no_control' ? 'no_control' : 'unknown';
+      await recordPage(b);
+      return { outcome: 'unresolved', branch: b };
+    }
   }
+}
+
+/** Longest apply_page_reason kept (spec 4.1: free text, capped in code). */
+export const APPLY_PAGE_REASON_MAX = 120;
+
+/**
+ * Record the last LinkedIn page classification on the listing (spec 7.3). Same (branch, reason) as stored
+ * -> apply_page_repeat + 1 (first_seen kept); anything else -> repeat 1, first_seen = now. PostgreSQL
+ * evaluates every SET expression against the OLD row, so the comparisons below see the previous values.
+ * @param {import('pg').ClientBase} client
+ * @param {number} listingId
+ * @param {string} branch
+ * @param {string|null} reason
+ * @param {Date} now
+ */
+export async function recordApplyPageState(client, listingId, branch, reason, now) {
+  const r = reason === null || reason === undefined ? null : String(reason).slice(0, APPLY_PAGE_REASON_MAX);
+  await client.query(
+    `UPDATE ic_job_listings SET
+       apply_page_repeat = CASE WHEN apply_page_branch IS NOT DISTINCT FROM $2 AND apply_page_reason IS NOT DISTINCT FROM $3 THEN apply_page_repeat + 1 ELSE 1 END,
+       apply_page_first_seen_at = CASE WHEN apply_page_branch IS NOT DISTINCT FROM $2 AND apply_page_reason IS NOT DISTINCT FROM $3 THEN coalesce(apply_page_first_seen_at, $4) ELSE $4 END,
+       apply_page_branch = $2, apply_page_reason = $3
+     WHERE id = $1`,
+    [listingId, branch, r, now],
+  );
 }
 
 /**
@@ -195,10 +237,13 @@ export async function prepareLinkedInListing(client, listing, deps) {
   /** @type {import('../core/apply-target-persist.js').ApplyDetail|null} */
   let applyDetail = null;
   let clicked = false;
+  /** @type {string|undefined} */
+  let manualOrigin;
 
   if (branch === 'external' && verdict.control) {
     if (verdict.control.href) {
       applyDetail = { externalApplyUrl: verdict.control.href };
+      manualOrigin = 'linkedin_href';
     } else if (!deps.probeSession) {
       branch = 'unknown';
       reason = 'external_button_no_probe_session';
@@ -207,8 +252,10 @@ export async function prepareLinkedInListing(client, listing, deps) {
       const probe = await probeLinkedInButtonApply(deps.probeSession.page, deps.probeSession.session, {
         control: { path: verdict.control.path, name: verdict.control.name }, timeoutMs: deps.probeTimeoutMs ?? 15000, sleep: deps.sleep,
       });
-      if (probe.outcome === 'new_target') applyDetail = { externalApplyUrl: probe.url };
-      else if (probe.outcome === 'hint') applyDetail = { applyProbe: probe.hint };
+      if (probe.outcome === 'new_target') {
+        applyDetail = { externalApplyUrl: probe.url };
+        manualOrigin = 'linkedin_click';
+      } else if (probe.outcome === 'hint') applyDetail = { applyProbe: probe.hint };
       else {
         branch = 'unknown';
         reason = probe.outcome === 'aborted' ? `click_aborted_${probe.reason}` : `click_${probe.outcome}`;
@@ -217,7 +264,7 @@ export async function prepareLinkedInListing(client, listing, deps) {
   }
   deps.log({ evt: 'linkedin_apply_state', listing_id: listing.id, branch, reason });
 
-  const persisted = await persistLinkedInApplyState(client, listing, { branch, reason, applyDetail }, {
+  const persisted = await persistLinkedInApplyState(client, listing, { branch, reason, applyDetail, manualOrigin }, {
     now: deps.now, countAttempt: true, resolveExternal: true, probeRegistry: deps.probeRegistry, reprobeAfterHours: deps.reprobeAfterHours,
     fetch: deps.fetch, lookup: deps.lookup, tripBreaker: deps.tripBreaker, markListingApplied: deps.markListingApplied,
   });

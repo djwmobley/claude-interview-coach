@@ -145,6 +145,17 @@ describe('assisted Easy Apply: start gates leave the application approved', () =
     assert.equal((await getApplication(c, id)).state, 'approved');
     assert.equal(h.calls.length, 0);
   });
+  test('manual-only lockout (Ready list R8/A4): a listing shown on the Ready list is never drafted or run', async () => {
+    const id = await seedApproved();
+    const app = await getApplication(c, id);
+    await c.query(`INSERT INTO ic_manual_only_locks (listing_id, root_listing_id, bucket) VALUES ($1, $1, 'ready_to_apply')`, [app.listing_id]);
+    const h = harness();
+    const r = await runApplyWorker(id, h.deps());
+    assert.deepEqual([r.status, r.reason], ['deferred', 'manual_only_lockout']);
+    assert.equal((await getApplication(c, id)).state, 'approved');
+    assert.equal(h.ran(), 0);
+    await c.query('DELETE FROM ic_manual_only_locks WHERE listing_id = $1', [app.listing_id]);
+  });
   test('morning trigger outside 09:00-19:00 America/Chicago', async () => {
     const id = await seedApproved();
     const h = harness();

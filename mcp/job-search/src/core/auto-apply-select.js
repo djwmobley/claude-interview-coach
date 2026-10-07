@@ -24,6 +24,7 @@ import { ABSENT_LOCATION, LEGACY_UNKNOWN_LOCATION } from './normalize.js';
 import { HOURLY_RE } from '../apply/answers.js';
 import { classifyExclusion, EXCLUSION_BRANCHES, loadExclusionConfig } from '../apply/exclusions.js';
 import { loadConfig } from './config.js';
+import { loadActiveManualLocks, lockMatches, lockSubjectFromRow } from './manual-lock.js';
 
 /**
  * Hourly-pay signal (Damian's ruling, spec item D): true when `salaryPeriod === 'hour'` (the structured,
@@ -84,7 +85,7 @@ export const CLOSED_REASONS = Object.freeze([
   ...EXCLUSION_BRANCHES.filter((b) => b !== 'eligible').map((b) => `exclusion_${b}`),
   'not_scored', 'below_fit', 'human_fit_override', 'fit_unverified', 'duplicate_of', 'not_us', 'salary_below_floor',
   'active_application', 'no_description', 'apply_target_unresolved', 'easy_apply_only', 'easy_apply_assisted', 'ats_not_allowed',
-  'confidence_not_exact', 'hourly_pay', 'daily_cap', 'eligible',
+  'confidence_not_exact', 'hourly_pay', 'manual_only', 'daily_cap', 'eligible',
 ]);
 
 /**
@@ -112,6 +113,9 @@ export const GATES = Object.freeze([
   { name: 'ats_not_allowed', reasons: Object.freeze(['ats_not_allowed']) },
   { name: 'confidence_not_exact', reasons: Object.freeze(['confidence_not_exact']) },
   { name: 'hourly_pay', reasons: Object.freeze(['hourly_pay']) },
+  // Ready to apply list R8: a listing already shown to Damian on the Ready list is manual only until he
+  // hands it back (src/core/manual-lock.js); applied after classification, before dedup and the cap.
+  { name: 'manual_only', reasons: Object.freeze(['manual_only']) },
 ]);
 
 /** Gate names in the funnel's own rendered order, `eligible` last (see GATES' own doc comment). */
@@ -352,7 +356,8 @@ export async function fetchCandidateRows(client) {
     SELECT
       l.id AS listing_id, l.fit_score, l.fit_basis, l.duplicate_of, l.location_norm, l.remote_mode,
       l.salary_max, l.salary_period, l.salary_raw, l.description, l.apply_url, l.apply_ats, l.apply_ats_confidence, l.apply_easy_only,
-      l.company, l.company_norm, l.title, l.title_norm, coalesce(l.url_normalized, l.url) AS source_url, l.source,
+      l.company, l.company_norm, l.title, l.title_norm, coalesce(l.url_normalized, l.url) AS source_url, l.source, l.manual_apply_url,
+      (SELECT t.final_url FROM ic_gmail_targets t WHERE t.listing_id = l.id) AS gmail_final_url,
       (SELECT actor FROM ic_job_events e WHERE e.listing_id = l.id AND e.kind = 'fit' ORDER BY e.at DESC, e.id DESC LIMIT 1) AS fit_actor,
       EXISTS (SELECT 1 FROM ic_job_applications a WHERE a.listing_id = l.id AND a.state <> 'withdrawn') AS has_active_application
     FROM ic_job_listings l
@@ -385,7 +390,24 @@ export async function fetchCandidateRows(client) {
     titleNorm: row.title_norm ?? null,
     sourceUrl: row.source_url ?? null,
     source: row.source ?? null,
+    manualApplyUrl: row.manual_apply_url ?? null,
+    gmailFinalUrl: row.gmail_final_url ?? null,
   }));
+}
+
+/**
+ * True when an active manual-only lock covers this candidate (src/core/manual-lock.js lockMatches).
+ * @param {CandidateRow} row
+ * @param {Array<import('./manual-lock.js').LockSubject>} locks
+ */
+export function isManualOnly(row, locks) {
+  if (!locks.length) return false;
+  const r = /** @type {any} */ (row);
+  const subject = lockSubjectFromRow({
+    id: row.listingId, duplicate_of: row.duplicateOf, company: row.company ?? null, company_norm: row.companyNorm ?? null, title_norm: row.titleNorm ?? null,
+    location_norm: row.locationNorm, urls: [row.sourceUrl, row.applyUrl, r.manualApplyUrl, r.gmailFinalUrl],
+  });
+  return locks.some((l) => lockMatches(l, subject));
 }
 
 /**
@@ -405,7 +427,7 @@ export async function fetchCandidateRows(client) {
  * Full select phase: fetch, classify, dedup, cap. Total and deterministic given the same input rows and
  * `now` -- no randomness, no hidden state.
  * @param {import('pg').ClientBase} client
- * @param {{ fitFloor: number, floors: import('./salary-floor.js').SalaryFloors, atsAllow: string[], dailyCap: number, now: Date, timezone: string, fetchCandidateRows?: (client: import('pg').ClientBase) => Promise<CandidateRow[]>, countAutoApprovedToday?: (client: import('pg').ClientBase, now: Date, timezone: string) => Promise<number>, exclusionConfig?: import('../apply/exclusions.js').ExclusionConfig, classifyCandidateWithExclusions?: (client: import('pg').ClientBase, row: CandidateRow, ctx: any) => Promise<string> }} opts
+ * @param {{ fitFloor: number, floors: import('./salary-floor.js').SalaryFloors, atsAllow: string[], dailyCap: number, now: Date, timezone: string, fetchCandidateRows?: (client: import('pg').ClientBase) => Promise<CandidateRow[]>, countAutoApprovedToday?: (client: import('pg').ClientBase, now: Date, timezone: string) => Promise<number>, exclusionConfig?: import('../apply/exclusions.js').ExclusionConfig, classifyCandidateWithExclusions?: (client: import('pg').ClientBase, row: CandidateRow, ctx: any) => Promise<string>, loadManualLocks?: (client: import('pg').ClientBase) => Promise<any[]> }} opts
  * @returns {Promise<SelectResult>}
  */
 export async function selectCandidates(client, opts) {
@@ -422,9 +444,14 @@ export async function selectCandidates(client, opts) {
   // [NO APPLY] report line (spec section 2), exactly like every other hard-error config in this pipeline.
   const exclusionConfig = opts.exclusionConfig ?? loadExclusionConfig(loadConfig().configDir);
   const ctx = { fitFloor: opts.fitFloor, floors: opts.floors, atsAllow: opts.atsAllow, exclusionConfig };
+  // Manual-only lockout (Ready to apply list R8): loaded once. The DB-free test seam (an injected
+  // classifyCandidateWithExclusions) also skips the lock load unless locks are injected explicitly.
+  const loadLocks = opts.loadManualLocks ?? (opts.classifyCandidateWithExclusions ? async () => [] : loadActiveManualLocks);
+  const locks = await loadLocks(client);
   const classified = [];
   for (const row of rows) {
-    classified.push({ row, reason: await classify(client, row, ctx) });
+    const reason = await classify(client, row, ctx);
+    classified.push({ row, reason: (reason === 'eligible' || reason === 'easy_apply_assisted') && isManualOnly(row, locks) ? 'manual_only' : reason });
   }
   const funnel = computeFunnel(classified);
   const deduped = dedupResolvedTargets(classified);
