@@ -143,7 +143,8 @@ describe('classifyCandidate: one reason per test, closed enum', () => {
       classifyCandidate(row(), CTX),
     ]);
     for (const reason of CLOSED_REASONS) {
-      if (reason === 'daily_cap' || reason.startsWith('exclusion_')) continue;
+      // daily_cap and manual_only (Ready list R8) are applied by selectCandidates after classifyCandidate.
+      if (reason === 'daily_cap' || reason === 'manual_only' || reason.startsWith('exclusion_')) continue;
       assert.ok(reachable.has(reason), `reason "${reason}" was never produced by any test row`);
     }
   });
@@ -401,9 +402,10 @@ describe('computeFunnel: sequential funnel derived from a single classify() pass
       { row: row({ listingId: 12 }), reason: 'hourly_pay' },
       { row: row({ listingId: 13 }), reason: 'eligible' },
       { row: row({ listingId: 14 }), reason: 'eligible' },
+      { row: row({ listingId: 15 }), reason: 'manual_only' },
     ];
     const funnel = computeFunnel(classified);
-    assert.equal(funnel.considered, 14);
+    assert.equal(funnel.considered, 15);
     for (const gate of GATES) assert.equal(funnel.eliminated[gate.name], 1, `gate ${gate.name}`);
     assert.equal(funnel.eligible, 2);
     const eliminated = Object.values(funnel.eliminated).reduce((a, b) => a + b, 0);

@@ -16,6 +16,7 @@ import {
   buildScanReport, buildReportSubject, renderReportText, renderReportHtml, renderReportMarkdown, writeReportFile,
   stampReportSent, escapeHtml, homeLocationNormsFor, dashboardHealthLineText, collectAutoApply,
   renderAutoApplyText, renderAutoApplyHtml, renderAutoApplyMarkdown,
+  collectReadyToApply, renderReadyToApplyText, renderReadyToApplyHtml, renderReadyToApplyMarkdown,
 } from './report.js';
 import { readWatchdogState, ackWatchdogRestarts } from './watchdog-state.js';
 import { readAutoApplySummary } from './auto-apply-state.js';
@@ -70,7 +71,8 @@ export function buildDigestHtml(rows, now) {
  *   reportSinceOverride?: Date|null, writeReportFileRoot?: string, skipReportFile?: boolean,
  *   watchdogStateFile?: string|null, autoApplySummaryFile?: string|null,
  *   calendar?: (() => Promise<import('./followups.js').CalendarDeps|null>)|null,
- * }} opts calendar (withdraw calendar cleanup): the lazy calendar client getter bin/remind.js wires to
+ *   readyDashboardUrl?: string,
+ * }} opts readyDashboardUrl: the dashboard's Ready page link printed in the Ready to apply section. calendar (withdraw calendar cleanup): the lazy calendar client getter bin/remind.js wires to
  *   makeCalendarProvider(env); when present, the retry pass for withdrawn nudges' calendar events runs
  *   first (applications.js cleanupWithdrawnNudgeCalendar). Omitted means no retry pass. reportSinceOverride, when the key is present (including explicitly `null`), bypasses the
  *   ic_report_state marker read (test seam; see report.js's buildScanReport). logError defaults to `log`
@@ -200,17 +202,26 @@ export async function runRemind(opts) {
   // scan report (buildScanReport already collected it), every run until the source is re-enabled.
   /** @type {any} */ (autoApplyData).latchedSources = report.latchedSources ?? [];
 
+  // Ready to apply list (spec section 8): classified live at send time, ALWAYS rendered (an error renders
+  // as [READY LIST ERROR], never an omitted section), above the auto-apply section. A real send is a
+  // display (A1: the manual-only lock is written for each listed row); a dry run is not.
+  const readyData = await collectReadyToApply(opts.client, {
+    config, now, display: !opts.dryRun, dashboardUrl: opts.readyDashboardUrl ?? 'http://127.0.0.1:7311/#/ready',
+  });
+  const readyCount = /** @type {any} */ (readyData).counts ? /** @type {any} */ (readyData).counts.ready : undefined;
+  say({ evt: 'remind_ready_to_apply', ready: readyCount ?? null, error: /** @type {any} */ (readyData).error ?? null });
+
   const followupsDigest = buildDigest(rows, now);
   const followupsHtml = buildDigestHtml(rows, now);
-  const subject = buildReportSubject(report, { followupsDue: rows.length });
+  const subject = buildReportSubject(report, { followupsDue: rows.length, readyCount, readyDrift: Boolean(/** @type {any} */ (readyData).drift?.tripped) });
   const reportText = renderReportText(report, registry, googleAuthState, dashboardHealthState);
   const reportHtml = renderReportHtml(report, registry, googleAuthState, dashboardHealthState);
   const autoApplyText = renderAutoApplyText(autoApplyData, registry);
   const autoApplyHtml = renderAutoApplyHtml(autoApplyData, registry);
   const autoApplyMarkdown = renderAutoApplyMarkdown(autoApplyData, registry);
-  const text = [reportText, '', autoApplyText, '', followupsDigest.body].join('\n');
-  const html = [reportHtml, autoApplyHtml, followupsHtml].join('\n');
-  const markdown = [renderReportMarkdown(report, registry, googleAuthState, dashboardHealthState), '', autoApplyMarkdown, '', `## Follow-ups due: ${rows.length}`, '', ...rows.map((r) => `- ${formatFollowup(r)}`)].join('\n');
+  const text = [reportText, '', renderReadyToApplyText(readyData), '', autoApplyText, '', followupsDigest.body].join('\n');
+  const html = [reportHtml, renderReadyToApplyHtml(readyData), autoApplyHtml, followupsHtml].join('\n');
+  const markdown = [renderReportMarkdown(report, registry, googleAuthState, dashboardHealthState), '', renderReadyToApplyMarkdown(readyData), '', autoApplyMarkdown, '', `## Follow-ups due: ${rows.length}`, '', ...rows.map((r) => `- ${formatFollowup(r)}`)].join('\n');
 
   /** @type {string|null} */
   let reportFile = null;

@@ -423,6 +423,13 @@ export const atsApplySchema = z.object({
 });
 
 /**
+ * Ready to apply list (A10): the hard ceiling on listing-mode resume generations per America/Chicago day,
+ * across every trigger (the morning run and the dashboard button share one budget source). Config can
+ * lower it, never raise it; no request parameter overrides it.
+ */
+export const READY_RESUME_HARD_CEILING = 10;
+
+/**
  * One-click apply / auto-apply gate config (PR A spec item 2, config/auto-apply.json). `floors` feeds
  * src/core/salary-floor.js's resolveFloor() directly -- every value here is a whole US dollar annual
  * figure, never a config-file magic number duplicated in code.
@@ -501,6 +508,31 @@ export const autoApplySchema = z.object({
   approvedDriver: z.object({
     enabled: z.boolean().default(false),
     maxPerRun: z.number().int().min(0).max(25).default(5),
+  }).default({}),
+  // Ready to apply list (spec-ready-to-apply-v1; src/core/ready-to-apply.js READY_DEFAULTS mirrors these).
+  // fitFloor null inherits autoApply.fitFloor. resume.dailyCap is bounded by READY_RESUME_HARD_CEILING
+  // (A10): a larger value fails config load, and no request can raise it.
+  readyToApply: z.object({
+    enabled: z.boolean().default(true),
+    fitFloor: z.number().int().min(0).max(100).nullable().default(null),
+    includeEasyApply: z.boolean().default(true),
+    noControlRepeatToList: z.number().int().min(1).max(10).default(2),
+    noControlHoldMaxDays: z.number().int().min(0).max(30).default(3),
+    staleDays: z.number().int().min(1).max(365).default(21),
+    autoStallRuns: z.number().int().min(1).max(10).default(2),
+    staleNeedsHumanHours: z.number().int().min(1).max(720).default(24),
+    driftThreshold: z.number().min(0).max(1).default(0.4),
+    driftMinRows: z.number().int().min(1).max(1000).default(5),
+    reportMaxRows: z.number().int().min(1).max(500).default(40),
+    heldReportMaxRows: z.number().int().min(1).max(500).default(20),
+    resume: z.object({
+      enabled: z.boolean().default(true),
+      dailyCap: z.number().int().min(0).max(READY_RESUME_HARD_CEILING).default(READY_RESUME_HARD_CEILING),
+      maxAttempts: z.number().int().min(1).max(2).default(2),
+      maxRunMinutes: z.number().int().min(1).max(600).default(180),
+      spawnLockWaitSeconds: z.number().int().min(0).max(3600).default(600),
+      autoApplyWaitMinutes: z.number().int().min(0).max(600).default(240),
+    }).default({}),
   }).default({}),
   // Unblock-auto-apply Item 2: reroute LinkedIn listings that apply on the company site to that ATS.
   // maxPerRun bounds LinkedIn probe page loads for rerouting per run (two details reserved per probe).

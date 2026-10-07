@@ -22,6 +22,8 @@ import { createDashboardServer } from '../src/dashboard/server.js';
 import { createScanRunner } from '../src/dashboard/scan-runner.js';
 import { createApplyRunner } from '../src/dashboard/apply-runner.js';
 import { createResumeRunner } from '../src/dashboard/resume-runner.js';
+import { createReadyResumeRunner } from '../src/dashboard/ready-resume-runner.js';
+import { createAdvisoryLock, RESUME_SPAWN_LOCK_KEY } from '../src/core/resume-spawn-lock.js';
 import { createReviewRunner } from '../src/dashboard/review-runner.js';
 import { createCalendarCache } from '../src/dashboard/calendar-cache.js';
 import { createLinkedInLiveCheck } from '../src/apply/linkedin-button-prepare.js';
@@ -134,6 +136,9 @@ async function main() {
     spawn: nodeSpawn,
     log,
   });
+  // Ready to apply list A5: one cross-process lock for EVERY resume spawn (this runner, bin/auto-apply.js's,
+  // and the Ready list's listing-mode runner below).
+  const resumeSpawnLock = createAdvisoryLock({ key: RESUME_SPAWN_LOCK_KEY });
   const resumeRunner = createResumeRunner({
     env,
     logDir: env.JOBSEARCH_LOG_DIR,
@@ -141,7 +146,9 @@ async function main() {
     withClient,
     spawn: nodeSpawn,
     log,
+    spawnLock: resumeSpawnLock,
   });
+  const readyResumeRunner = createReadyResumeRunner({ env, logDir: env.JOBSEARCH_LOG_DIR, repoRoot: repoRoot(), withClient, spawn: nodeSpawn, log });
   const reviewRunner = createReviewRunner({
     env,
     logDir: env.JOBSEARCH_LOG_DIR,
@@ -157,6 +164,8 @@ async function main() {
     applyRunner,
     resumeRunner,
     reviewRunner,
+    readyResumeRunner,
+    resumeSpawnLock,
     calendarCache: createCalendarCache(),
     credentials: createCredentials(),
     outputRoot: path.join(repoRoot(), 'output'),

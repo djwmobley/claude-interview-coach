@@ -19,6 +19,7 @@ function icon(children) {
 const ICON_FACTORIES = {
   home: () => icon([hSvg('path', { d: 'M2 8 8 2l6 6M4 7v7h3v-4h2v4h3V7' })]),
   jobs: () => icon([hSvg('rect', { x: 2, y: 5, width: 12, height: 8, rx: 1 }), hSvg('path', { d: 'M6 5V3.5A1.5 1.5 0 0 1 7.5 2h1A1.5 1.5 0 0 1 10 3.5V5' })]),
+  ready: () => icon([hSvg('rect', { x: 2, y: 2, width: 12, height: 12, rx: 1 }), hSvg('path', { d: 'M5 8.5 7 10.5 11 5.5' })]),
   pipeline: () => icon([hSvg('path', { d: 'M2 3h12l-4.5 6v4l-3 1.5V9z' })]),
   followups: () => icon([hSvg('circle', { cx: 8, cy: 8, r: 6 }), hSvg('path', { d: 'M8 5v3l2 2' })]),
   review: () => icon([hSvg('path', { d: 'M2 8s2.5-4.5 6-4.5S14 8 14 8s-2.5 4.5-6 4.5S2 8 2 8z' }), hSvg('circle', { cx: 8, cy: 8, r: 1.6 })]),

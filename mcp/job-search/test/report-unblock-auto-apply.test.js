@@ -217,9 +217,9 @@ describe('Gmail details line and manual-apply list (G3, B2)', () => {
       unwrap_failed: { blocked_by_guard: 1 }, denied: 2, no_link: 1, unknown: 0, deferred: { skipped_run_cap: 1 }, stuck_ineligible: 3,
     });
     assert.equal(line, 'gmail details: candidates 9; fetched 2 (linkedin 0, indeed 0, ats 0, generic 2); deduped 1; empty 1; unwrap failed 1 [blocked_by_guard:1]; denied 2; no_link 1; unknown 0; deferred 1 [skipped_run_cap:1]; stuck ineligible 3');
+    // Ready to apply list R5: the list itself moved to the Ready section; only a pointer remains here.
     const lines = gmailManualApplyLines([{ id: 5, title: 'CTO', company: 'Acme', fit: 72, link: 'https://www.remotehunter.com/apply-with-ai/x', outcome: 'denied_apply_link' }]);
-    assert.match(lines.join('\n'), /Gmail jobs to apply to by hand \(1\)/);
-    assert.match(lines.join('\n'), /#5 \| CTO \| Acme \| fit 72 \| denied_apply_link \| https:\/\/www\.remotehunter\.com/);
+    assert.match(lines.join('\n'), /Gmail jobs to apply to by hand: 1; see Ready to apply/);
     assert.deepEqual(gmailManualApplyLines([]), []);
   });
 });

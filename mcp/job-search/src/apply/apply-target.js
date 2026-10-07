@@ -127,7 +127,9 @@ export function isExactTarget(classification, urlStr) {
 
 /**
  * @typedef {{ resolved: true, url: string, ats: string, confidence: 'exact' }
- *   | { resolved: false, reason: 'no_candidate'|'invalid_url'|'apply_target_unresolved', host?: string|null }} ApplyTargetResult
+ *   | { resolved: false, reason: 'no_candidate'|'invalid_url'|'apply_target_unresolved', host?: string|null, manualUrl?: string|null }} ApplyTargetResult
+ *   manualUrl (Ready to apply list R1): on apply_target_unresolved, the decoded candidate, or the final URL
+ *   of an intermediary chase when one was reached: the link a human can still apply through by hand.
  */
 
 /**
@@ -166,7 +168,7 @@ export async function resolveApplyTarget(candidateHref, probeRegistry, opts = {}
   }
 
   if (!isIntermediaryHost(host)) {
-    return { resolved: false, reason: 'apply_target_unresolved', host };
+    return { resolved: false, reason: 'apply_target_unresolved', host, manualUrl: decoded };
   }
 
   /** @type {{ url: string, status: number, hops: number }} */
@@ -174,7 +176,7 @@ export async function resolveApplyTarget(candidateHref, probeRegistry, opts = {}
   try {
     final = await resolveRedirects(decoded, probeRegistry, opts);
   } catch {
-    return { resolved: false, reason: 'apply_target_unresolved', host };
+    return { resolved: false, reason: 'apply_target_unresolved', host, manualUrl: decoded };
   }
   const classification = classifyApplyUrl(final.url);
   if (isExactTarget(classification, final.url)) {
@@ -186,5 +188,5 @@ export async function resolveApplyTarget(candidateHref, probeRegistry, opts = {}
   } catch {
     /* keep the original intermediary host */
   }
-  return { resolved: false, reason: 'apply_target_unresolved', host: finalHost };
+  return { resolved: false, reason: 'apply_target_unresolved', host: finalHost, manualUrl: final.url };
 }

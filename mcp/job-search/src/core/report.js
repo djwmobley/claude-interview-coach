@@ -20,6 +20,9 @@ import { JobSearchError } from './errors.js';
 import { UNCONFIRMED_SUBMIT_KINDS } from './applications.js';
 import { collectGmailManualApply } from './gmail-detail.js';
 
+// Ready to apply section (spec-ready-to-apply-v1 section 8): lives in its own module, re-exported here.
+export { collectReadyToApply, readyView, renderReadyToApplyText, renderReadyToApplyHtml, renderReadyToApplyMarkdown } from './report-ready.js';
+
 /** Directory the markdown report is written to (spec R1.3), relative to the repo root; covered by the existing `/output/` .gitignore entry. */
 export const REPORTS_DIR = path.join('output', 'reports');
 
@@ -698,14 +701,14 @@ export function gmailDetailLine(d) {
 }
 
 /**
- * B2 manual-apply list: a blank line, a heading line, then one line per item. Empty when there are none.
+ * B2 manual-apply list, replaced by a pointer (Ready to apply list R5): these rows are listed, with their
+ * links and resumes, in the Ready to apply section. A blank line and one pointer line; empty when none.
  * @param {Array<{ id: number, title: string|null, company: string|null, fit: number|null, link: string|null, outcome: string }>|undefined} items
  * @returns {string[]}
  */
 export function gmailManualApplyLines(items) {
   if (!Array.isArray(items) || items.length === 0) return [];
-  return ['', `== Gmail jobs to apply to by hand (${items.length}) ==`,
-    ...items.map((x) => `  #${x.id} | ${x.title ?? 'n/a'} | ${x.company ?? 'n/a'} | fit ${x.fit ?? '?'} | ${x.outcome}${x.link ? ` | ${x.link}` : ''}`)];
+  return ['', `Gmail jobs to apply to by hand: ${items.length}; see Ready to apply`];
 }
 
 /** @param {import('pg').ClientBase} client */
@@ -786,7 +789,7 @@ export async function buildScanReport(client, opts = {}) {
 
 /**
  * @param {Awaited<ReturnType<typeof buildScanReport>>} data
- * @param {{ followupsDue?: number }} [extra]
+ * @param {{ followupsDue?: number, readyCount?: number, readyDrift?: boolean }} [extra]
  */
 export function buildReportSubject(data, extra = {}) {
   const prefixes = [];
@@ -804,7 +807,11 @@ export function buildReportSubject(data, extra = {}) {
   parts.push(`${newCount} to look at`);
   if (data.reviewQueue.total) parts.push(`${data.reviewQueue.total} in review`);
   if (extra.followupsDue) parts.push(`${extra.followupsDue} follow-up${extra.followupsDue === 1 ? '' : 's'} due`);
-  return [...prefixes, parts.join(', ')].join(' ');
+  // Ready to apply list A9: a tripped markup-drift breaker is a headline, not a buried count.
+  if (extra.readyDrift) prefixes.push('[MARKUP DRIFT]');
+  const subject = [...prefixes, parts.join(', ')].join(' ');
+  // Ready to apply list (spec section 8): " | ready N" whenever the section has a count.
+  return typeof extra.readyCount === 'number' ? `${subject} | ready ${extra.readyCount}` : subject;
 }
 
 /**
@@ -1115,7 +1122,7 @@ export function renderReportHtml(data, registry, googleAuthState, dashboardHealt
     parts.push(`<ul>${[...gmailReportLines(gmailAgg), ...gmailHealth.soft].map((l) => `<li>${esc(l.trim())}</li>`).join('')}</ul>`);
   }
   const manual = gmailManualApplyLines(/** @type {any} */ (data).gmailManualApply);
-  if (manual.length) parts.push(`<h3>${esc(manual[1].replace(/^== | ==$/g, ''))}</h3><ul>${manual.slice(2).map((l) => `<li>${esc(l.trim())}</li>`).join('')}</ul>`);
+  if (manual.length) parts.push(`<p>${esc(manual[1])}</p>`);
   parts.push(`<h3>Look at these (top ${data.lookAtThese.rows.length})</h3>`);
   if (data.lookAtThese.excludedCount) parts.push(`<p>(${data.lookAtThese.excludedCount} noise-classified row(s) excluded from this list; they are still in the database)</p>`);
   parts.push(data.lookAtThese.rows.length ? `<ul>${data.lookAtThese.rows.map((r) => rowLi(r, true)).join('')}</ul>` : '<p>(none)</p>');
@@ -1190,10 +1197,7 @@ export function renderReportMarkdown(data, registry, googleAuthState, dashboardH
     for (const l of [...gmailReportLines(gmailAgg), ...gmailHealth.soft]) lines.push(`- ${l.trim()}`);
   }
   const manualMd = gmailManualApplyLines(/** @type {any} */ (data).gmailManualApply);
-  if (manualMd.length) {
-    lines.push('', `## ${manualMd[1].replace(/^== | ==$/g, '')}`, '');
-    for (const l of manualMd.slice(2)) lines.push(`- ${l.trim()}`);
-  }
+  if (manualMd.length) lines.push('', manualMd[1]);
   lines.push('');
   lines.push(`## Look at these (top ${data.lookAtThese.rows.length})`);
   lines.push('');
@@ -1608,6 +1612,12 @@ export async function collectSubmissions(client) {
   };
 }
 
+/** Ready to apply list R5: the one-line pointer that replaced the unresolved-target list. @param {any} data */
+function unresolvedPointer(data) {
+  const n = Array.isArray(data.unresolved) ? data.unresolved.length : 0;
+  return `unresolved apply targets: ${n}; see Ready to apply`;
+}
+
 /** Rendered skipped-reasons clause shared by all three renderers below (excludes 'daily_cap', already its own `cappedCount`). @param {AutoApplyReportData} data */
 function skippedReasonsText(data) {
   const parts = Object.entries(data.skippedByReason).filter(([k]) => k !== 'daily_cap').map(([k, v]) => `${k}=${v}`);
@@ -1743,13 +1753,8 @@ function renderAutoApplyTextBody(data, registry) {
   lines.push(`submitted, unconfirmed (${unconfirmedRows.length}):`);
   for (const u of unconfirmedRows) lines.push(`  #${u.listingId} | app ${u.applicationId} | ${u.title ?? 'n/a'} | ${u.company ?? 'n/a'} | ${u.ats ?? 'n/a'}`);
   lines.push(`skipped: ${skippedReasonsText(data)}`);
-  lines.push(`unresolved apply targets (${data.unresolved.length}):`);
-  for (const u of data.unresolved) {
-    const candidate = u.linkedinDeepLink ?? u.url;
-    const passes = urlPassesRegistry(candidate, reg);
-    const link = !passes ? '' : u.linkedinDeepLink ? ` | linkedin: ${candidate}` : ` | ${candidate}`;
-    lines.push(`  #${u.id} | ${u.title} | ${u.company} | ${u.source ?? 'n/a'}${link}`);
-  }
+  // Ready to apply list R5: the unresolved rows are listed (with links and resumes) in that section.
+  lines.push(unresolvedPointer(data));
   const needsHuman = data.needsHuman ?? [];
   lines.push(`needs human input (${needsHuman.length}):`);
   for (const n of needsHuman) {
@@ -1816,20 +1821,7 @@ function renderAutoApplyHtmlBody(data, registry) {
     parts.push('<p>submitted, unconfirmed: (none)</p>');
   }
   parts.push(`<p>skipped: ${esc(skippedReasonsText(data))}</p>`);
-  if (data.unresolved.length) {
-    parts.push(`<p>unresolved apply targets (${data.unresolved.length}):</p><ul>`);
-    for (const u of data.unresolved) {
-      const candidate = u.linkedinDeepLink ?? u.url;
-      const passes = urlPassesRegistry(candidate, reg);
-      const link = !passes ? '' : u.linkedinDeepLink
-        ? ` (linkedin: <a href="${esc(candidate)}">${esc(candidate)}</a>)`
-        : ` (<a href="${esc(candidate)}">${esc(candidate)}</a>)`;
-      parts.push(`<li>#${u.id} ${esc(u.title)} at ${esc(u.company)}, ${esc(u.source ?? 'n/a')}${link}</li>`);
-    }
-    parts.push('</ul>');
-  } else {
-    parts.push('<p>unresolved apply targets: (none)</p>');
-  }
+  parts.push(`<p>${esc(unresolvedPointer(data))}</p>`);
   const needsHuman = data.needsHuman ?? [];
   if (needsHuman.length) {
     parts.push(`<p>needs human input (${needsHuman.length}):</p><ul>`);
@@ -1902,14 +1894,7 @@ function renderAutoApplyMarkdownBody(data, registry) {
   lines.push('');
   lines.push(`skipped: ${skippedReasonsText(data)}`);
   lines.push('');
-  lines.push(`unresolved apply targets (${data.unresolved.length}):`);
-  if (data.unresolved.length === 0) lines.push('(none)');
-  for (const u of data.unresolved) {
-    const candidate = u.linkedinDeepLink ?? u.url;
-    const passes = urlPassesRegistry(candidate, reg);
-    const link = !passes ? '' : u.linkedinDeepLink ? ` (linkedin: ${candidate})` : ` (${candidate})`;
-    lines.push(`- #${u.id} ${u.title} at ${u.company}, ${u.source ?? 'n/a'}${link}`);
-  }
+  lines.push(unresolvedPointer(data));
   lines.push('');
   const needsHuman = data.needsHuman ?? [];
   lines.push(`needs human input (${needsHuman.length}):`);

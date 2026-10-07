@@ -1,7 +1,7 @@
 ---
 name: write-resume
 description: Write a targeted resume for a specific role, reads all source data, tailors content, generates markdown and DOCX
-argument-hint: <job-ad-url-or-file-or-paste-or-listing-id> [application:<id>]
+argument-hint: <job-ad-url-or-file-or-paste-or-listing-id> [application:<id> | headless:listing run:<run-id>]
 user-invocable: true
 allowed-tools: Read(*), Write(*), Edit(*), Glob(*), WebFetch, mcp__job-search__get_job, mcp__job-search__render_doc
 ---
@@ -30,6 +30,34 @@ recruiter call cheat sheet.
   present ONLY on a one-click apply / headless run kicked off by the dashboard's
   Apply button. Presence of this token puts the skill in **headless mode** (see
   below). Absent on every normal interactive invocation.
+- `headless:listing run:<run-id>` (optional, appended after the listing id, e.g.
+  `5871 headless:listing run:rk2x9f-5871`): present ONLY on a Ready to apply
+  list run (the job-search `bin/ready-resumes.js` job or the dashboard's
+  "Generate" button). It is a **listing-mode headless run**: see HEADLESS
+  LISTING MODE below. Absent on every normal interactive invocation.
+
+---
+
+## HEADLESS LISTING MODE
+
+Triggered ONLY when `$ARGUMENTS` carries `headless:listing`. Every rule in
+HEADLESS MODE below applies (no questions, the same `HEADLESS_ABORT: <reason>`
+contract, the same 300-character description check, `LOCKED` is
+`HEADLESS_ABORT: docx_locked`), with these differences:
+
+- There is NO application. Never pass `applicationId` to `render_doc`; pass
+  `listingId` only, on the render call (not on the `checkOnly` preflight).
+- Write the markdown to `output/markdown/ready/<run-id>/YYYYMMDD-[role-slug].md`,
+  where `<run-id>` is the exact value of the `run:<run-id>` token. Create that
+  directory. Never write the markdown anywhere else in this mode: the caller
+  decides success by finding THIS run's markdown in THIS directory.
+- Render with the same human outward `outName` as Step 7 (e.g.
+  `'Jordan Reyes - [Title]'`, using the candidate's real name from the profile).
+  On `EXISTS`, re-call with `reuse_existing:true` and `listingId` exactly as
+  HEADLESS MODE describes; a company-suffixed sibling from `render_doc` is fine.
+- Skip Step 8 (the cheat sheet) in this mode. Only the resume is needed.
+- If the `run:<run-id>` token is missing, output
+  `HEADLESS_ABORT: missing_run_id` and stop.
 
 ---
 

@@ -413,3 +413,30 @@ describe('createResumeRunner: event-loop keep-alive (loop-drain bug regression)'
     assert.equal(Boolean(captured[0].__unreffed), false, 'the hard-timeout timer must never be unref()\'d');
   });
 });
+
+describe('createResumeRunner: shared cross-process spawn lock (Ready list A5)', () => {
+  test('lock not obtained within the wait: fails resume_spawn_busy and never spawns', async () => {
+    const listingId = await insertListing();
+    const app = await createApplication(client, { listingId });
+    let spawnCalled = false;
+    /** @type {any[]} */
+    const asked = [];
+    const spawnLock = { acquire: async (/** @type {any} */ o) => { asked.push(o); return null; } };
+    const runner = createResumeRunner(baseDeps({ spawn: () => { spawnCalled = true; throw new Error('must not spawn'); }, spawnLock, spawnLockWaitMs: 1234 }));
+    const result = await runner.run(app.id, listingId);
+    assert.deepEqual(result, { ok: false, reason: 'resume_spawn_busy' });
+    assert.equal(spawnCalled, false);
+    assert.equal(asked[0].waitMs, 1234);
+  });
+
+  test('lock obtained: the spawn runs inside it and the lock is released afterwards', async () => {
+    const listingId = await insertListing();
+    const app = await createApplication(client, { listingId });
+    const order = /** @type {string[]} */ ([]);
+    const spawnLock = { acquire: async () => { order.push('acquire'); return { release: async () => { order.push('release'); } }; } };
+    const spawnFn = makeFakeSpawn({ onSpawn: (child) => finishChild(child, { result: 'nothing' }) });
+    const runner = createResumeRunner(baseDeps({ spawn: (/** @type {any[]} */ ...a) => { order.push('spawn'); return spawnFn(...a); }, spawnLock }));
+    await runner.run(app.id, listingId);
+    assert.deepEqual(order, ['acquire', 'spawn', 'release']);
+  });
+});

@@ -26,7 +26,7 @@
 
 export const CHORD_WINDOW_MS = 600;
 
-const NAV_KEYS = Object.freeze({ h: 'home', j: 'jobs', p: 'pipeline', f: 'followups', r: 'review' });
+const NAV_KEYS = Object.freeze({ h: 'home', j: 'jobs', a: 'ready', p: 'pipeline', f: 'followups', r: 'review' });
 const ROW_ACTION_KEYS = Object.freeze({ m: 'maybe', s: 'shortlisted', a: 'applied', p: 'passed', x: 'skip' });
 
 export function initialKbState() {

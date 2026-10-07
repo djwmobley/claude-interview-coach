@@ -91,7 +91,13 @@ if (-not $nodeCmd) {
 # logs to mcp/job-search/logs/auto-apply-YYYY-MM-DD.log (src/core/logger.js's dailyLogPath convention,
 # identical to bin/scan.js and bin/apply.js) and prints one JSON summary line to its own stdout (unused
 # here, same as watchdog.js's own single summary line).
-$psArgument = "-NoLogo -NoProfile -WindowStyle Hidden -Command `"& '$($nodeCmd.Source)' '$autoApplyScript'`""
+# Ready to apply list (R6): bin/ready-resumes.js runs AFTER bin/auto-apply.js finishes, in the same task, so
+# the listing-mode resumes never start while the morning auto-apply run is still selecting or applying.
+$readyResumesScript = Join-Path $RepoRoot "mcp\job-search\bin\ready-resumes.js"
+if (-not (Test-Path $readyResumesScript)) {
+  throw "ready-resumes.js not found at $readyResumesScript -- pass -RepoRoot explicitly if this repo checkout lives elsewhere."
+}
+$psArgument = "-NoLogo -NoProfile -WindowStyle Hidden -Command `"& '$($nodeCmd.Source)' '$autoApplyScript'; & '$($nodeCmd.Source)' '$readyResumesScript'`""
 
 $action = New-ScheduledTaskAction -Execute "powershell.exe" -Argument $psArgument -WorkingDirectory $RepoRoot
 $trigger = New-ScheduledTaskTrigger -Daily -At $startTime

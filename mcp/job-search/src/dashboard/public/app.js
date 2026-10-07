@@ -33,6 +33,7 @@ const RAIL_SECTIONS = Object.freeze([
   { title: 'Daily', items: [
     { route: 'home', label: 'Home', key: 'h' },
     { route: 'jobs', label: 'Jobs', key: 'j' },
+    { route: 'ready', label: 'Ready', key: 'a' },
     { route: 'pipeline', label: 'Pipeline', key: 'p' },
     { route: 'followups', label: 'Follow-ups', key: 'f' },
     { route: 'review', label: 'Review', key: 'r' },
@@ -51,6 +52,7 @@ const RAIL_SECTIONS = Object.freeze([
 const PAGE_LOADERS = Object.freeze({
   home: () => import('./pages/home.js'),
   jobs: () => import('./pages/jobs.js'),
+  ready: () => import('./pages/ready.js'),
   'job-detail': () => import('./pages/job-detail.js'),
   pipeline: () => import('./pages/pipeline.js'),
   followups: () => import('./pages/followups.js'),
@@ -86,6 +88,7 @@ let activityState = null;
  * GET /api/applications' own `total` field (never derived from a page of already-loaded rows -- dashboard
  * UI restraint rule). 0 renders no badge at all. */
 let reviewBadgeCount = 0;
+let readyBadgeCount = 0;
 
 /** Section 8's chord/reducer state, driven by the module-level keydown listener below. */
 let kbState = initialKbState();
@@ -121,8 +124,9 @@ function renderRail() {
       // The `title` attribute is the tooltip shown once app.css's 1180px breakpoint hides
       // `.rail__link-label` and the link goes icon-only, per defect 5: illegible truncated 9px labels are
       // replaced by a single legible icon, never by a shrunken/truncated copy of the same text.
-      const badge = item.route === 'review' && reviewBadgeCount > 0
-        ? h('span', { className: 'rail__badge', text: String(reviewBadgeCount) })
+      const badgeCount = item.route === 'review' ? reviewBadgeCount : item.route === 'ready' ? readyBadgeCount : 0;
+      const badge = badgeCount > 0
+        ? h('span', { className: 'rail__badge', text: String(badgeCount) })
         : null;
       return h('a', {
         className: `rail__link ${active ? 'rail__link--active' : ''}`.trim(),
@@ -171,12 +175,19 @@ async function pollActivity() {
  * own "fetch, then update only the affected DOM" pattern. */
 async function pollReviewBadge() {
   const outcome = handleOutcome(await getJson('/api/applications', { state: 'docs_ready' }));
-  if (outcome.kind !== 'ok') return;
-  const next = Number(outcome.body.total) || 0;
-  if (next !== reviewBadgeCount) {
-    reviewBadgeCount = next;
-    renderRail();
+  // Ready to apply list: the Ready badge reads the ledger count only (GET /api/ready-to-apply/count is not
+  // a display and never writes a manual-only lock; only opening the Ready page does).
+  const readyOutcome = await getJson('/api/ready-to-apply/count');
+  let changed = false;
+  if (outcome.kind === 'ok') {
+    const next = Number(outcome.body.total) || 0;
+    if (next !== reviewBadgeCount) { reviewBadgeCount = next; changed = true; }
   }
+  if (readyOutcome.kind === 'ok') {
+    const nextReady = Number(/** @type {any} */ (readyOutcome.body).ready) || 0;
+    if (nextReady !== readyBadgeCount) { readyBadgeCount = nextReady; changed = true; }
+  }
+  if (changed) renderRail();
 }
 
 async function pollHealth() {

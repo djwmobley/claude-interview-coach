@@ -89,6 +89,8 @@ async function main() {
       // run (dry run included). Missing/corrupt just means "no auto-apply run to report" (readAutoApplySummary
       // already handles that), safe on a machine where auto-apply has never run.
       autoApplySummaryFile: defaultAutoApplySummaryFile(env.JOBSEARCH_LOG_DIR),
+      // Ready to apply list: the dashboard's Ready page, printed under that report section.
+      readyDashboardUrl: `http://127.0.0.1:${resolvePort(undefined, env.DASHBOARD_PORT, () => {}).port}/#/ready`,
       // Withdraw calendar cleanup retry: lazy, so Google is only contacted when a withdrawn nudge still
       // has a linked calendar event. A broken token makes the provider return null (warn and proceed).
       calendar: makeCalendarProvider(env),

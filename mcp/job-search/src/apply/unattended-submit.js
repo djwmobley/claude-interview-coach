@@ -27,6 +27,7 @@ import {
   APPLICATION_LOCK_NAMESPACE, hasSubmitRequestSentEver, reserveSubmitMarker, submitMarkersToday, submitUnconfirmedQuestion,
 } from '../core/applications.js';
 import { classifyExclusion, walkDuplicateRoot } from './exclusions.js';
+import { findManualLock } from '../core/manual-lock.js';
 import {
   classifyPreSubmit, unattendedSubmitConfig, auditForm, auditReview, reviewSingleForm, reviewWorkday, confirmationSignal,
   classifyConfirmation, SUBMIT_GATE_KIND, SUBMIT_ERROR_KIND, WORKDAY_SUBMIT_TARGET, WORKDAY_STATE_REQUEST, PRE_SUBMIT_REASONS,
@@ -63,13 +64,19 @@ export async function clickTimeExclusionCheck(client, app, exclusionConfig) {
     );
     if (r.rowCount === 0) return { branch: 'unknown_company', reason: 'listing no longer found at the click-time recheck' };
     const l = r.rows[0];
-    return classifyExclusion(
+    const verdict = await classifyExclusion(
       {
         id: Number(l.id), company: l.company ?? null, companyNorm: l.company_norm ?? null, title: l.title ?? null, titleNorm: l.title_norm ?? null,
         applyUrl: l.apply_url ?? null, sourceUrl: l.url_normalized ?? l.url ?? null, description: l.description ?? null,
       },
       { client: c, config: exclusionConfig, excludeApplicationId: app.id },
     );
+    if (verdict.branch !== 'eligible') return verdict;
+    // Ready to apply list R8: a listing shown to Damian on the Ready list is manual only until he hands it
+    // back; the click-time gate parks it (any non-eligible branch parks in classifyPreSubmit).
+    const lock = await findManualLock(c, app.listing_id);
+    if (lock) return { branch: 'manual_only_lockout', reason: `shown on the Ready to apply list (lock on listing #${lock.listingId}); hand it back on the dashboard to allow unattended submit` };
+    return verdict;
   });
 }
 

@@ -61,7 +61,9 @@ export function buildScanProbeRegistry(config) {
  * @param {import('pg').ClientBase} client
  * @param {ListingProbeState} listing
  * @param {ApplyDetail|null|undefined} applyDetail
- * @param {{ probeRegistry: import('../apply/probe-registry.js').ProbeRegistry, reprobeAfterHours: number, now: Date, dryRun: boolean, fetch?: typeof fetch, lookup?: import('./urlguard.js').Lookup }} opts
+ * @param {{ probeRegistry: import('../apply/probe-registry.js').ProbeRegistry, reprobeAfterHours: number, now: Date, dryRun: boolean, fetch?: typeof fetch, lookup?: import('./urlguard.js').Lookup, manualOrigin?: string }} opts
+ *   manualOrigin: manual_apply_origin for an unresolved external href ('linkedin_href'|'linkedin_click'|
+ *   'detail_external', default 'detail_external'; a chase that landed on another host is 'redirect_final')
  * @returns {Promise<{ outcome: string }>}
  */
 export async function persistApplyTargetForListing(client, listing, applyDetail, opts) {
@@ -80,7 +82,7 @@ export async function persistApplyTargetForListing(client, listing, applyDetail,
   if (applyDetail && applyDetail.easyApplyOnly && !external) {
     await client.query(
       `UPDATE ic_job_listings SET apply_easy_only = true, apply_url = NULL, apply_ats = NULL, apply_ats_confidence = NULL,
-         apply_ats_hint = NULL, apply_probed_at = $2, probe_attempts = probe_attempts + 1 WHERE id = $1`,
+         apply_ats_hint = NULL, apply_probed_at = $2, probe_attempts = probe_attempts + 1, ${CLEAR_MANUAL} WHERE id = $1`,
       [listing.id, opts.now],
     );
     return { outcome: 'resolved' };
@@ -104,11 +106,24 @@ export async function persistApplyTargetForListing(client, listing, applyDetail,
   if (result.resolved) {
     await client.query(
       `UPDATE ic_job_listings SET apply_url = $2, apply_ats = $3, apply_ats_confidence = $4,
-         apply_ats_hint = coalesce($5::jsonb, apply_ats_hint), apply_probed_at = $6, probe_attempts = probe_attempts + 1${easyOnlyFalse}
+         apply_ats_hint = coalesce($5::jsonb, apply_ats_hint), apply_probed_at = $6, probe_attempts = probe_attempts + 1${easyOnlyFalse}, ${CLEAR_MANUAL}
        WHERE id = $1`,
       [listing.id, result.url, result.ats, result.confidence, hint, opts.now],
     );
     return { outcome: 'resolved' };
+  }
+  // Ready to apply list R1 (spec 7.2): an EXTERNAL candidate that did not resolve to an exact ATS target is
+  // kept in manual_apply_* (never apply_url, which every submit path reads as the resolved target) so the
+  // Ready list can show it. A listing-URL fallback candidate, invalid_url, and no_candidate write nothing new.
+  const manual = external && result.reason === 'apply_target_unresolved' ? manualApplyFields(result, external, opts.manualOrigin) : null;
+  if (manual) {
+    await client.query(
+      `UPDATE ic_job_listings SET apply_ats_hint = coalesce($2::jsonb, apply_ats_hint), apply_probed_at = $3, probe_attempts = probe_attempts + 1${easyOnlyFalse},
+         manual_apply_url = $4, manual_apply_host = $5, manual_apply_origin = $6, manual_apply_seen_at = $3
+       WHERE id = $1`,
+      [listing.id, hint, opts.now, manual.url, manual.host, manual.origin],
+    );
+    return { outcome: 'unresolved' };
   }
   await client.query(
     `UPDATE ic_job_listings SET apply_ats_hint = coalesce($2::jsonb, apply_ats_hint), apply_probed_at = $3, probe_attempts = probe_attempts + 1${easyOnlyFalse}
@@ -116,6 +131,39 @@ export async function persistApplyTargetForListing(client, listing, applyDetail,
     [listing.id, hint, opts.now],
   );
   return { outcome: 'unresolved' };
+}
+
+/** SET fragment clearing every manual_apply_* column (a stale manual link must never shadow a real target). */
+const CLEAR_MANUAL = 'manual_apply_url = NULL, manual_apply_host = NULL, manual_apply_origin = NULL, manual_apply_seen_at = NULL';
+
+/** The manual_apply_origin vocabulary (sql/022 CHECK). */
+export const MANUAL_APPLY_ORIGINS = Object.freeze(['linkedin_href', 'linkedin_click', 'detail_external', 'redirect_final']);
+
+/**
+ * @param {{ manualUrl?: string|null, host?: string|null }} result
+ * @param {string} external the candidate href as given
+ * @param {string|undefined} origin caller's origin; 'detail_external' when absent
+ * @returns {{ url: string, host: string|null, origin: string }|null}
+ */
+function manualApplyFields(result, external, origin) {
+  const url = typeof result.manualUrl === 'string' && result.manualUrl ? result.manualUrl : external;
+  /** @type {string|null} */
+  let host = null;
+  try {
+    host = new URL(url).hostname.toLowerCase();
+  } catch {
+    return null;
+  }
+  const base = origin && MANUAL_APPLY_ORIGINS.includes(origin) ? origin : 'detail_external';
+  // A chase that ended somewhere other than the decoded candidate's own host is a redirect_final link.
+  let candidateHost = null;
+  try {
+    candidateHost = new URL(external).hostname.toLowerCase();
+  } catch {
+    candidateHost = null;
+  }
+  const chased = candidateHost !== null && host !== candidateHost && !/linkedin\.com$/.test(candidateHost);
+  return { url, host, origin: chased ? 'redirect_final' : base };
 }
 
 /**

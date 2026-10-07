@@ -33,6 +33,8 @@ import { easyApplyConfig } from './easy-apply-flow.js';
 import { breakerStatus, hasEasyApplyInFlight, lastAttemptAt, EASY_APPLY_BUDGET_SOURCE } from '../core/easy-apply-state.js';
 import { remainingBudget } from '../core/budget.js';
 import { createApplication, approve, transition } from '../core/applications.js';
+import { findManualLock } from '../core/manual-lock.js';
+import { JobSearchError } from '../core/errors.js';
 
 /**
  * @typedef {Object} MorningDeps
@@ -208,7 +210,13 @@ export function defaultMorningDeps(o) {
       capRemaining: async () => (await o.withClientFn((c) => remainingBudget(c, EASY_APPLY_BUDGET_SOURCE, { dailyPages: cfg.easyApplyDaily, dailyDetails: 1_000_000_000 }))).pages,
       leftoverApproved: async () => (await o.withClientFn((c) => c.query(`SELECT id FROM ic_job_applications WHERE ats_type = 'linkedin_easy' AND state = 'approved' ORDER BY updated_at ASC, id ASC`))).rows.map((r) => Number(r.id)),
     },
-    createApplication: (row) => o.withClientFn((c) => createApplication(c, { listingId: row.listingId, atsType: 'linkedin_easy', applyUrl: row.sourceUrl ?? null, actor: 'auto' })),
+    // Ready to apply list R8/A4: the draft path never creates an application for a listing already shown on
+    // the Ready list (the select phase already maps it to manual_only; this re-checks at create time).
+    createApplication: (row) => o.withClientFn(async (c) => {
+      const lock = await findManualLock(c, row.listingId);
+      if (lock) throw new JobSearchError('VALIDATION', `manual_only_lockout: listing #${row.listingId} is on the Ready to apply list (lock on #${lock.listingId})`);
+      return createApplication(c, { listingId: row.listingId, atsType: 'linkedin_easy', applyUrl: row.sourceUrl ?? null, actor: 'auto' });
+    }),
     async draft(applicationId, row) {
       const resumed = await o.resumeRunner.run(applicationId, row.listingId);
       if (!resumed.ok || !resumed.markdownPath) return { ok: false, reason: resumed.reason ?? null };

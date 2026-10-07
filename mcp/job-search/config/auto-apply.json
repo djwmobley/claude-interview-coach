@@ -42,5 +42,28 @@
       "workday": true
     },
     "dailySubmitCap": 5
+  },
+  "readyToApply": {
+    "_comment": "Ready to apply list (src/core/ready-to-apply.js): every live fit >= floor listing the unattended path cannot submit, with a link and a tailored resume. fitFloor null inherits fitFloor above. includeEasyApply lists LinkedIn Easy Apply rows too. Rows shown on the list become manual only (no unattended submit, no assisted Easy Apply) until handed back on the dashboard. resume.dailyCap is capped at 10 in code; resumes run after the morning auto-apply run (bin/ready-resumes.js), highest fit first.",
+    "enabled": true,
+    "fitFloor": null,
+    "includeEasyApply": true,
+    "noControlRepeatToList": 2,
+    "noControlHoldMaxDays": 3,
+    "staleDays": 21,
+    "autoStallRuns": 2,
+    "staleNeedsHumanHours": 24,
+    "driftThreshold": 0.4,
+    "driftMinRows": 5,
+    "reportMaxRows": 40,
+    "heldReportMaxRows": 20,
+    "resume": {
+      "enabled": true,
+      "dailyCap": 10,
+      "maxAttempts": 2,
+      "maxRunMinutes": 180,
+      "spawnLockWaitSeconds": 600,
+      "autoApplyWaitMinutes": 240
+    }
   }
 }

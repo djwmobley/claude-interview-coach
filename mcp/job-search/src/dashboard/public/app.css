@@ -507,3 +507,11 @@ textarea.notes-textarea { min-height: 100px; }
 .btn--hidden { display: none; }
 .application-card__ledger { margin: 4px 0 8px; padding-left: 18px; }
 .application-card__actions { display: flex; flex-wrap: wrap; gap: 8px; margin-top: 8px; }
+
+/* Ready to apply page (spec section 10): reuses the .approval-section card (thin cyan accent); a little color only. */
+.ready-actions { display: flex; flex-wrap: wrap; gap: 6px; }
+.ready-actions .btn { padding: 3px 8px; font-size: 12px; }
+.ready-muted, .ready-host { color: var(--muted); font-size: 12px; }
+.ready-resume { margin-right: 6px; font-size: 12px; }
+.ready-new { margin-left: 6px; color: var(--cyan); }
+.ready-warn { color: var(--yellow); font-size: 12px; margin: 0 0 8px; }

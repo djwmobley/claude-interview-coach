@@ -246,7 +246,7 @@ describe('renderers: never omit the section, even with no run today', () => {
   });
 });
 
-describe('renderers: unresolved link only passes when it clears the registry', () => {
+describe('renderers: unresolved rows are a pointer to the Ready to apply section (R5), never links', () => {
   const DATA = {
     hasRun: true,
     dryRun: false,
@@ -261,23 +261,24 @@ describe('renderers: unresolved link only passes when it clears the registry', (
     ],
   };
 
-  test('text: the LinkedIn link renders (registry match), the unregistered host does not', () => {
+  test('text: a pointer with the count, no links', () => {
     const text = renderAutoApplyText(DATA, REGISTRY);
-    assert.match(text, /linkedin: https:\/\/www\.linkedin\.com\/jobs\/view\/10\//);
+    assert.match(text, /unresolved apply targets: 2; see Ready to apply/);
     assert.doesNotMatch(text, /not-registered\.example\.com/);
+    assert.doesNotMatch(text, /jobs\/view\/10/);
     assert.match(text, /applied 1/);
     assert.match(text, /skipped: not_us=1/);
   });
 
-  test('html: the LinkedIn link renders as an anchor, escaped', () => {
+  test('html: a pointer with the count, no anchors for unresolved rows', () => {
     const html = renderAutoApplyHtml(DATA, REGISTRY);
-    assert.match(html, /<a href="https:\/\/www\.linkedin\.com\/jobs\/view\/10\/">/);
-    assert.doesNotMatch(html, /not-registered\.example\.com/);
+    assert.match(html, /unresolved apply targets: 2; see Ready to apply/);
+    assert.doesNotMatch(html, /jobs\/view\/10/);
   });
 
-  test('markdown: the LinkedIn link renders, the unregistered host does not', () => {
+  test('markdown: a pointer with the count', () => {
     const md = renderAutoApplyMarkdown(DATA, REGISTRY);
-    assert.match(md, /\(linkedin: https:\/\/www\.linkedin\.com\/jobs\/view\/10\/\)/);
+    assert.match(md, /unresolved apply targets: 2; see Ready to apply/);
     assert.doesNotMatch(md, /not-registered\.example\.com/);
   });
 
