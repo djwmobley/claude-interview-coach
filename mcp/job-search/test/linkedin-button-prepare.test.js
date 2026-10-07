@@ -225,7 +225,7 @@ describe('prepareLinkedInListing: closed, already_applied, no_control', () => {
 });
 
 describe('prepareLinkedInListing: load_failure, challenge, auth_wall', () => {
-  test('load_failure records apply_probed_at but never increments probe_attempts (spec v2 B7)', async () => {
+  test('A12: load_failure records apply_probed_at AND increments the lifetime probe_attempts, so the cap of 3 retires a page that never loads', async () => {
     const client = fakeClient();
     const b = browser({ gotoThrows: { code: 'TIMEOUT' } });
     const r = await prepareLinkedInListing(client, LISTING, { ...deps().d, cap: b.cap, probeSession: b.probeSession });
@@ -233,7 +233,7 @@ describe('prepareLinkedInListing: load_failure, challenge, auth_wall', () => {
     assert.equal(r.outcome, 'skipped_load_failure');
     const [w] = writes(client);
     assert.match(w.text, /apply_probed_at = \$2/);
-    assert.doesNotMatch(w.text, /probe_attempts/);
+    assert.match(w.text, /probe_attempts = probe_attempts \+ 1/);
   });
 
   test('challenge persists nothing on the listing and trips the durable 24h breaker (spec v2 B8)', async () => {

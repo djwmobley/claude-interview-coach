@@ -22,7 +22,7 @@
  *                    status vocabulary markSubmitted uses, actor 'apply')               attempt counted
  *   no_control       apply_easy_only=false                                               attempt counted
  *   unknown          apply_easy_only=false                                               attempt counted
- *   load_failure     apply_probed_at only (cooldown retry), NO attempt (spec v2 B7)
+ *   load_failure     apply_probed_at (cooldown retry), attempt counted (unblock A12)
  *   challenge        nothing on the listing, NO attempt; trips the breaker
  *   auth_wall        nothing on the listing; trips the breaker
  *
@@ -123,7 +123,9 @@ export async function persistLinkedInApplyState(client, listing, state, opts) {
       await trip(client, { reason: `linkedin_probe_${branch}`, applicationId: null, hours: LINKEDIN_PROBE_BREAKER_HOURS, ats: 'linkedin_easy', now: opts.now });
       return { outcome: `halted_${branch}`, branch };
     case 'load_failure':
-      if (opts.countAttempt) await client.query('UPDATE ic_job_listings SET apply_probed_at = $2 WHERE id = $1', [listing.id, opts.now]);
+      // Unblock-auto-apply A12: a failed page load counts as a lifetime probe attempt, so a page that
+      // never loads is retired by the lifetime cap instead of taking a per-run probe slot every day.
+      if (opts.countAttempt) await client.query('UPDATE ic_job_listings SET apply_probed_at = $2, probe_attempts = probe_attempts + 1 WHERE id = $1', [listing.id, opts.now]);
       return { outcome: 'skipped_load_failure', branch };
     case 'easy_apply':
       await update(`apply_easy_only = true, apply_url = NULL, apply_ats = 'linkedin_easy', apply_ats_confidence = 'inferred', apply_ats_hint = NULL`);

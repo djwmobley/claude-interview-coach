@@ -1493,6 +1493,8 @@ describe('runPrepare: unblock Item 3 (probe order, cap 30, counted not_us) and A
     assert.equal(r.stats.neverProbedAttempted, 1);
   });
 
+  // A12's lifetime-count half (probe_attempts + 1 on load_failure) is asserted in
+  // test/linkedin-button-prepare.test.js and test/linkedin-apply-persist-db.test.js; this is the per-run half.
   test('A12: a probe load failure still counts as a page load against the run cap and the budget', async () => {
     const r = await runLinkedInPrepare({ rows: [liRow(1), liRow(2)], probeRowCap: 1, probe: async () => ({ outcome: 'skipped_load_failure', branch: 'load_failure' }) });
     assert.equal(r.stats.attempted, 1);
