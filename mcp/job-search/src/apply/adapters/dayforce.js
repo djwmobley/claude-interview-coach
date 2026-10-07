@@ -21,7 +21,7 @@
  * does not actually recognize.
  */
 import { detectRecaptchaV3Script } from '../../browser/wall.js';
-import { classifyCompensationLabel } from '../answers.js';
+import { answerCustomFields, fillAndRecord, uploadAndRecord } from './form-fill.js';
 
 /** Selector contract this adapter targets. Grouped here (not inlined) so a future selector fix touches one place. */
 export const SELECTORS = Object.freeze({
@@ -41,99 +41,27 @@ export const SELECTORS = Object.freeze({
   customFields: '[data-automation="questionField"], .question-field',
   next: '[data-automation="nextButton"], button[data-automation="next"]',
   submit: '[data-automation="submitButton"], button[data-automation="submit"]',
-  confirmationHeading: '[data-automation="confirmationHeader"], h1, h2',
 });
 
 /** Bounded multi-step wizard loop, mirroring workday.js. Never an unbounded loop. */
 export const MAX_STEPS = 8;
 
 /**
- * @param {{ tagName: string, type: string|null }} f
- */
-function controlTypeFor(f) {
-  if (f.tagName === 'select') return 'radio';
-  if (f.tagName === 'textarea') return 'text';
-  if (f.tagName === 'input') {
-    if (f.type === 'checkbox') return 'checkbox-group';
-    if (f.type === 'radio') return 'radio';
-    if (f.type === null || f.type === 'text' || f.type === 'tel' || f.type === 'email' || f.type === 'number') return 'text';
-  }
-  return undefined;
-}
-
-/**
- * Answer every enumerated custom screening field found on the CURRENT wizard step. Compensation gate
- * (Damian's ruling, spec item B): identical rule to icims.js -- a compensation-family label
- * (classifyCompensationLabel) is ALWAYS routed through that gate before the generic bank matcher, and
- * every shape but a plain-text BASE ANNUAL figure with a configured floor always parks (never silently
- * skipped, regardless of the field's own required flag).
- * @param {import('../apply-capability.js').ApplyCapability} cap
- * @param {any} ctx
- */
-async function answerCustomFields(cap, ctx) {
-  const fields = /** @type {any[]} */ (await cap.waitFor(SELECTORS.customFields, { all: true, timeoutMs: 3000 }));
-  for (const f of fields ?? []) {
-    const label = String(f.text ?? '').trim();
-    if (!label) continue;
-    const controlType = controlTypeFor(f);
-    const selector = f.id ? `#${f.id}` : null;
-
-    const compClass = classifyCompensationLabel(label, { controlType, floor: ctx.answers.bank?.meta?.salary_floor ?? null });
-    if (compClass.category !== 'not_compensation') {
-      if (compClass.category === 'fill' && selector) {
-        await cap.fill(selector, String(compClass.value));
-        continue;
-      }
-      const shot = await cap.screenshot();
-      return {
-        parked: true,
-        pendingQuestion: {
-          kind: 'question', label, page_url: ctx.applyUrl, screenshot: shot.relPath, suggestion: null, tier: null,
-        },
-      };
-    }
-
-    const match = ctx.answers.match(label, controlType, f.options ?? undefined);
-    if (match.outcome === 'auto_answer') {
-      if (!selector) continue;
-      if (controlType === 'text') {
-        await cap.fill(selector, String(match.controlResult?.text ?? match.value ?? ''));
-      } else if (controlType === 'radio' && f.tagName === 'select') {
-        await cap.select(selector, String(match.controlResult?.selectedOption ?? ''));
-      } else {
-        await cap.click(selector);
-      }
-      continue;
-    }
-    if (f.required) {
-      const shot = await cap.screenshot();
-      return {
-        parked: true,
-        pendingQuestion: {
-          kind: 'question', label, page_url: ctx.applyUrl, screenshot: shot.relPath, suggestion: match.suggestion ?? null, tier: match.tier,
-        },
-      };
-    }
-    ctx.log({ evt: 'question_unmatched_optional', label: label.slice(0, 200) });
-  }
-  return { parked: false };
-}
-
-/**
  * Fill whichever profile fields are present on the current step. Every fill is guarded by an optional
  * probe first -- a field simply not being on THIS step of the wizard is normal, not an error.
  * @param {import('../apply-capability.js').ApplyCapability} cap
  * @param {any} ctx
+ * @param {any[]} ledger this step's fill ledger, appended to in place (see the form fill module)
  */
-async function fillProfileFieldsIfPresent(cap, ctx) {
+async function fillProfileFieldsIfPresent(cap, ctx, ledger) {
   if (ctx.profile.fullName) {
     const parts = String(ctx.profile.fullName).trim().split(/\s+/);
     const first = parts[0] ?? '';
     const last = parts.length > 1 ? parts.slice(1).join(' ') : '';
-    if (await cap.waitFor(SELECTORS.firstName, { optional: true, timeoutMs: 1500 })) await cap.fill(SELECTORS.firstName, first);
-    if (await cap.waitFor(SELECTORS.lastName, { optional: true, timeoutMs: 1500 })) await cap.fill(SELECTORS.lastName, last);
+    if (await cap.waitFor(SELECTORS.firstName, { optional: true, timeoutMs: 1500 })) await fillAndRecord(cap, ledger, { key: 'first_name', selector: SELECTORS.firstName, label: 'First name', value: first, source: 'contact' });
+    if (await cap.waitFor(SELECTORS.lastName, { optional: true, timeoutMs: 1500 })) await fillAndRecord(cap, ledger, { key: 'last_name', selector: SELECTORS.lastName, label: 'Last name', value: last, source: 'contact' });
   }
-  if (ctx.profile.phone && await cap.waitFor(SELECTORS.phone, { optional: true, timeoutMs: 1500 })) await cap.fill(SELECTORS.phone, ctx.profile.phone);
+  if (ctx.profile.phone && await cap.waitFor(SELECTORS.phone, { optional: true, timeoutMs: 1500 })) await fillAndRecord(cap, ledger, { key: 'phone', selector: SELECTORS.phone, label: 'Phone', value: ctx.profile.phone, source: 'contact' });
 }
 
 /**
@@ -142,18 +70,19 @@ async function fillProfileFieldsIfPresent(cap, ctx) {
  * @param {import('../apply-capability.js').ApplyCapability} cap
  * @param {any} ctx
  * @param {{ resume: boolean, cover: boolean }} uploaded
+ * @param {any[]} ledger this step's fill ledger, appended to in place
  * @returns {Promise<{ ok: true } | { ok: false, pendingQuestion: any }>}
  */
-async function uploadDocumentsIfPresent(cap, ctx, uploaded) {
+async function uploadDocumentsIfPresent(cap, ctx, uploaded, ledger) {
   if (!uploaded.resume && ctx.documents.resumePath && await cap.waitFor(SELECTORS.resumeUpload, { optional: true, timeoutMs: 2000 })) {
-    const uploadedName = await cap.upload(SELECTORS.resumeUpload, ctx.documents.resumePath);
+    const uploadedName = await uploadAndRecord(cap, ledger, { key: 'resume', selector: SELECTORS.resumeUpload, label: 'Resume', relPath: ctx.documents.resumePath });
     if (!uploadedName) {
       return { ok: false, pendingQuestion: { kind: 'unrecognized_page', label: 'Resume upload could not be confirmed; the file input did not register a file.', page_url: ctx.applyUrl } };
     }
     uploaded.resume = true;
   }
   if (!uploaded.cover && ctx.documents.coverletterPath && await cap.waitFor(SELECTORS.coverLetterUpload, { optional: true, timeoutMs: 2000 })) {
-    await cap.upload(SELECTORS.coverLetterUpload, ctx.documents.coverletterPath);
+    await uploadAndRecord(cap, ledger, { key: 'cover_letter', selector: SELECTORS.coverLetterUpload, label: 'Cover letter', relPath: ctx.documents.coverletterPath });
     uploaded.cover = true;
   }
   return { ok: true };
@@ -236,7 +165,6 @@ export const dayforce = {
     // MAX_STEPS caps the number of steps this adapter will ever walk on one run, regardless of whether a
     // submit control is ever found -- never an unbounded loop.
     const uploaded = { resume: false, cover: false };
-    let submittedThisRun = false;
     for (let step = 0; step < MAX_STEPS; step++) {
       const stepInfo = await cap.waitFor(SELECTORS.stepProbe, { optional: true, timeoutMs: 15000 });
       if (!stepInfo) {
@@ -245,21 +173,24 @@ export const dayforce = {
       const captchaHit = await checkCaptcha(cap, ctx, stepInfo);
       if (captchaHit) return captchaHit;
 
-      await fillProfileFieldsIfPresent(cap, ctx);
-      const uploadResult = await uploadDocumentsIfPresent(cap, ctx, uploaded);
+      // The ledger is per step: the click-time audit re-reads only what is on the Submit step's page (the
+      // earlier steps' inputs are gone from the DOM by then).
+      /** @type {any[]} */
+      const ledger = [];
+      await fillProfileFieldsIfPresent(cap, ctx, ledger);
+      const uploadResult = await uploadDocumentsIfPresent(cap, ctx, uploaded, ledger);
       if (!uploadResult.ok) return { outcome: 'needs_human', pendingQuestion: uploadResult.pendingQuestion };
 
-      const questionResult = await answerCustomFields(cap, ctx);
+      const questionResult = await answerCustomFields(cap, ctx, SELECTORS.customFields, ledger);
       if (questionResult.parked) {
         return { outcome: 'needs_human', pendingQuestion: questionResult.pendingQuestion };
       }
 
       const submitButton = await cap.waitFor(SELECTORS.submit, { optional: true, timeoutMs: 3000 });
       if (submitButton) {
-        await ctx.recordSubmitRequestSent();
-        await cap.click(SELECTORS.submit);
-        submittedThisRun = true;
-        break;
+        // The click-time gate, the submit marker, the single click, and the confirmation check
+        // (src/apply/unattended-submit.js). Nothing else in this adapter clicks Submit.
+        return ctx.submit({ submitSelector: SELECTORS.submit, scopeSelector: SELECTORS.stepProbe, ledger });
       }
       const nextButton = await cap.waitFor(SELECTORS.next, { optional: true, timeoutMs: 3000 });
       if (!nextButton) {
@@ -267,15 +198,6 @@ export const dayforce = {
       }
       await cap.click(SELECTORS.next);
     }
-    if (!submittedThisRun) {
-      return { outcome: 'needs_human', pendingQuestion: { kind: 'unrecognized_page', label: `The application wizard did not reach a submit step within ${MAX_STEPS} steps.`, page_url: ctx.applyUrl } };
-    }
-
-    const confirmation = await cap.waitFor(SELECTORS.confirmationHeading, { optional: true, timeoutMs: 20000 });
-    const confirmedByHeading = Boolean(confirmation && /thank you|application (received|submitted|complete)|we('| ha)ve received/i.test(String(confirmation.text ?? '')));
-    if (confirmedByHeading) {
-      return { outcome: 'submitted', confirmationRef: null };
-    }
-    return { outcome: 'needs_human', pendingQuestion: { kind: 'post_submit_uncertain', label: 'Submitted, but no confirmation heading was seen; verify manually.', page_url: ctx.applyUrl } };
+    return { outcome: 'needs_human', pendingQuestion: { kind: 'unrecognized_page', label: `The application wizard did not reach a submit step within ${MAX_STEPS} steps.`, page_url: ctx.applyUrl } };
   },
 };

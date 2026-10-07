@@ -18,7 +18,7 @@ import { urlPassesRegistry } from '../../core/report.js';
 import { prescoreParts } from '../../core/prescore.js';
 import { weightedPrescore, getDefaultNoiseRules } from '../../core/noise.js';
 import { classifyApplyUrl } from '../../apply/ats-detect.js';
-import { getApplicationForListing, hasAssistedNextClickEver } from '../../core/applications.js';
+import { getApplicationForListing, hasAssistedNextClickEver, hasSubmitRequestSentEver } from '../../core/applications.js';
 import { resumeEligible } from '../../apply/resume-gate.js';
 import { isApplyChainRunning } from './applications.js';
 import { classifyExclusion, loadExclusionConfig } from '../../apply/exclusions.js';
@@ -193,7 +193,9 @@ export function register(router, deps, streamHub) {
       c.query('SELECT run_id FROM ic_scan_run_items WHERE listing_id = $1 ORDER BY run_id DESC LIMIT 10', [id]),
       // Resume gate R3: the card shows the partial-draft warning when an assisted run ever clicked Next.
       // Chain-park spec D2: resume_eligible lets the card show Resume on a legacy blocked resume-runner park.
-      getApplicationForListing(c, id).then(async (a) => (a ? { ...a, partial_draft: await hasAssistedNextClickEver(c, Number(a.id)), resume_eligible: resumeEligible(a), chain_running: isApplyChainRunning(a.id) } : a)),
+      // Unattended submit spec v2 C8: submit_sent makes the card show "already submitted (unconfirmed)"
+      // instead of "I applied by hand" (which the server refuses for such a row).
+      getApplicationForListing(c, id).then(async (a) => (a ? { ...a, partial_draft: await hasAssistedNextClickEver(c, Number(a.id)), submit_sent: await hasSubmitRequestSentEver(c, Number(a.id)), resume_eligible: resumeEligible(a), chain_running: isApplyChainRunning(a.id) } : a)),
     ]));
     const files = listOutputFiles(deps.outputRoot);
     const aliases = deps.config?.companyAliases ?? {};

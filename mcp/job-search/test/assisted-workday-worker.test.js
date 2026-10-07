@@ -151,6 +151,10 @@ function harness(o = {}) {
       credentials: { read: async () => null, write: async () => {}, generatePassword: () => 'x' },
       gmailVerify: async () => ({ ok: true, code: null, link: null }), sleep: async () => {},
       workday: { runner, now: () => new Date() },
+      // These tests cover the ASSISTED hand-off (Damian submits). The click-time config read decides the
+      // Workday submit mode (unattended submit spec item 2), so it is pinned to 'assisted' here; the
+      // unattended path is covered by test/unattended-submit-dom.test.js and test/unattended-submit-db.test.js.
+      loadFreshConfig: () => ({ ...loadConfig(), autoApply: { ...loadConfig().autoApply, workday: { ...loadConfig().autoApply.workday, submitMode: 'assisted' } } }),
       ...extra,
     }),
   };

@@ -1,0 +1,25 @@
+<!doctype html>
+<html><head><meta charset="utf-8"><title>Dayforce review step fixture</title></head>
+<body>
+<main data-automation="applyWizard">
+  <div data-automation="wizardStep">
+    <h2>Review</h2>
+    <p>Jordan Reyes, jordan@example.com, Houston</p>
+    <button data-automation="submitButton" type="button">Submit</button>
+  </div>
+</main>
+<script>
+  window.__clicks = 0;
+  document.querySelector('[data-automation="submitButton"]').addEventListener('click', function () {
+    window.__clicks += 1;
+    setTimeout(function () {
+      var main = document.querySelector('main');
+      main.textContent = '';
+      var h = document.createElement('h1');
+      h.setAttribute('data-automation', 'confirmationHeader');
+      h.textContent = 'We have received your application';
+      main.appendChild(h);
+    }, 50);
+  });
+</script>
+</body></html>

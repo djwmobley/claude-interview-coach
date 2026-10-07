@@ -9,7 +9,7 @@
  *
  *   kind                                                               outcome
  *   unrecognized_page, captcha, assisted_stopped, assisted_partial,    needs_human -> approved (attempt+1)
- *     email_verification
+ *     email_verification, submit_gate
  *   resume_failed                                                      needs_human -> drafting (as the
  *                                                                        bin/auto-apply.js re-drive does)
  *   blocked, and isResumeRunnerPark() (legacy resume-runner park)      needs_human -> drafting (D2)
@@ -18,7 +18,13 @@
  *   credential                                                         refuse use_credential_save
  *   awaiting_submit                                                    refuse submit_or_abandon
  *   post_submit_uncertain                                              refuse may_be_submitted
+ *   submit_unconfirmed, submit_error                                   refuse submit_unconfirmed (C11)
  *   anything else                                                      refuse unknown_kind
+ *
+ * submit_gate (unattended submit spec item 1) is a PRE-click park: nothing was clicked and no submit marker
+ * was written, so a resume re-runs the whole gate at the next click. Any row that carries the durable
+ * submit marker from ANY attempt (spec v2 C2, hasSubmitRequestSentEver) is refused submit_request_sent
+ * whatever its kind, and a row whose kind does not already say so is re-labelled submit_unconfirmed.
  *
  * Every check runs inside ONE transaction after the row's SELECT ... FOR UPDATE (R1b), so a kind change,
  * a new lease, or a submit_request_sent event committed while this call waits on the lock is honored.
@@ -37,8 +43,10 @@ import { STATUS_GROUPS } from '../core/statuses.js';
 import { loadConfig } from '../core/config.js';
 import { remainingBudget } from '../core/budget.js';
 import {
-  transitionUnwrapped, hasSubmitRequestSentThisAttempt, hasAssistedNextClickEver, ASSISTED_ATS_TYPES, PARTIAL_DRAFT_WARNING,
+  transitionUnwrapped, hasSubmitRequestSentEver, hasAssistedNextClickEver, ASSISTED_ATS_TYPES, PARTIAL_DRAFT_WARNING,
+  SUBMIT_UNCONFIRMED_KIND, UNCONFIRMED_SUBMIT_KINDS, submitUnconfirmedQuestion, recordApplicationEvent,
 } from '../core/applications.js';
+import { SUBMIT_GATE_KIND, SUBMIT_ERROR_KIND } from './submit-gate.js';
 import { breakerStatus, EASY_APPLY_BUDGET_SOURCE, WORKDAY_ASSISTED_BUDGET_SOURCE } from '../core/easy-apply-state.js';
 import { AWAITING_SUBMIT_KIND } from '../core/easy-apply-tabs.js';
 import { workdayAssistedConfig } from './assisted/gate.js';
@@ -46,7 +54,14 @@ import { EASY_APPLY_DEFAULTS } from './easy-apply-policy.js';
 import { walkDuplicateRoot, collectDuplicateTreeIds } from './exclusions.js';
 
 /** Kinds a human Resume moves needs_human -> approved (R1). A named set; nothing else is allowed. */
-export const RESUME_APPROVE_KINDS = Object.freeze(['unrecognized_page', 'captcha', 'assisted_stopped', 'assisted_partial', 'email_verification']);
+export const RESUME_APPROVE_KINDS = Object.freeze(['unrecognized_page', 'captcha', 'assisted_stopped', 'assisted_partial', 'email_verification', SUBMIT_GATE_KIND]);
+
+/**
+ * Kinds that mean the final Submit was clicked (or may have been) and never go back toward another
+ * submission (unattended submit spec v2 C11). Named explicitly so they are refused with their own reason,
+ * not the unknown_kind default.
+ */
+export const RESUME_SUBMIT_UNCONFIRMED_KINDS = Object.freeze([SUBMIT_UNCONFIRMED_KIND, SUBMIT_ERROR_KIND]);
 
 /** Kinds a human Resume moves needs_human -> drafting (R1). */
 export const RESUME_REDRAFT_KINDS = Object.freeze(['resume_failed']);
@@ -140,7 +155,7 @@ export function resumeEligible(row) {
 export const RESUME_REFUSAL_REASONS = Object.freeze([
   'not_parked', 'lease_held', 'apply_running', 'chain_running',
   'use_answer', 'use_credential_save', 'submit_or_abandon', 'may_be_submitted', 'unknown_kind',
-  'blocked_not_resume_failure',
+  'blocked_not_resume_failure', 'submit_unconfirmed',
   'submit_request_sent', 'listing_closed', 'no_resume_doc', 'breaker_tripped', 'slot_busy', 'budget_exhausted',
   'partial_draft_ack_required',
 ]);
@@ -157,7 +172,8 @@ const RESUME_REFUSAL_MESSAGES = Object.freeze({
   may_be_submitted: 'The submit request may already have reached the site. Check the site or your email for a confirmation, then use "I applied by hand" or Withdraw.',
   unknown_kind: 'This application is parked for a reason the dashboard does not recognize, so it was not resumed. Finish it by hand or withdraw it.',
   blocked_not_resume_failure: 'This application is blocked for a reason other than a resume drafting failure, so it was not resumed. Finish it by hand or withdraw it.',
-  submit_request_sent: 'A submit request was already sent on this attempt. Check the site for a confirmation before anything runs again.',
+  submit_unconfirmed: 'Already submitted (unconfirmed): the final Submit was sent. It is never resubmitted; a matching confirmation email moves it to confirmed. Check the site or your email, or withdraw it.',
+  submit_request_sent: 'A submit request was already sent for this application (on this or an earlier attempt), so it is never resubmitted. Check the site or your email for a confirmation.',
   listing_closed: 'The listing is closed (dead, skipped, passed, lost, or accepted), so it was not resumed.',
   no_resume_doc: 'No resume is linked to this application, so it cannot go back to approved.',
   breaker_tripped: 'The circuit breaker for this site is tripped. Wait for it to clear, then resume.',
@@ -206,6 +222,7 @@ export function classifyResume(row, ctx = {}) {
   else if (kind === 'credential') return refuse('use_credential_save');
   else if (kind === AWAITING_SUBMIT_KIND) return refuse('submit_or_abandon');
   else if (kind === 'post_submit_uncertain') return refuse('may_be_submitted');
+  else if (kind !== null && RESUME_SUBMIT_UNCONFIRMED_KINDS.includes(kind)) return refuse('submit_unconfirmed');
   else if (kind === 'blocked') {
     // D2: a legacy resume-runner park goes back to drafting, exactly like resume_failed; any other
     // blocked park (or one whose error or label does not match) is refused.
@@ -277,7 +294,8 @@ export async function resumeParkedApplication(client, id, opts = {}) {
       leaseHeld: (lease.rowCount ?? 0) > 0,
       applyRunning: Boolean(opts.applyRunning),
       chainRunning: Boolean(opts.chainRunning),
-      submitRequestSent: await hasSubmitRequestSentThisAttempt(c, id),
+      // Spec v2 C2: the durable marker from ANY attempt, not only this one.
+      submitRequestSent: await hasSubmitRequestSentEver(c, id),
       listingClosed: (closed.rowCount ?? 0) > 0,
       partialDraft: await hasAssistedNextClickEver(c, id),
       acknowledgedPartialDraft: opts.acknowledgePartialDraft === true,
@@ -295,6 +313,14 @@ export async function resumeParkedApplication(client, id, opts = {}) {
 
     const verdict = classifyResume(row, ctx);
     if (verdict.action === 'refuse') {
+      // Spec v2 C2 "route to submit_unconfirmed": a parked row that carries the submit marker but whose
+      // kind does not say so is re-labelled, so its card shows "already submitted (unconfirmed)" and the
+      // Gmail cross-check picks it up. The state stays needs_human (no transition).
+      const pqKind = row.pending_question && typeof row.pending_question === 'object' ? row.pending_question.kind : null;
+      if (row.state === 'needs_human' && ctx.submitRequestSent && !UNCONFIRMED_SUBMIT_KINDS.includes(pqKind) && pqKind !== SUBMIT_ERROR_KIND) {
+        await c.query('UPDATE ic_job_applications SET pending_question = $2::jsonb, updated_at = now() WHERE id = $1', [id, JSON.stringify(submitUnconfirmedQuestion(null, `re-labelled from ${String(pqKind)}: a submit request was sent earlier`))]);
+        await recordApplicationEvent(c, { applicationId: id, kind: 'note', actor: /** @type {any} */ (actor), note: `resume refused: submit marker present; re-labelled ${String(pqKind)} -> ${SUBMIT_UNCONFIRMED_KIND}` });
+      }
       return { outcome: /** @type {const} */ ('refused'), reason: verdict.reason, message: verdict.message, state: row.state };
     }
     const priorKind = String(row.pending_question.kind);

@@ -14,9 +14,14 @@
  *   4. releases the tab: an awaiting_submit or evidence outcome keeps it, and the route policy is removed
  *      FIRST (release(true) unroutes); a failed unroute parks instead of reporting awaiting_submit (A9).
  *      The worker writes awaiting_submit and notifies only after this returns.
+ * Unattended submit (spec item 2): between 3 and 4, and ONLY after a verified finish, the worker's own
+ * scripted submitStep (never the model, never a tool verb) may click the single Submit control behind the
+ * click-time gate (src/apply/unattended-submit.js). Its result replaces awaiting_submit and the tab is
+ * closed; a null result (submitMode 'assisted', or a soft gate park) leaves step 4 exactly as before. The
+ * lease is heartbeated while the session runs (spec v2 C9).
  * The model's exit code never decides anything.
  */
-import { issueLease, getLease, closeLease, tripBreaker } from '../../core/easy-apply-state.js';
+import { issueLease, getLease, closeLease, tripBreaker, updateLeaseState } from '../../core/easy-apply-state.js';
 import { recordApplicationEvent, hasAssistedNextClickEver } from '../../core/applications.js';
 import { pendingOptionFields } from './field-policy.js';
 
@@ -99,13 +104,23 @@ export function outcomeForStop(row, profile, pageUrl) {
  *   | { ok: false, result: { outcome: 'needs_human', pendingQuestion: any }, release: (keepTab: boolean) => Promise<{ ok: boolean }> }} PreludeResult
  */
 
+/** Lease heartbeat while the headless session fills (unattended submit spec v2 C9). */
+export const LEASE_HEARTBEAT_MS = 60000;
+
+/**
+ * @typedef {(m: { ledger: any[], prefilledUnledgered: string[] }) => Promise<null | { outcome: 'submitted', confirmationRef?: null } | { outcome: 'needs_human', pendingQuestion: any, clicked?: boolean }>} SubmitStep
+ *   Unattended submit (spec item 2): the worker's SCRIPTED post-finish step, run only after a verified
+ *   finish and BEFORE the tab is released (the route policy is still on). null keeps the assisted
+ *   awaiting_submit hand-off (submitMode 'assisted', or a soft gate park such as the kill switch).
+ */
+
 /**
  * @param {{
  *   client: import('pg').ClientBase, app: any, profile: any, trigger?: 'morning'|'dashboard',
  *   prelude: () => Promise<PreludeResult>, runner: { run: (i: { applicationId: number, leaseToken: string }) => Promise<any> },
- *   ttlMs: number, breakerHours: number, now?: () => Date, log: (f: any) => void,
+ *   ttlMs: number, breakerHours: number, now?: () => Date, log: (f: any) => void, submitStep?: SubmitStep, heartbeatMs?: number,
  * }} p
- * @returns {Promise<{ outcome: 'awaiting_submit', targetId: string, ledger: any[], screenshotRelPath: string|null, reason: string, prefilledUnledgered: string[] } | { outcome: 'needs_human', pendingQuestion: any }>}
+ * @returns {Promise<{ outcome: 'awaiting_submit', targetId: string, ledger: any[], screenshotRelPath: string|null, reason: string, prefilledUnledgered: string[] } | { outcome: 'needs_human', pendingQuestion: any } | { outcome: 'submitted', confirmationRef: null }>}
  */
 export async function runAssistedHandoff(p) {
   const { client, app, profile, log } = p;
@@ -122,10 +137,20 @@ export async function runAssistedHandoff(p) {
     log({ evt: 'assisted_lease_issued', application_id: app.id, lease_id: lease.leaseId, ats: profile.ats });
     /** @type {any} */
     let runResult = null;
+    // C9: heartbeat the lease while the session runs, so reconcileStale never mistakes a live fill for a
+    // crashed one. Best-effort: a failed heartbeat is logged, never fatal.
+    const heartbeat = setInterval(() => {
+      updateLeaseState(client, lease.leaseId, { lastActionAt: now() }).catch((/** @type {unknown} */ err) => {
+        log({ evt: 'assisted_lease_heartbeat_failed', application_id: app.id, err_message: err instanceof Error ? err.message.slice(0, 200) : String(err).slice(0, 200) });
+      });
+    }, p.heartbeatMs ?? LEASE_HEARTBEAT_MS);
+    heartbeat.unref?.();
     try {
       runResult = await p.runner.run({ applicationId: app.id, leaseToken: lease.token });
     } catch (err) {
       log({ evt: 'assisted_runner_threw', application_id: app.id, err_message: err instanceof Error ? err.message.slice(0, 200) : String(err).slice(0, 200) });
+    } finally {
+      clearInterval(heartbeat);
     }
     await closeLease(client, lease.leaseId, { stopReason: 'no_finish' });
     const row = await getLease(client, lease.leaseId);
@@ -136,6 +161,22 @@ export async function runAssistedHandoff(p) {
     const mapped = outcomeForStop(row, profile, pageUrl);
     if (mapped.outcome === 'needs_human' && mapped.trip) {
       await tripBreaker(client, { reason: mapped.stopReason, applicationId: app.id, hours: p.breakerHours, now: now(), ats: profile.breakerKey });
+    }
+    // Unattended submit (spec item 2): after a VERIFIED finish only, and while the route policy is still
+    // on, the worker's scripted step may click the single Submit control behind the click-time gate. Any
+    // result it returns closes the tab; null keeps the assisted hand-off below exactly as before.
+    if (mapped.outcome === 'awaiting_submit' && typeof p.submitStep === 'function') {
+      const sub = await p.submitStep({ ledger: mapped.ledger, prefilledUnledgered: mapped.prefilledUnledgered });
+      if (sub) {
+        released = true;
+        await pre.release(false);
+        if (sub.outcome === 'submitted') return { outcome: 'submitted', confirmationRef: null };
+        const pq = sub.pendingQuestion;
+        if (sub.clicked !== true && await hasAssistedNextClickEver(client, app.id)) {
+          return { outcome: 'needs_human', pendingQuestion: { ...pq, next_clicked: true, requires_human_retry: true } };
+        }
+        return { outcome: 'needs_human', pendingQuestion: pq };
+      }
     }
     // A9: the route policy comes off BEFORE the caller writes awaiting_submit; a failed unroute parks.
     released = true;

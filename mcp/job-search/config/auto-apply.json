@@ -1,5 +1,5 @@
 {
-  "_comment": "One-click apply / auto-apply gate config (PR A spec item 2, extended by PR B docs/auto-apply-spec.md). fitFloor: minimum fit_score an auto-apply candidate must carry. dailyCap: max auto-apply submissions per day. atsAllow: ATS types auto-apply is permitted to submit through (excludes indeed_easy/linkedin_easy -- classify-only adapters -- and unknown). floors: src/core/salary-floor.js's resolveFloor() inputs, in whole US dollars per year. probeCapPerSource/probeRowCap/reprobeAfterHours: apply-target probe registry budget and cooldown. lockMinutes/pollSeconds: bin/auto-apply.js's own advisory-lock contention poll.",
+  "_comment": "One-click apply / auto-apply gate config (PR A spec item 2, extended by PR B docs/auto-apply-spec.md). fitFloor: minimum fit_score an auto-apply candidate must carry. dailyCap: max auto-apply submissions per day. atsAllow: ATS types auto-apply is permitted to submit through (excludes indeed_easy/linkedin_easy -- classify-only adapters -- and unknown). floors: src/core/salary-floor.js's resolveFloor() inputs, in whole US dollars per year. probeCapPerSource/probeRowCap/reprobeAfterHours: apply-target probe registry budget and cooldown. lockMinutes/pollSeconds: bin/auto-apply.js's own advisory-lock contention poll. unattendedSubmit: read fresh at click time by src/apply/submit-gate.js; enabled:false is the kill switch for every ATS, ats turns each ATS on, dailySubmitCap counts submit clicks. workday.submitMode 'unattended' lets the worker click Workday's Submit after a verified Review page.",
   "fitFloor": 60,
   "dailyCap": 5,
   "atsAllow": ["greenhouse", "lever", "smartrecruiters", "workday", "icims", "dayforce"],
@@ -19,5 +19,20 @@
   "waitStaleHeartbeatMinutes": 10,
   "probeFitFloor": 60,
   "probeRowCapWithBrowser": 40,
-  "probeTimeBudgetMs": 600000
+  "probeTimeBudgetMs": 600000,
+  "workday": {
+    "submitMode": "unattended"
+  },
+  "unattendedSubmit": {
+    "enabled": true,
+    "ats": {
+      "greenhouse": true,
+      "lever": true,
+      "smartrecruiters": true,
+      "icims": true,
+      "dayforce": true,
+      "workday": true
+    },
+    "dailySubmitCap": 5
+  }
 }

@@ -17,6 +17,7 @@ import { formatFollowup, selectDue, unsnoozeDue } from './followups.js';
 import { repoRoot, DEFAULT_REPORT_HOME_MIN_PRESCORE } from './config.js';
 import { normalizeLocation } from './normalize.js';
 import { JobSearchError } from './errors.js';
+import { UNCONFIRMED_SUBMIT_KINDS } from './applications.js';
 
 /** Directory the markdown report is written to (spec R1.3), relative to the repo root; covered by the existing `/output/` .gitignore entry. */
 export const REPORTS_DIR = path.join('output', 'reports');
@@ -1071,6 +1072,11 @@ export function renderReportMarkdown(data, registry, googleAuthState, dashboardH
  * @property {{ attempted?: number, resolved?: number, unresolved?: number, skipped?: number, skippedByReason?: Record<string, number>, stoppedBy?: string|null, remaining?: number }|null} prepare
  *   the prepare-phase stats bin/auto-apply.js's runPrepare() returned, or null when prepare was skipped
  *   this run (the still-running-at-deadline path, dry-run before any prepare ran, or an older summary).
+ * @property {Array<{ applicationId: number, listingId: number, title: string|null, company: string|null, ats: string|null, state: string, submittedAt: string|null }>} [submittedDb]
+ *   unattended submit spec item 7: submissions read from the DATABASE (submitted_at in the last 24h),
+ *   whatever path produced them, not only this run's summary (D6).
+ * @property {Array<{ applicationId: number, listingId: number, title: string|null, company: string|null, ats: string|null, reason: string }>} [submitUnconfirmed]
+ *   unattended submit spec item 7: every unconfirmed submit, in its own section.
  * @property {number} submittedReviewFail submit-on-resume spec section 1: of `appliedCount`, how many
  *   carried an advisory review_verdict of 'FAIL' -- submitted anyway, never blocked.
  * @property {number} submittedNoVerdict submit-on-resume spec section 1: of `appliedCount`, how many
@@ -1188,10 +1194,13 @@ export async function collectAutoApply(client, summary) {
   }
   const needsHuman = await collectNeedsHumanApplications(client);
   const failed = await collectFailedApplications(client);
+  const submissions = await collectSubmissions(client);
   return {
     hasRun: true,
     dryRun: Boolean(summary.dry_run),
     appliedCount,
+    submittedDb: submissions.submitted,
+    submitUnconfirmed: submissions.unconfirmed,
     submittedReviewFail,
     submittedNoVerdict,
     cappedCount,
@@ -1258,14 +1267,15 @@ export async function collectFailedApplications(client) {
  * @returns {Promise<Array<{ applicationId: number, listingId: number, title: string|null, company: string|null, reason: string }>>}
  */
 export async function collectNeedsHumanApplications(client) {
+  // Unconfirmed submits have their own section (collectSubmissions below), so they are not listed twice.
   const r = await client.query(`
     SELECT a.id AS application_id, a.listing_id, a.pending_question, l.title, l.company
     FROM ic_job_applications a
     JOIN ic_job_listings l ON l.id = a.listing_id
-    WHERE a.state = 'needs_human'
+    WHERE a.state = 'needs_human' AND coalesce(a.pending_question->>'kind', '') <> ALL($1::text[])
     ORDER BY a.updated_at DESC
     LIMIT 50
-  `);
+  `, [UNCONFIRMED_SUBMIT_KINDS]);
   return r.rows.map((row) => ({
     applicationId: Number(row.application_id),
     listingId: Number(row.listing_id),
@@ -1273,6 +1283,44 @@ export async function collectNeedsHumanApplications(client) {
     company: row.company ?? null,
     reason: row.pending_question && typeof row.pending_question.label === 'string' ? row.pending_question.label : 'Needs your attention.',
   }));
+}
+
+/**
+ * Submissions read from the DATABASE (unattended submit spec item 7, D6 fix): every application that
+ * reached 'submitted' in the last 24 hours (submitted_at, whatever started it: the morning run, the
+ * dashboard, a Resume, or the Gmail cross-check of an unconfirmed submit; a row that has since confirmed
+ * still counts), and every unconfirmed submit (needs_human parked as submit_unconfirmed or the legacy
+ * post_submit_uncertain) in its own list. A CURRENT snapshot, capped at 50 rows each.
+ * @param {import('pg').ClientBase} client
+ * @returns {Promise<{ submitted: Array<{ applicationId: number, listingId: number, title: string|null, company: string|null, ats: string|null, state: string, submittedAt: string|null }>, unconfirmed: Array<{ applicationId: number, listingId: number, title: string|null, company: string|null, ats: string|null, reason: string }> }>}
+ */
+export async function collectSubmissions(client) {
+  const s = await client.query(`
+    SELECT a.id AS application_id, a.listing_id, a.ats_type, a.state, a.submitted_at, l.title, l.company
+    FROM ic_job_applications a
+    JOIN ic_job_listings l ON l.id = a.listing_id
+    WHERE a.state IN ('submitted', 'confirmed') AND a.submitted_at >= now() - interval '24 hours'
+    ORDER BY a.submitted_at DESC
+    LIMIT 50
+  `);
+  const u = await client.query(`
+    SELECT a.id AS application_id, a.listing_id, a.ats_type, a.pending_question, l.title, l.company
+    FROM ic_job_applications a
+    JOIN ic_job_listings l ON l.id = a.listing_id
+    WHERE a.state = 'needs_human' AND a.pending_question->>'kind' = ANY($1::text[])
+    ORDER BY a.updated_at DESC
+    LIMIT 50
+  `, [UNCONFIRMED_SUBMIT_KINDS]);
+  return {
+    submitted: s.rows.map((row) => ({
+      applicationId: Number(row.application_id), listingId: Number(row.listing_id), title: row.title ?? null, company: row.company ?? null,
+      ats: row.ats_type ?? null, state: String(row.state), submittedAt: row.submitted_at ? new Date(row.submitted_at).toISOString() : null,
+    })),
+    unconfirmed: u.rows.map((row) => ({
+      applicationId: Number(row.application_id), listingId: Number(row.listing_id), title: row.title ?? null, company: row.company ?? null,
+      ats: row.ats_type ?? null, reason: row.pending_question && typeof row.pending_question.label === 'string' ? row.pending_question.label : 'Submitted, unconfirmed.',
+    })),
+  };
 }
 
 /** Rendered skipped-reasons clause shared by all three renderers below (excludes 'daily_cap', already its own `cappedCount`). @param {AutoApplyReportData} data */
@@ -1350,6 +1398,12 @@ export function renderAutoApplyText(data, registry) {
   lines.push(`applied ${data.appliedCount} | capped ${data.cappedCount} | cap used ${data.capUsed ?? '?'} | cap remaining ${data.capRemaining ?? '?'}`);
   const advisoryLine = submittedAdvisoryText(data);
   if (advisoryLine) lines.push(advisoryLine);
+  const submittedDb = data.submittedDb ?? [];
+  lines.push(`submitted in the last 24h, from the database (${submittedDb.length}):`);
+  for (const s of submittedDb) lines.push(`  #${s.listingId} | app ${s.applicationId} | ${s.title ?? 'n/a'} | ${s.company ?? 'n/a'} | ${s.ats ?? 'n/a'} | ${s.state}`);
+  const unconfirmedRows = data.submitUnconfirmed ?? [];
+  lines.push(`submitted, unconfirmed (${unconfirmedRows.length}):`);
+  for (const u of unconfirmedRows) lines.push(`  #${u.listingId} | app ${u.applicationId} | ${u.title ?? 'n/a'} | ${u.company ?? 'n/a'} | ${u.ats ?? 'n/a'}`);
   lines.push(`skipped: ${skippedReasonsText(data)}`);
   lines.push(`unresolved apply targets (${data.unresolved.length}):`);
   for (const u of data.unresolved) {
@@ -1406,6 +1460,22 @@ export function renderAutoApplyHtml(data, registry) {
   parts.push(`<p>applied ${data.appliedCount}, capped ${data.cappedCount}, cap used ${data.capUsed ?? '?'}, cap remaining ${data.capRemaining ?? '?'}</p>`);
   const advisoryLine = submittedAdvisoryText(data);
   if (advisoryLine) parts.push(`<p>${esc(advisoryLine)}</p>`);
+  const submittedDb = data.submittedDb ?? [];
+  if (submittedDb.length) {
+    parts.push(`<p>submitted in the last 24h, from the database (${submittedDb.length}):</p><ul>`);
+    for (const s of submittedDb) parts.push(`<li>#${s.listingId} (app ${s.applicationId}) ${esc(s.title ?? 'n/a')} at ${esc(s.company ?? 'n/a')}, ${esc(s.ats ?? 'n/a')}, ${esc(s.state)}</li>`);
+    parts.push('</ul>');
+  } else {
+    parts.push('<p>submitted in the last 24h, from the database: (none)</p>');
+  }
+  const unconfirmedRows = data.submitUnconfirmed ?? [];
+  if (unconfirmedRows.length) {
+    parts.push(`<p>submitted, unconfirmed (${unconfirmedRows.length}):</p><ul>`);
+    for (const u of unconfirmedRows) parts.push(`<li>#${u.listingId} (app ${u.applicationId}) ${esc(u.title ?? 'n/a')} at ${esc(u.company ?? 'n/a')}, ${esc(u.ats ?? 'n/a')}</li>`);
+    parts.push('</ul>');
+  } else {
+    parts.push('<p>submitted, unconfirmed: (none)</p>');
+  }
   parts.push(`<p>skipped: ${esc(skippedReasonsText(data))}</p>`);
   if (data.unresolved.length) {
     parts.push(`<p>unresolved apply targets (${data.unresolved.length}):</p><ul>`);
@@ -1480,6 +1550,16 @@ export function renderAutoApplyMarkdown(data, registry) {
   lines.push('');
   const advisoryLine = submittedAdvisoryText(data);
   if (advisoryLine) { lines.push(advisoryLine); lines.push(''); }
+  const submittedDb = data.submittedDb ?? [];
+  lines.push(`submitted in the last 24h, from the database (${submittedDb.length}):`);
+  if (submittedDb.length === 0) lines.push('(none)');
+  for (const s of submittedDb) lines.push(`- #${s.listingId} (app ${s.applicationId}) ${s.title ?? 'n/a'} at ${s.company ?? 'n/a'}, ${s.ats ?? 'n/a'}, ${s.state}`);
+  lines.push('');
+  const unconfirmedRows = data.submitUnconfirmed ?? [];
+  lines.push(`submitted, unconfirmed (${unconfirmedRows.length}):`);
+  if (unconfirmedRows.length === 0) lines.push('(none)');
+  for (const u of unconfirmedRows) lines.push(`- #${u.listingId} (app ${u.applicationId}) ${u.title ?? 'n/a'} at ${u.company ?? 'n/a'}, ${u.ats ?? 'n/a'}`);
+  lines.push('');
   lines.push(`skipped: ${skippedReasonsText(data)}`);
   lines.push('');
   lines.push(`unresolved apply targets (${data.unresolved.length}):`);

@@ -471,16 +471,35 @@ export const autoApplySchema = z.object({
     runTimeoutMinutes: z.number().int().positive().default(15),
     staleAwaitingHours: z.number().positive().default(24),
   }).default({}),
-  // Assisted Workday (spec v1 clause 8): the model fills the wizard and stops before Submit; Damian
-  // submits. submitMode accepts ONLY 'assisted' in this release (an unattended mode would be a separate,
-  // worker-only driver op, never a tool verb). assistedDaily is Workday's own daily cap
-  // (ic_scan_budget source 'workday_assisted'); breakerHours sizes the Workday breaker trip.
+  // Assisted Workday (spec v1 clause 8): the model fills the wizard and stops before Submit. submitMode
+  // 'assisted' leaves the verified Review page open for Damian to submit; 'unattended' (unattended submit
+  // spec item 2) lets a scripted worker step (never the model, never a tool verb) click the single Submit
+  // control after a verified finish, behind src/apply/submit-gate.js classifyPreSubmit. assistedDaily is
+  // Workday's own daily attempt cap (ic_scan_budget source 'workday_assisted'); breakerHours sizes the
+  // Workday breaker trip.
   workday: z.object({
-    submitMode: z.enum(['assisted']).default('assisted'),
+    submitMode: z.enum(['assisted', 'unattended']).default('assisted'),
     assistedDaily: z.number().int().min(0).max(25).default(5),
     breakerHours: z.number().positive().default(24),
     runTimeoutMinutes: z.number().int().min(8).max(30).default(15),
   }).default({}),
+  // Unattended submit (spec item 6, v2 C1): read FRESH from disk at click time by
+  // src/apply/submit-gate.js. `enabled: false` is the kill switch for every ATS at once; `ats` turns each
+  // ATS on individually (a missing key is off); dailySubmitCap counts submit markers (clicks), not
+  // approvals. LinkedIn and Indeed are never listed: they never submit unattended. The default is OFF, so
+  // a config file without this block never submits unattended.
+  unattendedSubmit: z.object({
+    enabled: z.boolean().default(false),
+    ats: z.object({
+      greenhouse: z.boolean().default(false),
+      lever: z.boolean().default(false),
+      smartrecruiters: z.boolean().default(false),
+      icims: z.boolean().default(false),
+      dayforce: z.boolean().default(false),
+      workday: z.boolean().default(false),
+    }).strict().default({}),
+    dailySubmitCap: z.number().int().min(1).max(25).default(5),
+  }).strict().default({}),
 });
 
 export const companyAliasesSchema = z.object({

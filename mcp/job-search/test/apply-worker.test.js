@@ -14,7 +14,7 @@ import assert from 'node:assert/strict';
 import pg from 'pg';
 import { pgConnectionConfig, loadConfig } from '../src/core/config.js';
 import { ensureAuxSchema } from '../src/core/schema.js';
-import { createApplication, transition, getApplication, approve, withdrawApplication } from '../src/core/applications.js';
+import { createApplication, transition, getApplication, approve, withdrawApplication, recordSubmitRequestSent } from '../src/core/applications.js';
 import { LOCK_KEY as SCAN_LOCK_KEY } from '../src/core/scan-run.js';
 import { runApplyWorker, preSubmitExclusionRecheck, LOCK_KEY as APPLY_LOCK_KEY } from '../src/apply/worker.js';
 import { ADAPTERS } from '../src/apply/adapters/index.js';
@@ -205,13 +205,17 @@ describe('runApplyWorker: totality', () => {
     assert.equal(row.confirmation_ref, 'conf-123');
   });
 
-  test('SUBMIT_REQUEST_SENT ORDERING: an adapter that records submit_request_sent then throws parks in needs_human, NEVER failed (duplicate-application guard)', async () => {
+  test('SUBMIT_REQUEST_SENT ORDERING: a run that throws after the submit marker parks as submit_unconfirmed, NEVER failed (duplicate-application guard)', async () => {
     const id = await seedApprovedApplication();
     const fakeAdapters = {
       greenhouse: {
         ats: 'greenhouse', requires: [], classifyOnly: false, uploadHosts: [],
-        async run(cap, ctx) {
-          await ctx.recordSubmitRequestSent();
+        async run(/** @type {any} */ _cap, /** @type {any} */ ctx) {
+          // Adapters reach Submit only through ctx.submit (unattended submit spec items 1-4); there is no
+          // other submit hook. The marker is simulated with the marker writer itself, then a crash.
+          assert.equal(typeof ctx.recordSubmitRequestSent, 'undefined', 'no direct marker hook in the adapter ctx');
+          assert.equal(typeof ctx.submit, 'function');
+          await recordSubmitRequestSent(verifyClient, id);
           throw new Error('crash right after the submit click');
         },
       },
@@ -220,7 +224,16 @@ describe('runApplyWorker: totality', () => {
     assert.equal(result.status, 'needs_human');
     const row = await getApplication(verifyClient, id);
     assert.equal(row.state, 'needs_human');
-    assert.equal(row.pending_question.kind, 'post_submit_uncertain');
+    assert.equal(row.pending_question.kind, 'submit_unconfirmed');
+  });
+
+  test('a marker from an EARLIER attempt also parks a crash as submit_unconfirmed (spec v2 C2: the worker catch reads any attempt)', async () => {
+    const id = await seedApprovedApplication();
+    await recordSubmitRequestSent(verifyClient, id);
+    const fakeAdapters = { greenhouse: { ats: 'greenhouse', requires: [], classifyOnly: false, uploadHosts: [], async run() { throw new Error('crash before any click this attempt'); } } };
+    const result = await runApplyWorker(id, baseDeps({ adapters: fakeAdapters }));
+    assert.equal(result.status, 'needs_human');
+    assert.equal((await getApplication(verifyClient, id)).pending_question.kind, 'submit_unconfirmed');
   });
 
   test('document-drift guard: a resume_hash mismatch parks in needs_human before ever attaching a page', async () => {

@@ -21,7 +21,7 @@
  * appropriate) instead of proceeding against a page it does not actually recognize.
  */
 import { detectRecaptchaV3Script } from '../../browser/wall.js';
-import { classifyCompensationLabel } from '../answers.js';
+import { answerCustomFields, fillAndRecord, uploadAndRecord } from './form-fill.js';
 
 /** Selector contract this adapter targets. Grouped here (not inlined) so a future selector fix touches one place. */
 export const SELECTORS = Object.freeze({
@@ -43,22 +43,7 @@ export const SELECTORS = Object.freeze({
   coverLetterUpload: '#coverLetter, input[name="coverLetter"]',
   customFields: '[data-testid="question-field"], .iCIMS_MainWrapper .question-field, [data-field-type]',
   submit: '#icims_submit_button, button[type="submit"]',
-  confirmationHeading: '[data-testid="application-confirmation"], h1, h2',
 });
-
-/**
- * @param {{ tagName: string, type: string|null }} f
- */
-function controlTypeFor(f) {
-  if (f.tagName === 'select') return 'radio';
-  if (f.tagName === 'textarea') return 'text';
-  if (f.tagName === 'input') {
-    if (f.type === 'checkbox') return 'checkbox-group';
-    if (f.type === 'radio') return 'radio';
-    if (f.type === null || f.type === 'text' || f.type === 'tel' || f.type === 'email' || f.type === 'number') return 'text';
-  }
-  return undefined;
-}
 
 /**
  * Captcha check: a DOM probe plus the reCAPTCHA v3 script-loader heuristic, reusing a prior waitFor
@@ -81,17 +66,18 @@ async function checkCaptcha(cap, ctx, probeResult) {
  * Fill whichever profile fields are present. Every fill is guarded by an optional probe first.
  * @param {import('../apply-capability.js').ApplyCapability} cap
  * @param {any} ctx
+ * @param {any[]} ledger appended to in place (see the form fill module)
  */
-async function fillProfileFieldsIfPresent(cap, ctx) {
+async function fillProfileFieldsIfPresent(cap, ctx, ledger) {
   if (ctx.profile.fullName) {
     const parts = String(ctx.profile.fullName).trim().split(/\s+/);
     const first = parts[0] ?? '';
     const last = parts.length > 1 ? parts.slice(1).join(' ') : '';
-    if (await cap.waitFor(SELECTORS.firstName, { optional: true, timeoutMs: 1500 })) await cap.fill(SELECTORS.firstName, first);
-    if (await cap.waitFor(SELECTORS.lastName, { optional: true, timeoutMs: 1500 })) await cap.fill(SELECTORS.lastName, last);
+    if (await cap.waitFor(SELECTORS.firstName, { optional: true, timeoutMs: 1500 })) await fillAndRecord(cap, ledger, { key: 'first_name', selector: SELECTORS.firstName, label: 'First name', value: first, source: 'contact' });
+    if (await cap.waitFor(SELECTORS.lastName, { optional: true, timeoutMs: 1500 })) await fillAndRecord(cap, ledger, { key: 'last_name', selector: SELECTORS.lastName, label: 'Last name', value: last, source: 'contact' });
   }
-  if (ctx.profile.email && await cap.waitFor(SELECTORS.email, { optional: true, timeoutMs: 1500 })) await cap.fill(SELECTORS.email, ctx.profile.email);
-  if (ctx.profile.phone && await cap.waitFor(SELECTORS.phone, { optional: true, timeoutMs: 1500 })) await cap.fill(SELECTORS.phone, ctx.profile.phone);
+  if (ctx.profile.email && await cap.waitFor(SELECTORS.email, { optional: true, timeoutMs: 1500 })) await fillAndRecord(cap, ledger, { key: 'email', selector: SELECTORS.email, label: 'Email', value: ctx.profile.email, source: ctx.profile.emailSource ?? 'contact' });
+  if (ctx.profile.phone && await cap.waitFor(SELECTORS.phone, { optional: true, timeoutMs: 1500 })) await fillAndRecord(cap, ledger, { key: 'phone', selector: SELECTORS.phone, label: 'Phone', value: ctx.profile.phone, source: 'contact' });
 }
 
 /**
@@ -99,79 +85,20 @@ async function fillProfileFieldsIfPresent(cap, ctx) {
  * other adapter in this package.
  * @param {import('../apply-capability.js').ApplyCapability} cap
  * @param {any} ctx
+ * @param {any[]} ledger appended to in place
  * @returns {Promise<{ ok: true } | { ok: false, pendingQuestion: any }>}
  */
-async function uploadDocumentsIfPresent(cap, ctx) {
+async function uploadDocumentsIfPresent(cap, ctx, ledger) {
   if (ctx.documents.resumePath) {
-    const uploadedName = await cap.upload(SELECTORS.resumeUpload, ctx.documents.resumePath);
+    const uploadedName = await uploadAndRecord(cap, ledger, { key: 'resume', selector: SELECTORS.resumeUpload, label: 'Resume', relPath: ctx.documents.resumePath });
     if (!uploadedName) {
       return { ok: false, pendingQuestion: { kind: 'unrecognized_page', label: 'Resume upload could not be confirmed; the file input did not register a file.', page_url: ctx.applyUrl } };
     }
   }
   if (ctx.documents.coverletterPath) {
-    await cap.upload(SELECTORS.coverLetterUpload, ctx.documents.coverletterPath);
+    await uploadAndRecord(cap, ledger, { key: 'cover_letter', selector: SELECTORS.coverLetterUpload, label: 'Cover letter', relPath: ctx.documents.coverletterPath });
   }
   return { ok: true };
-}
-
-/**
- * Answer every enumerated custom screening field on the page. Compensation gate (Damian's ruling, spec
- * item B): a label classifying as compensation-family (classifyCompensationLabel) is ALWAYS routed
- * through that gate before the generic bank matcher ever runs -- never answered by an unrelated
- * alias/synonym/learned match. Hourly is a disqualifier and is never filled; only a plain-text BASE ANNUAL
- * figure with a configured floor ever auto-fills. Every other compensation-family shape always parks,
- * regardless of the field's own required flag -- never silently skipped, since guessing or skipping a
- * compensation figure is a worse failure mode than an extra manual click.
- * @param {import('../apply-capability.js').ApplyCapability} cap
- * @param {any} ctx
- */
-async function answerCustomFields(cap, ctx) {
-  const fields = /** @type {any[]} */ (await cap.waitFor(SELECTORS.customFields, { all: true, timeoutMs: 3000 }));
-  for (const f of fields ?? []) {
-    const label = String(f.text ?? '').trim();
-    if (!label) continue;
-    const controlType = controlTypeFor(f);
-    const selector = f.id ? `#${f.id}` : null;
-
-    const compClass = classifyCompensationLabel(label, { controlType, floor: ctx.answers.bank?.meta?.salary_floor ?? null });
-    if (compClass.category !== 'not_compensation') {
-      if (compClass.category === 'fill' && selector) {
-        await cap.fill(selector, String(compClass.value));
-        continue;
-      }
-      const shot = await cap.screenshot();
-      return {
-        parked: true,
-        pendingQuestion: {
-          kind: 'question', label, page_url: ctx.applyUrl, screenshot: shot.relPath, suggestion: null, tier: null,
-        },
-      };
-    }
-
-    const match = ctx.answers.match(label, controlType, f.options ?? undefined);
-    if (match.outcome === 'auto_answer') {
-      if (!selector) continue;
-      if (controlType === 'text') {
-        await cap.fill(selector, String(match.controlResult?.text ?? match.value ?? ''));
-      } else if (controlType === 'radio' && f.tagName === 'select') {
-        await cap.select(selector, String(match.controlResult?.selectedOption ?? ''));
-      } else {
-        await cap.click(selector);
-      }
-      continue;
-    }
-    if (f.required) {
-      const shot = await cap.screenshot();
-      return {
-        parked: true,
-        pendingQuestion: {
-          kind: 'question', label, page_url: ctx.applyUrl, screenshot: shot.relPath, suggestion: match.suggestion ?? null, tier: match.tier,
-        },
-      };
-    }
-    ctx.log({ evt: 'question_unmatched_optional', label: label.slice(0, 200) });
-  }
-  return { parked: false };
 }
 
 export const icims = {
@@ -209,30 +136,21 @@ export const icims = {
     }
 
     // (3) Profile fields, (4) document uploads (refuse submit if unconfirmed).
-    await fillProfileFieldsIfPresent(cap, ctx);
-    const uploadResult = await uploadDocumentsIfPresent(cap, ctx);
+    /** @type {any[]} the fill ledger the click-time audit re-reads */
+    const ledger = [];
+    await fillProfileFieldsIfPresent(cap, ctx, ledger);
+    const uploadResult = await uploadDocumentsIfPresent(cap, ctx, ledger);
     if (!uploadResult.ok) return { outcome: 'needs_human', pendingQuestion: uploadResult.pendingQuestion };
 
     // (5) Screening questions via the bank; a compensation-family label is routed through
-    // classifyCompensationLabel (see answerCustomFields above) before the generic matcher ever runs.
-    const questionResult = await answerCustomFields(cap, ctx);
+    // classifyCompensationLabel (src/apply/adapters/form-fill.js answerCustomFields) before the generic matcher ever runs.
+    const questionResult = await answerCustomFields(cap, ctx, SELECTORS.customFields, ledger);
     if (questionResult.parked) {
       return { outcome: 'needs_human', pendingQuestion: questionResult.pendingQuestion };
     }
 
-    // (6) Submit and confirm.
-    const submitButton = await cap.waitFor(SELECTORS.submit, { optional: true, timeoutMs: 3000 });
-    if (!submitButton) {
-      return { outcome: 'needs_human', pendingQuestion: { kind: 'unrecognized_page', label: 'Could not find a submit control on the iCIMS application form.', page_url: ctx.applyUrl } };
-    }
-    await ctx.recordSubmitRequestSent();
-    await cap.click(SELECTORS.submit);
-
-    const confirmation = await cap.waitFor(SELECTORS.confirmationHeading, { optional: true, timeoutMs: 20000 });
-    const confirmedByHeading = Boolean(confirmation && /thank you|application (received|submitted|complete)|we('| ha)ve received/i.test(String(confirmation.text ?? '')));
-    if (confirmedByHeading) {
-      return { outcome: 'submitted', confirmationRef: null };
-    }
-    return { outcome: 'needs_human', pendingQuestion: { kind: 'post_submit_uncertain', label: 'Submitted, but no confirmation heading was seen; verify manually.', page_url: ctx.applyUrl } };
+    // (6) The click-time gate, the submit marker, the single click, and the confirmation check all live in
+    // ctx.submit (src/apply/unattended-submit.js); a missing submit control parks there (review check).
+    return ctx.submit({ submitSelector: SELECTORS.submit, scopeSelector: SELECTORS.pageProbe, ledger });
   },
 };

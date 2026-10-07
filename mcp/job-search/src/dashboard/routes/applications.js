@@ -17,8 +17,9 @@ import {
   createApplication, approve, getApplication, getApplicationForListing, retry, markAppliedByHand, resume,
   listApplicationEvents, recordApplicationEvent, transitionUnwrapped, APPLICATION_STATES, checkApplicationBlockers,
   withdrawApplication, ASSISTED_ATS_TYPES,
-  cleanupWithdrawnNudgeCalendar, hasAssistedNextClickEver, partialDraftSql, PARTIAL_DRAFT_WARNING,
+  cleanupWithdrawnNudgeCalendar, hasAssistedNextClickEver, partialDraftSql, PARTIAL_DRAFT_WARNING, submitMarkerSql, confirmSubmittedByHuman,
 } from '../../core/applications.js';
+import { collectSubmissions } from '../../core/report.js';
 import { resumeParkedApplication, humanizeParkReason, resumeEligible } from '../../apply/resume-gate.js';
 import { classifyApplyUrl } from '../../apply/ats-detect.js';
 import { resolveLatestApplicationScreenshot } from '../../apply/screenshot.js';
@@ -493,6 +494,14 @@ export function register(router, deps, streamHub) {
   // empty entry from e.g. "docs_ready,") or any entry outside APPLICATION_STATES is a 400 naming the
   // offending value, never silently dropped. Capped at 200 rows (ordered created_at DESC, id DESC for a
   // stable tiebreak); `total` is the FULL matching count so the UI can render "showing 200 of N".
+  // Unattended submit spec item 7: submissions read from the DATABASE (submitted in the last 24 hours, any
+  // path) and every unconfirmed submit in its own list, the same rows the morning report shows
+  // (src/core/report.js collectSubmissions). Its own path so it never collides with /api/applications/:id.
+  router.register('GET', '/api/submissions', async (ctx) => {
+    const out = await deps.withClient((c) => collectSubmissions(c));
+    sendJson(ctx.res, 200, { ok: true, submitted: out.submitted, unconfirmed: out.unconfirmed });
+  });
+
   router.register('GET', '/api/applications', async (ctx) => {
     const raw = typeof ctx.query.state === 'string' && ctx.query.state.trim() ? ctx.query.state : 'docs_ready';
     const parts = raw.split(',').map((s) => s.trim());
@@ -521,7 +530,7 @@ export function register(router, deps, streamHub) {
                 l.title, l.company, l.company_norm, l.title_norm, l.location_norm, l.apply_ats, l.apply_url,
                 l.url, l.url_normalized, l.description, l.status AS listing_status,
                 rd.rel_path AS resume_rel_path, cd.rel_path AS coverletter_rel_path,
-                ${partialDraftSql('a')} AS partial_draft
+                ${partialDraftSql('a')} AS partial_draft, ${submitMarkerSql('a')} AS submit_sent
          FROM ic_job_applications a
          JOIN ic_job_listings l ON l.id = a.listing_id
          LEFT JOIN ic_job_documents rd ON rd.id = a.resume_doc_id
@@ -553,6 +562,8 @@ export function register(router, deps, streamHub) {
           // so a legacy blocked resume-runner park shows Resume and every other blocked park does not.
           resume_eligible: resumeEligible({ state: row.state, pending_question: row.pending_question, error: row.error }),
           partial_draft: Boolean(row.partial_draft),
+          // Unattended submit spec v2 C8: a submit marker exists (any attempt): already submitted (unconfirmed).
+          submit_sent: Boolean(row.submit_sent),
           created_at: row.created_at, updated_at: row.updated_at,
           blocked: blockers.blocked, blocked_reason: blockers.blockedReason, sibling_active: blockers.siblingActive,
         });
@@ -686,6 +697,17 @@ export function register(router, deps, streamHub) {
     const row = await deps.withClient((c) => markAppliedByHand(c, id, { actor: 'dashboard' }));
     streamHub?.notifyChanged('events');
     sendJson(ctx.res, 200, { ok: true, row });
+  }, { allowEmptyBody: true });
+
+  // Unattended submit: "Confirm submitted" for an unconfirmed submit (needs_human, kind submit_unconfirmed
+  // or post_submit_uncertain, submit marker present). Human-only, idempotent; records what already happened
+  // and nothing else: no cap slot, no marker, no runner kick, no click (core/applications.js).
+  router.register('POST', '/api/applications/:id/confirm-submitted', async (ctx) => {
+    const id = Number(ctx.params.id);
+    if (!Number.isInteger(id) || id <= 0) throw new JobSearchError('VALIDATION', 'id must be a positive integer');
+    const out = await deps.withClient((c) => confirmSubmittedByHuman(c, id));
+    streamHub?.notifyChanged('events');
+    sendJson(ctx.res, 200, { ok: true, outcome: out.outcome, row: out.row });
   }, { allowEmptyBody: true });
 
   // Apply pipeline slice 5: the needs_human answer box (plan section 4's "growing the bank"). `save`

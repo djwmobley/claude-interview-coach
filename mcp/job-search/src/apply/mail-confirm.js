@@ -12,6 +12,12 @@
  * already do: classifyAndConnect() with need: {gmailRead: true}, a plain GET against the Gmail REST
  * endpoints, and a total, never-throwing failure classification on any auth problem.
  *
+ * UNCONFIRMED SUBMITS (unattended submit spec item 5, v2 C7): a second pool, needs_human rows parked as
+ * submit_unconfirmed (or the legacy post_submit_uncertain), is matched ONLY on a strict rule (company plus
+ * the full title or a requisition token, and an email dated after the submit marker within 72 hours). One
+ * unambiguous match moves needs_human -> submitted -> confirmed in one boundary; any ambiguity leaves every
+ * row alone and is logged and recorded.
+ *
  * CANDIDATE POOL (amended decision 3): built ONCE per run from `submitted` and `confirmed`
  * applications. A 'received' mail is only ever matched against the `submitted` subset (a 'confirmed'
  * application has nothing left to confirm); a 'rejected'/'closed' mail is matched against BOTH --
@@ -74,7 +80,9 @@
  * commits-when-it-shouldn't failure mode this fixes.
  */
 import { classifyAndConnect } from '../core/google.js';
-import { transitionUnwrapped, getApplication, APPLY_NUDGE_PREFIX } from '../core/applications.js';
+import {
+  transitionUnwrapped, getApplication, APPLY_NUDGE_PREFIX, UNCONFIRMED_SUBMIT_KINDS, SUBMIT_REQUEST_SENT_NOTE, confirmUnconfirmedSubmitUnwrapped,
+} from '../core/applications.js';
 import { completeFollowup } from '../core/followups.js';
 import { recordEvent } from '../core/events.js';
 import { enqueueReview } from '../core/upsert.js';
@@ -163,6 +171,90 @@ async function loadCandidates(client) {
     title: row.title,
     listing_status: row.listing_status,
   }));
+}
+
+/** How long after the submit marker a confirmation email may arrive and still match (spec v2 C7). */
+export const UNCONFIRMED_MATCH_WINDOW_MS = 72 * 60 * 60 * 1000;
+
+/**
+ * Unconfirmed submits (unattended submit spec item 5, v2 C7): needs_human applications parked as
+ * submit_unconfirmed (or the legacy post_submit_uncertain), each with the time of its LATEST submit marker.
+ * A row with no marker at all is left out: without a marker time no email can be dated after it.
+ * @param {import('pg').ClientBase} client
+ * @returns {Promise<Array<{ application_id: number, listing_id: number, apply_url: string|null, company: string|null, company_norm: string|null, title: string|null, marker_at: Date }>>}
+ */
+export async function loadUnconfirmedCandidates(client) {
+  const r = await client.query(
+    `SELECT a.id AS application_id, a.listing_id, a.apply_url, l.company, l.company_norm, l.title,
+            (SELECT max(t) FROM (
+               SELECT created_at AS t FROM ic_job_submit_markers WHERE application_id = a.id
+               UNION ALL
+               SELECT created_at FROM ic_job_application_events WHERE application_id = a.id AND kind = 'progress' AND note = $2
+             ) x) AS marker_at
+       FROM ic_job_applications a
+       JOIN ic_job_listings l ON l.id = a.listing_id
+      WHERE a.state = 'needs_human' AND a.pending_question->>'kind' = ANY($1::text[])`,
+    [UNCONFIRMED_SUBMIT_KINDS, SUBMIT_REQUEST_SENT_NOTE],
+  );
+  return r.rows.filter((row) => row.marker_at).map((row) => ({
+    application_id: Number(row.application_id), listing_id: Number(row.listing_id), apply_url: row.apply_url,
+    company: row.company, company_norm: row.company_norm, title: row.title, marker_at: new Date(row.marker_at),
+  }));
+}
+
+/** Lowercase, every non-alphanumeric run to one space, padded so whole-phrase checks need no regex. @param {unknown} s */
+function phraseNorm(s) {
+  return ` ${String(s ?? '').toLowerCase().replace(/[^a-z0-9]+/g, ' ').trim()} `;
+}
+
+/**
+ * Requisition-like tokens in an apply URL's path and query values: a token carrying at least 5 digits
+ * (e.g. 12345, R0012345, JR-104455), never a bare short number such as a year.
+ * @param {string|null} applyUrl
+ * @returns {string[]}
+ */
+export function requisitionTokens(applyUrl) {
+  if (typeof applyUrl !== 'string') return [];
+  /** @type {URL} */
+  let u;
+  try {
+    u = new URL(applyUrl);
+  } catch {
+    return [];
+  }
+  const raw = [...u.pathname.split('/'), ...[...u.searchParams.values()]];
+  const out = new Set();
+  for (const part of raw) {
+    for (const tok of String(part).split(/[^A-Za-z0-9-]+/)) {
+      const t = tok.replace(/^-+|-+$/g, '');
+      if ((t.match(/\d/g) ?? []).length >= 5 && t.length <= 24) out.add(t.toLowerCase());
+    }
+  }
+  return [...out];
+}
+
+/**
+ * Strict match of a 'received' mail against the unconfirmed-submit pool (spec v2 C7): the company_norm
+ * matches, the URL veto does not fire, the email is dated AFTER the submit marker and within 72 hours of
+ * it, and the mail names the role: the listing's full title as a whole phrase, or a requisition token from
+ * the apply URL as a whole word. Returns every match (0, 1, or many); the caller never guesses.
+ * @param {Awaited<ReturnType<typeof loadUnconfirmedCandidates>>} pool
+ * @param {string|null} companyNorm
+ * @param {string} mailText
+ * @param {Date|null} receivedAt
+ */
+export function matchUnconfirmed(pool, companyNorm, mailText, receivedAt) {
+  if (!companyNorm || !(receivedAt instanceof Date) || Number.isNaN(receivedAt.getTime())) return [];
+  const mailPhrase = phraseNorm(mailText);
+  return pool.filter((c) => {
+    if (c.company_norm !== companyNorm || mailUrlContradictsCandidate(mailText, c.apply_url)) return false;
+    const delta = receivedAt.getTime() - c.marker_at.getTime();
+    if (!(delta > 0 && delta <= UNCONFIRMED_MATCH_WINDOW_MS)) return false;
+    const title = phraseNorm(c.title);
+    const titleHit = title.trim().length > 0 && mailPhrase.includes(title);
+    const reqHit = requisitionTokens(c.apply_url).some((t) => mailPhrase.includes(phraseNorm(t)));
+    return titleHit || reqHit;
+  });
 }
 
 /**
@@ -278,7 +370,7 @@ function errFieldsLite(err) {
  * ic_gmail_processed_messages, or throws (the caller decides whether to record `unknown`/skip on error --
  * see runMailConfirm's per-message try/catch).
  * @param {import('pg').ClientBase} client
- * @param {{ messageId: string, subject: string, text: string, html: string, fromName: string|null }} msg
+ * @param {{ messageId: string, subject: string, text: string, html: string, fromName: string|null, receivedAt?: Date|null }} msg
  * @param {Awaited<ReturnType<typeof loadCandidates>>} candidates
  * @param {(fields: Record<string, unknown>) => void} log
  * @param {(fields: Record<string, unknown>) => void} logError
@@ -286,8 +378,9 @@ function errFieldsLite(err) {
  *   `client` is already inside an outer transaction the caller (bin/confirm.js --dry-run) will itself
  *   roll back -- selects withSavepoint() over withTransaction() for both DB boundaries below so this
  *   function's own commit-equivalent can never touch that outer transaction early.
+ * @param {Awaited<ReturnType<typeof loadUnconfirmedCandidates>>} [unconfirmed] the unconfirmed-submit pool
  */
-async function handleMessage(client, msg, candidates, log, logError, dryRun) {
+async function handleMessage(client, msg, candidates, log, logError, dryRun, unconfirmed = []) {
   const wrap = dryRun ? withSavepoint : withTransaction;
   const classified = classifyApplicationMail({ subject: msg.subject, text: msg.text, html: msg.html, fromName: msg.fromName });
   const mailText = `${msg.subject}\n${msg.text}\n${msg.html}`;
@@ -301,6 +394,32 @@ async function handleMessage(client, msg, candidates, log, logError, dryRun) {
   if (classified.kind === 'received') {
     const pool = candidates.filter((c) => c.state === 'submitted');
     const matches = matchCandidates(pool, classified.company_norm, mailText);
+    // Unattended submit spec item 5, v2 C7: an unconfirmed submit is matched only on the strict rule
+    // (company + title or requisition token + dated after the marker within 72h). Any ambiguity, against
+    // other unconfirmed rows OR an ordinary submitted row of the same company, leaves every row as it is
+    // and is surfaced (log + ledger note); never a guessed confirmation.
+    const uMatches = matchUnconfirmed(unconfirmed, classified.company_norm, mailText, msg.receivedAt ?? null);
+    if (uMatches.length > 0) {
+      if (uMatches.length + matches.length > 1) {
+        const ids = [...uMatches.map((m) => m.application_id), ...matches.map((m) => m.application_id)];
+        log({ evt: 'confirm_unconfirmed_ambiguous', message_id: msg.messageId, application_ids: ids.join(',') });
+        await recordProcessed(client, {
+          messageId: msg.messageId, kind: 'received', companyRaw: classified.company_raw, companyNorm: classified.company_norm, applicationId: null,
+          outcome: 'ambiguous_unconfirmed', note: `${ids.length} candidates (unconfirmed submits and submitted): application ids ${ids.join(',')}`,
+        });
+        return 'ambiguous_unconfirmed';
+      }
+      const target = uMatches[0];
+      return wrap(client, async (c) => {
+        await confirmUnconfirmedSubmitUnwrapped(c, target.application_id, {
+          note: 'unconfirmed submit matched a confirmation email (company, role, and time window)',
+          meta: { message_id: msg.messageId, company_norm: classified.company_norm, matched_phrase: classified.matchedPhrase, received_at: msg.receivedAt ? msg.receivedAt.toISOString() : null },
+        });
+        await completeNudge(c, target.application_id, logError);
+        await recordProcessed(c, { messageId: msg.messageId, kind: 'received', companyRaw: classified.company_raw, companyNorm: classified.company_norm, applicationId: target.application_id, outcome: 'confirmed_unconfirmed' });
+        return 'confirmed_unconfirmed';
+      });
+    }
     if (matches.length === 0) {
       await recordProcessed(client, { messageId: msg.messageId, kind: 'received', companyRaw: classified.company_raw, companyNorm: classified.company_norm, applicationId: null, outcome: 'no_match' });
       return 'no_match';
@@ -412,8 +531,10 @@ export async function runMailConfirm(o) {
   const windowDays = o.windowDays ?? MAILBOX_WINDOW_DAYS;
 
   const candidates = await loadCandidates(o.client);
-  log({ evt: 'confirm_candidates_loaded', count: candidates.length });
-  if (candidates.length === 0) {
+  // Spec item 5 (D5 fix): the pool also includes unconfirmed submits.
+  const unconfirmed = await loadUnconfirmedCandidates(o.client);
+  log({ evt: 'confirm_candidates_loaded', count: candidates.length, unconfirmed: unconfirmed.length });
+  if (candidates.length === 0 && unconfirmed.length === 0) {
     return { ok: true, code: 0, google_auth_state: null, candidates: 0, messages_seen: 0, already_processed: 0, outcomes: {}, reason: 'no_candidates' };
   }
 
@@ -501,8 +622,11 @@ export async function runMailConfirm(o) {
       const parts = { text: null, html: null };
       collectBodyParts(msgJson.payload, parts);
 
+      // Gmail's internalDate (ms since epoch, as a string): the received time the C7 window is checked on.
+      const internal = Number(msgJson.internalDate);
+      const receivedAt = Number.isFinite(internal) && internal > 0 ? new Date(internal) : null;
       try {
-        const outcome = await handleMessage(o.client, { messageId: id, subject, text: parts.text ?? '', html: parts.html ?? '', fromName }, candidates, log, logError, dryRun);
+        const outcome = await handleMessage(o.client, { messageId: id, subject, text: parts.text ?? '', html: parts.html ?? '', fromName, receivedAt }, candidates, log, logError, dryRun, unconfirmed);
         bump(outcome);
       } catch (err) {
         // A single message's handling failing (e.g. a state-machine VALIDATION race) never aborts the

@@ -409,7 +409,35 @@ export function applicationCard(opts) {
     const resumeEl = resumeButtonVisible(application)
       ? resumeControl(application.id, { partialDraft: application.partial_draft === true, onChanged: opts.onChanged })
       : (application.partial_draft === true ? partialDraftWarning() : null);
-    needsHumanPanel = h('div', { className: 'application-card__needs-human' }, [screenshotEl, kindPanel, resumeEl, appliedByHandButton]);
+    // Unattended submit spec v2 C8: once the worker sent the final Submit (any attempt), "I applied by
+    // hand" is refused by the server; the card says what is true instead.
+    const submitSent = application.submit_sent === true || pq.kind === 'submit_unconfirmed' || pq.kind === 'submit_error';
+    // "Confirm submitted": Damian checked the site or his email and the submit went through. Records it
+    // only (no worker, no click, no cap slot); shown for the unconfirmed kinds the server accepts.
+    const confirmable = submitSent && (pq.kind === 'submit_unconfirmed' || pq.kind === 'post_submit_uncertain');
+    const confirmButton = confirmable
+      ? h('button', {
+        className: 'btn btn--small',
+        attrs: { type: 'button' },
+        text: 'Confirm submitted',
+        on: {
+          click: async () => {
+            const outcome = handleOutcome(await postJson(`/api/applications/${application.id}/confirm-submitted`, {}));
+            if (outcome.kind === 'ok') {
+              showToast({ message: 'Recorded as submitted.' });
+              opts.onChanged();
+            }
+          },
+        },
+      })
+      : null;
+    const handEl = submitSent
+      ? h('div', {}, [
+        h('p', { className: 'application-card__note', text: 'Already submitted (unconfirmed). A matching confirmation email moves it to confirmed; if you verified it on the site, confirm it here.' }),
+        confirmButton,
+      ])
+      : appliedByHandButton;
+    needsHumanPanel = h('div', { className: 'application-card__needs-human' }, [screenshotEl, kindPanel, resumeEl, handEl]);
   }
 
   const failedPanel = application.state === 'failed'

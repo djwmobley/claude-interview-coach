@@ -632,23 +632,26 @@ describe('reconcileStale', () => {
     assert.ok(results.some((r) => r.id === id));
     const row = await getApplication(client, id);
     assert.equal(row.state, 'needs_human');
-    assert.equal(row.pending_question.kind, 'post_submit_uncertain');
+    // Unattended submit spec item 4: crash recovery after the marker routes to submit_unconfirmed.
+    assert.equal(row.pending_question.kind, 'submit_unconfirmed');
   });
 
-  test('a submit_request_sent event from an EARLIER attempt never leaks into this attempt\'s stale-reconcile decision', async () => {
-    // Simulate: attempt 1 sent the submit request and then failed; attempt 2 (Retry -> approved ->
-    // submitting again) never got that far before going stale. The OLD submit_request_sent event must not
-    // cause the new stale-submitting row to be treated as "already sent" this time.
+  test('a submit_request_sent event from an EARLIER attempt blocks every re-arm and still counts at stale reconcile (spec v2 C2)', async () => {
+    // Before C2 an earlier attempt's marker was ignored ("this attempt only"), so a Retry could submit a
+    // second time. Now the marker counts from ANY attempt: Retry (failed -> approved) is refused under the
+    // row lock, and a stale row (here forced back to submitting by raw SQL, as a legacy row would be) is
+    // reconciled to submit_unconfirmed, never to a retryable 'failed'.
     const { id } = await seedApplication('approved');
     await transition(client, id, 'submitting', { actor: 'apply' });
     await recordSubmitRequestSent(client, id);
     await transition(client, id, 'failed', { actor: 'apply', error: 'first attempt failed' });
-    await retry(client, id, {});
-    await transition(client, id, 'submitting', { actor: 'apply' });
-    await client.query(`UPDATE ic_job_applications SET updated_at = now() - interval '30 minutes' WHERE id = $1`, [id]);
+    await assert.rejects(() => retry(client, id, {}), (err) => err instanceof Error && /never re-armed/.test(err.message));
+    assert.equal((await getApplication(client, id)).state, 'failed');
+    await client.query(`UPDATE ic_job_applications SET state = 'submitting', updated_at = now() - interval '30 minutes' WHERE id = $1`, [id]);
     await reconcileStale(client, { maxAgeMinutes: 10 });
     const row = await getApplication(client, id);
-    assert.equal(row.state, 'failed', 'the second attempt never sent a submit request, so it must be treated as a plain failure');
+    assert.equal(row.state, 'needs_human');
+    assert.equal(row.pending_question.kind, 'submit_unconfirmed');
   });
 });
 

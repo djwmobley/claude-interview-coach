@@ -1,0 +1,26 @@
+<!doctype html>
+<html><head><meta charset="utf-8"><title>iCIMS form fixture</title></head>
+<body>
+<div class="iCIMS_MainWrapper">
+  <form onsubmit="return false;">
+    <label for="firstName">First name *</label><input id="firstName" name="firstName" required>
+    <label for="lastName">Last name *</label><input id="lastName" name="lastName" required>
+    <label for="email">Email *</label><input id="email" name="email" required>
+    <label for="phone">Phone</label><input id="phone" name="phone">
+    <label for="resume">Resume *</label><input id="resume" type="file" name="resume" required>
+    <button id="icims_submit_button" type="submit">Submit</button>
+  </form>
+</div>
+<script>
+  window.__clicks = 0;
+  document.getElementById('icims_submit_button').addEventListener('click', function () {
+    window.__clicks += 1;
+    setTimeout(function () {
+      document.querySelector('.iCIMS_MainWrapper').textContent = '';
+      var h = document.createElement('h1');
+      h.textContent = 'Your application has been submitted';
+      document.querySelector('.iCIMS_MainWrapper').appendChild(h);
+    }, 50);
+  });
+</script>
+</body></html>

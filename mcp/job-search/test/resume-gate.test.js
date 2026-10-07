@@ -151,11 +151,14 @@ describe('classifyResume(): total classification by pending_question.kind', () =
     /** @type {Record<string, string>} */
     const expected = {
       unrecognized_page: 'approve', captcha: 'approve', assisted_stopped: 'approve', assisted_partial: 'approve', email_verification: 'approve',
+      // Unattended submit: a pre-click gate park resumes (nothing was clicked); a click without a seen
+      // confirmation never does (spec v2 C11).
+      submit_gate: 'approve', submit_unconfirmed: 'submit_unconfirmed', submit_error: 'submit_unconfirmed',
       resume_failed: 'redraft',
       question: 'use_answer', credential: 'use_credential_save', awaiting_submit: 'submit_or_abandon', post_submit_uncertain: 'may_be_submitted',
       blocked: 'blocked_not_resume_failure', abandoned_tab: 'unknown_kind', easy_apply_stopped: 'unknown_kind', zz_never_seen: 'unknown_kind', '': 'unknown_kind',
     };
-    assert.deepEqual([...RESUME_APPROVE_KINDS].sort(), ['assisted_partial', 'assisted_stopped', 'captcha', 'email_verification', 'unrecognized_page']);
+    assert.deepEqual([...RESUME_APPROVE_KINDS].sort(), ['assisted_partial', 'assisted_stopped', 'captcha', 'email_verification', 'submit_gate', 'unrecognized_page']);
     for (const [kind, want] of Object.entries(expected)) {
       const out = classifyResume({ state: 'needs_human', pending_question: { kind, label: 'x' }, resume_doc_id: 1 }, ctxOk);
       const got = out.action === 'refuse' ? out.reason : out.action;

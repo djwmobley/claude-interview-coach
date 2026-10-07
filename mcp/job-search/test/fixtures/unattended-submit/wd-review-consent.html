@@ -1,0 +1,17 @@
+<!doctype html>
+<html><head><meta charset="utf-8"><title>Workday review with consent fixture</title></head>
+<body>
+<div data-automation-id="applyFlowPage">
+  <h2>Review</h2>
+  <div><span>City</span> <span>Houston</span></div>
+  <div data-automation-id="file-upload-item"><span data-automation-id="file-upload-item-name">resume.docx</span></div>
+  <label><input type="checkbox" data-automation-id="agreementCheckbox"> I certify that the information provided is true and complete</label>
+</div>
+<div data-automation-id="pageFooter">
+  <button type="button" data-automation-id="pageFooterNextButton">Submit</button>
+</div>
+<script>
+  window.__clicks = [];
+  for (const b of document.querySelectorAll('button')) b.addEventListener('click', function () { window.__clicks.push(b.getAttribute('data-automation-id')); });
+</script>
+</body></html>
