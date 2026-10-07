@@ -69,13 +69,13 @@ async function insertListing(o) {
  * config-locked model-step support files copied from the real shipped config/ dir, and a non-blank
  * triage-candidate.md.
  */
-function buildConfigDir() {
+function buildConfigDir(/** @type {Record<string, unknown>} */ model = {}) {
   const dir = fs.mkdtempSync(path.join(os.tmpdir(), 'triage-backfill-leftover-config-'));
   for (const name of BASE_CONFIG_FILES) fs.copyFileSync(path.join(CONFIG_DIR, name), path.join(dir, name));
   fs.copyFileSync(path.join(PKG, 'config', 'triage-output-schema.json'), path.join(dir, 'triage-output-schema.json'));
   fs.copyFileSync(path.join(PKG, 'config', 'triage-mcp-empty.json'), path.join(dir, 'triage-mcp-empty.json'));
   fs.writeFileSync(path.join(dir, 'triage-candidate.md'), 'A CTO with 20 years of experience.');
-  fs.writeFileSync(path.join(dir, 'triage.json'), JSON.stringify({ deterministic: { enabled: true, floor: 40, ceiling: 70 }, model: { enabled: true } }));
+  fs.writeFileSync(path.join(dir, 'triage.json'), JSON.stringify({ deterministic: { enabled: true, floor: 40, ceiling: 70 }, model: { enabled: true, ...model } }));
   return dir;
 }
 
@@ -210,5 +210,36 @@ describe('bin/triage-backfill.js: review-band leftover fit-scoring pass (jobs-un
     assert.equal(byId.get(outOfBandId).fit_score, null);
     assert.equal(byId.get(noisyId).fit_score, null);
     assert.equal(byId.get(alreadyScoredId).fit_score, 81, 'unchanged');
+  });
+});
+
+describe('bin/triage-backfill.js: reskip pass (score-everything, --dry-run only, see file header)', () => {
+  test('dry-run reports an automatic skip_low row with a null fit, never a human skip, a noise skip, a sticky skip, or a fitted row', async () => {
+    const skipLow = 'auto-triage: prescore 10 < floor 40';
+    const autoLowId = await insertListing({ status: 'skip', fitScore: null, prescore: 10 });
+    await recordEvent(client, { listingId: autoLowId, kind: 'status', fromStatus: null, toStatus: 'skip', actor: 'auto', note: skipLow });
+    const humanId = await insertListing({ status: 'skip', fitScore: null, prescore: 10 });
+    await recordEvent(client, { listingId: humanId, kind: 'status', fromStatus: null, toStatus: 'skip', actor: 'dashboard' });
+    const noiseId = await insertListing({ status: 'skip', fitScore: null, prescore: 10, noiseClass: 'suspect' });
+    await recordEvent(client, { listingId: noiseId, kind: 'status', fromStatus: null, toStatus: 'skip', actor: 'auto', note: 'auto-triage: noise_class=suspect' });
+    const stickyId = await insertListing({ status: 'skip', fitScore: null, prescore: 10 });
+    await recordEvent(client, { listingId: stickyId, kind: 'status', fromStatus: null, toStatus: 'skip', actor: 'auto', note: 'sticky skip' });
+    const fittedId = await insertListing({ status: 'skip', fitScore: 12, prescore: 10 });
+    await recordEvent(client, { listingId: fittedId, kind: 'status', fromStatus: null, toStatus: 'skip', actor: 'auto', note: skipLow });
+    const noEventId = await insertListing({ status: 'skip', fitScore: null, prescore: 10 });
+
+    const dir = buildConfigDir({ scoreFloor: 0 });
+    const env = { ...process.env, JOBSEARCH_CONFIG_DIR: dir, JOBSEARCH_TRIAGE_CLAUDE_BIN: process.execPath, JOBSEARCH_TRIAGE_CLAUDE_SCRIPT: FAKE_CLAUDE_JS };
+    const r = await runCli(['--profile', PROFILE, '--dry-run'], env);
+    assert.equal(r.code, 0, `expected exit 0, got ${r.code}. stdout=${r.out} stderr=${r.err}`);
+    const line = r.out.split('\n').find((l) => l.includes('reskip pass:') && l.includes('candidate(s)'));
+    assert.ok(line, `no reskip-pass line in stdout: ${r.out}`);
+    const ids = JSON.parse(line.slice(line.indexOf('[')));
+    assert.ok(ids.includes(autoLowId), 'the automatic skip_low row is a candidate');
+    for (const id of [humanId, noiseId, stickyId, fittedId, noEventId]) assert.ok(!ids.includes(id), `row ${id} is never a candidate`);
+    assert.match(r.out, /reskip pass: dry-run, no writes performed\./);
+    const row = await client.query('SELECT status, fit_score FROM ic_job_listings WHERE id = $1', [autoLowId]);
+    assert.equal(row.rows[0].status, 'skip', 'dry-run performs zero writes');
+    assert.equal(row.rows[0].fit_score, null);
   });
 });

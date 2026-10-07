@@ -402,6 +402,58 @@ export async function loadBacklogIds(client, runId, limit) {
 }
 
 /**
+ * The exact status-event note classifyForTriage() writes for skip_low (unchanged since PR #16). Anchored
+ * on both ends so a human note that merely contains the phrase never matches.
+ */
+export const AUTO_SKIP_LOW_NOTE_RE = '^auto-triage: prescore [0-9]+ < floor [0-9]+$';
+
+/**
+ * Reskip sweep candidates (score-everything, 2026-10-07): rows an EARLIER deterministic pass auto-skipped
+ * as skip_low that the CURRENT config would send to the model as model_low, and that still have no fit.
+ * A row qualifies only when ALL hold:
+ *   - status 'skip' and fit_score NULL; a live listing (listing kind, not a duplicate, not expired, not
+ *     stale); noise_class ok/ok_manual; no open review item; under the model-failure cap;
+ *   - prescore in [cfg.model.scoreFloor, cfg.deterministic.floor) under today's config (no scoreFloor set
+ *     means no model_low band, so nothing is re-sent);
+ *   - its LATEST status event (ic_job_events kind 'status', newest at, then id) is actor 'auto',
+ *     to_status 'skip', with exactly the skip_low note. Any later human status change, a sticky skip
+ *     ('sticky skip'), a skip_noise note, a model skip (which also carries a fit), or no status event at
+ *     all excludes the row: when the event trail cannot prove the skip was an automatic skip_low, the row
+ *     is left alone.
+ * Newest first_seen first, at most `limit`. `runId` excludes rows this run touched (null: none excluded).
+ * @param {import('pg').ClientBase} client
+ * @param {number|null} runId
+ * @param {number} limit
+ * @param {{ deterministic: { floor: number }, model?: { scoreFloor?: number } }} cfg
+ * @returns {Promise<number[]>}
+ */
+export async function loadAutoSkipLowIds(client, runId, limit, cfg) {
+  const scoreFloor = cfg.model?.scoreFloor;
+  if (!(limit > 0) || typeof scoreFloor !== 'number') return [];
+  const r = await client.query(
+    `SELECT l.id FROM ic_job_listings l
+      WHERE coalesce(l.record_kind,'listing') = 'listing' AND l.duplicate_of IS NULL AND l.expired_at IS NULL
+        AND coalesce(l.stale, false) = false AND l.status = 'skip' AND l.fit_score IS NULL
+        AND l.noise_class IN ('ok', 'ok_manual') AND l.prescore IS NOT NULL AND l.prescore >= $3 AND l.prescore < $4
+        AND l.triage_model_failures < $5
+        AND NOT EXISTS (SELECT 1 FROM ic_job_review_queue q WHERE q.candidate_id = l.id AND q.resolved_at IS NULL)
+        AND ($1::int IS NULL OR NOT EXISTS (SELECT 1 FROM ic_scan_run_items i WHERE i.listing_id = l.id AND i.run_id = $1))
+        AND EXISTS (
+          SELECT 1 FROM (
+            SELECT e.actor, e.to_status, e.note FROM ic_job_events e
+             WHERE e.listing_id = l.id AND e.kind = 'status'
+             ORDER BY e.at DESC, e.id DESC LIMIT 1
+          ) last
+          WHERE last.actor = 'auto' AND last.to_status = 'skip' AND last.note ~ $6
+        )
+      ORDER BY l.first_seen DESC NULLS LAST, l.id DESC
+      LIMIT $2`,
+    [runId, limit, scoreFloor, cfg.deterministic.floor, BACKLOG_MAX_MODEL_FAILURES, AUTO_SKIP_LOW_NOTE_RE],
+  );
+  return r.rows.map((row) => Number(row.id));
+}
+
+/**
  * Rescore candidates (unblock-auto-apply A2): a model fit computed without a description
  * (fit_basis 'no_description') whose listing now HAS one (the detail fit sweep fetched it). Live rows in the
  * pipeline group only, highest fit first, at most `limit`.
@@ -674,10 +726,13 @@ export function validateModelOutput(outcome, requestedIds, cfg) {
  * (a failed batch, an omitted id, a vanished row) gets triage_model_failures + 1 (A9), which the backlog
  * sweep reads.
  */
-export async function runModelTriage(client, runId, ids, cfg, configDir, candidateSummary, profile, deps = {}, autoNewIds = [], reviewBandIds = [], rescoreIds = []) {
+export async function runModelTriage(client, runId, ids, cfg, configDir, candidateSummary, profile, deps = {}, autoNewIds = [], reviewBandIds = [], rescoreIds = [], reskipIds = []) {
   const autoNewSet = new Set(autoNewIds);
   const reviewBandSet = new Set(reviewBandIds);
   const rescoreSet = new Set(rescoreIds);
+  // Score-everything reskip ids (loadAutoSkipLowIds): full status decision like model_low, applied only
+  // while the row is still status 'skip' with a NULL fit (a human re-mark in between wins).
+  const reskipSet = new Set(reskipIds);
   const stats = {
     enabled: false, reason: /** @type {string|null} */ (null),
     batches_sent: 0, batches_ok: 0, batches_failed: 0, batches_zero_scored: 0,
@@ -685,6 +740,7 @@ export async function runModelTriage(client, runId, ids, cfg, configDir, candida
     fit_only_scored: 0, fit_only_already_scored: 0, fit_only_unscored: 0,
     review_fit_scored: 0, review_fit_already_scored: 0, review_fit_unscored: 0,
     rescore_scored: 0, rescore_skipped: 0, rescore_unscored: 0,
+    reskip_scored: 0, reskip_skipped: 0, reskip_unscored: 0,
     last_failure_reason: /** @type {string|null} */ (null),
   };
   if (!cfg.model.enabled) {
@@ -739,6 +795,7 @@ export async function runModelTriage(client, runId, ids, cfg, configDir, candida
     const autoNewHandled = new Set(); // auto_new ids resolved this batch, in any of the three fit-only buckets
     const reviewBandHandled = new Set(); // review_band ids resolved this batch, in any of the three fit-only buckets
     const rescoreHandled = new Set(); // rescore ids resolved this batch (scored or skipped)
+    const reskipHandled = new Set(); // reskip ids resolved this batch (scored or skipped)
     if (!validated.ok) {
       stats.batches_failed++;
       stats.last_failure_reason = validated.reason;
@@ -748,7 +805,21 @@ export async function runModelTriage(client, runId, ids, cfg, configDir, candida
       if (validated.entries.length) {
         await withTransaction(client, async (c) => {
           for (const entry of validated.entries) {
-            if (rescoreSet.has(entry.id)) {
+            if (reskipSet.has(entry.id)) {
+              const guard = await c.query('SELECT status, fit_score FROM ic_job_listings WHERE id = $1 FOR UPDATE', [entry.id]);
+              if (guard.rowCount === 0) {
+                // Row vanished mid-run; counted unscored below.
+              } else if (guard.rows[0].status !== 'skip' || guard.rows[0].fit_score !== null) {
+                stats.reskip_skipped++;
+                reskipHandled.add(entry.id);
+              } else {
+                await applyMark(c, { id: entry.id, status: entry.status, fit_score: entry.fit_score, statusNote: entry.reason }, { now: new Date(), explicit: true, actor: 'auto', runId });
+                await setBasis(c, entry.id);
+                if (entry.downgraded) stats.downgraded++;
+                stats.reskip_scored++;
+                reskipHandled.add(entry.id);
+              }
+            } else if (rescoreSet.has(entry.id)) {
               // A2 rescore: replaces a no-description fit, and only while it is still one; status untouched.
               const guard = await c.query('SELECT fit_basis FROM ic_job_listings WHERE id = $1 FOR UPDATE', [entry.id]);
               if (guard.rowCount === 0) {
@@ -813,7 +884,9 @@ export async function runModelTriage(client, runId, ids, cfg, configDir, candida
     /** @type {number[]} */
     const failedIds = [];
     for (const id of batchIds) {
-      if (rescoreSet.has(id)) {
+      if (reskipSet.has(id)) {
+        if (!reskipHandled.has(id)) { stats.reskip_unscored++; failedIds.push(id); }
+      } else if (rescoreSet.has(id)) {
         if (!rescoreHandled.has(id)) { stats.rescore_unscored++; failedIds.push(id); }
       } else if (autoNewSet.has(id)) {
         if (!autoNewHandled.has(id)) { stats.fit_only_unscored++; failedIds.push(id); }
@@ -887,19 +960,29 @@ export async function runTriage(client, runId, config, profile, deps = {}) {
     backlogIds = swept.filter((id) => keep.has(id));
     backlogAutoNew = r.autoNewIds;
   }
+  // Score-everything reskip sweep: earlier automatic skip_low rows the current scoreFloor now puts in
+  // model_low, still unscored. Same gate and budget as the backlog sweep; queued right after it.
+  /** @type {number[]} */
+  let reskipIds = [];
+  if (cfg.model.enabled && cfg.deterministic.enabled && backlogPerRun > 0) {
+    reskipIds = (await loadAutoSkipLowIds(client, runId, backlogPerRun, cfg)).filter((id) => !taken.has(id));
+    for (const id of reskipIds) taken.add(id);
+    if (backlog) backlog.reskip = reskipIds.length;
+  }
 
-  const combined = [...band, ...low, ...autoNewIds, ...rescoreIds, ...backlogIds, ...reviewBandIds];
+  const combined = [...band, ...low, ...autoNewIds, ...rescoreIds, ...backlogIds, ...reskipIds, ...reviewBandIds];
   const ids = combined.slice(0, cfg.model.maxListingsPerRun);
   const capped = Math.max(0, combined.length - ids.length);
   const idsSet = new Set(ids);
   const autoNewInBatch = [...autoNewIds, ...backlogAutoNew].filter((id) => idsSet.has(id));
   const reviewBandInBatch = reviewBandIds.filter((id) => idsSet.has(id));
   const rescoreInBatch = rescoreIds.filter((id) => idsSet.has(id));
+  const reskipInBatch = reskipIds.filter((id) => idsSet.has(id));
   // Read once per triage invocation, reused verbatim for every batch this run sends (spec section 3,
   // finding 17): never re-read mid-run, so a file edited partway through a long run cannot produce a
   // self-inconsistent run.
   const candidateSummary = loadTriageCandidateSummary(config.configDir);
-  const model = await runModelTriage(client, runId, ids, cfg, config.configDir, candidateSummary, profile, deps, autoNewInBatch, reviewBandInBatch, rescoreInBatch);
+  const model = await runModelTriage(client, runId, ids, cfg, config.configDir, candidateSummary, profile, deps, autoNewInBatch, reviewBandInBatch, rescoreInBatch, reskipInBatch);
   model.capped += capped;
 
   // Coverage (Item 4): eligible = every id the model step wanted this run, sent = what actually went out
@@ -911,16 +994,17 @@ export async function runTriage(client, runId, config, profile, deps = {}) {
   for (const id of autoNewIds) kindOf.set(id, 'auto_new');
   for (const id of rescoreIds) kindOf.set(id, 'rescore');
   for (const id of backlogIds) kindOf.set(id, 'backlog');
+  for (const id of reskipIds) kindOf.set(id, 'reskip');
   for (const id of reviewBandIds) kindOf.set(id, 'review');
   /** @type {Record<string, number>} */
-  const byKind = { band: 0, low: 0, auto_new: 0, rescore: 0, backlog: 0, review: 0 };
+  const byKind = { band: 0, low: 0, auto_new: 0, rescore: 0, backlog: 0, reskip: 0, review: 0 };
   for (const id of sentIds) byKind[kindOf.get(id)] += 1;
   const coverage = {
     eligible: combined.length,
     sent: sentIds.length,
-    scored: model.scored + model.fit_only_scored + model.review_fit_scored + model.rescore_scored,
+    scored: model.scored + model.fit_only_scored + model.review_fit_scored + model.rescore_scored + model.reskip_scored,
     capped: model.capped,
-    failed: model.unscored + model.fit_only_unscored + model.review_fit_unscored + model.rescore_unscored,
+    failed: model.unscored + model.fit_only_unscored + model.review_fit_unscored + model.rescore_unscored + model.reskip_unscored,
     by_kind: byKind,
   };
   return { configured: Boolean(cfg.present), deterministic, ...(backlog ? { backlog } : {}), model, coverage };
