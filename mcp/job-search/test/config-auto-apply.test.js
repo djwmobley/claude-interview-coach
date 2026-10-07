@@ -8,7 +8,7 @@
  */
 import { test, describe } from 'node:test';
 import assert from 'node:assert/strict';
-import { autoApplySchema } from '../src/core/config.js';
+import { autoApplySchema, triageSchema } from '../src/core/config.js';
 import fs from 'node:fs';
 import path from 'node:path';
 import { fileURLToPath } from 'node:url';
@@ -42,14 +42,25 @@ describe('shipped config/auto-apply.json fit floors (operator decision 2026-10-0
 });
 
 describe('shipped config/triage.json (unblock Item 4)', () => {
-  test('scoreFloor 20, backlogPerRun 60, maxListingsPerRun 200, maxBatchesPerRun 15', () => {
+  test('score everything: scoreFloor 0, backlogPerRun 1500, maxListingsPerRun 1500, maxBatchesPerRun 100', () => {
     const p = path.join(path.dirname(fileURLToPath(import.meta.url)), '..', 'config', 'triage.json');
     const t = JSON.parse(fs.readFileSync(p, 'utf8'));
-    assert.equal(t.model.scoreFloor, 20);
-    assert.equal(t.model.backlogPerRun, 60);
-    assert.equal(t.model.maxListingsPerRun, 200);
-    assert.equal(t.model.maxBatchesPerRun, 15);
+    assert.equal(t.model.scoreFloor, 0);
+    assert.equal(t.model.backlogPerRun, 1500);
+    assert.equal(t.model.maxListingsPerRun, 1500);
+    assert.equal(t.model.maxBatchesPerRun, 100);
     assert.equal(t.deterministic.floor, 40, 'the deterministic floor (sticky-skip, scope) is unchanged');
+  });
+  test('the shipped triage.json passes triageSchema (no schema max blocks the shipped values)', () => {
+    const p = path.join(path.dirname(fileURLToPath(import.meta.url)), '..', 'config', 'triage.json');
+    const r = triageSchema.safeParse(JSON.parse(fs.readFileSync(p, 'utf8')));
+    assert.equal(r.success, true, r.success ? '' : JSON.stringify(r.error.issues));
+    const m = r.success ? r.data.model : null;
+    assert.ok(m, 'parsed model block');
+    // The batch cap must be able to carry the listing cap, or rows past maxBatchesPerRun * batchSize
+    // are silently left unscored every run.
+    assert.ok(m.maxBatchesPerRun * m.batchSize >= m.maxListingsPerRun, `batches ${m.maxBatchesPerRun} x size ${m.batchSize} < listings ${m.maxListingsPerRun}`);
+    assert.ok(m.maxListingsPerRun >= m.backlogPerRun, 'the listing cap can carry the whole backlog sweep');
   });
 });
 

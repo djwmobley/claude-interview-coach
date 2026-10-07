@@ -653,9 +653,11 @@ export const triageSchema = z.object({
     // deterministic.floor), sent to the model with a full status decision instead of auto-skipped. Absent
     // means deterministic.floor (no model_low band at all, unchanged behavior). Sticky-skip and the scope
     // gate keep deterministic.floor regardless. backlogPerRun bounds the backlog sweep (untriaged rows from
-    // earlier runs, newest first); 0 turns it off.
+    // earlier runs, newest first); 0 turns it off. Score-everything (2026-10-07): scoreFloor 0 sends every
+    // noise-ok row to the model (prescore is clamped to [0, 100], so skip_low cannot fire); the backlog
+    // max is 5000 so one run can drain an accumulated unscored backlog, while staying bounded.
     scoreFloor: z.number().int().min(0).max(100).optional(),
-    backlogPerRun: z.number().int().min(0).max(500).default(0),
+    backlogPerRun: z.number().int().min(0).max(5000).default(0),
   }).default({}),
 });
 

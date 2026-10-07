@@ -1245,6 +1245,26 @@ describe('classifyForTriage: model.scoreFloor opens a model_low band below the d
     const s = triageSchema.safeParse({ model: { scoreFloor: 20, backlogPerRun: 60 } });
     assert.equal(s.success && s.data.model.scoreFloor, 20);
   });
+  test('scoreFloor 0: skip_low never fires for a noise-ok row with any clamped prescore in [0, floor)', () => {
+    const zero = { deterministic: { floor: 40, ceiling: 70 }, model: { scoreFloor: 0 } };
+    for (let p = 0; p < 40; p++) {
+      const r = at(p, zero);
+      assert.equal(r.branch, 'model_low', `prescore ${p}`);
+      assert.equal(r.action, 'none', `prescore ${p} is never auto-marked`);
+    }
+    assert.equal(at(40, zero).branch, 'model_band');
+    assert.equal(at(70, zero).branch, 'auto_new');
+    // Noise-class rows stay deterministic skip_noise: scoring them is not the model's job.
+    const noisy = classifyForTriage({ status: null, noise_class: 'noise', prescore: 0, duplicate_of: null, expired_at: null }, zero);
+    assert.equal(noisy.branch, 'skip_noise');
+  });
+  test('triageSchema: scoreFloor 0 is accepted, and backlogPerRun 1500 is within the schema max', () => {
+    const r = triageSchema.safeParse({ model: { scoreFloor: 0, backlogPerRun: 1500, maxListingsPerRun: 1500, maxBatchesPerRun: 100 } });
+    assert.equal(r.success, true, r.success ? '' : JSON.stringify(r.error.issues));
+    assert.equal(r.success && r.data.model.scoreFloor, 0);
+    assert.equal(r.success && r.data.model.backlogPerRun, 1500);
+    assert.equal(triageSchema.safeParse({ model: { backlogPerRun: 5001 } }).success, false, 'the backlog sweep stays bounded');
+  });
 });
 
 describe('runTriage: model_low, backlog sweep, rescore, coverage (Item 4, A2, A9)', () => {
