@@ -41,6 +41,9 @@ const COMP_PATTERNS = [
   /\$\s*\d{3},\d{3}\b/,
 ];
 
+/** Compensation context words; a COMP_PATTERNS hit only counts on a line that contains one. */
+const LINE_COMP_CONTEXT_RE = /compens|salary|\bpay\b|\bbase\b|\bOTE\b|\bcomp\b|expected|desired|target|bonus|equity|\brate\b|wage|remunerat/i;
+
 /** @param {string} s */
 const squash = (s) => s.toLowerCase().replace(/[^a-z0-9]+/g, ' ').trim();
 
@@ -129,7 +132,9 @@ export function scanResume(resumeMarkdown, fields) {
   for (const z of fields.zips) {
     if (new RegExp(`(?<![\\d])${z}(?:-\\d{4})?(?![\\d])`).test(text)) return { ok: false, reason: LEAK_REASON, detail: 'zip' };
   }
-  if (COMP_PATTERNS.some((re) => re.test(text))) return { ok: false, reason: LEAK_REASON, detail: 'compensation_pattern' };
+  // A bare dollar amount is only compensation when its own line also carries a compensation context word;
+  // achievement bullets ("Cut technology spend by $450K") legitimately hold such amounts.
+  if (text.split(/\r?\n/).some((line) => LINE_COMP_CONTEXT_RE.test(line) && COMP_PATTERNS.some((re) => re.test(line)))) return { ok: false, reason: LEAK_REASON, detail: 'compensation_pattern' };
   if (fields.amounts.size) {
     for (const a of amountsIn(text)) if (fields.amounts.has(a)) return { ok: false, reason: LEAK_REASON, detail: 'compensation_value' };
   }

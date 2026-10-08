@@ -10,9 +10,16 @@ import fs from 'node:fs';
 import os from 'node:os';
 import path from 'node:path';
 import { fileURLToPath } from 'node:url';
-import { waitForAutoApply, readyResumesSummaryFile } from '../bin/ready-resumes.js';
+import { waitForAutoApply, readyResumesSummaryFile, parseListingArgs } from '../bin/ready-resumes.js';
 
 const HERE = path.dirname(fileURLToPath(import.meta.url));
+
+describe('parseListingArgs', () => {
+  test('--listing <id>, --listing=<id>, repeatable; junk and duplicates ignored', () => {
+    assert.deepEqual(parseListingArgs(['--listing', '12', '--listing=34', '--listing', 'x', '--listing', '12', '--listing', '-5']), [12, 34]);
+    assert.deepEqual(parseListingArgs([]), []);
+  });
+});
 
 describe('waitForAutoApply', () => {
   test('no marker: not_running immediately', async () => {

@@ -1480,6 +1480,37 @@ describe('runTriage: model_low, backlog sweep, rescore, coverage (Item 4, A2, A9
     assert.ok(!(await loadAutoSkipLowIds(client, null, 5000, { deterministic: { floor: 40 }, model: { scoreFloor: 0 } })).includes(autoLow));
   });
 
+  test('reskip sweep: a stale auto skip_low row is selected and scored; duplicate and expired rows are not', async () => {
+    await cleanup();
+    const oldRun = await insertRun();
+    const staleLow = await insertListing({ prescore: 10 });
+    const dupLow = await insertListing({ prescore: 10 });
+    const expiredLow = await insertListing({ prescore: 10 });
+    const staleBacklog = await insertListing({ prescore: 55 });
+    const all = [staleLow, dupLow, expiredLow, staleBacklog];
+    for (const id of all) await recordRunItem(oldRun, id, 'greenhouse');
+    await client.query(`UPDATE ic_job_listings SET first_seen = now() + interval '40 days' WHERE id = ANY($1::int[])`, [all]);
+    await runTriage(client, oldRun, { ...testConfig(), configDir, triage: triageCfg({ backlogPerRun: 0 }) }, { keywords: [] }, { execFile: async () => { throw Object.assign(new Error('x'), { code: 1 }); } });
+    assert.equal((await listing(staleLow)).status, 'skip', 'precondition: automatic skip_low');
+    await client.query('UPDATE ic_job_listings SET triage_model_failures = 0 WHERE id = $1', [staleBacklog]);
+    await client.query('UPDATE ic_job_listings SET stale = true WHERE id = ANY($1::int[])', [all]);
+    await client.query('UPDATE ic_job_listings SET duplicate_of = $2 WHERE id = $1', [dupLow, staleLow]);
+    await client.query('UPDATE ic_job_listings SET expired_at = now() WHERE id = $1', [expiredLow]);
+    const picked = await loadAutoSkipLowIds(client, null, 5000, { deterministic: { floor: 40 }, model: { scoreFloor: 0 } });
+    assert.deepEqual(picked.filter((id) => all.includes(id)), [staleLow]);
+
+    const seen = /** @type {number[]} */ ([]);
+    await runTriage(client, await insertRun(), { ...testConfig(), configDir, triage: triageCfg({ scoreFloor: 0, backlogPerRun: 5000 }) }, { keywords: [] },
+      { execFile: execFor(seen, (id) => ({ id, fit_score: 62, status: 'maybe', reason: 'worth a look' })) });
+    assert.ok(seen.includes(staleLow), 'stale reskip row is sent to the model');
+    assert.ok(seen.includes(staleBacklog), 'stale untriaged backlog row is swept');
+    assert.ok(!seen.includes(dupLow) && !seen.includes(expiredLow));
+    assert.equal((await listing(staleLow)).fit_score, 62);
+    assert.equal((await listing(staleLow)).status, 'maybe');
+    assert.equal((await listing(dupLow)).fit_score, null);
+    assert.equal((await listing(expiredLow)).fit_score, null);
+  });
+
   test('backlogMaxAgeDays 14: a row first seen 13 days ago is swept, 15 days ago is not (backlog and reskip)', async () => {
     await cleanup();
     const oldRun = await insertRun();

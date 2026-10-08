@@ -40,6 +40,17 @@ describe('scanResume', () => {
       assert.equal(/** @type {any} */ (r).reason, 'private_data_leak');
     }
   });
+  test('achievement bullets with dollar amounts pass; compensation lines with them fail', () => {
+    for (const t of ['Cut technology spend by $450K', '$250,000 cost savings', 'Saved $1,200,000 in cloud licensing', 'Reduced licensing cost by $75K a year']) {
+      assert.deepEqual(scanResume(`- ${t}\n`, fields), { ok: true }, t);
+    }
+    for (const t of ['Expected salary: $225K', 'Base compensation $225,000', 'Target OTE $300,000', 'Desired rate $185K']) {
+      assert.equal(scanResume(`Cut spend by $450K\n${t}\n`, fields).ok, false, t);
+    }
+  });
+  test('a profile compensation value fails even without a context word', () => {
+    for (const t of ['777k', '$777K', '777,000', '777000']) assert.equal(scanResume(`- Cut spend to ${t}\n`, fields).ok, false, t);
+  });
   test('the detail names a kind, never a value', () => {
     const r = /** @type {any} */ (scanResume(`${FAKE.street}`, fields));
     assert.ok(!JSON.stringify(r).includes(FAKE.street));
