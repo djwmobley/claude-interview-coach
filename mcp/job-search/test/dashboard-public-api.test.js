@@ -79,12 +79,25 @@ describe('classify(): section 4 table, one case per named branch', () => {
   test('there is no 401 branch anywhere: an unrecognized status/code maps to the same generic branch as INTERNAL, never throws', () => {
     assert.doesNotThrow(() => classify(401, { ok: false, code: 'UNAUTHORIZED', message: 'x' }));
     const r401 = classify(401, { ok: false, code: 'UNAUTHORIZED', message: 'x' });
-    assert.equal(r401.kind, 'internal');
-    assert.equal(r401.unknownStatus, 401);
+    assert.equal(r401.kind, 'message', 'an unknown 4xx shows the server text, never Internal error');
+    assert.equal(r401.message, 'x');
 
     assert.doesNotThrow(() => classify(418, {}));
     const rTeapot = classify(418, {});
-    assert.equal(rTeapot.kind, 'internal');
+    assert.equal(rTeapot.kind, 'message');
+    assert.ok(rTeapot.message.length > 0);
+    assert.equal(classify(502, {}).kind, 'internal');
+    assert.equal(classify(302, {}).kind, 'internal');
+  });
+
+  test('409 LINKEDIN_NOT_EASY_APPLY and unknown 409 codes map to a message, not internal', () => {
+    const r = /** @type {any} */ (classify(409, { ok: false, code: 'LINKEDIN_NOT_EASY_APPLY', message: 'server text' }));
+    assert.equal(r.kind, 'message');
+    assert.match(r.message, /company's site/);
+    assert.match(r.message, /Open posting/);
+    const u = /** @type {any} */ (classify(409, { ok: false, code: 'SOMETHING_NEW', message: 'Some refusal' }));
+    assert.equal(u.kind, 'message');
+    assert.equal(u.message, 'Some refusal');
   });
 });
 

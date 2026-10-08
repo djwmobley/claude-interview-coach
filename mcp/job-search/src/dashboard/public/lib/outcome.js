@@ -50,6 +50,9 @@ export function handleOutcome(outcome, opts = {}) {
     case 'payload_too_large':
       showToast({ message: 'Too much text. Shorten it and try again.', tone: 'error' });
       break;
+    case 'message':
+      showToast({ message: String(outcome.message), tone: 'error', code: outcome.code ?? undefined });
+      break;
     case 'internal':
       showToast({ message: `Internal error.${outcome.requestId ? ` Reference: ${outcome.requestId}` : ''}`, tone: 'error', code: outcome.code ?? 'INTERNAL' });
       break;

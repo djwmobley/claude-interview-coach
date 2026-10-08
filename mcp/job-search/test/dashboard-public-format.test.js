@@ -2,7 +2,7 @@
 /** Pure formatting function tests (pr3-spec-decisions.md section 12 item 2). No DOM required. */
 import { test, describe } from 'node:test';
 import assert from 'node:assert/strict';
-import { relativeTime, ageDays, agingBucket, scoreBucket, fitBucket, fitDisplayState, applyButtonState, STALE_ACTIONABLE_MS, DETAIL_MIN_CHARS, shortDate, shortDateTime, salaryRange, formatMoney, pluralize, truncate, sourceLabel, formatPercent, normalizeAgendaTime, agendaTimeLabel, approvalRowFindingsState, approvalRowApproveState, withdrawButtonVisible, resumeButtonVisible, RESUME_BUTTON_KINDS, PARTIAL_DRAFT_CARD_WARNING, ledgerLineText, pendingChoiceOptions } from '../src/dashboard/public/lib/format.js';
+import { relativeTime, ageDays, agingBucket, scoreBucket, fitBucket, fitDisplayState, applyButtonState, STALE_ACTIONABLE_MS, DETAIL_MIN_CHARS, shortDate, shortDateTime, salaryRange, formatMoney, pluralize, truncate, sourceLabel, formatPercent, normalizeAgendaTime, agendaTimeLabel, approvalRowFindingsState, approvalRowApproveState, withdrawButtonVisible, resumeButtonVisible, RESUME_BUTTON_KINDS, PARTIAL_DRAFT_CARD_WARNING, ledgerLineText, pendingChoiceOptions, displayPendingQuestion, postingUrl, NAMELESS_PARK_LABEL, applyControlsState, manualPostingUrl } from '../src/dashboard/public/lib/format.js';
 import { RESUME_APPROVE_KINDS, RESUME_REDRAFT_KINDS } from '../src/apply/resume-gate.js';
 import { PARTIAL_DRAFT_WARNING } from '../src/core/applications.js';
 import { STALE_ACTIONABLE_MS as SERVER_STALE_ACTIONABLE_MS } from '../src/dashboard/routes/applications.js';
@@ -589,5 +589,44 @@ describe('answer-fallback F3/F6 card helpers', () => {
     assert.equal(pendingChoiceOptions({ options: ['A'], field_kind: 'text' }), null);
     assert.equal(pendingChoiceOptions({ options: [] }), null);
     assert.equal(pendingChoiceOptions({ label: 'x' }), null);
+  });
+});
+
+describe('parked-question visibility', () => {
+  test('displayPendingQuestion: legacy nameless question label shows as the stopped kind, others untouched', () => {
+    const legacy = { kind: 'question', label: 'Easy Apply needs an answer (model_parked).', page_url: 'https://www.linkedin.com/jobs/view/1' };
+    const out = displayPendingQuestion(legacy);
+    assert.equal(out.kind, 'easy_apply_stopped');
+    assert.equal(out.label, NAMELESS_PARK_LABEL);
+    assert.equal(out.page_url, legacy.page_url);
+    assert.equal(legacy.kind, 'question', 'input not mutated');
+    const real = { kind: 'question', label: 'Do you have a clearance?' };
+    assert.equal(displayPendingQuestion(real), real);
+    const other = { kind: 'easy_apply_stopped', label: 'Easy Apply needs an answer (x).' };
+    assert.equal(displayPendingQuestion(other), other);
+    assert.equal(displayPendingQuestion(null), null);
+  });
+  test('postingUrl: http(s) only, url_normalized preferred, unsafe -> null', () => {
+    assert.equal(postingUrl({ url: 'https://a.example/j', url_normalized: 'https://b.example/j' }), 'https://b.example/j');
+    assert.equal(postingUrl({ url: 'https://a.example/j', url_normalized: 'javascript:alert(1)' }), 'https://a.example/j');
+    assert.equal(postingUrl({ url: 'javascript:alert(1)' }), null);
+    assert.equal(postingUrl({ url: 'data:text/html,x' }), null);
+    assert.equal(postingUrl({}), null);
+    assert.equal(postingUrl(null), null);
+  });
+});
+
+describe('applyControlsState / manualPostingUrl (total)', () => {
+  test('easy_apply, unknown, null, unrecognized -> create; external/no_control/closed or locked -> manual', () => {
+    for (const b of ['easy_apply', 'unknown', null, undefined, 'weird_new_branch']) assert.equal(applyControlsState({ apply_page_branch: b }, false), 'create');
+    for (const b of ['external', 'no_control', 'closed']) assert.equal(applyControlsState({ apply_page_branch: b }, false), 'manual');
+    assert.equal(applyControlsState({ apply_page_branch: 'easy_apply' }, true), 'manual');
+    assert.equal(applyControlsState(null, false), 'create');
+    assert.equal(applyControlsState({}), 'create');
+  });
+  test('manualPostingUrl prefers a safe manual_apply_url, falls back to the posting, never an unsafe scheme', () => {
+    assert.equal(manualPostingUrl({ manual_apply_url: 'https://co.example/apply', url: 'https://l.example/1' }), 'https://co.example/apply');
+    assert.equal(manualPostingUrl({ manual_apply_url: 'javascript:alert(1)', url: 'https://l.example/1' }), 'https://l.example/1');
+    assert.equal(manualPostingUrl({ manual_apply_url: null, url: 'ftp://x' }), null);
   });
 });

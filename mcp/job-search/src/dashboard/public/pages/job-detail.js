@@ -11,6 +11,7 @@ import { stageButtons, DIGIT_STAGE_ORDER } from '../components/stage-buttons.js'
 import { timeline } from '../components/timeline.js';
 import { documentChip, chipClassName, atsChip, atsConfidenceChip } from '../components/chips.js';
 import { applicationCard } from '../components/application-card.js';
+import { postingLink } from '../components/posting-link.js';
 import { skeleton, emptyState } from '../components/empty-state.js';
 import { salaryRange, shortDate } from '../lib/format.js';
 import { on, off } from '../lib/bus.js';
@@ -184,7 +185,7 @@ export async function render(container, params, app) {
     // application row (or null) the same way it already nests documents/followups/prescore_breakdown.
     const applicationPanel = applicationCard({
       listing, application: outcome.body.application ?? null, ats: outcome.body.ats, documents: docs, onChanged: load,
-      applyExclusion: outcome.body.apply_exclusion ?? null,
+      applyExclusion: outcome.body.apply_exclusion ?? null, manualLocked: outcome.body.manual_locked === true,
     });
 
     const prescoreBreakdownCard = prescoreBreakdownPanel(outcome.body.prescore_breakdown, listing);
@@ -207,6 +208,7 @@ export async function render(container, params, app) {
         atsBadge,
       ]),
       h('p', { className: 'job-detail-sub', text: `${listing.company ?? 'unknown company'} - ${listing.location ?? 'not listed'} - ${salaryRange(listing.salary_min, listing.salary_max)}` }),
+      postingLink(listing),
       h('div', { className: 'job-detail-grid' }, [
         h('div', { className: 'job-detail-main' }, [
           stageButtons({ status: listing.status, disabled, onSelect: setStage }),

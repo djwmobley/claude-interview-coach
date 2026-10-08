@@ -23,6 +23,7 @@ import { resumeEligible } from '../../apply/resume-gate.js';
 import { isApplyChainRunning } from './applications.js';
 import { classifyExclusion, loadExclusionConfig } from '../../apply/exclusions.js';
 import { loadConfig } from '../../core/config.js';
+import { findManualLock } from '../../core/manual-lock.js';
 import { sendJson } from '../http.js';
 
 /** @param {Record<string,string>} q @param {string} key */
@@ -173,7 +174,8 @@ export function register(router, deps, streamHub) {
       `SELECT id, title, company, location, location_norm, remote_mode, posted_at, salary_min, salary_max, salary_raw,
               prescore, prescore_raw, noise_class, fit_score, status, source, url, url_normalized, external_id, notes,
               description, first_seen, last_seen, times_seen, duplicate_of, repost_of, expired_at, stale, record_kind,
-              search_profile, detail_skipped, marked_at, company_norm, title_norm, apply_url
+              search_profile, detail_skipped, marked_at, company_norm, title_norm, apply_url,
+              apply_page_branch, manual_apply_url
        FROM ic_job_listings WHERE id = $1`,
       [id],
     ));
@@ -227,9 +229,18 @@ export function register(router, deps, streamHub) {
     } catch (err) {
       applyExclusion = { branch: null, reason: null, error: err instanceof Error ? err.message.slice(0, 300) : String(err).slice(0, 300) };
     }
+    // Manual-only lockout: a listing covered by an active lock is never submitted by an unattended path, so
+    // the card offers Open posting + I applied instead of Create application. A lookup failure reads as not locked.
+    let manualLocked = false;
+    try {
+      manualLocked = Boolean(await deps.withClient((c) => findManualLock(c, id)));
+    } catch {
+      manualLocked = false;
+    }
     sendJson(ctx.res, 200, {
       ok: true,
       row: listing,
+      manual_locked: manualLocked,
       events,
       documents,
       suggestions,

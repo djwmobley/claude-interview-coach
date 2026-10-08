@@ -81,7 +81,7 @@ export function parseHash(hash) {
 
 /** Build a hash string for a route + params (the inverse of parseHash, used by nav links). */
 export function buildHash(route, params = {}) {
-  const table = { home: '#/', jobs: '#/jobs', 'job-detail': (p) => `#/jobs/${p.id}`, pipeline: '#/pipeline',
+  const table = { home: '#/', jobs: '#/jobs', 'job-detail': (p) => `#/jobs/${p.id}`, pipeline: '#/pipeline', ready: '#/ready',
     followups: '#/followups', review: '#/review', runs: '#/runs', 'run-detail': (p) => `#/runs/${p.id}`,
     reports: '#/reports', 'report-view': (p) => `#/reports/${p.day}`, calendar: '#/calendar',
     analytics: '#/analytics', companies: '#/companies', 'company-detail': (p) => `#/companies/${encodeURIComponent(p.norm)}` };

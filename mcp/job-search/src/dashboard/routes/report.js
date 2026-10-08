@@ -6,7 +6,7 @@
  */
 import fs from 'node:fs';
 import path from 'node:path';
-import { buildScanReport, buildReportSubject, renderReportText, renderReportHtml, resolveReportWindow, homeLocationNormsFor, getReportState } from '../../core/report.js';
+import { buildScanReport, buildReportSubject, renderReportText, renderReportHtml, wrapReportHtml, resolveReportWindow, homeLocationNormsFor, getReportState } from '../../core/report.js';
 import { buildRegistry } from '../../core/urlguard.js';
 import { runRemind } from '../../core/remind.js';
 import { connectDedicated } from '../../core/db.js';
@@ -69,11 +69,12 @@ export function register(router, deps) {
   // responds with the rendered HTML directly under the sandbox CSP so the front end's iframe can `src=`
   // it, exactly like GET /api/documents/file already does for a saved report file.
   router.register('GET', '/api/report/preview.html', async (ctx) => {
-    const { html } = await buildPreview(deps, ctx.query);
-    applySandboxHtmlHeaders(ctx.res);
+    const { report, html } = await buildPreview(deps, ctx.query);
+    // The bare fragment has no document or styles; wrap it like the stored report so it is readable on the dark surface.
+    applySandboxHtmlHeaders(ctx.res, { allowInlineStyle: true });
     ctx.res.setHeader('Content-Type', 'text/html; charset=utf-8');
     ctx.res.statusCode = 200;
-    ctx.res.end(html);
+    ctx.res.end(wrapReportHtml(html, report.dayKey));
   });
 
   router.register('POST', '/api/report/send', async (ctx) => {

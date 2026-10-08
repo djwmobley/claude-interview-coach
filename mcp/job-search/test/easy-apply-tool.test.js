@@ -140,8 +140,8 @@ describe('server lease mode', () => {
     assert.ok(!toolsForEnv({}).some((t) => t.name === 'easy_apply'));
     assert.equal(toolsForEnv({}), TOOLS);
   });
-  test('the schema carries no value field: the model can only pass an action and a ref', () => {
-    assert.deepEqual(Object.keys(schema).sort(), ['action', 'ref']);
+  test('the schema carries no value field: the model can only pass an action, a ref, and a park label hint (never filled)', () => {
+    assert.deepEqual(Object.keys(schema).sort(), ['action', 'label', 'ref']);
   });
 });
 
@@ -190,6 +190,29 @@ describe('answer (G6)', () => {
     assert.equal(lease.stop_reason, 'parked');
     assert.match(lease.finish_result.park.question, /sponsorship/);
     await assert.rejects(t.handler({ action: 'snapshot' }, deps), /lease_closed/);
+  });
+  test('park with a ref not in the snapshot is refused once (re-snapshot), then parks with the label hint and no question', async () => {
+    const { token, leaseId } = await setup();
+    const t = toolFor(fakeDriver([contactStep]), { token });
+    const first = /** @type {any} */ (await t.handler({ action: 'park', ref: 'e99-zz', label: 'Cover note box' }, deps));
+    assert.equal(first.ok, false);
+    assert.equal(first.error, 'unknown_ref');
+    assert.notEqual(first.stopped, true);
+    assert.equal((await getLease(client, leaseId)).stop_reason, null);
+    const second = /** @type {any} */ (await t.handler({ action: 'park', ref: 'e98-yy', label: 'Cover note box' }, deps));
+    assert.equal(second.stopped, true);
+    const lease = await getLease(client, leaseId);
+    assert.equal(lease.stop_reason, 'parked');
+    assert.equal(lease.finish_result.park.question, null);
+    assert.equal(lease.finish_result.park.label_hint, 'Cover note box');
+  });
+  test('park with a real ref after a refused one parks with the question text', async () => {
+    const { token, leaseId } = await setup();
+    const t = toolFor(fakeDriver([contactStep]), { token });
+    await t.handler({ action: 'park', ref: 'e99-zz' }, deps);
+    const r = /** @type {any} */ (await t.handler({ action: 'park', ref: 'e2-b' }, deps));
+    assert.equal(r.stopped, true);
+    assert.equal((await getLease(client, leaseId)).finish_result.park.question, 'Mobile phone number');
   });
   test('two failed read-backs park', async () => {
     const { token, leaseId } = await setup();

@@ -183,9 +183,15 @@ export async function runAssistedEasyApply(p) {
     }
     if (row.stop_reason === 'parked') {
       const pk = fr.park ?? {};
-      const label = typeof pk.question === 'string' && pk.question.trim() ? pk.question.trim().slice(0, 500) : `Easy Apply needs an answer (${String(pk.reason ?? 'unknown')}).`;
+      // Total mapping: question text present -> question kind; absent -> the stopped kind. Never a question
+      // kind without text (the card would render an answer box with nothing to answer, a dead end).
+      const qText = typeof pk.question === 'string' ? pk.question.trim().slice(0, 500) : '';
+      if (!qText) {
+        const hint = typeof pk.label_hint === 'string' && pk.label_hint.trim() ? ` The assistant described it as: ${pk.label_hint.trim().slice(0, 200)}` : '';
+        return park('easy_apply_stopped', `The assistant stopped on a field it could not name. Open the job and answer it there.${hint}`, { easy_apply_reason: pk.reason ?? null });
+      }
       // Answer-fallback spec F4: a parked choice field's captured options (re-sanitized, F5).
-      return park('question', label, { easy_apply_reason: pk.reason ?? null, ...(typeof pk.bank_key === 'string' ? { suggestion: { key: pk.bank_key, value: null } } : {}), ...pendingOptionFields(pk, LINKEDIN_PROFILE) });
+      return park('question', qText, { easy_apply_reason: pk.reason ?? null, ...(typeof pk.bank_key === 'string' ? { suggestion: { key: pk.bank_key, value: null } } : {}), ...pendingOptionFields(pk, LINKEDIN_PROFILE) });
     }
     if (row.stop_reason === 'unexpected_submit') {
       keepTab = true;

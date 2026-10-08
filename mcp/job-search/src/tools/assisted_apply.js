@@ -27,6 +27,7 @@
  * stops the session and trips the persisted 24-hour circuit breaker. Once the session stops, every
  * further call is refused (the lease is closed). There is no action that can reach a Submit button.
  */
+import { log } from '../core/logger.js';
 import fs from 'node:fs';
 import path from 'node:path';
 import crypto from 'node:crypto';
@@ -62,6 +63,8 @@ const CAPTURE_REASONS = Object.freeze(['no_exact_match', 'not_exact_learned', 'n
 export const schema = {
   action: z.enum(['snapshot', 'answer', 'upload_resume', 'advance', 'park', 'finish']),
   ref: z.string().regex(REF_RE).optional(),
+  // park only: the model's own words for the field it stopped on (kept as a hint when the ref cannot be resolved).
+  label: z.string().max(300).optional(),
 };
 
 /** Canonical tool name and description. */
@@ -345,7 +348,17 @@ export function makeAssistedApplyTool(seams = {}) {
 
       if (args.action === 'park') {
         const f = snap.fields.find((/** @type {any} */ x) => x.ref === args.ref);
-        return stop('parked', { park: { question: f ? f.question : null, reason: 'model_parked', bank_key: null, kind: f ? f.kind : null } });
+        const suppliedLabel = typeof args.label === 'string' ? args.label.trim().slice(0, 300) : '';
+        log.info({ evt: 'assisted_park_args', app: sess.app.id, ref: args.ref ?? null, found: Boolean(f), kind: f ? f.kind : null, question: f ? String(f.question).slice(0, 200) : null, label: suppliedLabel || null });
+        if (!f) {
+          // The ref is not in the current snapshot. First miss: tell the model so it re-snapshots and parks
+          // with a real ref. Second miss: park with whatever it supplied; the flow maps a park with no
+          // question text to the stopped kind (never an answer box with nothing to answer).
+          sess.parkMisses = (sess.parkMisses ?? 0) + 1;
+          if (sess.parkMisses < 2) return { ok: false, error: 'unknown_ref', message: 'park ref is not a field in the current step. Call snapshot, then park with a ref from that snapshot.' };
+          return stop('parked', { park: { question: null, reason: 'model_parked', bank_key: null, kind: null, ...(suppliedLabel ? { label_hint: suppliedLabel } : {}) } });
+        }
+        return stop('parked', { park: { question: f.question, reason: 'model_parked', bank_key: null, kind: f.kind } });
       }
 
       if (args.action === 'advance') {

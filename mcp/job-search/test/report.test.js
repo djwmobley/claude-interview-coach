@@ -1015,3 +1015,12 @@ describe('writeReportFile / wrapReportHtml (dashboard PR 1)', () => {
     assert.ok(!html.includes('<title>2026-08-10 <script>'));
   });
 });
+
+import { wrapReportHtml as wrapForColorScheme } from '../src/core/report.js';
+test('wrapReportHtml is color-scheme aware (light default, dark media block)', () => {
+  const out = wrapForColorScheme('<p>x</p>', '2026-10-08');
+  assert.match(out, /<meta name="color-scheme" content="light dark">/);
+  assert.match(out, /:root\{color-scheme:light dark\}/);
+  assert.match(out, /@media \(prefers-color-scheme: dark\)\{body\{color:#e6e6e6;background:#14171c\}/);
+  assert.match(out, /color:#1a1a1a;background:#ffffff/);
+});

@@ -257,6 +257,8 @@ describe('listings', () => {
     // Apply pipeline slice 2 (ATS badge, spec-adversary amendment S12): a manually-created listing with no
     // URL classifies unknown, computed on the fly, never persisted.
     assert.deepEqual(r.json.ats, { ats: 'unknown', tenant: null, confidence: 'low' });
+    assert.equal(r.json.manual_locked, false);
+    assert.ok('apply_page_branch' in r.json.row && 'manual_apply_url' in r.json.row);
   });
 
   test('an invalid status is refused with 400, no event written', async () => {
@@ -923,8 +925,11 @@ describe('report', () => {
     const r = await req('GET', '/api/report/preview.html');
     assert.equal(r.status, 200);
     assert.equal(r.headers.get('content-type'), 'text/html; charset=utf-8');
-    assert.equal(r.headers.get('content-security-policy'), "sandbox; default-src 'none'");
+    assert.equal(r.headers.get('content-security-policy'), "sandbox; default-src 'none'; style-src 'unsafe-inline'");
     assert.ok(r.text.length > 0);
+    assert.match(r.text, /^<!doctype html>/i, 'preview is the wrapped document, not a bare fragment');
+    assert.match(r.text, /<meta name="color-scheme" content="light dark">/);
+    assert.match(r.text, /@media \(prefers-color-scheme: dark\)/);
     assert.equal(/^\s*\{/.test(r.text), false, 'response body must be HTML, not a JSON envelope');
     const after = (await verifyClient.query('SELECT last_report_sent_at FROM ic_report_state WHERE id = true')).rows[0].last_report_sent_at;
     assert.deepEqual(before, after);

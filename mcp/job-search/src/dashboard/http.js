@@ -224,10 +224,13 @@ export function applyBaseHeaders(res, pathname) {
  * allow-* tokens, `default-src 'none'`. The page is rendered only inside a sandboxed iframe by the front
  * end; standing constraint (recorded in README): allow-scripts and allow-same-origin are never added
  * together to that iframe.
+ * `allowInlineStyle` adds `style-src 'unsafe-inline'` (a report page carries its own <style> block);
+ * scripts, images, fonts and every other fetch stay blocked.
  * @param {import('node:http').ServerResponse} res
+ * @param {{ allowInlineStyle?: boolean }} [opts]
  */
-export function applySandboxHtmlHeaders(res) {
-  res.setHeader('Content-Security-Policy', "sandbox; default-src 'none'");
+export function applySandboxHtmlHeaders(res, opts = {}) {
+  res.setHeader('Content-Security-Policy', opts.allowInlineStyle ? "sandbox; default-src 'none'; style-src 'unsafe-inline'" : "sandbox; default-src 'none'");
 }
 
 /**

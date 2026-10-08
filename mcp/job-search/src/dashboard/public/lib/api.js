@@ -21,6 +21,8 @@ const JSON_CONTENT_TYPE = 'application/json';
  *   the response text failed to parse as JSON
  * @returns {ApiOutcome}
  */
+export const NOT_EASY_APPLY_MESSAGE = "This job applies on the company's site, not LinkedIn Easy Apply. Use Open posting, then I applied.";
+
 export function classify(status, body) {
   const b = /** @type {any} */ (body ?? {});
   if (b && b.__unparsable) return { kind: 'unparsable', raw: b.raw };
@@ -59,7 +61,12 @@ export function classify(status, body) {
   if (status === 413 && code === 'PAYLOAD_TOO_LARGE') return { kind: 'payload_too_large', message: b.message };
   if (status === 415 && code === 'UNSUPPORTED_MEDIA_TYPE') return { kind: 'client_bug', code, message: b.message };
   if (status === 503 && code === 'DB_UNAVAILABLE') return { kind: 'db_unavailable', message: b.message };
+  // Create application on a job that is not LinkedIn Easy Apply: a human sentence, never "Internal error".
+  if (status === 409 && code === 'LINKEDIN_NOT_EASY_APPLY') return { kind: 'message', code, message: NOT_EASY_APPLY_MESSAGE };
   if (status === 500 && code === 'INTERNAL') return { kind: 'internal', requestId: b.requestId ?? null };
+  // Any other 4xx (a known 409 code without its own case, 401, 418, ...) is a refusal the person can read:
+  // show the server's text. Only a real 5xx (or a non-error status we cannot place) is "internal".
+  if (status >= 400 && status < 500) return { kind: 'message', code, message: typeof b.message === 'string' && b.message ? b.message : 'That request was refused.' };
   // Unknown/unrecognized status or code: same terminal branch as INTERNAL (section 4's closing rule).
   return { kind: 'internal', requestId: b.requestId ?? null, code: code ?? null, unknownStatus: status };
 }
