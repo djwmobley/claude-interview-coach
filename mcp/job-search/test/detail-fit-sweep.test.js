@@ -153,12 +153,12 @@ describe('src/core/detail-fit-sweep.js', () => {
     assert.ok(ids.includes(included));
   });
 
-  test('excludes stale rows', async () => {
-    const excluded = await seedRow({ stale: true });
-    const included = await seedRow();
+  test('includes stale rows (stale means the scan did not reach the row, not that it closed)', async () => {
+    const stale = await seedRow({ stale: true });
+    const fresh = await seedRow();
     const ids = await runQuery();
-    assert.ok(!ids.includes(excluded));
-    assert.ok(ids.includes(included));
+    assert.ok(ids.includes(stale));
+    assert.ok(ids.includes(fresh));
   });
 
   test('excludes a row with an active (non-withdrawn) application', async () => {

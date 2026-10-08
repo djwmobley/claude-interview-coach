@@ -394,7 +394,7 @@ export async function loadBacklogIds(client, runId, limit, maxAgeDays = null) {
   const r = await client.query(
     `SELECT l.id FROM ic_job_listings l
       WHERE coalesce(l.record_kind,'listing') = 'listing' AND l.duplicate_of IS NULL AND l.expired_at IS NULL
-        AND coalesce(l.stale, false) = false AND l.status IS NULL AND l.triage_model_failures < $3
+        AND l.status IS NULL AND l.triage_model_failures < $3
         AND NOT EXISTS (SELECT 1 FROM ic_job_review_queue q WHERE q.candidate_id = l.id AND q.resolved_at IS NULL)
         AND NOT EXISTS (SELECT 1 FROM ic_scan_run_items i WHERE i.listing_id = l.id AND i.run_id = $1)
         AND ($4::int IS NULL OR l.first_seen >= current_date - $4::int)
@@ -415,8 +415,8 @@ export const AUTO_SKIP_LOW_NOTE_RE = '^auto-triage: prescore [0-9]+ < floor [0-9
  * Reskip sweep candidates (score-everything, 2026-10-07): rows an EARLIER deterministic pass auto-skipped
  * as skip_low that the CURRENT config would send to the model as model_low, and that still have no fit.
  * A row qualifies only when ALL hold:
- *   - status 'skip' and fit_score NULL; a live listing (listing kind, not a duplicate, not expired, not
- *     stale); noise_class ok/ok_manual; no open review item; under the model-failure cap;
+ *   - status 'skip' and fit_score NULL; a live listing (listing kind, not a duplicate, not expired; stale rows
+ *     ARE included: stale means the scan did not reach the row, not that it closed); noise_class ok/ok_manual; no open review item; under the model-failure cap;
  *   - prescore in [cfg.model.scoreFloor, cfg.deterministic.floor) under today's config (no scoreFloor set
  *     means no model_low band, so nothing is re-sent);
  *   - its LATEST status event (ic_job_events kind 'status', newest at, then id) is actor 'auto',
@@ -437,7 +437,7 @@ export async function loadAutoSkipLowIds(client, runId, limit, cfg) {
   const r = await client.query(
     `SELECT l.id FROM ic_job_listings l
       WHERE coalesce(l.record_kind,'listing') = 'listing' AND l.duplicate_of IS NULL AND l.expired_at IS NULL
-        AND coalesce(l.stale, false) = false AND l.status = 'skip' AND l.fit_score IS NULL
+        AND l.status = 'skip' AND l.fit_score IS NULL
         AND l.noise_class IN ('ok', 'ok_manual') AND l.prescore IS NOT NULL AND l.prescore >= $3 AND l.prescore < $4
         AND l.triage_model_failures < $5
         AND NOT EXISTS (SELECT 1 FROM ic_job_review_queue q WHERE q.candidate_id = l.id AND q.resolved_at IS NULL)

@@ -31,9 +31,9 @@
  *     that did not appear on its source's most recent scan list pages (src/core/scan-run.js's expiryPass
  *     increments absent_runs for exactly that case, ahead of eventual expiry -- a listing already on that
  *     path is not worth spending a detail-fetch slot on)
- *   - coalesce(stale, false) = false                          -- spec S1's "if stale is a separate flag,
- *     exclude stale too": sql/001_extend_ic_job_listings.sql's own `stale` boolean, set by expiryPass when
- *     a listing falls off the deepest page a run actually crawled
+ *   - stale rows are INCLUDED: sql/001's `stale` boolean is set by expiryPass when a listing falls off the
+ *     deepest page a run crawled, i.e. the scan did not reach it; it is not evidence the job closed
+ *     (closed-looking rows get absent_runs++ instead, which is still excluded above)
  *   - NOT EXISTS (... ic_job_applications ... state <> 'withdrawn' ...) -- the EXACT active-application
  *     predicate auto-apply-select.js's fetchCandidateRows() uses (there it is a positive EXISTS read into
  *     `row.hasActiveApplication`, which classifyCandidate() then rejects on; restated here directly as a
@@ -87,7 +87,6 @@ export function fitSweepPredicateSql(o) {
     `(status IS NULL OR status IN ('new','maybe','shortlisted'))`,
     `expired_at IS NULL`,
     `absent_runs = 0`,
-    `coalesce(stale, false) = false`,
     `NOT EXISTS (SELECT 1 FROM ic_job_applications a WHERE a.listing_id = ic_job_listings.id AND a.state <> 'withdrawn')`,
   ];
   // Gmail intake addendum G3: a gmail-sourced row whose own external_id is canonical for this source

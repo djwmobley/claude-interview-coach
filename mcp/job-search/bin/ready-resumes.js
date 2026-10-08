@@ -4,6 +4,7 @@
  * Ready to apply list: tailored resumes for the listed jobs (spec section 9, R6, A5, A10).
  *
  *   node bin/ready-resumes.js
+ *   node bin/ready-resumes.js --listing 123 --listing 456   (re-run only those listings; same cap and lock)
  *
  * Scheduled as the SECOND step of the "job-search auto-apply" task (scripts/register-auto-apply-task.ps1
  * runs bin/auto-apply.js, then this), so it starts only after the morning auto-apply run has finished. When
@@ -27,10 +28,28 @@ import { withClient, closePool } from '../src/core/db.js';
 import { createLogger, dailyLogPath, pruneLogs } from '../src/core/logger.js';
 import { errFields } from '../src/core/errors.js';
 import { runningMarkerPath, readLiveMarker } from '../src/core/running-marker.js';
-import { runReadyResumes } from '../src/core/ready-resumes.js';
+import { runReadyResumes, startReadyResumeForListing } from '../src/core/ready-resumes.js';
 import { readyConfig } from '../src/core/ready-to-apply.js';
 import { createAdvisoryLock, RESUME_SPAWN_LOCK_KEY, READY_RESUME_RUN_LOCK_KEY } from '../src/core/resume-spawn-lock.js';
 import { createReadyResumeRunner } from '../src/dashboard/ready-resume-runner.js';
+
+/**
+ * Listing ids from `--listing <id>` (repeatable) or `--listing=<id>`; anything not a positive integer is ignored.
+ * @param {string[]} argv
+ * @returns {number[]}
+ */
+export function parseListingArgs(argv) {
+  /** @type {number[]} */
+  const out = [];
+  for (let i = 0; i < argv.length; i++) {
+    const m = /^--listing(?:=(.*))?$/.exec(argv[i]);
+    if (!m) continue;
+    const raw = m[1] ?? argv[++i];
+    const n = Number(raw);
+    if (Number.isInteger(n) && n > 0 && !out.includes(n)) out.push(n);
+  }
+  return out;
+}
 
 /** @param {string} logDir */
 export function readyResumesSummaryFile(logDir) {
@@ -84,12 +103,31 @@ async function main() {
     if (waited === 'wait_expired') log({ evt: 'ready_resumes_auto_apply_still_running', severity: 'warning' });
     const root = repoRoot();
     const runner = createReadyResumeRunner({ env, logDir: env.JOBSEARCH_LOG_DIR, repoRoot: root, withClient, spawn, log });
-    const r = await runReadyResumes({
+    const deps = {
       withClient, config, now: () => new Date(), log, runner,
       spawnLock: createAdvisoryLock({ key: RESUME_SPAWN_LOCK_KEY }),
       runLock: createAdvisoryLock({ key: READY_RESUME_RUN_LOCK_KEY }),
       outputRoot: path.join(root, 'output'),
-    });
+    };
+    const only = parseListingArgs(process.argv.slice(2));
+    if (only.length) {
+      // Re-run for specific listings: same eligibility, daily cap and shared spawn lock as the dashboard button.
+      const runHeld = await deps.runLock.tryAcquire();
+      if (!runHeld) { finish({ ok: true, status: 'locked' }); return 0; }
+      try {
+        /** @type {Record<string, unknown>[]} */
+        const results = [];
+        for (const id of only) {
+          const s = await startReadyResumeForListing(deps, id);
+          results.push('done' in s ? { listing_id: id, result: await s.done } : { listing_id: id, refused: s.code });
+        }
+        finish({ ok: true, status: 'ok', auto_apply_wait: waited, listings: results });
+      } finally {
+        await runHeld.release().catch(() => {});
+      }
+      return 0;
+    }
+    const r = await runReadyResumes(deps);
     finish({ ok: true, auto_apply_wait: waited, ...r });
     return 0;
   } catch (err) {
