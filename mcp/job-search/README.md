@@ -583,6 +583,12 @@ would otherwise kill a long-running server), `-MultipleInstances IgnoreNew`,
 `RestartCount 3`. Unregister with `powershell -File
 scripts/register-dashboard-task.ps1 -Unregister`.
 
+**Restarting after a code change.** `node bin/restart-dashboard.js [--if-stale]` (or the
+`restart_dashboard` MCP tool) stops exactly the verified dashboard process (node running this
+repo's `bin/dashboard.js`, found via `logs/dashboard.pid`, the port listener, and a command-line
+scan), runs the scheduled task, and waits up to 30 s for health. It refuses on an ambiguous match
+or a foreign process on the port, and never signals any other process.
+
 **Seed file** (outside opportunities that never came from a scan -- a recruiter
 call, a role already known before this repo tracked it):
 

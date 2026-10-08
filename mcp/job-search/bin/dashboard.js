@@ -27,6 +27,7 @@ import { createAdvisoryLock, RESUME_SPAWN_LOCK_KEY } from '../src/core/resume-sp
 import { createReviewRunner } from '../src/dashboard/review-runner.js';
 import { createCalendarCache } from '../src/dashboard/calendar-cache.js';
 import { createLinkedInLiveCheck } from '../src/apply/linkedin-button-prepare.js';
+import { dashboardPidFile, writePidFile, removePidFileIfOwn } from '../src/core/dashboard-restart.js';
 
 const HERE = path.dirname(fileURLToPath(import.meta.url));
 const PACKAGE_ROOT = path.join(HERE, '..');
@@ -200,6 +201,11 @@ async function main() {
   }
 
   log({ evt: 'dashboard_started', port, pid: process.pid });
+  // logs/dashboard.pid lets bin/restart-dashboard.js find this exact process; removed on exit only if it
+  // still names this pid. A hard kill leaves a stale file, which the restarter verifies and ignores.
+  const pidFile = dashboardPidFile(env.JOBSEARCH_LOG_DIR);
+  writePidFile(pidFile, process.pid);
+  process.on('exit', () => removePidFileIfOwn(pidFile, process.pid));
   console.log(`job-search dashboard listening on http://127.0.0.1:${port}/`);
 
   if (args.open) {
