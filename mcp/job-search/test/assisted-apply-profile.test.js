@@ -129,7 +129,7 @@ describe('assisted_apply tool, easy_apply alias (A14)', () => {
     assert.equal(assistedTool.name, 'assisted_apply');
     assert.equal(easyApplyTool.name, 'easy_apply');
     assert.equal(assistedTool.schema, easySchema);
-    assert.deepEqual(Object.keys(assistedTool.schema).sort(), ['action', 'ref']);
+    assert.deepEqual(Object.keys(assistedTool.schema).sort(), ['action', 'label', 'ref']);
   });
   test('the assisted lease env exposes ONLY assisted_apply; the legacy env exposes ONLY easy_apply; neither leaks into normal mode', () => {
     assert.notEqual(ASSISTED_LEASE_ENV, LEASE_ENV);

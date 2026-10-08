@@ -10,7 +10,7 @@
  * progress POSTs already trigger that broadcast; this card does not poll separately) -- see the PR body's
  * design note on why this reuses the existing plumbing instead of a new SSE event type.
  */
-import { h, hApplicationScreenshot } from '../lib/dom.js';
+import { h, hLink, hApplicationScreenshot } from '../lib/dom.js';
 import { postJson, getJson } from '../lib/api.js';
 import { handleOutcome } from '../lib/outcome.js';
 import { showToast } from '../lib/toast.js';
@@ -19,7 +19,8 @@ import { credentialPrompt } from './credential-prompt.js';
 import { withdrawControl } from './withdraw-control.js';
 import { resumeControl, partialDraftWarning } from './resume-control.js';
 import { confirmButton } from './confirm-button.js';
-import { withdrawButtonVisible, resumeButtonVisible, ledgerLineText, pendingChoiceOptions } from '../lib/format.js';
+import { withdrawButtonVisible, resumeButtonVisible, ledgerLineText, pendingChoiceOptions, displayPendingQuestion, applyControlsState } from '../lib/format.js';
+import { postingLink } from './posting-link.js';
 
 /** Apply exclusion gate (src/apply/exclusions.js): branches that are never overridable from the dashboard. */
 const HARD_EXCLUSION_BRANCHES = new Set(['blocked_company', 'already_applied_listing', 'already_applied_history']);
@@ -76,6 +77,25 @@ export function applicationCard(opts) {
         on: { click: () => postApplyNow(overrideArmed) },
       }))
     : null;
+
+  if (!application && applyControlsState(listing, opts.manualLocked) === 'manual') {
+    return h('div', { className: 'application-card' }, [
+      h('h3', { text: 'Application' }),
+      h('p', { className: 'application-card__hint', text: 'This job is not LinkedIn Easy Apply (or is reserved for you). Open the posting, apply there, then mark it applied.' }),
+      postingLink(listing),
+      confirmButton({
+        label: 'I applied',
+        confirmLabel: 'Confirm applied',
+        onConfirm: async () => {
+          const out = handleOutcome(await postJson(`/api/listings/${listing.id}/status`, { status: 'applied', note: 'applied by hand from job detail' }));
+          if (out.kind === 'ok') {
+            showToast({ message: 'Marked applied.' });
+            opts.onChanged();
+          }
+        },
+      }),
+    ]);
+  }
 
   if (!application) {
     return h('div', { className: 'application-card' }, [
@@ -390,7 +410,7 @@ export function applicationCard(opts) {
   if (application.state === 'needs_human' && application.pending_question && application.pending_question.kind === 'awaiting_submit') {
     needsHumanPanel = h('div', { className: 'application-card__needs-human' }, [screenshotEl, easyApplyPanel(application.pending_question)]);
   } else if (application.state === 'needs_human' && application.pending_question) {
-    const pq = application.pending_question;
+    const pq = displayPendingQuestion(application.pending_question);
     /** @type {any} */
     let kindPanel;
     if (pq.kind === 'credential') {
@@ -401,7 +421,7 @@ export function applicationCard(opts) {
       kindPanel = h('div', { className: 'credential-prompt' }, [
         h('h4', { text: 'Needs your attention' }),
         h('p', { className: 'application-card__note', text: pq.label ? String(pq.label) : `Unrecognized pending question kind: ${String(pq.kind)}` }),
-        pq.page_url ? h('p', { className: 'application-card__hint', text: String(pq.page_url) }) : null,
+        pq.page_url ? h('p', { className: 'application-card__hint' }, [hLink({ url: pq.page_url, urlOk: true, text: String(pq.page_url), target: '_blank' })]) : null,
       ]);
     }
     // Resume gate R1/R3: Resume (two-click confirm) for kinds the server resumes, carrying the partial-draft
@@ -437,7 +457,7 @@ export function applicationCard(opts) {
         confirmButton,
       ])
       : appliedByHandButton;
-    needsHumanPanel = h('div', { className: 'application-card__needs-human' }, [screenshotEl, kindPanel, resumeEl, handEl]);
+    needsHumanPanel = h('div', { className: 'application-card__needs-human' }, [screenshotEl, kindPanel, postingLink(listing), resumeEl, handEl]);
   }
 
   const failedPanel = application.state === 'failed'

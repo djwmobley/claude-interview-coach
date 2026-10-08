@@ -1,4 +1,5 @@
 // @ts-check
+import { isSafeHttpUrl } from './dom.js';
 /**
  * Pure formatting helpers, no DOM access, so they run identically under node:test (pr3-spec-decisions.md
  * section 12, item 2) and in the browser. US spelling and copy rules apply to every returned string.
@@ -499,4 +500,55 @@ export function pendingChoiceOptions(pq) {
   if (options.length === 0) return null;
   if (pq.field_kind !== undefined && pq.field_kind !== null && !CHOICE_FIELD_KINDS.includes(pq.field_kind)) return null;
   return options;
+}
+
+/** Label prefix the pre-fix Easy Apply flow wrote for a park that carried no question text (apps 15 and 16). */
+export const LEGACY_NAMELESS_PARK_PREFIX = 'Easy Apply needs an answer (';
+/** The label a nameless park carries now, and the one legacy rows are displayed with. */
+export const NAMELESS_PARK_LABEL = 'The assistant stopped on a field it could not name. Open the job and answer it there.';
+
+/**
+ * Display-side total mapping for a pending question (no DB write): a 'question' whose label is the old
+ * placeholder is shown as the stopped kind, so no answer box appears with nothing to answer.
+ * @param {any} pq
+ */
+export function displayPendingQuestion(pq) {
+  if (!pq || typeof pq !== 'object') return pq;
+  if (pq.kind === 'question' && typeof pq.label === 'string' && pq.label.startsWith(LEGACY_NAMELESS_PARK_PREFIX)) {
+    return { ...pq, kind: 'easy_apply_stopped', label: NAMELESS_PARK_LABEL };
+  }
+  return pq;
+}
+
+/**
+ * The listing's posting URL when it is http(s) and safe to link, else null. url_normalized wins over url.
+ * @param {any} listing
+ * @returns {string|null}
+ */
+export function postingUrl(listing) {
+  if (!listing || typeof listing !== 'object') return null;
+  for (const u of [listing.url_normalized, listing.url]) if (isSafeHttpUrl(u)) return /** @type {string} */ (u);
+  return null;
+}
+
+/** LinkedIn apply-page branches (apply_page_branch) on which Easy Apply is not available. */
+export const NON_EASY_APPLY_BRANCHES = Object.freeze(['external', 'no_control', 'closed']);
+
+/**
+ * Total mapping for the listing's apply controls: easy_apply, unknown, null and anything unrecognized ->
+ * 'create' (the server still refuses safely); external / no_control / closed, or an active manual-only
+ * lock -> 'manual' (Open posting + I applied).
+ * @param {any} listing @param {boolean} [manualLocked]
+ * @returns {'create'|'manual'}
+ */
+export function applyControlsState(listing, manualLocked) {
+  if (manualLocked === true) return 'manual';
+  const branch = listing && typeof listing === 'object' ? listing.apply_page_branch : null;
+  return typeof branch === 'string' && NON_EASY_APPLY_BRANCHES.includes(branch) ? 'manual' : 'create';
+}
+
+/** manual_apply_url when it is a safe http(s) URL, else the listing's own posting URL, else null. @param {any} listing */
+export function manualPostingUrl(listing) {
+  if (listing && typeof listing === 'object' && isSafeHttpUrl(listing.manual_apply_url)) return /** @type {string} */ (listing.manual_apply_url);
+  return postingUrl(listing);
 }

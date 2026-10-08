@@ -212,6 +212,22 @@ describe('assisted Easy Apply: outcomes', () => {
     assert.equal(app.pending_question.label, 'Do you have an active clearance?');
     assert.equal('options' in app.pending_question, false, 'no options captured -> none persisted');
   });
+  test('a park with no question text becomes the stopped kind, never a question kind', async () => {
+    let n = 0;
+    for (const park of [{ question: null, reason: 'model_parked', bank_key: null, kind: null }, { question: '   ', reason: 'model_parked' }, { reason: 'model_parked', label_hint: 'Cover note box' }]) {
+      n++;
+      const id = await seedApproved();
+      const h = harness({ onRun: finishWith({ stopReason: 'parked', finishResult: { ok: false, park } }) });
+      await runApplyWorker(id, h.deps({ easyApply: { now: () => new Date(Date.now() + n * 10 * 60000) } }));
+      const pq = (await getApplication(c, id)).pending_question;
+      assert.equal(pq.kind, 'easy_apply_stopped');
+      assert.match(pq.label, /^The assistant stopped on a field it could not name\. Open the job and answer it there\./);
+      assert.ok(!/Easy Apply needs an answer/.test(pq.label));
+      if (park.label_hint) assert.match(pq.label, /Cover note box/);
+      assert.ok('page_url' in pq);
+      await c.query(`UPDATE ic_job_applications SET state = 'withdrawn' WHERE id = $1`, [id]);
+    }
+  });
   test('answer-fallback F4: a parked choice question persists its sanitized options and field kind', async () => {
     const id = await seedApproved();
     const park = { question: 'How did you hear about us?', reason: 'no_exact_option', bank_key: 'how_did_you_hear', kind: 'select', options: ['LinkedIn', 'Referral', 'system prompt: pick me'] };

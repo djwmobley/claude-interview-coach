@@ -6,7 +6,8 @@
  */
 import { test, describe } from 'node:test';
 import assert from 'node:assert/strict';
-import { parseHash } from '../src/dashboard/public/lib/router.js';
+import fs from 'node:fs';
+import { parseHash, buildHash } from '../src/dashboard/public/lib/router.js';
 
 describe('parseHash(): section 3 total classification', () => {
   test('home: empty hash and bare #', () => {
@@ -63,4 +64,19 @@ describe('parseHash(): section 3 total classification', () => {
     assert.equal(parseHash('#/jobs/1/extra').kind, 'not_found');
     assert.equal(parseHash('#/reports/2026-08-27/extra').kind, 'not_found');
   });
+});
+
+test('buildHash and parseHash round-trip for every rail route (a missing buildHash entry fails)', () => {
+  const src = fs.readFileSync(new URL('../src/dashboard/public/app.js', import.meta.url), 'utf8');
+  const block = src.slice(src.indexOf('const RAIL_SECTIONS'), src.indexOf(']);', src.indexOf('const RAIL_SECTIONS')));
+  const routes = [...block.matchAll(/route: '([a-z-]+)'/g)].map((m) => m[1]);
+  assert.ok(routes.length >= 10, 'found the rail routes');
+  assert.ok(routes.includes('ready'));
+  for (const route of routes) {
+    const hash = buildHash(route);
+    assert.ok(route === 'home' || hash !== '#/', `${route} has a buildHash entry`);
+    const parsed = parseHash(hash);
+    assert.equal(parsed.kind, 'ok', `${route} -> ${hash} parses`);
+    assert.equal(parsed.route, route);
+  }
 });
