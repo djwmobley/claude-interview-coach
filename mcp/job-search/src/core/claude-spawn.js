@@ -48,7 +48,7 @@ const SKILL_READS = Object.freeze(['Read(./data/**)', 'Read(./memory/**)', 'Read
  * @typedef {{ name: string, allowed: readonly string[], mcpTools: readonly string[] }} SpawnProfile
  */
 
-/** @type {Readonly<Record<'write-resume'|'review-cv', SpawnProfile>>} */
+/** @type {Readonly<Record<'write-resume'|'review-cv'|'triage', SpawnProfile>>} */
 export const SPAWN_PROFILES = Object.freeze({
   'write-resume': Object.freeze({
     name: 'write-resume',
@@ -58,6 +58,9 @@ export const SPAWN_PROFILES = Object.freeze({
       'Write(./output/markdown/**)', 'Edit(./output/markdown/**)', 'Write(./output/cheatsheets/**)', 'Edit(./output/cheatsheets/**)',
     ]),
   }),
+  // Fit triage is a pure text-in, JSON-out call: the listing batch arrives on stdin and the answer is the
+  // schema-constrained envelope. It needs no tool at all, so nothing is allowed.
+  triage: Object.freeze({ name: 'triage', mcpTools: Object.freeze([]), allowed: Object.freeze([]) }),
   'review-cv': Object.freeze({
     name: 'review-cv',
     mcpTools: Object.freeze(['get_job']),
@@ -86,9 +89,11 @@ export function assistedApplyProfile(runnerToolName) {
 export function permissionArgs(profile) {
   const mcpAllowed = profile.mcpTools.map((t) => `mcp__job-search__${t}`);
   const mcpDenied = JOB_SEARCH_TOOL_NAMES.filter((t) => !profile.mcpTools.includes(t)).map((t) => `mcp__job-search__${t}`);
+  const allow = [...profile.allowed, ...mcpAllowed];
   return [
     '--permission-mode', 'dontAsk',
-    '--allowedTools', ...profile.allowed, ...mcpAllowed,
+    // A profile with no tools passes no --allowedTools flag (an empty variadic would swallow the next flag).
+    ...(allow.length ? ['--allowedTools', ...allow] : []),
     '--disallowedTools', ...ALWAYS_DISALLOWED, ...mcpDenied,
   ];
 }

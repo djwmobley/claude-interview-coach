@@ -42,8 +42,11 @@ describe('permissionArgs', () => {
         'mcp__claude_ai_Gmail', 'mcp__google-workspace', 'mcp__claude-in-chrome', 'mcp__chrome', 'mcp__plugin_playwright_playwright']) {
         assert.ok(denied.includes(t), `${t} denied`);
       }
-      const allowed = listAfter(argv, '--allowedTools');
-      assert.ok(allowed.length > 0);
+      // A tool-free profile (triage) passes no --allowedTools flag at all.
+      const toolFree = profile.allowed.length === 0 && profile.mcpTools.length === 0;
+      if (toolFree) assert.ok(!argv.includes('--allowedTools'), 'tool-free profile allows nothing');
+      const allowed = toolFree ? [] : listAfter(argv, '--allowedTools');
+      assert.ok(toolFree || allowed.length > 0);
       for (const a of allowed) {
         assert.ok(!/^(Bash|PowerShell|WebFetch|WebSearch|Agent|Task)\b/.test(a), `${a} must not be allowed`);
         assert.ok(!/^(Read|Edit|Write)$/.test(a) && !/\(\*\)$/.test(a), `${a} must be path-scoped`);

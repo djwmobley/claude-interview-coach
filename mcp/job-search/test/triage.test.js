@@ -594,6 +594,32 @@ describe('runModelTriage (fake execFile, real DB writes)', () => {
     assert.equal(stats.batches_sent, 0);
   });
 
+  test('least privilege: dontAsk, no allowed tools at all, shell/web/Google denied, env without a sentinel secret', async () => {
+    const runId = await insertRun();
+    const id = await insertListing({ prescore: 55 });
+    process.env.ZZ_TRIAGE_SENTINEL_SECRET = 'sentinel-value';
+    /** @type {any} */
+    let seen = null;
+    const fakeExecFile = async (_bin, args, opts) => {
+      seen = { args, opts };
+      return { stdout: JSON.stringify({ type: 'result', is_error: false, structured_output: { results: [{ id, fit_score: 62, status: 'new', reason: 'ok' }] } }) };
+    };
+    try {
+      await runModelTriage(client, runId, [id], cfgFor({ model: { enabled: true } }), configDir, 'candidate summary text', { keywords: [] }, { execFile: fakeExecFile });
+    } finally {
+      delete process.env.ZZ_TRIAGE_SENTINEL_SECRET;
+    }
+    assert.ok(seen, 'spawned');
+    const a = seen.args;
+    assert.equal(a[a.indexOf('--permission-mode') + 1], 'dontAsk');
+    assert.ok(!a.includes('--allowedTools'), 'no tool is allowed');
+    assert.ok(!a.some((x) => /bypass|dangerously/i.test(x)));
+    const denied = a.slice(a.indexOf('--disallowedTools') + 1);
+    for (const t of ['Bash', 'WebFetch', 'WebSearch', 'Agent', 'Read(./mcp/job-search/config/**)', 'mcp__job-search__mark_jobs', 'mcp__claude_ai_Gmail']) assert.ok(denied.includes(t), `${t} denied`);
+    assert.ok(seen.opts.env && !('ZZ_TRIAGE_SENTINEL_SECRET' in seen.opts.env), 'env excludes the sentinel');
+    assert.ok(seen.opts.env.PATH || seen.opts.env.Path, 'env still carries PATH');
+  });
+
   test('a valid batch applies marks with actor=auto and fit_score, counted in scored', async () => {
     const runId = await insertRun();
     const id = await insertListing({ prescore: 55 });
