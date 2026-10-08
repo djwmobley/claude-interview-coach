@@ -372,6 +372,7 @@ describe('linkedin (fake capability)', () => {
       async readJson(/** @type {string} */ name) {
         if (name === 'linkedinJobCards') return gotos.length <= 5 ? [...cards, ...Array.from({ length: 25 }, (_, i) => ({ id: String(5000000000 + gotos.length * 100 + i), title: 'CTO filler', company: 'F', location: 'Houston, TX', datetime: '2026-08-24' }))] : [];
         if (name === 'linkedinEmptyState') return true;
+        if (name === 'linkedinSearchShell') return { shell: false, path: '/jobs/search/', keywords: null, location: null };
         if (name === 'wallMarkers') return { challengeCloudflare: false, challengeForm: false, recaptcha: false };
         throw new Error('unexpected extractor ' + name);
       },

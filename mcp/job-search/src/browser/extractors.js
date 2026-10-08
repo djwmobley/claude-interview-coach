@@ -50,6 +50,10 @@ export function wallMarkers() {
     challengeCloudflare: !!document.querySelector('iframe[src*="challenges.cloudflare.com"]'),
     challengeForm: !!document.querySelector('#challenge-form'),
     recaptcha: !!document.querySelector('iframe[title*="recaptcha"]'),
+    // LinkedIn guest interstitial ("Sign in to see more jobs", "Join to view more") and an inline login
+    // form: a page carrying either is a wall, never an end of results.
+    guestInterstitial: /sign in to (see|view) more|join (linkedin )?to (see|view) more/i.test(String(document.body ? document.body.innerText || document.body.textContent || '' : '').slice(0, 20000)),
+    loginForm: !!document.querySelector('input[name="session_key"], form.login__form, form[action*="login-submit"]'),
     title: String(document.title || '').slice(0, 120),
     url: String(location.href).split('?')[0].slice(0, 300),
   };
@@ -145,6 +149,26 @@ export function linkedinJobCards() {
     });
   }
   return out;
+}
+
+/**
+ * LinkedIn search shell: AFFIRMATIVE evidence that the page is a LinkedIn jobs search results page (a
+ * results container, pagination, or the results header), plus the path and the keywords/location params
+ * the page actually landed on, so the adapter can tell a real end of results from a redirect to some other
+ * query. Global nav and the search box alone do not count: a soft-block page keeps those.
+ */
+export function linkedinSearchShell() {
+  const shell = !!document.querySelector('.jobs-search-results-list, .scaffold-layout__list, .jobs-search-pagination, .artdeco-pagination, .jobs-search-results-list__subtitle, .jobs-search-results-list__title-heading');
+  let params = new URLSearchParams('');
+  let path = '';
+  try {
+    const u = new URL(String(location.href));
+    params = u.searchParams;
+    path = u.pathname;
+  } catch {
+    /* leave empty: the adapter treats a missing path or params as a mismatch */
+  }
+  return { shell, path, keywords: params.get('keywords'), location: params.get('location') };
 }
 
 /**
@@ -260,6 +284,7 @@ export const EXTRACTORS = Object.freeze({
   indeedDomJobs,
   indeedEmptyState,
   linkedinJobCards,
+  linkedinSearchShell,
   linkedinEmptyState,
   linkedinJobDetail,
   linkedinGuestJobDetail,
