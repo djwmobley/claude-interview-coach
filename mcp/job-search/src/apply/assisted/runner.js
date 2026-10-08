@@ -8,9 +8,11 @@
  *
  * Invocation (exact; test/easy-apply-runner.test.js pins it):
  *   claude -p <prompt> --model sonnet --strict-mcp-config --mcp-config <job-search only; lease via env>
- *     --allowedTools mcp__job-search__easy_apply --permission-mode dontAsk --max-turns 60
+ *     --setting-sources project <permissionArgs(assistedApplyProfile(tool)) from src/core/claude-spawn.js:
+ *     --permission-mode dontAsk, --allowedTools mcp__job-search__<tool>, --disallowedTools shell, web,
+ *     subagent, browser, Google, and every other job-search tool> --max-turns 60
  *     --max-budget-usd 1 --output-format json
- * NEVER bypassPermissions. `dontAsk` denies every tool not pre-approved; on the installed CLI
+ * Never the bypass permission mode. `dontAsk` denies every tool not pre-approved; on the installed CLI
  * (2.1.289) a probe with this exact flag pair denied Bash, Read, and Task even though the operator's user
  * settings pre-approve them (see the PR body). Belt and braces: in lease mode the job-search server itself
  * registers easy_apply and nothing else (src/server.js toolsForEnv).
@@ -25,9 +27,7 @@ import { execFile } from 'node:child_process';
 import { JobSearchError, errFields } from '../../core/errors.js';
 import { log as defaultLog } from '../../core/logger.js';
 import { LEASE_ENV, ASSISTED_LEASE_ENV, parseLeaseToken } from '../../core/easy-apply-state.js';
-
-/** Claude Code env vars (and every lease env) that must never leak into the headless child. */
-const STRIP_ENV_VARS = Object.freeze(['CLAUDECODE', 'CLAUDE_CODE_ENTRYPOINT', 'CLAUDE_AGENT_ID', LEASE_ENV, ASSISTED_LEASE_ENV]);
+import { assistedApplyProfile, buildChildEnv, permissionArgs } from '../../core/claude-spawn.js';
 
 /** The two tool names a lease-mode server can expose (src/server.js toolsForEnv). */
 const RUNNER_TOOL_NAMES = Object.freeze(['assisted_apply', 'easy_apply']);
@@ -91,14 +91,14 @@ export function createAssistedRunner(deps) {
         '--model', 'sonnet',
         '--strict-mcp-config',
         '--mcp-config', mcpConfigPath,
-        '--allowedTools', `mcp__job-search__${profile.runnerToolName}`,
-        '--permission-mode', 'dontAsk',
+        '--setting-sources', 'project',
+        ...permissionArgs(assistedApplyProfile(profile.runnerToolName)),
         '--max-turns', '60',
         '--max-budget-usd', '1',
         '--output-format', 'json',
       ];
-      const spawnEnv = { ...process.env, ...deps.env };
-      for (const k of STRIP_ENV_VARS) delete spawnEnv[k];
+      // Allowlisted env only (src/core/claude-spawn.js); lease vars and Claude Code nesting vars are never on it.
+      const spawnEnv = buildChildEnv(process.env, deps.env);
       const child = deps.spawn(claudeBin, argv, { cwd: deps.repoRoot, detached: true, stdio: ['ignore', 'pipe', 'pipe'], windowsHide: true, env: spawnEnv });
       say({ evt: 'easy_apply_runner_started', application_id: input.applicationId, pid: child.pid ?? null });
       let stdout = '';

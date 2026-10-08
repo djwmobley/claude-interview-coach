@@ -30,8 +30,7 @@ import { execFile } from 'node:child_process';
 import { JobSearchError, errFields } from '../core/errors.js';
 import { log as defaultLog } from '../core/logger.js';
 import { recordApplicationEvent } from '../core/applications.js';
-
-const STRIP_ENV_VARS = Object.freeze(['CLAUDECODE', 'CLAUDE_CODE_ENTRYPOINT', 'CLAUDE_AGENT_ID']);
+import { buildClaudeArgs, buildChildEnv, SPAWN_PROFILES } from '../core/claude-spawn.js';
 
 // Case-sensitive, no leading whitespace tolerated (SKILL.md requires the VERDICT line at column 0), CRLF
 // tolerant via the explicit optional \r before the end-of-line anchor. Global + multiline so every
@@ -184,19 +183,12 @@ export function createReviewRunner(deps) {
       const mcpConfigPath = path.join(deps.logDir, `review-mcp-${applicationId}-${Date.now()}.json`);
       fs.copyFileSync(path.join(deps.repoRoot, '.mcp.json'), mcpConfigPath);
 
-      const argv = [
-        '-p', `Run the /review-cv skill with argument ${resumeMarkdownPath} listing:${listingId}`,
-        '--model', model,
-        '--setting-sources', 'project',
-        '--permission-mode', 'bypassPermissions',
-        '--max-turns', String(maxTurns),
-        '--max-budget-usd', String(budgetUsd),
-        '--output-format', 'json',
-        '--strict-mcp-config',
-        '--mcp-config', mcpConfigPath,
-      ];
-      const spawnEnv = { ...process.env, ...deps.env };
-      for (const k of STRIP_ENV_VARS) delete spawnEnv[k];
+      // Least privilege (src/core/claude-spawn.js): dontAsk, the review-cv tool set only (no writes), allowlisted env.
+      const argv = buildClaudeArgs({
+        prompt: `Run the /review-cv skill with argument ${resumeMarkdownPath} listing:${listingId}`,
+        model, profile: SPAWN_PROFILES['review-cv'], maxTurns, budgetUsd, mcpConfigPath,
+      });
+      const spawnEnv = buildChildEnv(process.env, deps.env);
 
       // detached:true is kept ONLY so the hard-timeout branch below can taskkill /T the whole process tree
       // (see resume-runner.js's matching comment for the full rationale -- this file is the same shape).

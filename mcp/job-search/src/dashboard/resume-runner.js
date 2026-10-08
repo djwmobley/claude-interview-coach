@@ -40,11 +40,11 @@ import { JobSearchError, errFields } from '../core/errors.js';
 import { log as defaultLog } from '../core/logger.js';
 import { getApplication, recordApplicationEvent, transition } from '../core/applications.js';
 import { DETAIL_MIN_CHARS } from '../core/normalize.js';
+import { buildClaudeArgs, buildChildEnv, SPAWN_PROFILES } from '../core/claude-spawn.js';
+import { checkResumeFile } from '../core/resume-leak-gate.js';
 
-/** claude CLI env vars that must never leak into the headless child (this dashboard process IS a Claude
- * Code session when run interactively during development; the spawned CLI must never inherit that and
- * think it is a nested/resumed session). */
-const STRIP_ENV_VARS = Object.freeze(['CLAUDECODE', 'CLAUDE_CODE_ENTRYPOINT', 'CLAUDE_AGENT_ID']);
+/* Claude Code nesting vars (CLAUDECODE, CLAUDE_CODE_ENTRYPOINT, CLAUDE_AGENT_ID) never reach the child:
+ * buildChildEnv copies only its allowlist, and none of them is on it. */
 
 // Shared with scan-run.js's detail_outcome classification (spec R4 item 2): one constant, one place.
 const MIN_DESCRIPTION_CHARS = DETAIL_MIN_CHARS;
@@ -81,6 +81,7 @@ function looksQuestionShaped(text) {
  * @property {{ acquire: (o: { waitMs: number }) => Promise<{ release: () => Promise<void> }|null> }} [spawnLock] the shared
  *   cross-process resume spawn lock (src/core/resume-spawn-lock.js); production always wires it
  * @property {number} [spawnLockWaitMs] how long to wait for it (default DEFAULT_SPAWN_LOCK_WAIT_MS)
+ * @property {string} [profilePath] data/profile.md override for the private-data gate (tests); default repoRoot/data/profile.md
  */
 
 /** Default bounded wait for the shared resume spawn lock. */
@@ -261,19 +262,12 @@ export function createResumeRunner(deps) {
       // than this cutoff (less the 2 s mtime buffer), so findNewestMarkdown cannot pick it up.
       const startedAt = new Date();
       const mcpConfigPath = writeMcpConfig(applicationId);
-      const argv = [
-        '-p', `Run the /write-resume skill with argument ${listingId} application:${applicationId}`,
-        '--model', model,
-        '--setting-sources', 'project',
-        '--permission-mode', 'bypassPermissions',
-        '--max-turns', String(maxTurns),
-        '--max-budget-usd', String(budgetUsd),
-        '--output-format', 'json',
-        '--strict-mcp-config',
-        '--mcp-config', mcpConfigPath,
-      ];
-      const spawnEnv = { ...process.env, ...deps.env };
-      for (const k of STRIP_ENV_VARS) delete spawnEnv[k];
+      // Least privilege (src/core/claude-spawn.js): dontAsk, the write-resume tool set only, allowlisted env.
+      const argv = buildClaudeArgs({
+        prompt: `Run the /write-resume skill with argument ${listingId} application:${applicationId}`,
+        model, profile: SPAWN_PROFILES['write-resume'], maxTurns, budgetUsd, mcpConfigPath,
+      });
+      const spawnEnv = buildChildEnv(process.env, deps.env);
 
       // detached:true is kept ONLY so the hard-timeout branch below can taskkill /T the whole process tree
       // (the claude CLI can itself spawn further node/tool processes; without a detached child as the head
@@ -349,6 +343,22 @@ export function createResumeRunner(deps) {
           const markdownPath = findNewestMarkdown(startedAt);
           if (!markdownPath) {
             return await fail(applicationId, 'markdown_not_found');
+          }
+          // Private-data gate (src/core/resume-leak-gate.js): an injected listing may have talked the run into
+          // putting profile data in the resume. Before anything can submit it: unlink and delete the document,
+          // walk back to drafting, and park visibly with the reason. An unreadable profile blocks the same way.
+          const gate = checkResumeFile({ repoRoot: deps.repoRoot, markdownPath, profilePath: deps.profilePath });
+          if (!gate.ok) {
+            const docId = app.resume_doc_id;
+            await deps.withClient((c) => c.query('UPDATE ic_job_applications SET resume_doc_id = NULL, updated_at = now() WHERE id = $1', [applicationId]));
+            await deps.withClient((c) => c.query('DELETE FROM ic_job_documents WHERE id = $1', [docId]));
+            try {
+              await deps.withClient((c) => transition(c, applicationId, 'drafting', { actor: 'apply', note: `resume blocked by private-data gate (${gate.detail}); link reset` }));
+            } catch {
+              /* state moved on between the SELECT above and here; the unlink above is the material fix */
+            }
+            say({ evt: 'resume_runner_private_data_blocked', application_id: applicationId, listing_id: listingId, reason: gate.reason, kind: gate.detail });
+            return await fail(applicationId, gate.reason, { meta: { gate_kind: gate.detail } });
           }
           say({ evt: 'resume_runner_success', application_id: applicationId, listing_id: listingId });
           return { ok: true, markdownPath };

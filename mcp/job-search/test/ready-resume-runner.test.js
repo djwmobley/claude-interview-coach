@@ -16,6 +16,7 @@ import pg from 'pg';
 import { pgConnectionConfig } from '../src/core/config.js';
 import { withClient, closePool } from '../src/core/db.js';
 import { createReadyResumeRunner } from '../src/dashboard/ready-resume-runner.js';
+import { writeFixtureProfile, FAKE } from './helpers/fixture-profile.js';
 
 const SRC = `zz-test-readyrunner-${process.pid}`;
 const LONG = 'A senior technology leadership role. '.repeat(20);
@@ -46,6 +47,7 @@ beforeEach(() => {
   repoRoot = fs.mkdtempSync(path.join(os.tmpdir(), 'ready-runner-repo-'));
   fs.writeFileSync(path.join(repoRoot, '.mcp.json'), '{}');
   fs.mkdirSync(path.join(repoRoot, 'output', 'resumes'), { recursive: true });
+  writeFixtureProfile(repoRoot);
 });
 
 /** @param {(child: any, argv: string[]) => Promise<void>|void} onSpawn */
@@ -78,14 +80,14 @@ function runner(spawn) {
 }
 
 /** Simulate the skill: write the run's markdown and the DOCX, link a document row. @param {number} docListingId */
-function skillWrites(docListingId, opts = { markdown: true }) {
+function skillWrites(docListingId, opts = { markdown: true, body: '# r' }) {
   return async (/** @type {any} */ child, /** @type {string[]} */ argv) => {
     const prompt = argv[argv.indexOf('-p') + 1];
     const runId = /run:([a-z0-9-]+)/.exec(prompt)?.[1] ?? 'none';
     if (opts.markdown) {
       const dir = path.join(repoRoot, 'output', 'markdown', 'ready', runId);
       fs.mkdirSync(dir, { recursive: true });
-      fs.writeFileSync(path.join(dir, 'resume.md'), '# r');
+      fs.writeFileSync(path.join(dir, 'resume.md'), opts.body ?? '# r');
     }
     const name = `Damian Mobley - CTO ${docListingId}.docx`;
     fs.writeFileSync(path.join(repoRoot, 'output', 'resumes', name), 'docx');
@@ -93,6 +95,26 @@ function skillWrites(docListingId, opts = { markdown: true }) {
     finish(child, 'done');
   };
 }
+
+describe('least privilege (src/core/claude-spawn.js)', () => {
+  test('generate spawns with the write-resume profile and review with the review-cv profile; never the bypass mode', async () => {
+    const id = await listing();
+    const s = fakeSpawn(skillWrites(id));
+    const r = runner(s.fn);
+    await r.generate(id, 'run-lp01');
+    const genArgv = s.calls[0];
+    assert.ok(!genArgv.some((/** @type {string} */ a) => /bypass/i.test(a)));
+    assert.equal(genArgv[genArgv.indexOf('--permission-mode') + 1], 'dontAsk');
+    assert.ok(genArgv.includes('Skill(write-resume)') && genArgv.includes('mcp__job-search__render_doc'));
+    for (const t of ['Bash', 'WebFetch', 'WebSearch', 'Agent', 'mcp__job-search__mark_jobs']) assert.ok(genArgv.indexOf(t) > genArgv.indexOf('--disallowedTools'), `${t} denied`);
+    const s2 = fakeSpawn((/** @type {any} */ child) => finish(child, 'VERDICT: PASS\n```json\n{"critical_count":0}\n```'));
+    await runner(s2.fn).review(id, 'output/markdown/ready/run-lp01/resume.md');
+    const revArgv = s2.calls[0];
+    assert.ok(revArgv.includes('Skill(review-cv)'));
+    assert.ok(revArgv.indexOf('mcp__job-search__render_doc') > revArgv.indexOf('--disallowedTools'), 'review cannot render');
+    assert.ok(!revArgv.some((/** @type {string} */ a) => /^(Write|Edit)\(\.\/output/.test(a)), 'review has no write rule');
+  });
+});
 
 describe('generate (listing mode)', () => {
   test('success: run-dir markdown plus a new resume document for this listing with its file on disk', async () => {
@@ -107,6 +129,25 @@ describe('generate (listing mode)', () => {
     assert.match(prompt, new RegExp(`/write-resume skill with argument ${id} headless:listing run:run-abc1`));
     const apps1 = (await client.query('SELECT count(*)::int AS n FROM ic_job_applications')).rows[0].n;
     assert.equal(apps1, apps0, 'listing mode never writes ic_job_applications');
+  });
+
+  test('private-data gate: a compensation figure in the markdown blocks the run, deletes the document row, and is never reusable', async () => {
+    const id = await listing();
+    const r = await runner(fakeSpawn(skillWrites(id, { markdown: true, body: `# ${FAKE.name}
+Houston, TX
+Expected comp ${FAKE.salaryA}
+` })).fn).generate(id, 'run-leak1');
+    assert.equal(r.ok, false);
+    assert.equal(r.reason, 'private_data_leak');
+    assert.equal((await client.query(`SELECT 1 FROM ic_job_documents WHERE listing_id = $1 AND kind = 'resume'`, [id])).rowCount, 0);
+  });
+
+  test('private-data gate: an unreadable profile fails closed', async () => {
+    const id = await listing();
+    fs.rmSync(path.join(repoRoot, 'data', 'profile.md'));
+    const r = await runner(fakeSpawn(skillWrites(id)).fn).generate(id, 'run-leak2');
+    assert.equal(r.ok, false);
+    assert.equal(r.reason, 'private_data_profile_unreadable');
   });
 
   test('a document linked to ANOTHER listing is a failure (no_document)', async () => {

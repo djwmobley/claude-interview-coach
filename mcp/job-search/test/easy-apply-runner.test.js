@@ -13,6 +13,7 @@ import os from 'node:os';
 import path from 'node:path';
 import { EventEmitter } from 'node:events';
 import { createEasyApplyRunner, EASY_APPLY_PROMPT } from '../src/apply/easy-apply-runner.js';
+import { assistedApplyProfile, permissionArgs } from '../src/core/claude-spawn.js';
 
 /** @type {string} */
 let repoRoot;
@@ -67,13 +68,16 @@ describe('createEasyApplyRunner', () => {
       '--model', 'sonnet',
       '--strict-mcp-config',
       '--mcp-config', cfgPath,
-      '--allowedTools', 'mcp__job-search__easy_apply',
-      '--permission-mode', 'dontAsk',
+      '--setting-sources', 'project',
+      ...permissionArgs(assistedApplyProfile('easy_apply')),
       '--max-turns', '60',
       '--max-budget-usd', '1',
       '--output-format', 'json',
     ]);
-    assert.ok(!seen.argv.includes('bypassPermissions'));
+    assert.ok(!seen.argv.some((/** @type {string} */ a) => /bypass/i.test(a)));
+    assert.deepEqual(seen.argv.slice(seen.argv.indexOf('--allowedTools') + 1, seen.argv.indexOf('--disallowedTools')), ['mcp__job-search__easy_apply']);
+    for (const t of ['Bash', 'PowerShell', 'WebFetch', 'WebSearch', 'Agent', 'mcp__job-search__mark_jobs', 'mcp__job-search__assisted_apply']) assert.ok(seen.argv.includes(t), `${t} denied`);
+    assert.equal(seen.opts.env.SOME, undefined, 'only allowlisted env reaches the child');
     assert.deepEqual(Object.keys(configAtSpawn.mcpServers), ['job-search']);
     assert.equal(configAtSpawn.mcpServers['job-search'].env.JOBSEARCH_EASY_APPLY_LEASE, '42.abcdef0123456789abcdef0123456789');
     assert.equal(fs.existsSync(cfgPath), false, 'the config file carries the nonce and must be deleted after the run');

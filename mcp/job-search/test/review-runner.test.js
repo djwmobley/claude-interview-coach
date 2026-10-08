@@ -210,6 +210,35 @@ describe('parseReviewResult: total classification over the machine block (pure f
   });
 });
 
+describe('createReviewRunner: least privilege (src/core/claude-spawn.js)', () => {
+  test('spawns dontAsk with the review-cv profile, shell/web/render denied, and an allowlisted env without the sentinel secret', async () => {
+    const listingId = await insertListing();
+    const app = await createApplication(client, { listingId });
+    /** @type {any} */
+    let seen = null;
+    const spawnFn = makeFakeSpawn({ onSpawn: (child) => finishChild(child, { result: PASS_BLOCK, exitCode: 0 }) });
+    process.env.JOBSEARCH_SENTINEL_SECRET = 'leak';
+    try {
+      const runner = createReviewRunner(baseDeps({
+        env: /** @type {any} */ ({ GOOGLE_TOKEN_FILE: 'C:/t.json', LOG_LEVEL: 'info' }),
+        spawn: (/** @type {any} */ cmd, /** @type {string[]} */ argv, /** @type {any} */ opts) => { seen = { argv, opts }; return spawnFn(); },
+      }));
+      await runner.run(app.id, 'output/markdown/x.md', listingId);
+    } finally {
+      delete process.env.JOBSEARCH_SENTINEL_SECRET;
+    }
+    assert.ok(!seen.argv.some((/** @type {string} */ a) => /bypass/i.test(a)));
+    assert.equal(seen.argv[seen.argv.indexOf('--permission-mode') + 1], 'dontAsk');
+    assert.ok(seen.argv.includes('Skill(review-cv)'));
+    const d = seen.argv.indexOf('--disallowedTools');
+    for (const t of ['Bash', 'PowerShell', 'WebFetch', 'WebSearch', 'Agent', 'mcp__job-search__render_doc', 'mcp__job-search__mark_jobs']) assert.ok(seen.argv.indexOf(t) > d, `${t} denied`);
+    assert.equal(seen.opts.env.JOBSEARCH_SENTINEL_SECRET, undefined);
+    assert.equal(seen.opts.env.GOOGLE_TOKEN_FILE, undefined);
+    assert.equal(seen.opts.env.CLAUDECODE, undefined);
+    assert.equal(seen.opts.env.LOG_LEVEL, 'info');
+  });
+});
+
 describe('createReviewRunner: DB storage and runner return value', () => {
   test('VERDICT: PASS stores review_verdict=PASS and review_findings, returns ok:true', async () => {
     const listingId = await insertListing();

@@ -21,6 +21,7 @@ import { ensureAuxSchema } from '../src/core/schema.js';
 import { withClient, closePool } from '../src/core/db.js';
 import { createApplication, getApplication, listApplicationEvents } from '../src/core/applications.js';
 import { createResumeRunner } from '../src/dashboard/resume-runner.js';
+import { writeFixtureProfile, FAKE } from './helpers/fixture-profile.js';
 
 const CO = `ZZ-TEST-RESUMERUNNER-${process.pid}`;
 const LONG_DESCRIPTION = 'A senior technology leadership role. '.repeat(20); // > 300 chars
@@ -78,6 +79,7 @@ beforeEach(() => {
   repoRoot = fs.mkdtempSync(path.join(os.tmpdir(), 'jobsearch-resumerunner-repo-'));
   fs.writeFileSync(path.join(repoRoot, '.mcp.json'), JSON.stringify({ mcpServers: { 'job-search': { command: 'node', args: ['x'] } } }));
   fs.mkdirSync(path.join(repoRoot, 'output', 'markdown'), { recursive: true });
+  writeFixtureProfile(repoRoot);
   logDir = fs.mkdtempSync(path.join(os.tmpdir(), 'jobsearch-resumerunner-log-'));
 });
 
@@ -163,6 +165,36 @@ describe('createResumeRunner: precheck (spec item 11)', () => {
   });
 });
 
+describe('createResumeRunner: least privilege (src/core/claude-spawn.js)', () => {
+  test('spawns dontAsk with the write-resume profile, shell/web/subagent denied, and an allowlisted env without the sentinel secret', async () => {
+    const listingId = await insertListing({ description: 'x'.repeat(300) });
+    const app = await createApplication(client, { listingId });
+    /** @type {any} */
+    let seen = null;
+    const spawnFn = makeFakeSpawn({ onSpawn: (child) => finishChild(child, { result: 'no draft happened' }) });
+    process.env.JOBSEARCH_SENTINEL_SECRET = 'leak';
+    try {
+      const runner = createResumeRunner(baseDeps({
+        env: /** @type {any} */ ({ GOOGLE_TOKEN_FILE: 'C:/t.json', SCAN_PROFILE_DIR: 'C:/p', LOG_LEVEL: 'info' }),
+        spawn: (/** @type {any} */ cmd, /** @type {string[]} */ argv, /** @type {any} */ opts) => { seen = { argv, opts }; return spawnFn(); },
+      }));
+      await runner.run(app.id, listingId);
+    } finally {
+      delete process.env.JOBSEARCH_SENTINEL_SECRET;
+    }
+    assert.ok(!seen.argv.some((/** @type {string} */ a) => /bypass/i.test(a)));
+    assert.equal(seen.argv[seen.argv.indexOf('--permission-mode') + 1], 'dontAsk');
+    assert.ok(seen.argv.includes('Skill(write-resume)') && seen.argv.includes('mcp__job-search__render_doc'));
+    const d = seen.argv.indexOf('--disallowedTools');
+    for (const t of ['Bash', 'PowerShell', 'WebFetch', 'WebSearch', 'Agent', 'mcp__claude_ai_Gmail', 'mcp__job-search__mark_jobs']) assert.ok(seen.argv.indexOf(t) > d, `${t} denied`);
+    assert.equal(seen.opts.env.JOBSEARCH_SENTINEL_SECRET, undefined);
+    assert.equal(seen.opts.env.GOOGLE_TOKEN_FILE, undefined);
+    assert.equal(seen.opts.env.SCAN_PROFILE_DIR, undefined);
+    assert.equal(seen.opts.env.CLAUDECODE, undefined);
+    assert.equal(seen.opts.env.LOG_LEVEL, 'info');
+  });
+});
+
 describe('createResumeRunner: DB-only success verification (spec item 4/5)', () => {
   test('exit 0 without a DB flip to docs_ready is a failure (no_docs_ready)', async () => {
     const listingId = await insertListing();
@@ -198,6 +230,47 @@ describe('createResumeRunner: DB-only success verification (spec item 4/5)', () 
     const result = await runner.run(app.id, listingId);
     assert.equal(result.ok, true);
     assert.equal(result.markdownPath, 'output/markdown/20260903-cto.md');
+  });
+
+  test('private-data gate: a resume carrying a profile street line is blocked, unlinked, deleted, and parked with private_data_leak', async () => {
+    const listingId = await insertListing();
+    const app = await createApplication(client, { listingId });
+    const docId = await insertDocument(listingId, 'resumes/leaky.docx');
+    const spawnFn = makeFakeSpawn({
+      onSpawn: async (child) => {
+        fs.writeFileSync(path.join(repoRoot, 'output', 'markdown', 'leaky.md'), `# ${FAKE.name}
+Houston, TX
+${FAKE.street}
+`);
+        await client.query('UPDATE ic_job_applications SET state = $2, resume_doc_id = $3, updated_at = now() WHERE id = $1', [app.id, 'docs_ready', docId]);
+        finishChild(child, { result: 'Resume written.', exitCode: 0 });
+      },
+    });
+    const result = await createResumeRunner(baseDeps({ spawn: spawnFn })).run(app.id, listingId);
+    assert.equal(result.ok, false);
+    assert.equal(result.reason, 'private_data_leak');
+    const row = await getApplication(client, app.id);
+    assert.equal(row.resume_doc_id, null);
+    assert.equal(row.state, 'needs_human');
+    assert.match(row.pending_question?.label ?? '', /private_data_leak/);
+    assert.equal((await client.query('SELECT 1 FROM ic_job_documents WHERE id = $1', [docId])).rowCount, 0, 'the leaked document row is gone');
+  });
+
+  test('private-data gate: an unreadable profile fails closed (never skips the check)', async () => {
+    const listingId = await insertListing();
+    const app = await createApplication(client, { listingId });
+    const docId = await insertDocument(listingId, 'resumes/fine.docx');
+    fs.rmSync(path.join(repoRoot, 'data', 'profile.md'));
+    const spawnFn = makeFakeSpawn({
+      onSpawn: async (child) => {
+        fs.writeFileSync(path.join(repoRoot, 'output', 'markdown', 'fine.md'), '# fine');
+        await client.query('UPDATE ic_job_applications SET state = $2, resume_doc_id = $3, updated_at = now() WHERE id = $1', [app.id, 'docs_ready', docId]);
+        finishChild(child, { result: 'Resume written.', exitCode: 0 });
+      },
+    });
+    const result = await createResumeRunner(baseDeps({ spawn: spawnFn })).run(app.id, listingId);
+    assert.equal(result.ok, false);
+    assert.equal(result.reason, 'private_data_profile_unreadable');
   });
 
   test('a DB flip to docs_ready with a MISMATCHED listing resets the link and fails (listing_mismatch)', async () => {

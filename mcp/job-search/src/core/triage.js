@@ -15,6 +15,7 @@ import { withTransaction } from './db.js';
 import { applyMark } from '../tools/mark_jobs.js';
 import { salaryText } from './report.js';
 import { loadTriageCandidateSummary } from './config.js';
+import { permissionArgs, buildChildEnv, SPAWN_PROFILES } from './claude-spawn.js';
 
 /**
  * Reliable claude CLI invocation. Deviation from the spec's literal `promisify(execFile)(..., {input:
@@ -40,12 +41,12 @@ import { loadTriageCandidateSummary } from './config.js';
  * `stdout`/`stderr` attached.
  * @param {string} bin
  * @param {string[]} args
- * @param {{ input?: string, timeout?: number, maxBuffer?: number, windowsHide?: boolean }} [opts]
+ * @param {{ input?: string, timeout?: number, maxBuffer?: number, windowsHide?: boolean, env?: Record<string, string> }} [opts]
  * @returns {Promise<{ stdout: string, stderr: string }>}
  */
 export function execFileWithStdin(bin, args, opts = {}) {
   return new Promise((resolve, reject) => {
-    const child = spawn(bin, args, { windowsHide: opts.windowsHide ?? true });
+    const child = spawn(bin, args, { windowsHide: opts.windowsHide ?? true, ...(opts.env ? { env: opts.env } : {}) });
     let stdout = '';
     let stderr = '';
     let settled = false;
@@ -763,6 +764,10 @@ export async function runModelTriage(client, runId, ids, cfg, configDir, candida
   const claudeBin = process.env.JOBSEARCH_TRIAGE_CLAUDE_BIN || 'claude';
   const claudeScript = process.env.JOBSEARCH_TRIAGE_CLAUDE_SCRIPT || null;
   const run = deps.execFile ?? execFileWithStdin;
+  // Least privilege: the child gets only the allowlisted environment, never the scan process's whole env.
+  // The fake-claude test fixture (reachable only through JOBSEARCH_TRIAGE_CLAUDE_SCRIPT, never set in
+  // production) is steered by FAKE_CLAUDE_MODE, so that one key is forwarded when that hook is in use.
+  const childEnv = { ...buildChildEnv(process.env), ...(claudeScript && process.env.FAKE_CLAUDE_MODE ? { FAKE_CLAUDE_MODE: process.env.FAKE_CLAUDE_MODE } : {}) };
 
   const allBatches = [];
   for (let i = 0; i < ids.length; i += cfg.model.batchSize) allBatches.push(ids.slice(i, i + cfg.model.batchSize));
@@ -781,12 +786,14 @@ export async function runModelTriage(client, runId, ids, cfg, configDir, candida
       '-p', '--model', cfg.model.modelName, '--output-format', 'json',
       '--json-schema', schemaJson,
       '--strict-mcp-config', '--mcp-config', mcpEmptyPath,
+      // The prompt carries untrusted listing text: no tool of any kind, shell/web/Google always denied.
+      ...permissionArgs(SPAWN_PROFILES.triage),
     ];
     const args = claudeScript ? [claudeScript, ...realArgs] : realArgs;
     /** @type {ClaudeOutcome} */
     let outcome;
     try {
-      const res = /** @type {any} */ (await run(claudeBin, args, { input: prompt, timeout: cfg.model.timeoutMs, maxBuffer: 1 << 20, windowsHide: true }));
+      const res = /** @type {any} */ (await run(claudeBin, args, { input: prompt, timeout: cfg.model.timeoutMs, maxBuffer: 1 << 20, windowsHide: true, env: childEnv }));
       const stdout = res && typeof res === 'object' && 'stdout' in res ? String(res.stdout) : String(res ?? '');
       outcome = { exitCode: 0, timedOut: false, stdout };
     } catch (err) {
