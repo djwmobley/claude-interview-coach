@@ -27,6 +27,8 @@ const WALL_PATH = /\/(login|checkpoint|authwall|uas)(\/|$|\?)/i;
  * @property {boolean} [challengeForm] #challenge-form present
  * @property {boolean} [recaptcha] iframe[title*="recaptcha"] present
  * @property {boolean} [emptyState] a known empty-state marker for the source is present
+ * @property {boolean} [guestInterstitial] "sign in to see more" / "join to view more" guest interstitial text present
+ * @property {boolean} [loginForm] an inline login form is present
  */
 
 /**
@@ -44,6 +46,9 @@ const WALL_PATH = /\/(login|checkpoint|authwall|uas)(\/|$|\?)/i;
 export function classifyPage(s) {
   const parsed = Number.isFinite(s.parsed) ? s.parsed : 0;
   if (parsed > 0) return { kind: 'ok', reason: 'parsed', stopSource: false, code: '' };
+  // A guest interstitial or inline login form outranks an empty-state marker: the page is gating results.
+  if (s.guestInterstitial === true) return { kind: 'wall', reason: 'guest_interstitial', stopSource: true, code: 'LOGIN_WALL' };
+  if (s.loginForm === true) return { kind: 'wall', reason: 'login_form', stopSource: true, code: 'LOGIN_WALL' };
   if (s.emptyState === true) return { kind: 'empty', reason: 'empty_state_marker', stopSource: false, code: '' };
   const status = s.status ?? null;
   if (status === 403 || status === 429) return { kind: 'wall', reason: `http_${status}`, stopSource: true, code: 'LOGIN_WALL' };

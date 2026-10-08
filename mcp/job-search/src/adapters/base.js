@@ -70,6 +70,7 @@ export const KEYWORD_RE = /^[\p{L}\p{N} .,+'/&-]{1,80}$/u;
  *   src/core/google-reauth.js reauthorizeGoogle() (tokenFile/timeoutMs/signal already filled in by
  *   scan-run.js's makeCtx). Only meaningful when `interactive` is true; the gmail adapter is today's only
  *   caller, on broken_invalid_grant/broken_no_refresh_token/broken_missing_scopes, exactly once per run.
+ * @property {(html: string, meta: { query: string, pageIndex: number, classification?: string }) => Promise<string|null>} [saveSnapshot] present for browser sources only: writes a sanitized HTML snapshot (max 10 per run) so a wall/unrecognized/end-of-results page can be diagnosed later; resolves null once the per-run cap is hit
  * @property {(fields: Record<string, string|number|boolean|null>) => void} log enumerated scalars only
  */
 

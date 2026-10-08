@@ -638,6 +638,21 @@ export function aggregateGmailStats(runs) {
 }
 
 /**
+ * Headline lines for a suspected LinkedIn throttle (stats.linkedin written by the linkedin adapter's
+ * source_stats event): one line per run whose every non-empty-page-1 query ended on page 2.
+ * @param {any[]|null|undefined} runs
+ * @returns {string[]}
+ */
+export function linkedinThrottleLines(runs) {
+  const out = [];
+  for (const r of Array.isArray(runs) ? runs : []) {
+    const l = r && r.stats ? r.stats.linkedin : null;
+    if (l && l.suspected_throttle === true) out.push(`LINKEDIN SUSPECTED THROTTLE: ${Number(l.eor_page2)} of ${Number(l.page1_nonempty)} queries ended on page 2`);
+  }
+  return out;
+}
+
+/**
  * Gmail health lines (G4 with B7). Hard: a registered sender with parse_empty or parse_error > 0 in at least
  * `minEmails` emails -> "PARSER BROKEN: ..." (also the subject prefix). Soft info: emails with no job markers
  * (news, resume reports). Ratio warning: listings under half of the job markers.
@@ -1009,11 +1024,13 @@ export function renderReportText(data, registry, googleAuthState, dashboardHealt
   const gmailAgg = aggregateGmailStats(data.runs);
   const gmailHealth = gmailHealthLines(gmailAgg, /** @type {any} */ (data).parserBrokenMinEmails ?? 1);
   if (gmailHealth.broken.length) lines.push(...gmailHealth.broken, '');
+  const liThrottle = linkedinThrottleLines(data.runs);
+  if (liThrottle.length) lines.push(...liThrottle, '');
   if (googleAuthState !== undefined) {
     lines.push(googleAuthLineText(googleAuthState));
     lines.push('');
   }
-  const dashboardLine = dashboardHealthLineText(dashboardHealthState ?? null);
+  const dashboardLine =dashboardHealthLineText(dashboardHealthState ?? null);
   if (dashboardLine) {
     lines.push(dashboardLine);
     lines.push('');
@@ -1099,6 +1116,7 @@ export function renderReportHtml(data, registry, googleAuthState, dashboardHealt
   const gmailAgg = aggregateGmailStats(data.runs);
   const gmailHealth = gmailHealthLines(gmailAgg, /** @type {any} */ (data).parserBrokenMinEmails ?? 1);
   for (const l of gmailHealth.broken) parts.push(`<p><strong>${esc(l)}</strong></p>`);
+  for (const l of linkedinThrottleLines(data.runs)) parts.push(`<p><strong>${esc(l)}</strong></p>`);
   if (googleAuthState !== undefined) parts.push(`<p>${esc(googleAuthLineText(googleAuthState))}</p>`);
   const dashboardLineHtml = dashboardHealthLineText(dashboardHealthState ?? null);
   if (dashboardLineHtml) parts.push(`<p>${esc(dashboardLineHtml)}</p>`);
@@ -1167,6 +1185,8 @@ export function renderReportMarkdown(data, registry, googleAuthState, dashboardH
   const gmailAgg = aggregateGmailStats(data.runs);
   const gmailHealth = gmailHealthLines(gmailAgg, /** @type {any} */ (data).parserBrokenMinEmails ?? 1);
   if (gmailHealth.broken.length) lines.push(...gmailHealth.broken.map((l) => `**${l}**`), '');
+  const liThrottleMd = linkedinThrottleLines(data.runs);
+  if (liThrottleMd.length) lines.push(...liThrottleMd.map((l) => `**${l}**`), '');
   if (googleAuthState !== undefined) {
     lines.push(googleAuthLineText(googleAuthState));
     lines.push('');

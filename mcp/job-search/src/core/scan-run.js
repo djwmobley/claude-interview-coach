@@ -58,6 +58,7 @@ import { connectSession as defaultConnectSession, applyTargetMarkerPath } from '
 import { makeCapability } from '../browser/capability.js';
 import { ADAPTERS, getAdapter } from '../adapters/index.js';
 import { runTriage } from './triage.js';
+import { createSnapshotSaver } from './linkedin-snapshot.js';
 import { persistApplyTargetForListing, buildScanProbeRegistry } from './apply-target-persist.js';
 
 /** Advisory lock key shared by MCP and CLI (spec section 5). */
@@ -704,6 +705,9 @@ async function executeRun(p) {
       config,
       env: { GOOGLE_TOKEN_FILE: env.GOOGLE_TOKEN_FILE },
       interactive,
+      // LinkedIn diagnosability: a sanitized snapshot of any wall / unrecognized / end-of-results page,
+      // under the gitignored logs tree, capped per run inside the saver.
+      ...(s.name === 'linkedin' && env.JOBSEARCH_LOG_DIR ? { saveSnapshot: createSnapshotSaver({ dir: path.join(env.JOBSEARCH_LOG_DIR, 'linkedin-snapshots'), runId }) } : {}),
       // Spec A5/A8: bound so an adapter never sees tokenFile/timeoutMs/signal wiring. Only meaningful
       // when `interactive` is true -- the unattended policy (spec A6) is handled entirely around the
       // source loop below, never through this ctx method.
@@ -1402,7 +1406,7 @@ async function executeRun(p) {
           async onWarning(ev) {
             const msg = `${ev.code}: ${ev.message}`;
             if (!warnings.includes(msg)) warnings.push(msg);
-            if (ev.code === 'BROWSER_UNAVAILABLE' || ev.code === 'UNRENDERABLE' || ev.code === 'AUTH_UNAVAILABLE') partial = true;
+            if (ev.code === 'BROWSER_UNAVAILABLE' || ev.code === 'UNRENDERABLE' || ev.code === 'AUTH_UNAVAILABLE' || ev.code === 'SUSPECTED_THROTTLE') partial = true;
             if (ev.code === 'BOARD_NOT_FOUND' || ev.code === 'BAD_RESPONSE') {
               // A configured board that does not answer is a config defect: visible as partial, never silent.
               partial = true;
