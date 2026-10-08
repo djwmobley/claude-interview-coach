@@ -22,7 +22,7 @@
  * test/claude-spawn.test.js fails when the server gains a tool that is not listed here. */
 export const JOB_SEARCH_TOOL_NAMES = Object.freeze([
   'search_jobs', 'query_jobs', 'get_job', 'mark_jobs', 'profiles', 'scans', 'review', 'render_doc', 'followups',
-  'scan_report', 'assisted_apply', 'easy_apply',
+  'scan_report', 'restart_dashboard', 'assisted_apply', 'easy_apply',
 ]);
 
 /** Denied for every profile, whatever its allow list says. */
