@@ -163,6 +163,36 @@ describe('createResumeRunner: precheck (spec item 11)', () => {
   });
 });
 
+describe('createResumeRunner: least privilege (src/core/claude-spawn.js)', () => {
+  test('spawns dontAsk with the write-resume profile, shell/web/subagent denied, and an allowlisted env without the sentinel secret', async () => {
+    const listingId = await insertListing({ description: 'x'.repeat(300) });
+    const app = await createApplication(client, { listingId });
+    /** @type {any} */
+    let seen = null;
+    const spawnFn = makeFakeSpawn({ onSpawn: (child) => finishChild(child, { result: 'no draft happened' }) });
+    process.env.JOBSEARCH_SENTINEL_SECRET = 'leak';
+    try {
+      const runner = createResumeRunner(baseDeps({
+        env: /** @type {any} */ ({ GOOGLE_TOKEN_FILE: 'C:/t.json', SCAN_PROFILE_DIR: 'C:/p', LOG_LEVEL: 'info' }),
+        spawn: (/** @type {any} */ cmd, /** @type {string[]} */ argv, /** @type {any} */ opts) => { seen = { argv, opts }; return spawnFn(); },
+      }));
+      await runner.run(app.id, listingId);
+    } finally {
+      delete process.env.JOBSEARCH_SENTINEL_SECRET;
+    }
+    assert.ok(!seen.argv.some((/** @type {string} */ a) => /bypass/i.test(a)));
+    assert.equal(seen.argv[seen.argv.indexOf('--permission-mode') + 1], 'dontAsk');
+    assert.ok(seen.argv.includes('Skill(write-resume)') && seen.argv.includes('mcp__job-search__render_doc'));
+    const d = seen.argv.indexOf('--disallowedTools');
+    for (const t of ['Bash', 'PowerShell', 'WebFetch', 'WebSearch', 'Agent', 'mcp__claude_ai_Gmail', 'mcp__job-search__mark_jobs']) assert.ok(seen.argv.indexOf(t) > d, `${t} denied`);
+    assert.equal(seen.opts.env.JOBSEARCH_SENTINEL_SECRET, undefined);
+    assert.equal(seen.opts.env.GOOGLE_TOKEN_FILE, undefined);
+    assert.equal(seen.opts.env.SCAN_PROFILE_DIR, undefined);
+    assert.equal(seen.opts.env.CLAUDECODE, undefined);
+    assert.equal(seen.opts.env.LOG_LEVEL, 'info');
+  });
+});
+
 describe('createResumeRunner: DB-only success verification (spec item 4/5)', () => {
   test('exit 0 without a DB flip to docs_ready is a failure (no_docs_ready)', async () => {
     const listingId = await insertListing();

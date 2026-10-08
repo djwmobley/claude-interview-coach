@@ -94,6 +94,26 @@ function skillWrites(docListingId, opts = { markdown: true }) {
   };
 }
 
+describe('least privilege (src/core/claude-spawn.js)', () => {
+  test('generate spawns with the write-resume profile and review with the review-cv profile; never the bypass mode', async () => {
+    const id = await listing();
+    const s = fakeSpawn(skillWrites(id));
+    const r = runner(s.fn);
+    await r.generate(id, 'run-lp01');
+    const genArgv = s.calls[0];
+    assert.ok(!genArgv.some((/** @type {string} */ a) => /bypass/i.test(a)));
+    assert.equal(genArgv[genArgv.indexOf('--permission-mode') + 1], 'dontAsk');
+    assert.ok(genArgv.includes('Skill(write-resume)') && genArgv.includes('mcp__job-search__render_doc'));
+    for (const t of ['Bash', 'WebFetch', 'WebSearch', 'Agent', 'mcp__job-search__mark_jobs']) assert.ok(genArgv.indexOf(t) > genArgv.indexOf('--disallowedTools'), `${t} denied`);
+    const s2 = fakeSpawn((/** @type {any} */ child) => finish(child, 'VERDICT: PASS\n```json\n{"critical_count":0}\n```'));
+    await runner(s2.fn).review(id, 'output/markdown/ready/run-lp01/resume.md');
+    const revArgv = s2.calls[0];
+    assert.ok(revArgv.includes('Skill(review-cv)'));
+    assert.ok(revArgv.indexOf('mcp__job-search__render_doc') > revArgv.indexOf('--disallowedTools'), 'review cannot render');
+    assert.ok(!revArgv.some((/** @type {string} */ a) => /^(Write|Edit)\(\.\/output/.test(a)), 'review has no write rule');
+  });
+});
+
 describe('generate (listing mode)', () => {
   test('success: run-dir markdown plus a new resume document for this listing with its file on disk', async () => {
     const id = await listing();
