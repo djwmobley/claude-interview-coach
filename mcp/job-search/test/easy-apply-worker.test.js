@@ -213,10 +213,12 @@ describe('assisted Easy Apply: outcomes', () => {
     assert.equal('options' in app.pending_question, false, 'no options captured -> none persisted');
   });
   test('a park with no question text becomes the stopped kind, never a question kind', async () => {
+    let n = 0;
     for (const park of [{ question: null, reason: 'model_parked', bank_key: null, kind: null }, { question: '   ', reason: 'model_parked' }, { reason: 'model_parked', label_hint: 'Cover note box' }]) {
+      n++;
       const id = await seedApproved();
       const h = harness({ onRun: finishWith({ stopReason: 'parked', finishResult: { ok: false, park } }) });
-      await runApplyWorker(id, h.deps());
+      await runApplyWorker(id, h.deps({ easyApply: { now: () => new Date(Date.now() + n * 10 * 60000) } }));
       const pq = (await getApplication(c, id)).pending_question;
       assert.equal(pq.kind, 'easy_apply_stopped');
       assert.match(pq.label, /^The assistant stopped on a field it could not name\. Open the job and answer it there\./);
