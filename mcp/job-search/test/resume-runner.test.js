@@ -21,6 +21,7 @@ import { ensureAuxSchema } from '../src/core/schema.js';
 import { withClient, closePool } from '../src/core/db.js';
 import { createApplication, getApplication, listApplicationEvents } from '../src/core/applications.js';
 import { createResumeRunner } from '../src/dashboard/resume-runner.js';
+import { writeFixtureProfile, FAKE } from './helpers/fixture-profile.js';
 
 const CO = `ZZ-TEST-RESUMERUNNER-${process.pid}`;
 const LONG_DESCRIPTION = 'A senior technology leadership role. '.repeat(20); // > 300 chars
@@ -78,6 +79,7 @@ beforeEach(() => {
   repoRoot = fs.mkdtempSync(path.join(os.tmpdir(), 'jobsearch-resumerunner-repo-'));
   fs.writeFileSync(path.join(repoRoot, '.mcp.json'), JSON.stringify({ mcpServers: { 'job-search': { command: 'node', args: ['x'] } } }));
   fs.mkdirSync(path.join(repoRoot, 'output', 'markdown'), { recursive: true });
+  writeFixtureProfile(repoRoot);
   logDir = fs.mkdtempSync(path.join(os.tmpdir(), 'jobsearch-resumerunner-log-'));
 });
 
@@ -228,6 +230,47 @@ describe('createResumeRunner: DB-only success verification (spec item 4/5)', () 
     const result = await runner.run(app.id, listingId);
     assert.equal(result.ok, true);
     assert.equal(result.markdownPath, 'output/markdown/20260903-cto.md');
+  });
+
+  test('private-data gate: a resume carrying a profile street line is blocked, unlinked, deleted, and parked with private_data_leak', async () => {
+    const listingId = await insertListing();
+    const app = await createApplication(client, { listingId });
+    const docId = await insertDocument(listingId, 'resumes/leaky.docx');
+    const spawnFn = makeFakeSpawn({
+      onSpawn: async (child) => {
+        fs.writeFileSync(path.join(repoRoot, 'output', 'markdown', 'leaky.md'), `# ${FAKE.name}
+Houston, TX
+${FAKE.street}
+`);
+        await client.query('UPDATE ic_job_applications SET state = $2, resume_doc_id = $3, updated_at = now() WHERE id = $1', [app.id, 'docs_ready', docId]);
+        finishChild(child, { result: 'Resume written.', exitCode: 0 });
+      },
+    });
+    const result = await createResumeRunner(baseDeps({ spawn: spawnFn })).run(app.id, listingId);
+    assert.equal(result.ok, false);
+    assert.equal(result.reason, 'private_data_leak');
+    const row = await getApplication(client, app.id);
+    assert.equal(row.resume_doc_id, null);
+    assert.equal(row.state, 'needs_human');
+    assert.match(row.pending_question?.label ?? '', /private_data_leak/);
+    assert.equal((await client.query('SELECT 1 FROM ic_job_documents WHERE id = $1', [docId])).rowCount, 0, 'the leaked document row is gone');
+  });
+
+  test('private-data gate: an unreadable profile fails closed (never skips the check)', async () => {
+    const listingId = await insertListing();
+    const app = await createApplication(client, { listingId });
+    const docId = await insertDocument(listingId, 'resumes/fine.docx');
+    fs.rmSync(path.join(repoRoot, 'data', 'profile.md'));
+    const spawnFn = makeFakeSpawn({
+      onSpawn: async (child) => {
+        fs.writeFileSync(path.join(repoRoot, 'output', 'markdown', 'fine.md'), '# fine');
+        await client.query('UPDATE ic_job_applications SET state = $2, resume_doc_id = $3, updated_at = now() WHERE id = $1', [app.id, 'docs_ready', docId]);
+        finishChild(child, { result: 'Resume written.', exitCode: 0 });
+      },
+    });
+    const result = await createResumeRunner(baseDeps({ spawn: spawnFn })).run(app.id, listingId);
+    assert.equal(result.ok, false);
+    assert.equal(result.reason, 'private_data_profile_unreadable');
   });
 
   test('a DB flip to docs_ready with a MISMATCHED listing resets the link and fails (listing_mismatch)', async () => {

@@ -41,6 +41,7 @@ import { log as defaultLog } from '../core/logger.js';
 import { getApplication, recordApplicationEvent, transition } from '../core/applications.js';
 import { DETAIL_MIN_CHARS } from '../core/normalize.js';
 import { buildClaudeArgs, buildChildEnv, SPAWN_PROFILES } from '../core/claude-spawn.js';
+import { checkResumeFile } from '../core/resume-leak-gate.js';
 
 /* Claude Code nesting vars (CLAUDECODE, CLAUDE_CODE_ENTRYPOINT, CLAUDE_AGENT_ID) never reach the child:
  * buildChildEnv copies only its allowlist, and none of them is on it. */
@@ -80,6 +81,7 @@ function looksQuestionShaped(text) {
  * @property {{ acquire: (o: { waitMs: number }) => Promise<{ release: () => Promise<void> }|null> }} [spawnLock] the shared
  *   cross-process resume spawn lock (src/core/resume-spawn-lock.js); production always wires it
  * @property {number} [spawnLockWaitMs] how long to wait for it (default DEFAULT_SPAWN_LOCK_WAIT_MS)
+ * @property {string} [profilePath] data/profile.md override for the private-data gate (tests); default repoRoot/data/profile.md
  */
 
 /** Default bounded wait for the shared resume spawn lock. */
@@ -341,6 +343,22 @@ export function createResumeRunner(deps) {
           const markdownPath = findNewestMarkdown(startedAt);
           if (!markdownPath) {
             return await fail(applicationId, 'markdown_not_found');
+          }
+          // Private-data gate (src/core/resume-leak-gate.js): an injected listing may have talked the run into
+          // putting profile data in the resume. Before anything can submit it: unlink and delete the document,
+          // walk back to drafting, and park visibly with the reason. An unreadable profile blocks the same way.
+          const gate = checkResumeFile({ repoRoot: deps.repoRoot, markdownPath, profilePath: deps.profilePath });
+          if (!gate.ok) {
+            const docId = app.resume_doc_id;
+            await deps.withClient((c) => c.query('UPDATE ic_job_applications SET resume_doc_id = NULL, updated_at = now() WHERE id = $1', [applicationId]));
+            await deps.withClient((c) => c.query('DELETE FROM ic_job_documents WHERE id = $1', [docId]));
+            try {
+              await deps.withClient((c) => transition(c, applicationId, 'drafting', { actor: 'apply', note: `resume blocked by private-data gate (${gate.detail}); link reset` }));
+            } catch {
+              /* state moved on between the SELECT above and here; the unlink above is the material fix */
+            }
+            say({ evt: 'resume_runner_private_data_blocked', application_id: applicationId, listing_id: listingId, reason: gate.reason, kind: gate.detail });
+            return await fail(applicationId, gate.reason, { meta: { gate_kind: gate.detail } });
           }
           say({ evt: 'resume_runner_success', application_id: applicationId, listing_id: listingId });
           return { ok: true, markdownPath };

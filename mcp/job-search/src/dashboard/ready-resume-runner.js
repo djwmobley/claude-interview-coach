@@ -28,6 +28,7 @@ import { log as defaultLog } from '../core/logger.js';
 import { DETAIL_MIN_CHARS } from '../core/normalize.js';
 import { parseReviewResult } from './review-runner.js';
 import { buildClaudeArgs, buildChildEnv, SPAWN_PROFILES } from '../core/claude-spawn.js';
+import { checkResumeFile } from '../core/resume-leak-gate.js';
 
 const HEADLESS_ABORT_RE = /HEADLESS_ABORT:\s*([a-z0-9_]+)/i;
 const QUESTION_SHAPED_RE = /\b(want me to|should i|shall i|do you want|would you like|can i confirm|proceed anyway|is (?:it|that) ok(?:ay)? if)\b/i;
@@ -39,7 +40,7 @@ const RUN_ID_RE = /^[a-z0-9][a-z0-9-]{2,63}$/;
  *   env: any, logDir: string, repoRoot: string, withClient: <T>(fn: (c: import('pg').ClientBase) => Promise<T>) => Promise<T>,
  *   spawn: typeof import('node:child_process').spawn, execFile?: typeof execFile,
  *   claudeBin?: string, model?: string, reviewModel?: string, maxTurns?: number, budgetUsd?: number, timeoutMs?: number,
- *   log?: (f: Record<string, unknown>) => void,
+ *   log?: (f: Record<string, unknown>) => void, profilePath?: string,
  * }} deps
  */
 export function createReadyResumeRunner(deps) {
@@ -148,6 +149,14 @@ export function createReadyResumeRunner(deps) {
       return new Date(d.created_at).getTime() >= cutoff || mtime >= cutoff;
     });
     if (markdownPath && fresh) {
+      // Private-data gate (src/core/resume-leak-gate.js): block before review, ledger 'ready', or any submit.
+      // The generated document row is deleted so findReusableResume can never hand it to a later run.
+      const gate = checkResumeFile({ repoRoot: deps.repoRoot, markdownPath, profilePath: deps.profilePath });
+      if (!gate.ok) {
+        await deps.withClient((c) => c.query('DELETE FROM ic_job_documents WHERE id = $1', [Number(fresh.id)])).catch(() => {});
+        say({ evt: 'ready_resume_private_data_blocked', listing_id: listingId, run_id: runId, reason: gate.reason, kind: gate.detail });
+        return { ok: false, reason: gate.reason };
+      }
       say({ evt: 'ready_resume_success', listing_id: listingId, run_id: runId, doc_id: Number(fresh.id) });
       return { ok: true, docId: Number(fresh.id), relPath: String(fresh.rel_path), markdownPath };
     }
