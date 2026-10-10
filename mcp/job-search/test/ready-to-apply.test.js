@@ -74,6 +74,8 @@ describe('T2 mapping table', () => {
     ['active_application', { appId: 9, appState: 'drafting', appUpdatedAt: NOW }, 'excluded_active_application', null],
     ['no_description', {}, 'held_no_description', null],
     ['hourly_pay', {}, 'excluded_hourly_pay', null],
+    ['director_level', {}, 'excluded_title_gate', null],
+    ['non_tech_function', {}, 'excluded_title_gate', null],
     ['easy_apply_only', { source: 'indeed' }, 'ready_to_apply', 'indeed_easy'],
     ['easy_apply_only', { source: 'dice' }, 'ready_to_apply', 'easy_other'],
     ['easy_apply_assisted', {}, 'ready_to_apply', 'linkedin_easy'],

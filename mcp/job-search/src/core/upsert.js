@@ -16,6 +16,8 @@ import { normalizeLegacyRow } from './normalize.js';
 import { classifyNoise } from './noise.js';
 import { JobSearchError } from './errors.js';
 import { recordEvent } from './events.js';
+import { classifyTitle } from './title-gate.js';
+import { applyTitleGate } from './title-gate-apply.js';
 import { isStickyStatus, matchTest, surfaceException, stickyEligibleFor } from './sticky-skip.js';
 
 /**
@@ -440,6 +442,21 @@ export async function scopeGateRule(c, rec, decision, ctx) {
 }
 
 /**
+ * Title gate for one stored row (src/core/title-gate.js verdict, src/core/title-gate-apply.js write).
+ * The pure classifier runs first so a passing title costs no query. Runs on the caller's savepoint client.
+ * @param {import('pg').ClientBase} c
+ * @param {import('./normalize.js').NormalizedListing} rec
+ * @param {number} id
+ * @param {ApplyContext} ctx
+ * @returns {Promise<{ applied: boolean, reason: string|null }>}
+ */
+async function gateTitle(c, rec, id, ctx) {
+  if (classifyTitle(rec.title).verdict !== 'drop') return { applied: false, reason: null };
+  const r = await applyTitleGate(c, id, { now: ctx.now ?? new Date(), runId: ctx.runId ?? null });
+  return { applied: r.applied, reason: r.reason };
+}
+
+/**
  * Persist one classify() decision. Runs inside a SAVEPOINT.
  * @param {import('pg').ClientBase} client
  * @param {import('./normalize.js').NormalizedListing} rec
@@ -472,7 +489,9 @@ export async function applyDecision(client, rec, decision, ctx) {
         ? { ...decision, inherit: { status: stickyRoot.status, queueReason: null }, queue: false, reason: null }
         : decision;
       id = await updateListing(c, rec, effective, ctx, { bumpTimesSeen: first });
-      if (effective.queue && effective.reason) {
+      // Title gate: a re-arriving listing whose title drops is skipped (actor auto) and never queued.
+      const gated = await gateTitle(c, rec, id, ctx);
+      if (effective.queue && effective.reason && !gated.applied) {
         queued = await enqueueReview(c, { runId: ctx.runId, candidate: candidateSnapshot(rec), candidateId: id, matches: effective.matches, reason: effective.reason, statusAtCreate: target.status ?? null });
       }
       if (stickyRoot) {
@@ -480,9 +499,10 @@ export async function applyDecision(client, rec, decision, ctx) {
           listingId: id, kind: 'status', fromStatus: target.status ?? null, toStatus: stickyRoot.status, note: 'sticky skip', actor: 'auto', runId: ctx.runId ?? null, at: ctx.now ?? new Date(),
         });
       }
-      const status = repostBranch && effective.inherit && effective.inherit.status !== null ? effective.inherit.status : (target.status ?? null);
+      const status = gated.applied ? 'skip' : repostBranch && effective.inherit && effective.inherit.status !== null ? effective.inherit.status : (target.status ?? null);
       return {
         id, outcome: decision.outcome, queued, branch: decision.branch, status, stickySkipMerged: Boolean(stickyRoot), stickySkipRootId: stickyRoot?.id ?? null,
+        titleGate: gated.applied ? gated.reason : null,
       };
     }
 
@@ -533,7 +553,10 @@ export async function applyDecision(client, rec, decision, ctx) {
         [ctx.runId ?? null, JSON.stringify(candidateSnapshot(rec)), id, scopeClosed.matches, scopeClosed.reason, ctx.now ?? new Date()],
       );
     }
-    if (effective.queue && effective.reason) {
+    // Title gate: a new row whose title drops is skipped (actor auto) and never queued. Not applied to a
+    // row that inherited a human status (gateTitle's titleGateBlock refuses it) or that anchors a conflict.
+    const gated = await gateTitle(c, rec, id, ctx);
+    if (effective.queue && effective.reason && !gated.applied) {
       const statusAtCreate = effective.outcome === 'ambiguous' ? 'review' : effective.inherit?.status ?? null;
       queued = await enqueueReview(c, { runId: ctx.runId, candidate: candidateSnapshot(rec), candidateId: id, matches: effective.matches, reason: effective.reason, statusAtCreate });
     } else if (inserted.conflictAnchor !== null) {
@@ -553,10 +576,10 @@ export async function applyDecision(client, rec, decision, ctx) {
         listingId: id, kind: 'status', fromStatus: null, toStatus: stickyRoot.status, note: 'sticky skip', actor: 'auto', runId: ctx.runId ?? null, at: ctx.now ?? new Date(),
       });
     }
-    const status = effective.outcome === 'ambiguous' ? 'review' : effective.inherit?.status ?? null;
+    const status = gated.applied ? 'skip' : effective.outcome === 'ambiguous' ? 'review' : effective.inherit?.status ?? null;
     return {
       id, outcome: effective.outcome, queued, branch: base.branch, status, stickySkipMerged: Boolean(stickyRoot), stickySkipRootId: stickyRoot?.id ?? null,
-      scopeSeparated: Boolean(scopeClosed), scopeRule: scopeClosed?.rule ?? null,
+      scopeSeparated: Boolean(scopeClosed), scopeRule: scopeClosed?.rule ?? null, titleGate: gated.applied ? gated.reason : null,
     };
   });
 }
