@@ -66,8 +66,8 @@ describe('title-gate: normalization and matching', () => {
     assert.equal(classifyTitle('Director of IT | CTO staff').reason, 'director_level');
     assert.equal(classifyTitle('Director of IT (CIO org)').reason, 'director_level');
     assert.equal(classifyTitle('Director of IT reporting to the CTO').reason, 'director_level');
-    assert.equal(classifyTitle('Director of IT – CTO org').reason, 'director_level');
-    assert.equal(classifyTitle('Director of IT — CTO org').reason, 'director_level');
+    assert.equal(classifyTitle('Director of IT \u2013 CTO org').reason, 'director_level');
+    assert.equal(classifyTitle('Director of IT \u2014 CTO org').reason, 'director_level');
   });
 
   test('an exec token only after the HEAD cut does not rescue a Director', () => {

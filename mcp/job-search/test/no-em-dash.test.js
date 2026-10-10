@@ -2,7 +2,7 @@
 /**
  * Repo-wide em-dash / en-dash lint for the prose corpus swept in the "no em-dash" pass
  * (framework/, .claude/skills/, docs/, tools/, root *.md, mcp/job-search/README.md,
- * mcp/job-search/data/*.example.md, memory/ if tracked).
+ * mcp/job-search/data/*.example.md, mcp/job-search/test/, memory/ if tracked).
  *
  * Resolves the repo root from this file's own location (mandatory: walking via `git ls-files`
  * from the repo root, not from cwd, means this test behaves identically whether it's invoked
@@ -57,6 +57,9 @@ function inScope(relPath) {
   if (relPath.startsWith('memory/')) return true;
   if (relPath === 'mcp/job-search/README.md') return true;
   if (/^mcp\/job-search\/data\/[^/]+\.example\.md$/.test(relPath)) return true;
+  // Test sources and fixtures: dash characters used as test input must be written as JS/JSON
+  // escapes (backslash-u 2014 / 2013), never as literal glyphs.
+  if (relPath.startsWith('mcp/job-search/test/')) return true;
   // root-level *.md (CLAUDE.md, README.md, etc.): no "/" anywhere in the path
   if (!relPath.includes('/') && ext === '.md') return true;
 
