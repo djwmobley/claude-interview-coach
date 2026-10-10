@@ -119,6 +119,48 @@ describe('classifyCandidate: one reason per test, closed enum', () => {
     });
   });
 
+  describe('title gate: director_level / non_tech_function (src/core/title-gate.js)', () => {
+    test('a plain Director title is director_level, a non-technology function is non_tech_function', () => {
+      assert.equal(classifyCandidate(row({ title: 'Director of IT', statusActor: null }), CTX), 'director_level');
+      assert.equal(classifyCandidate(row({ title: 'Associate Director, Data', statusActor: 'auto' }), CTX), 'director_level');
+      assert.equal(classifyCandidate(row({ title: 'Chief Marketing Officer', statusActor: null }), CTX), 'non_tech_function');
+    });
+
+    test('passing titles are unaffected', () => {
+      for (const title of ['Senior Director, Technology', 'Chief Technology Officer', 'VP Finance Systems']) {
+        assert.equal(classifyCandidate(row({ title, statusActor: null }), CTX), 'eligible', title);
+      }
+    });
+
+    test('skipped when the latest status event is by a human (any actor but auto)', () => {
+      for (const actor of ['dashboard', 'mcp', 'cli']) {
+        assert.equal(classifyCandidate(row({ title: 'Director of IT', statusActor: actor }), CTX), 'eligible', actor);
+      }
+    });
+
+    test('skipped when the caller did not load statusActor (approved-application re-drive)', () => {
+      assert.equal(classifyCandidate(row({ title: 'Director of IT' }), CTX), 'eligible');
+    });
+
+    test('duplicate_of still wins; the gate precedes not_scored and below_fit', () => {
+      assert.equal(classifyCandidate(row({ title: 'Director of IT', statusActor: null, duplicateOf: 7 }), CTX), 'duplicate_of');
+      assert.equal(classifyCandidate(row({ title: 'Director of IT', statusActor: null, fitScore: null }), CTX), 'director_level');
+    });
+
+    test('the title_gate funnel gate claims both reasons, so eliminated + eligible = considered', () => {
+      const gate = GATES.find((g) => g.name === 'title_gate');
+      assert.deepEqual([...(gate?.reasons ?? [])], ['director_level', 'non_tech_function']);
+      const classified = [
+        { row: row({ listingId: 1 }), reason: 'director_level' },
+        { row: row({ listingId: 2 }), reason: 'non_tech_function' },
+        { row: row({ listingId: 3 }), reason: 'eligible' },
+      ];
+      const f = computeFunnel(classified);
+      assert.equal(f.eliminated.title_gate, 2);
+      assert.equal(f.eligible, 1);
+    });
+  });
+
   test('every non-daily_cap, non-exclusion_* CLOSED_REASONS member is reachable from classifyCandidate() alone', () => {
     // The apply exclusion gate's own reasons ('exclusion_*') are produced by classifyCandidateWithExclusions
     // (DB-backed, see the describe block below and test/exclusions.test.js), never by this pure,
@@ -140,6 +182,8 @@ describe('classifyCandidate: one reason per test, closed enum', () => {
       classifyCandidate(row({ applyAts: 'workday', applyUrl: 'https://acme.wd1.myworkdayjobs.com/en-US/External/job/x' }), CTX),
       classifyCandidate(row({ applyConfidence: 'inferred' }), CTX),
       classifyCandidate(row({ salaryPeriod: 'hour' }), CTX),
+      classifyCandidate(row({ title: 'Director of IT', statusActor: null }), CTX),
+      classifyCandidate(row({ title: 'Chief Financial Officer', statusActor: 'auto' }), CTX),
       classifyCandidate(row(), CTX),
     ]);
     for (const reason of CLOSED_REASONS) {
@@ -403,9 +447,10 @@ describe('computeFunnel: sequential funnel derived from a single classify() pass
       { row: row({ listingId: 13 }), reason: 'eligible' },
       { row: row({ listingId: 14 }), reason: 'eligible' },
       { row: row({ listingId: 15 }), reason: 'manual_only' },
+      { row: row({ listingId: 16 }), reason: 'director_level' },
     ];
     const funnel = computeFunnel(classified);
-    assert.equal(funnel.considered, 15);
+    assert.equal(funnel.considered, 16);
     for (const gate of GATES) assert.equal(funnel.eliminated[gate.name], 1, `gate ${gate.name}`);
     assert.equal(funnel.eligible, 2);
     const eliminated = Object.values(funnel.eliminated).reduce((a, b) => a + b, 0);

@@ -480,7 +480,7 @@ describe('sticky-skip part B: scan-time auto-merge (applyDecision / findStickySk
   });
 
   test('SURFACE-EXCEPTION (salary jump > 10%) blocks the auto-merge: queues normally instead', async () => {
-    const raw = { title: 'Director of Platform', company: 'Acme Platform Widgets', location: 'Houston, TX', url: `https://example.test/${SRC}/surface-root`, source: 'greenhouse' };
+    const raw = { title: 'VP of Platform', company: 'Acme Platform Widgets', location: 'Houston, TX', url: `https://example.test/${SRC}/surface-root`, source: 'greenhouse' };
     const root = await insertRootFromListing(raw, { status: 'skip', salaryMax: 200000 });
     await insertStatusEvent({ listingId: root, toStatus: 'skip', actor: 'dashboard', note: null });
 
@@ -498,7 +498,7 @@ describe('sticky-skip part B: scan-time auto-merge (applyDecision / findStickySk
   });
 
   test('an auto skip_low root never auto-merges when the incoming candidate has NO prescore in ctx (not STICKY-ELIGIBLE): queues normally', async () => {
-    const raw = { title: 'Director of Low Prescore', company: 'Acme Low Widgets', location: 'Houston, TX', url: `https://example.test/${SRC}/lowskip-root`, source: 'greenhouse' };
+    const raw = { title: 'VP of Low Prescore', company: 'Acme Low Widgets', location: 'Houston, TX', url: `https://example.test/${SRC}/lowskip-root`, source: 'greenhouse' };
     const root = await insertRootFromListing(raw, { status: 'skip' });
     await insertStatusEvent({ listingId: root, toStatus: 'skip', actor: 'auto', note: 'auto-triage: prescore 10 < floor 25' });
 
@@ -538,7 +538,7 @@ describe('sticky-skip part B: scan-time auto-merge (applyDecision / findStickySk
   });
 
   test('auto-skip-sticky: scan path -- ctx.prescore at or above ctx.stickyFloor never merges into an auto-skipped root', async () => {
-    const raw = { title: 'Director of High Prescore', company: 'Acme High Widgets', location: 'Houston, TX', url: `https://example.test/${SRC}/highskip-root`, source: 'greenhouse' };
+    const raw = { title: 'VP of High Prescore', company: 'Acme High Widgets', location: 'Houston, TX', url: `https://example.test/${SRC}/highskip-root`, source: 'greenhouse' };
     const root = await insertRootFromListing(raw, { status: 'skip' });
     await insertStatusEvent({ listingId: root, toStatus: 'skip', actor: 'auto', note: 'auto-triage: prescore 10 < floor 40' });
 

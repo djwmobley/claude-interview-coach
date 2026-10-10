@@ -22,6 +22,7 @@
  *       dead, lost, new, maybe, shortlisted, garbage)                -> in       status
  *   (d) fit_score >= SCOPE_FIT_FLOOR                                 -> in       fit_score    (F11)
  *   (e) titleMatches() true for ANY profile with keywords/phrases    -> in       title_match  (F12)
+ *   (F0) title-gate.js drop verdict (Director level / non-tech)      -> out      title_gate
  *   (F1) any prescore.js SENIORITY token in the title                -> in       seniority
  *   (f) prescore null                                                -> unknown  prescore_null
  *   (g) prescore >= scope prescore floor                             -> in       prescore     (F11)
@@ -33,6 +34,7 @@
  */
 import { titleMatches } from '../adapters/base.js';
 import { SENIORITY_PATTERNS } from './prescore.js';
+import { classifyTitle } from './title-gate.js';
 import { isLocationEligible, isRemoteLocation } from './normalize.js';
 import { surfaceException } from './sticky-skip.js';
 
@@ -133,6 +135,9 @@ export function scopeDetail(row, profiles, opts = {}) {
     return { scope: 'in', rule: 'fit_score' };
   }
   if (usable.some((p) => titleMatches(title, p))) return { scope: 'in', rule: 'title_match' };
+  // Title gate (src/core/title-gate.js): a dropped title (plain Director, non-technology function) is
+  // out even though its title carries a SENIORITY token, so this check runs before F1.
+  if (classifyTitle(title).verdict === 'drop') return { scope: 'out', rule: 'title_gate' };
   if (hasSeniorityToken(title)) return { scope: 'in', rule: 'seniority' };
   if (row.prescore === null || row.prescore === undefined || !Number.isFinite(Number(row.prescore))) {
     return { scope: 'unknown', rule: 'prescore_null' };

@@ -72,6 +72,14 @@ describe('scope: scopeOf rules, first match wins', () => {
     const second = [{ name: 'b', keywords: ['Hygienist'], phrases: [], exclude_terms: [] }];
     assert.equal(scopeOf(row({ title: 'Dental Hygienist' }), [...PROFILES, ...second]), 'in', 'ANY profile (F12)');
   });
+  test('F0: a title-gate drop verdict overrides F1 (row is out) while a passing exec title stays in', () => {
+    for (const t of ['Director of IT', 'EVP Sales', 'Chief Financial Officer']) {
+      assert.equal(hasSeniorityToken(t), true, `premise: ${t} carries a seniority token`);
+      assert.deepEqual(scopeDetail(row({ title: t, prescore: 30 }), PROFILES), { scope: 'out', rule: 'title_gate' }, t);
+    }
+    assert.equal(scopeDetail(row({ title: 'Senior Director, Technology', prescore: 30 }), PROFILES).rule, 'seniority');
+    assert.equal(scopeDetail(row({ title: 'Director of IT', status: 'applied', prescore: 30 }), PROFILES).rule, 'status', 'status rules still run first');
+  });
   test('F1: exec seniority tokens are in regardless of prescore or exclude_terms', () => {
     const cio = { title: 'Chief Information Officer', location: 'Houston, TX', location_norm: 'houston-tx' };
     assert.equal(prescore(cio, {}), 30, 'premise: prescore 30, below the floor');

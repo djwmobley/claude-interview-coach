@@ -24,6 +24,7 @@ import { ABSENT_LOCATION, LEGACY_UNKNOWN_LOCATION } from './normalize.js';
 import { HOURLY_RE } from '../apply/answers.js';
 import { classifyExclusion, EXCLUSION_BRANCHES, loadExclusionConfig } from '../apply/exclusions.js';
 import { loadConfig } from './config.js';
+import { classifyTitle } from './title-gate.js';
 import { loadActiveManualLocks, lockMatches, lockSubjectFromRow } from './manual-lock.js';
 
 /**
@@ -83,7 +84,8 @@ export const CLOSED_REASONS = Object.freeze([
   // prefixed reason per non-eligible EXCLUSION_BRANCHES entry (its own 'eligible' branch simply falls
   // through to the checks below, never adding a reason of its own).
   ...EXCLUSION_BRANCHES.filter((b) => b !== 'eligible').map((b) => `exclusion_${b}`),
-  'not_scored', 'below_fit', 'human_fit_override', 'fit_unverified', 'duplicate_of', 'not_us', 'salary_below_floor',
+  'duplicate_of', 'director_level', 'non_tech_function',
+  'not_scored', 'below_fit', 'human_fit_override', 'fit_unverified', 'not_us', 'salary_below_floor',
   'active_application', 'no_description', 'apply_target_unresolved', 'easy_apply_only', 'easy_apply_assisted', 'ats_not_allowed',
   'confidence_not_exact', 'hourly_pay', 'manual_only', 'daily_cap', 'eligible',
 ]);
@@ -101,6 +103,7 @@ export const GATES = Object.freeze([
   { name: 'exclusions', reasons: Object.freeze(EXCLUSION_BRANCHES.filter((b) => b !== 'eligible').map((b) => `exclusion_${b}`)) },
   { name: 'fit', reasons: Object.freeze(['not_scored', 'below_fit', 'human_fit_override', 'fit_unverified']) },
   { name: 'duplicate_of', reasons: Object.freeze(['duplicate_of']) },
+  { name: 'title_gate', reasons: Object.freeze(['director_level', 'non_tech_function']) },
   { name: 'not_us', reasons: Object.freeze(['not_us']) },
   { name: 'salary_below_floor', reasons: Object.freeze(['salary_below_floor']) },
   { name: 'active_application', reasons: Object.freeze(['active_application']) },
@@ -159,6 +162,9 @@ export function computeFunnel(classified) {
  *   other way, or never scored at all)
  * @property {string|null} [fitBasis] ic_job_listings.fit_basis (sql/021): 'no_description' marks a model fit
  *   made without a description (reason fit_unverified); 'description' or null is trusted as before
+ * @property {string|null} [statusActor] actor of the most recent ic_job_events kind='status' row for this
+ *   listing, or null when none exists. Left undefined by callers that did not load it, which disables the
+ *   title gate (director_level / non_tech_function) for that row; only null and 'auto' are gated.
  * @property {number|null} duplicateOf ic_job_listings.duplicate_of
  * @property {string|null} locationNorm
  * @property {string|null} remoteMode
@@ -196,6 +202,14 @@ export function computeFunnel(classified) {
  */
 export function classifyCandidate(row, ctx) {
   if (row.duplicateOf !== null && row.duplicateOf !== undefined) return 'duplicate_of';
+  // Title gate (src/core/title-gate.js). Applies only when the caller loaded the latest status-event actor
+  // (statusActor !== undefined): null (no status event) or 'auto' is gated; any other actor is a human
+  // decision the gate must not override. A caller that did not load it (the approved-application re-drive)
+  // is never gated.
+  if (row.statusActor === null || row.statusActor === 'auto') {
+    const gate = classifyTitle(row.title ?? '');
+    if (gate.verdict === 'drop') return /** @type {'director_level'|'non_tech_function'} */ (gate.reason);
+  }
   if (row.fitScore === null || row.fitScore === undefined) return 'not_scored';
   if (row.fitScore < ctx.fitFloor) {
     // Human-set fit always wins over model fit (locked decision): a below-floor score a human deliberately
@@ -359,6 +373,7 @@ export async function fetchCandidateRows(client) {
       l.company, l.company_norm, l.title, l.title_norm, coalesce(l.url_normalized, l.url) AS source_url, l.source, l.manual_apply_url,
       (SELECT t.final_url FROM ic_gmail_targets t WHERE t.listing_id = l.id) AS gmail_final_url,
       (SELECT actor FROM ic_job_events e WHERE e.listing_id = l.id AND e.kind = 'fit' ORDER BY e.at DESC, e.id DESC LIMIT 1) AS fit_actor,
+      (SELECT actor FROM ic_job_events e WHERE e.listing_id = l.id AND e.kind = 'status' ORDER BY e.at DESC, e.id DESC LIMIT 1) AS status_actor,
       EXISTS (SELECT 1 FROM ic_job_applications a WHERE a.listing_id = l.id AND a.state <> 'withdrawn') AS has_active_application
     FROM ic_job_listings l
     WHERE coalesce(l.record_kind, 'listing') = 'listing'
@@ -371,6 +386,7 @@ export async function fetchCandidateRows(client) {
     listingId: Number(row.listing_id),
     fitScore: row.fit_score === null ? null : Number(row.fit_score),
     fitActor: row.fit_actor ?? null,
+    statusActor: row.status_actor ?? null,
     fitBasis: row.fit_basis ?? null,
     duplicateOf: row.duplicate_of === null ? null : Number(row.duplicate_of),
     locationNorm: row.location_norm ?? null,

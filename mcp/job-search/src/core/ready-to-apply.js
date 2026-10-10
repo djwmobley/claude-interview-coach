@@ -48,6 +48,7 @@ export const HELD_BUCKETS = Object.freeze([
 export const EXCLUDED_BUCKETS = Object.freeze([
   'excluded_blocked_company', 'excluded_already_applied', 'excluded_withdrawn', 'excluded_duplicate', 'excluded_below_fit',
   'excluded_not_us', 'excluded_salary_below_floor', 'excluded_active_application', 'excluded_hourly_pay', 'excluded_stale',
+  'excluded_title_gate',
 ]);
 /** The closed, total bucket list. */
 export const READY_BUCKETS = Object.freeze(['auto_submit_path', 'ready_to_apply', ...HELD_BUCKETS, ...EXCLUDED_BUCKETS]);
@@ -183,6 +184,8 @@ function mapUnsafe(row, reason, ctx) {
     }
     case 'no_description': return out('held_no_description');
     case 'hourly_pay': return out('excluded_hourly_pay', { link: null });
+    case 'director_level':
+    case 'non_tech_function': return out('excluded_title_gate', { link: null });
     case 'easy_apply_only': return out('ready_to_apply', { channel: row.source === 'indeed' ? 'indeed_easy' : 'easy_other' });
     case 'easy_apply_assisted':
       if (ctx.includeEasyApply !== false) return out('ready_to_apply', { channel: 'linkedin_easy', flags: row.locked ? ['manual_only'] : [] });
@@ -407,6 +410,7 @@ export async function fetchReadyRows(client, fitFloor) {
       l.manual_apply_url, l.apply_page_branch, l.apply_page_reason, l.apply_page_repeat, l.apply_page_first_seen_at,
       t.final_url AS gmail_final_url,
       (SELECT e.actor FROM ic_job_events e WHERE e.listing_id = l.id AND e.kind = 'fit' ORDER BY e.at DESC, e.id DESC LIMIT 1) AS fit_actor,
+      (SELECT e.actor FROM ic_job_events e WHERE e.listing_id = l.id AND e.kind = 'status' ORDER BY e.at DESC, e.id DESC LIMIT 1) AS status_actor,
       a.id AS app_id, a.state AS app_state, a.updated_at AS app_updated_at,
       r.auto_path_since, r.first_listed_at, r.first_displayed_at, r.resume_status, r.resume_doc_id, r.resume_source, r.resume_attempts,
       r.resume_last_error, r.review_verdict, d.rel_path AS resume_rel_path,
@@ -426,6 +430,7 @@ export async function fetchReadyRows(client, fitFloor) {
     listingId: Number(x.listing_id),
     fitScore: x.fit_score === null ? null : Number(x.fit_score),
     fitActor: x.fit_actor ?? null,
+    statusActor: x.status_actor ?? null,
     fitBasis: x.fit_basis ?? null,
     duplicateOf: x.duplicate_of === null ? null : Number(x.duplicate_of),
     locationNorm: x.location_norm ?? null,
