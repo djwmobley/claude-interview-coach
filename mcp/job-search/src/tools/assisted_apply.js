@@ -35,6 +35,7 @@ import { z } from 'zod';
 import { getEnv, packageRoot, repoRoot } from '../core/config.js';
 import { untrusted } from '../core/compact.js';
 import { resolveOutputPath } from '../core/documents.js';
+import { checkResumeFile } from '../core/resume-content-gate.js';
 import {
   ASSISTED_LEASE_ENV, validateLease, closeLease, updateLeaseState, tripBreaker,
 } from '../core/easy-apply-state.js';
@@ -327,6 +328,10 @@ export function makeAssistedApplyTool(seams = {}) {
         const absPath = /** @type {any} */ (resolved).absPath;
         const hash = crypto.createHash('sha256').update(fs.readFileSync(absPath)).digest('hex');
         if (hash !== sess.app.resume_hash) return stop('resume_hash_mismatch');
+        // Stale or foreign resume guard (S3): even with Damian present, never upload a resume that fails the
+        // content gate against the CURRENT project index. Visible stop, nothing uploaded.
+        const verdict = checkResumeFile(absPath, path.join(path.dirname(outputRoot), 'data', 'project-index.md'));
+        if (!verdict.ok) return stop('stale_resume', { message: `The linked resume is stale and was not uploaded: ${verdict.reason}. Regenerate it, then re-approve.` });
         const expected = path.basename(absPath);
         const up = await sess.driver.uploadFile(absPath);
         if (!up.ok || up.fileName !== expected) return stop('resume_upload_unverified');

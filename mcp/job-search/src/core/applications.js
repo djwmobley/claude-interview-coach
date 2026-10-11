@@ -37,6 +37,8 @@
  */
 import crypto from 'node:crypto';
 import fs from 'node:fs';
+import path from 'node:path';
+import { checkResumeFile } from './resume-content-gate.js';
 import { withTransaction, isUniqueViolation } from './db.js';
 import { JobSearchError } from './errors.js';
 import { EVENT_ACTORS } from './events.js';
@@ -1572,6 +1574,17 @@ export async function approve(client, id, opts) {
 
     const resumeDoc = await c.query('SELECT rel_path FROM ic_job_documents WHERE id = $1', [row.resume_doc_id]);
     if (resumeDoc.rowCount === 0) throw new JobSearchError('NOT_FOUND', `document ${row.resume_doc_id} not found`);
+    // Stale or foreign resume guard (S3): never hand a human an Approve on a resume that no longer matches
+    // the CURRENT project index. Throws inside the transaction, so nothing is written.
+    const resumeResolved = resolveOutputPath(opts.outputRoot, resumeDoc.rows[0].rel_path);
+    if (!resumeResolved.ok) throw new JobSearchError('VALIDATION', `cannot gate resume: ${resumeResolved.reason}`, { details: { reason: resumeResolved.reason } });
+    const contentVerdict = checkResumeFile(resumeResolved.absPath, path.join(path.dirname(opts.outputRoot), 'data', 'project-index.md'));
+    if (!contentVerdict.ok) {
+      throw new JobSearchError('STALE_RESUME', `approve() refused: the linked resume ${resumeResolved.relPath} is stale: ${contentVerdict.reason}`, {
+        hint: 'regenerate the resume from the current data, then approve',
+        details: { application_id: id, rel_path: resumeResolved.relPath, missing: contentVerdict.missing.join('; ').slice(0, 300) },
+      });
+    }
     const resumeHash = hashOutputFile(opts.outputRoot, resumeDoc.rows[0].rel_path);
     let coverletterHash = null;
     if (row.coverletter_doc_id) {

@@ -760,6 +760,20 @@ describe('approve() (apply pipeline slice 3): docs_ready -> approved, hashes sto
     assert.equal(last.to_state, 'approved');
   });
 
+  test('stale or foreign resume: approve() refuses with STALE_RESUME, nothing written, state stays docs_ready', async () => {
+    const { id } = await seedWithDocs('docs_ready', { resumeRelPath: RESUME_REL });
+    setGateHooksForTests({ resumeGate: () => ({ ok: false, missing: ['Advisicon'], reason: 'missing employers: Advisicon' }), docxValid: () => true });
+    try {
+      await assert.rejects(approve(client, id, { outputRoot }), (err) => /** @type {any} */ (err).code === 'STALE_RESUME' && /Advisicon/.test(/** @type {any} */ (err).details.missing));
+    } finally {
+      setGateHooksForTests({ resumeGate: () => ({ ok: true, missing: [], reason: null }), docxValid: () => true });
+    }
+    const row = await getApplication(client, id);
+    assert.equal(row.state, 'docs_ready');
+    assert.equal(row.resume_hash, null);
+    assert.equal(row.approved_at, null);
+  });
+
   test('resume only: coverletter_hash stays null, resume_hash is still stored', async () => {
     const { id } = await seedWithDocs('docs_ready', { resumeRelPath: RESUME_REL });
     const row = await approve(client, id, { outputRoot });
@@ -897,3 +911,8 @@ describe('approve() blockers (review-approvals-list PR spec A2): blocked employe
     assert.ok(row.approved_at);
   });
 });
+
+// Fixtures here are fake resume bytes; the stale or foreign resume content gate has its own tests
+// (resume-content-gate.test.js), so these suites stand it in with an always-pass gate.
+import { setGateHooksForTests } from '../src/core/resume-content-gate.js';
+setGateHooksForTests({ resumeGate: () => ({ ok: true, missing: [], reason: null }), docxValid: () => true });

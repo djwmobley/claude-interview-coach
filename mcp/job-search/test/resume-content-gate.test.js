@@ -19,7 +19,7 @@ import {
   evaluateResumeContent, docxToText, checkResumeFile, containsWholeWord, findCompanyLines, parseIndexEntries, setGateHooksForTests,
 } from '../src/core/resume-content-gate.js';
 
-const EN = '–';
+const EN = String.fromCharCode(0x2013);
 
 /** @param {string[]} entries "Client|Period" pairs */
 const indexOf = (entries) => `# Project Index\n\n${entries.map((e, i) => {
