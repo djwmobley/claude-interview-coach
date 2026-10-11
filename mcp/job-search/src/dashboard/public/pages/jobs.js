@@ -10,6 +10,7 @@ import { openFilterModal } from '../components/filter-modal.js';
 import { skeleton, emptyState } from '../components/empty-state.js';
 import { on, off } from '../lib/bus.js';
 import { createListCursor } from '../lib/list-cursor.js';
+import { dismissRowOptimistic } from '../lib/dismiss-row.js';
 import { DIGIT_STAGE_ORDER } from '../components/stage-buttons.js';
 import { stageChip } from '../components/chips.js';
 
@@ -99,6 +100,8 @@ export const COLUMNS = Object.freeze([
   { text: 'Location', sortKey: 'location', className: 'job-row__location' },
   // One-click apply (PR A spec item 8): not sortable -- application state is not a query_jobs sort key.
   { text: 'Apply', className: 'job-row__apply' },
+  // Dismiss: marks the listing passed and drops the row from the current view; not sortable.
+  { text: 'Dismiss', className: 'job-row__dismiss' },
 ]);
 
 /**
@@ -243,6 +246,22 @@ export async function render(container, params, app) {
     }
   }
 
+  /**
+   * Dismiss: reuses POST /api/listings/:id/status with the existing 'passed' status. The row leaves the
+   * view immediately; on any failure it is put back and an error toast shows (handleOutcome already
+   * toasts the transport and server error kinds, the explicit toast covers the rest).
+   * @param {number} id @param {HTMLElement} tr
+   */
+  async function dismiss(id, tr) {
+    selected.delete(id);
+    const ok = await dismissRowOptimistic(tr, async () => {
+      const out = handleOutcome(await postJson(`/api/listings/${id}/status`, { status: 'passed', note: 'dismissed from Jobs list' }));
+      return out.kind === 'ok';
+    });
+    if (!ok) showToast({ message: 'Could not dismiss that job. It was put back.', tone: 'error' });
+    cursor.setRows([...container.querySelectorAll('.job-row')]);
+  }
+
   /** @param {string} sortKey */
   function onSort(sortKey) {
     sortState = nextSortState(sortState, sortKey);
@@ -329,6 +348,7 @@ export async function render(container, params, app) {
               onToggleSelect: (id) => { if (selected.has(id)) selected.delete(id); else selected.add(id); load(); },
               onOpen: (id) => app.navigate('job-detail', { id }),
               onApplyNow: applyNow,
+              onDismiss: dismiss,
               triageBand,
             })),
           }),
