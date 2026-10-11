@@ -204,6 +204,7 @@ table { border-collapse: collapse; width: 100%; }
 /* One-click apply (PR A spec item 8): the Apply column absorbs its own fixed width like every other
    non-percentage column above, sized for its longest label ("Drafting resume"). */
 .jobs-table .job-row__apply { width: 112px; }
+.jobs-table .job-row__dismiss { width: 84px; }
 /* Apply-chain-park fix, spec item 4: the Apply cell now always renders a real <button> (never a plain
    status span) -- a disabled one is dimmed and loses the pointer cursor so it still reads as inert at a
    glance, replacing the old .job-row__apply-status span's styling. */

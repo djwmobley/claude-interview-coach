@@ -283,6 +283,17 @@ describe('listings', () => {
     assert.equal(after2[0].actor, 'dashboard');
   });
 
+  test('Jobs-page Dismiss: status passed is accepted and records a passed status event', async () => {
+    const before2 = (await req('GET', `/api/listings/${listingId}`)).json.events.length;
+    const r = await req('POST', `/api/listings/${listingId}/status`, { body: { status: 'passed', note: 'dismissed from Jobs list' } });
+    assert.equal(r.status, 200);
+    const detail = await req('GET', `/api/listings/${listingId}`);
+    assert.equal(detail.json.row.status, 'passed');
+    assert.equal(detail.json.events.length, before2 + 1);
+    assert.equal(detail.json.events[0].to_status, 'passed');
+    assert.equal(detail.json.events[0].actor, 'dashboard');
+  });
+
   test('PUT /api/listings/:id/notes updates notes and records a note event', async () => {
     const r = await req('PUT', `/api/listings/${listingId}/notes`, { body: { notes: 'called recruiter' } });
     assert.equal(r.status, 200);

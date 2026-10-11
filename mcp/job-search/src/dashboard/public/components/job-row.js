@@ -27,7 +27,7 @@ export const FIT_TITLE = 'Fit: judgment score set by you or an agent, empty unti
 
 /**
  * @param {any} row a GET /api/listings row (carries url_ok)
- * @param {{ selected: boolean, onToggleSelect: (id: number) => void, onOpen: (id: number) => void, onApplyNow: (id: number) => void, triageBand?: { floor: number, ceiling: number }|null }} opts
+ * @param {{ selected: boolean, onToggleSelect: (id: number) => void, onOpen: (id: number) => void, onApplyNow: (id: number) => void, onDismiss: (id: number, tr: HTMLElement) => void, triageBand?: { floor: number, ceiling: number }|null }} opts
  *   triageBand (jobs-unscored-visibility PR, Change 3): the dashboard's own triage floor/ceiling, from
  *   GET /api/listings' `triage` field, threaded through by pages/jobs.js -- see lib/format.js's
  *   fitDisplayState() for how it is used. onApplyNow (one-click apply PR A spec item 8): POST
@@ -98,6 +98,21 @@ export function jobRow(row, opts) {
             ev.stopPropagation();
             if (applyState.actionable) opts.onApplyNow(row.id);
           },
+        },
+      }),
+    ]),
+    // Dismiss: marks the listing passed. stopPropagation keeps the click from reaching the row's own
+    // open handler; the page (pages/jobs.js) owns the optimistic removal and the server call.
+    h('td', { className: 'job-row__dismiss' }, [
+      h('button', {
+        className: 'btn btn--small', text: 'Dismiss',
+        attrs: { type: 'button' },
+        on: {
+          click: (ev) => {
+            ev.stopPropagation();
+            opts.onDismiss(row.id, tr);
+          },
+          keydown: (ev) => { ev.stopPropagation(); },
         },
       }),
     ]),
