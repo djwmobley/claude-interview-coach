@@ -1302,3 +1302,7 @@ detected by the test suite.
   concurrent, unrelated write to `output/markdown/` from some other process during the run's window (a
   manual `/write-resume` invocation running at the same moment, outside this dashboard) could in principle
   cause the wrong file to be picked. Nothing in this PR guards against that specific interleaving.
+
+## Blocked detail pages
+
+A detail fetch can return a Cloudflare or Indeed verification page, a login wall or an HTTP error body instead of a posting. `classifyDetail` (`src/browser/detail-classify.js`, re-exported from `src/browser/wall.js`) classifies every fetched description as `ok`, `blocked:<reason>`, `transient`, `empty`, `too_short` or `unverified`. `storeDescription` (`src/core/store-description.js`) is the only place that writes `ic_job_listings.description`; scan writes go through `screenPayload` in `src/core/upsert.js`. Only `ok` text is stored. Blocks are recorded under a separate `<source>:detail` key in `ic_source_state`, so list scans and apply paths keep running. Interactive runs (dashboard or MCP trigger) bring the blocked page to the front of the scan Chrome window once per source and poll it for 10 minutes in total; unattended runs defer and the scan report carries a `Blocked detail pages: N (...)` line. `node bin/repair-blocked-descriptions.js` (dry run by default; `--apply`, `--limit N`, `--include-applied`, `--include-unverified`) cleans descriptions stored before this gate existed.

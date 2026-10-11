@@ -7,6 +7,7 @@ import { z } from 'zod';
 import { untrusted } from './_shared.js';
 import { formatRow } from '../core/compact.js';
 import { htmlToText } from '../core/normalize.js';
+import { storeDescription } from '../core/store-description.js';
 import { JobSearchError } from '../core/errors.js';
 import { ADAPTERS } from '../adapters/index.js';
 
@@ -49,8 +50,11 @@ export const tool = {
         try {
           const d = await deps.fetchDetail(row);
           if (d && d.description) {
-            description = d.description;
-            await deps.withClient((c) => c.query('UPDATE ic_job_listings SET description = $2 WHERE id = $1 AND description IS NULL', [row.id, description]));
+            // Detail-block fix: the single description chokepoint classifies before anything is stored.
+            const sig = /** @type {any} */ (d).detailSignals ?? {};
+            const stored = await deps.withClient((c) => storeDescription(c, row.id, d.description, { source: row.source, url: sig.url ?? null, httpStatus: sig.httpStatus ?? null, cfMitigated: sig.cfMitigated ?? null, wallSignals: sig.wallSignals ?? null, onlyIfMissing: true }));
+            if (stored.ok) description = d.description;
+            else warnings.push(`detail fetch returned unusable text (${stored.cls}); not stored`);
           } else warnings.push('detail fetch returned no description');
         } catch (err) {
           warnings.push(`detail fetch failed: ${err instanceof JobSearchError ? err.code : 'INTERNAL'}`);

@@ -122,7 +122,16 @@ export const indeed = defineAdapter({
     const cap = await ctx.capFor('indeed');
     if (!cap) return { description: null };
     await ctx.reserveDetail();
-    await cap.goto(url);
+    const nav = await cap.goto(url);
+    /** @type {any} */
+    let markers = null;
+    try {
+      markers = await cap.readJson('wallMarkers');
+    } catch {
+      markers = null;
+    }
+    // Detail-block fix: scalars the scan uses to classify this page (classifyDetail), never the text itself.
+    const detailSignals = { httpStatus: nav ? nav.status : null, cfMitigated: nav ? nav.cfMitigated : null, url: nav ? nav.url : null, wallSignals: markers };
     // Auto-apply PR B: Indeed's own Easy Apply ("applystart") flow never navigates externally -- observed
     // here, never clicked. An "Apply on company site" anchor off indeed.com is surfaced as externalApplyUrl.
     /** @type {any} */
@@ -139,11 +148,11 @@ export const indeed = defineAdapter({
       const nodes = Array.isArray(d) ? d : [d];
       for (const n of nodes) {
         if (n && n['@type'] === 'JobPosting' && typeof n.description === 'string' && n.description.trim()) {
-          return { description: n.description, externalApplyUrl, easyApplyOnly };
+          return { description: n.description, externalApplyUrl, easyApplyOnly, detailSignals };
         }
       }
     }
     const text = /** @type {string} */ (await cap.readJson('bodyText'));
-    return { description: text && text.trim() ? text : null, externalApplyUrl, easyApplyOnly };
+    return { description: text && text.trim() ? text : null, externalApplyUrl, easyApplyOnly, detailSignals };
   },
 });

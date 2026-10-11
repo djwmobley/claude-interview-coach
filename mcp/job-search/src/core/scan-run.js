@@ -39,7 +39,7 @@ import { launchOsBrowser } from './open-dashboard.js';
 import { connectDedicated as defaultConnectDedicated, withTransaction } from './db.js';
 import { JobSearchError, errFields } from './errors.js';
 import { log as defaultLog } from './logger.js';
-import { normalizeListing, DETAIL_MIN_CHARS } from './normalize.js';
+import { normalizeListing } from './normalize.js';
 import { classify, makePgLookups } from './dedup.js';
 import { applyDecision, adoptUnclassifiedRows, updateListing } from './upsert.js';
 import { loadScopeProfiles } from './scope.js';
@@ -53,7 +53,9 @@ import { runGmailDetail } from './gmail-detail.js';
 import { planPages, assertPlanWithinCap, reserveBudget } from './budget.js';
 import { makeRateLimiter } from './ratelimit.js';
 import { runSearch } from './scheduler.js';
-import { classifyPage, recordWall, recordClean, sourceEnabled } from '../browser/wall.js';
+import { classifyPage, recordWall, recordClean, sourceEnabled, classifyDetail, isBlockedClass, detailWallKey } from '../browser/wall.js';
+import { DETAIL_OUTCOME_VALUES } from './store-description.js';
+import { createVerifyCoordinator } from './detail-verify.js';
 import { connectSession as defaultConnectSession, applyTargetMarkerPath } from '../browser/session.js';
 import { makeCapability } from '../browser/capability.js';
 import { ADAPTERS, getAdapter } from '../adapters/index.js';
@@ -187,7 +189,7 @@ export const CLOSE_ALL_TIMEOUT_MS = 10000;
  * item 2). Every item that ever reaches finalizeListing carries exactly one of these -- there is no
  * "unclassified" state, enforced by the assertion inside finalizeListing itself.
  */
-export const DETAIL_OUTCOMES = Object.freeze(['fetched', 'empty', 'error', 'skipped_budget', 'skipped_gate', 'skipped_cancelled', 'not_queued']);
+export const DETAIL_OUTCOMES = DETAIL_OUTCOME_VALUES;
 const DETAIL_OUTCOME_SET = new Set(DETAIL_OUTCOMES);
 
 /** stats counter key for each DETAIL_OUTCOMES value. */
@@ -200,6 +202,21 @@ const DETAIL_OUTCOME_STAT_KEYS = Object.freeze({
   skipped_cancelled: 'detail_skipped_cancelled',
   not_queued: 'detail_not_queued',
 });
+
+/** stats counter for any DETAIL_OUTCOMES value (detail-block fix): blocked:* and transient get their own counters; too_short and unverified are fetched-but-unusable and count with 'empty'. @param {string} outcome */
+function detailStatKey(outcome) {
+  if (outcome.startsWith('blocked:')) return 'detail_blocked';
+  if (outcome === 'transient') return 'detail_transient';
+  if (outcome === 'too_short' || outcome === 'unverified') return 'detail_empty';
+  return /** @type {Record<string, string>} */ (DETAIL_OUTCOME_STAT_KEYS)[outcome];
+}
+
+/** details_by_source bucket field for any DETAIL_OUTCOMES value. @param {string} outcome */
+function detailBucketKey(outcome) {
+  if (outcome.startsWith('blocked:')) return 'blocked';
+  if (outcome === 'too_short' || outcome === 'unverified') return 'empty';
+  return outcome;
+}
 
 /** @param {unknown} err */
 function errRecord(err, source = null) {
@@ -405,6 +422,7 @@ async function executeRun(p) {
   const stats = {
     fetched: 0, new: 0, updated: 0, cross_source_dup: 0, repost: 0, ambiguous: 0, errors: 0, unembedded: 0, stale_dropped: 0,
     detail_fetched: 0, detail_empty: 0, detail_error: 0, detail_skipped_budget: 0, detail_skipped_run_cap: 0, detail_skipped_gate: 0, detail_skipped_cancelled: 0, detail_not_queued: 0, detail_timeout: 0,
+    detail_blocked: 0, detail_transient: 0, detail_skipped_blocked: 0, detail_blocked_by_source: {},
     detail_fit_sweep_queued: 0, detail_fit_sweep_fetched: 0,
     details_by_source: {},
     dedup_sticky_skip_merged: 0, dedup_scope_separated: 0, adopted: 0, expired: 0, pages_by_source: {},
@@ -417,7 +435,7 @@ async function executeRun(p) {
    * @param {string} name
    */
   function ensureDetailsBucket(name) {
-    return (stats.details_by_source[name] ??= { fetched: 0, empty: 0, error: 0, skipped_budget: 0, skipped_gate: 0, skipped_cancelled: 0, timeout: 0, fit_sweep_queued: 0, fit_sweep_fetched: 0 });
+    return (stats.details_by_source[name] ??= { fetched: 0, empty: 0, error: 0, skipped_budget: 0, skipped_gate: 0, skipped_cancelled: 0, timeout: 0, blocked: 0, transient: 0, fit_sweep_queued: 0, fit_sweep_fetched: 0 });
   }
   // Seeded with anything the caller already knew about before this run started (scan-never-skip fix): a
   // config-lock mismatch, an unlocked rubric, or a self-healed/failed Chrome launch. Each carries
@@ -734,6 +752,95 @@ async function executeRun(p) {
 
   const lookups = makePgLookups(client);
 
+  // ---- Detail-block handling (detail-block fix, S5/S6) ----
+  /** Sources whose detail fetches are stopped for the rest of this run (a block was observed or their detail backoff is active). */
+  const blockedDetailSources = new Set();
+  const verify = createVerifyCoordinator({
+    interactive,
+    capFor,
+    sleep: (ms) => (deps.sleep ? deps.sleep(ms, signal) : new Promise((resolve) => setTimeout(resolve, ms))),
+    signal,
+    log,
+    async notify(source, message) {
+      const entry = { source, code: 'DETAIL_VERIFICATION_NEEDED', severity: /** @type {const} */ ('warning'), message };
+      errors.push(entry);
+      progress({ run_id: runId, source, notice: message });
+      if (!dryRun) {
+        try {
+          await client.query("UPDATE ic_scan_runs SET errors = coalesce(errors, '[]'::jsonb) || $2::jsonb WHERE id = $1 AND status = 'running'", [runId, JSON.stringify([entry])]);
+        } catch {
+          /* the in-memory entry still lands in the finalize write */
+        }
+      }
+    },
+  });
+
+  /**
+   * Classify an adapter's fetchDetail result together with the page signals it gathered.
+   * @param {any} d
+   * @param {string} source
+   * @param {string|null|undefined} url
+   */
+  function classifyFetchedDetail(d, source, url) {
+    const sig = d && d.detailSignals ? d.detailSignals : {};
+    return classifyDetail({ text: d ? d.description : null, url: sig.url ?? url ?? null, source, httpStatus: sig.httpStatus ?? null, cfMitigated: sig.cfMitigated ?? null, wallSignals: sig.wallSignals ?? null });
+  }
+
+  /**
+   * True when this source's detail fetches are stopped: blocked earlier this run, or its separate
+   * '<source>:detail' backoff (never the source's own list/apply wall state) is active.
+   * @param {{ name: string }} s
+   */
+  async function detailLatched(s) {
+    if (blockedDetailSources.has(s.name)) return true;
+    const en = await sourceEnabled(client, detailWallKey(s.name), now);
+    if (!en.enabled) {
+      blockedDetailSources.add(s.name);
+      return true;
+    }
+    return false;
+  }
+
+  /** @param {string} source @param {string} reason */
+  function countBlocked(source, reason) {
+    const by = (stats.detail_blocked_by_source[source] ??= {});
+    by[reason] = (by[reason] ?? 0) + 1;
+  }
+
+  /**
+   * A detail fetch came back blocked:*. Interactive runs get one verification pop per source (S6); on
+   * 'cleared' the fetch is retried once. Whatever remains blocked stops this source's detail fetches for
+   * the run and records ONE wall under the separate '<source>:detail' key (S5). Never touches the
+   * source's own wall state.
+   * @param {{ name: string }} s
+   * @param {any} r the blocked result
+   * @param {() => Promise<any>} refetch
+   * @param {string|null|undefined} url
+   */
+  async function handleDetailBlock(s, r, refetch, url) {
+    let cur = r;
+    countBlocked(s.name, String(cur.outcome).slice('blocked:'.length));
+    const verdict = await verify.onBlocked(s.name, { url: url ?? null, reason: String(cur.outcome) });
+    if (verdict === 'cleared') {
+      const again = await refetch();
+      if (!again.abandonRest && !again.cutByCap && isBlockedClass(again.outcome)) {
+        countBlocked(s.name, String(again.outcome).slice('blocked:'.length));
+        verify.markDeferred(s.name);
+        cur = again;
+      } else {
+        return again;
+      }
+    }
+    if (!blockedDetailSources.has(s.name)) {
+      blockedDetailSources.add(s.name);
+      if (!dryRun) {
+        const w = await recordWall(client, detailWallKey(s.name), now);
+        log({ evt: 'detail_blocked', run_id: runId, source: s.name, reason: cur.outcome, consecutive: w.consecutiveWalls });
+      }
+    }
+    return cur;
+  }
+
   /**
    * Persist one classified listing (insert/update, stats, response row, log). Shared by the immediate path
    * (a row not eligible for a detail fetch) and the sorted detail pass below (spec R4).
@@ -747,16 +854,17 @@ async function executeRun(p) {
    * @param {string} detailOutcome one of DETAIL_OUTCOMES (spec R4 item 2's total classification); asserted below
    * @param {import('./apply-target-persist.js').ApplyDetail|null} [applyDetail] auto-apply PR B: set only
    *   when this row went through a detail fetch AND the adapter returned an apply-target hint
+   * @param {{ text: string|null, cls: string }|null} [rejected] detail-block fix: fetched text that classified non-ok; never stored, audited by upsert.js once the row id is known
    */
-  async function finalizeListing(s, ev, rec, decision, ps, psRaw, noiseClass, detailOutcome, applyDetail = null) {
+  async function finalizeListing(s, ev, rec, decision, ps, psRaw, noiseClass, detailOutcome, applyDetail = null, rejected = null) {
     // Total classification, enforced (spec R4 item 2): every item reaching this function carries one of
     // DETAIL_OUTCOMES, never undefined -- a caller passing anything else is a bug in THIS file, not a
     // runtime data problem, so this throws unconditionally rather than only under NODE_ENV=test.
     assert.ok(DETAIL_OUTCOME_SET.has(detailOutcome), `finalizeListing: detailOutcome must be one of ${DETAIL_OUTCOMES.join('|')}, got ${JSON.stringify(detailOutcome)}`);
-    stats[DETAIL_OUTCOME_STAT_KEYS[detailOutcome]]++;
+    /** @type {any} */ (stats)[detailStatKey(detailOutcome)]++;
     if (detailOutcome !== 'not_queued') {
       const bucket = ensureDetailsBucket(s.name);
-      bucket[detailOutcome]++;
+      /** @type {any} */ (bucket)[detailBucketKey(detailOutcome)]++;
     }
     const detailSkipped = detailOutcome === 'skipped_budget';
     /** @type {{ id: number|null, outcome: string, queued: number|null, branch: string, status?: string|null, stickySkipMerged?: boolean }} */
@@ -785,7 +893,7 @@ async function executeRun(p) {
         // deterministic.floor, default 40), so findStickySkipRoot/findStickySkipRootForSameRow gate an
         // auto-actor STICKY-ELIGIBLE root on this row's own already-computed prescore (`ps` above)
         // against the SAME floor auto-triage itself would use to decide skip_low.
-        prescore: ps, prescoreRaw: psRaw, noiseClass, detailSkipped, detailOutcome, embedding, now, stickyFloor: config.triage.deterministic.floor,
+        prescore: ps, prescoreRaw: psRaw, noiseClass, detailSkipped, detailOutcome, rejectedDescription: rejected, embedding, now, stickyFloor: config.triage.deterministic.floor,
         // Relevance gate (dedup scope-gate spec A3, F11): the prescore floor is the same triage floor;
         // the fit floor is scope.js's own SCOPE_FIT_FLOOR constant, never this value.
         scopeProfiles, scopePrescoreFloor: config.triage.deterministic.floor,
@@ -855,15 +963,18 @@ async function executeRun(p) {
     const applyDetail = d && (d.externalApplyUrl !== undefined || d.easyApplyOnly !== undefined || d.applyProbe !== undefined)
       ? { externalApplyUrl: d.externalApplyUrl ?? null, easyApplyOnly: Boolean(d.easyApplyOnly), applyProbe: d.applyProbe ?? null }
       : null;
-    if (d && d.description) {
+    // Detail-block fix: classify the fetched text together with the adapter's page signals BEFORE it can
+    // become a description (a Cloudflare or Indeed verification page used to be stored as one).
+    const cls = d ? classifyFetchedDetail(d, rec.source, ev.listing.url) : 'empty';
+    if (d && cls === 'ok') {
       const rec2 = normalizeListing({ ...ev.listing, description: d.description });
       const psRaw2 = prescore(rec2, profile);
       const noiseClass2 = classifyNoise(rec2, { rules: noiseRules, knownSources: noiseKnownSources });
       const ps2 = weightedPrescore(psRaw2, noiseClass2, { rules: noiseRules });
       const decision2 = await classify(rec2, lookups, classifyOpts);
-      const outcome = rec2.description && rec2.description.length >= DETAIL_MIN_CHARS ? 'fetched' : 'empty';
-      return { outcome, rec: rec2, decision: decision2, ps: ps2, psRaw: psRaw2, noiseClass: noiseClass2, applyDetail };
+      return { outcome: 'fetched', rec: rec2, decision: decision2, ps: ps2, psRaw: psRaw2, noiseClass: noiseClass2, applyDetail };
     }
+    if (d && cls !== 'empty') return { outcome: cls, applyDetail, rejected: d.description ? { text: String(d.description), cls } : null };
     // A reason of 'not_found' (item 6 follow-up fix, linkedin.js's source B: the listing is confirmed
     // gone -- 404/410 or the equivalent goto-throw shape) is classified 'error' rather than 'empty': the
     // resource itself failed to resolve, not merely "fetched but nothing useful came back." Both outcomes
@@ -1032,7 +1143,13 @@ async function executeRun(p) {
     const maxDetailsPerRun = capOverride !== undefined ? capOverride : (typeof s.cfg.maxDetailsPerRun === 'number' ? s.cfg.maxDetailsPerRun : null);
     let queuedSkippedFromHere = false;
     let runCapHit = false;
+    let blockedStop = false;
+    let okCount = 0;
     let attempted = 0;
+    if (sorted.length && await detailLatched(s)) {
+      queuedSkippedFromHere = true;
+      blockedStop = true;
+    }
     for (let i = 0; i < sorted.length; i++) {
       if (signal.aborted) {
         for (let j = i; j < sorted.length; j++) {
@@ -1047,12 +1164,15 @@ async function executeRun(p) {
       let detailOutcome;
       /** @type {import('./apply-target-persist.js').ApplyDetail|null} */
       let applyDetail = null;
+      /** @type {{ text: string|null, cls: string }|null} */
+      let rejected = null;
       if (queuedSkippedFromHere) {
         // Budget already exhausted earlier in this SAME sorted pass (either the daily pool, via
         // BUDGET_EXHAUSTED below, or the per-run cap above): every remaining item skips the network
         // attempt outright (decision 22: queued minus fetched) rather than re-throwing per item.
         detailOutcome = 'skipped_budget';
-        if (runCapHit) stats.detail_skipped_run_cap++;
+        if (blockedStop) stats.detail_skipped_blocked++;
+        else if (runCapHit) stats.detail_skipped_run_cap++;
       } else if (maxDetailsPerRun !== null && attempted >= maxDetailsPerRun) {
         detailOutcome = 'skipped_budget';
         queuedSkippedFromHere = true;
@@ -1060,7 +1180,14 @@ async function executeRun(p) {
         stats.detail_skipped_run_cap++;
       } else {
         attempted++;
-        const r = await tryFetchDetailWithTimeout(s, ctx, ev, rec);
+        let r = await tryFetchDetailWithTimeout(s, ctx, ev, rec);
+        if (!r.abandonRest && !r.cutByCap && isBlockedClass(r.outcome)) {
+          r = await handleDetailBlock(s, r, () => tryFetchDetailWithTimeout(s, ctx, ev, rec), ev.listing.url);
+          if (isBlockedClass(r.outcome)) {
+            queuedSkippedFromHere = true;
+            blockedStop = true;
+          }
+        }
         if (r.abandonRest) {
           // Item timeout/cap-cut plus a page/context that would not even close within 10s (spec item A):
           // finalize THIS item, finalize everything still queued behind it without another network
@@ -1090,10 +1217,13 @@ async function executeRun(p) {
             noiseClass = r.noiseClass;
           }
           applyDetail = r.applyDetail ?? null;
+          rejected = r.rejected ?? null;
+          if (detailOutcome === 'fetched') okCount++;
         }
       }
-      await finalizeListing(s, ev, rec, decision, ps, psRaw, noiseClass, detailOutcome, applyDetail);
+      await finalizeListing(s, ev, rec, decision, ps, psRaw, noiseClass, detailOutcome, applyDetail, rejected);
     }
+    if (okCount && !blockedDetailSources.has(s.name) && !dryRun) await recordClean(client, detailWallKey(s.name));
   }
 
   /**
@@ -1125,7 +1255,8 @@ async function executeRun(p) {
     const applyDetail = d && (d.externalApplyUrl !== undefined || d.easyApplyOnly !== undefined || d.applyProbe !== undefined)
       ? { externalApplyUrl: d.externalApplyUrl ?? null, easyApplyOnly: Boolean(d.easyApplyOnly), applyProbe: d.applyProbe ?? null }
       : null;
-    if (d && d.description) {
+    const cls = d ? classifyFetchedDetail(d, row.source, row.url) : 'empty';
+    if (d && cls === 'ok') {
       const rec2 = normalizeListing({
         title: row.title, company: row.company, url: row.url, location: row.location,
         remoteMode: row.remote_mode, remoteDeclared: row.remote_declared,
@@ -1135,9 +1266,9 @@ async function executeRun(p) {
       const psRaw2 = prescore(rec2, profile);
       const noiseClass2 = classifyNoise(rec2, { rules: noiseRules, knownSources: noiseKnownSources });
       const ps2 = weightedPrescore(psRaw2, noiseClass2, { rules: noiseRules });
-      const outcome = rec2.description && rec2.description.length >= DETAIL_MIN_CHARS ? 'fetched' : 'empty';
-      return { outcome, rec: rec2, ps: ps2, psRaw: psRaw2, noiseClass: noiseClass2, applyDetail };
+      return { outcome: 'fetched', rec: rec2, ps: ps2, psRaw: psRaw2, noiseClass: noiseClass2, applyDetail };
     }
+    if (d && cls !== 'empty') return { outcome: cls, applyDetail, rejected: d.description ? { text: String(d.description), cls } : null };
     if (d && d.reason === 'not_found') return { outcome: 'error', applyDetail };
     return { outcome: 'empty', applyDetail };
   }
@@ -1215,6 +1346,7 @@ async function executeRun(p) {
       now, pageIndex: null, profileRev: null,
       prescore: r?.ps ?? null, prescoreRaw: r?.psRaw ?? null, noiseClass: r?.noiseClass ?? null,
       detailSkipped: outcome === 'skipped_budget', detailOutcome: outcome,
+      rejectedDescription: r?.rejected ?? null,
     };
     await updateListing(client, /** @type {any} */ (detailRec), decision, writeCtx, { bumpTimesSeen: false });
     if (r && r.applyDetail) await maybeSaveApplyTarget(s.name, row.id, { url_normalized: row.url_normalized }, r.applyDetail);
@@ -1237,6 +1369,8 @@ async function executeRun(p) {
     bucket.fit_sweep_queued += rows.length;
     stats.detail_fit_sweep_queued += rows.length;
     let queuedSkippedFromHere = false;
+    let sweepOk = 0;
+    if (rows.length && await detailLatched(s)) queuedSkippedFromHere = true;
     for (let i = 0; i < rows.length; i++) {
       const row = rows[i];
       if (signal.aborted) {
@@ -1247,7 +1381,11 @@ async function executeRun(p) {
         await writeSweepOutcome(s, row, 'skipped_budget', null);
         continue;
       }
-      const r = await tryFetchSweepDetailWithTimeout(s, ctx, row);
+      let r = await tryFetchSweepDetailWithTimeout(s, ctx, row);
+      if (!r.abandonRest && !r.cutByCap && isBlockedClass(r.outcome)) {
+        r = await handleDetailBlock(s, r, () => tryFetchSweepDetailWithTimeout(s, ctx, row), row.url);
+        if (isBlockedClass(r.outcome)) queuedSkippedFromHere = true;
+      }
       if (r.abandonRest) {
         await writeSweepOutcome(s, row, r.outcome, null);
         if (r.outcome === 'fetched') {
@@ -1266,10 +1404,12 @@ async function executeRun(p) {
       if (outcome === 'skipped_budget') queuedSkippedFromHere = true;
       await writeSweepOutcome(s, row, outcome, r);
       if (outcome === 'fetched') {
+        sweepOk++;
         bucket.fit_sweep_fetched++;
         stats.detail_fit_sweep_fetched++;
       }
     }
+    if (sweepOk && !blockedDetailSources.has(s.name) && !dryRun) await recordClean(client, detailWallKey(s.name));
   }
 
   /**

@@ -156,7 +156,7 @@ describe('runGmailDetail (real DB)', () => {
 
   test('generic: a Dice job page with a JSON-LD description of 400 chars is stored; loadRescoreIds then returns a no_description row (A2 hand-off)', async () => {
     const id = await seed({ url: 'https://www.dice.com/job-detail/e58b886b-7029-48d3-8ee5-8129e74f8edd', fitBasis: 'no_description' });
-    const desc = 'A senior technology leadership role. '.repeat(11);
+    const desc = 'A senior technology leadership role with responsibilities and experience. '.repeat(6);
     const stats = await runGmailDetail(c, {
       config, now: new Date(), log: () => {}, reserveBudget: reserveOk,
       fetchOnce: async () => ({ status: 200, location: null, text: JSONLD(desc) }),
@@ -211,7 +211,7 @@ describe('runGmailDetail (real DB)', () => {
     const a = await seed({ url: 'https://www.dice.com/job-detail/11111111-1111-4111-8111-111111111111' });
     const b = await seed({ url: 'https://www.dice.com/job-detail/22222222-2222-4222-8222-222222222222' });
     const one = { adapters: { adapters: { ...config.adapters.adapters, gmail: { detailRouting: { ...config.adapters.adapters.gmail.detailRouting, generic: { perDay: 60, perRun: 1 } } } } } };
-    const s1 = await runGmailDetail(c, { config: one, now: new Date(), log: () => {}, reserveBudget: reserveOk, fetchOnce: async () => ({ status: 200, location: null, text: JSONLD('d'.repeat(400)) }) });
+    const s1 = await runGmailDetail(c, { config: one, now: new Date(), log: () => {}, reserveBudget: reserveOk, fetchOnce: async () => ({ status: 200, location: null, text: JSONLD('Role requirements and experience. '.repeat(12)) }) });
     assert.equal(s1.fetched_by.generic, 1);
     assert.equal(s1.deferred.skipped_run_cap, 1);
     const refused = async () => ({ ok: false, remainingPages: 0, remainingDetails: 0 });

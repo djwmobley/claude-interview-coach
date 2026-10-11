@@ -97,9 +97,11 @@ export const greenhouse = defineAdapter({
     await ctx.reserveDetail();
     const res = await ctx.fetchJson(`${API}/${m[1]}/jobs/${m[2]}`);
     const j = /** @type {any} */ (res.json);
-    if (res.status !== 200 || !j || typeof j.content !== 'string') return { description: null, externalApplyUrl: url };
+    // Detail-block fix: the HTTP status lets scan-run.js tell a 403 (blocked) or 429/503 (transient) from an empty board.
+    const detailSignals = { httpStatus: res.status };
+    if (res.status !== 200 || !j || typeof j.content !== 'string') return { description: null, externalApplyUrl: url, detailSignals };
     // Auto-apply PR B: a Greenhouse board's own listing URL IS the apply page (classifyApplyUrl already
     // resolves it to 'exact' confidence directly), so it is surfaced as-is rather than left null.
-    return { description: decodeEntities(j.content), externalApplyUrl: url };
+    return { description: decodeEntities(j.content), externalApplyUrl: url, detailSignals };
   },
 });

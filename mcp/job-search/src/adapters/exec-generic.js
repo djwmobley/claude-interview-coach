@@ -276,15 +276,26 @@ export const exec = defineAdapter({
     await ctx.reserveDetail();
     /** @type {string} */
     let html;
+    /** @type {any} */
+    let detailSignals = null;
     if (b.mode === 'fetch') {
       const res = await ctx.fetchText(url, { headers: { accept: 'text/html' }, source: src });
-      if (res.status !== 200) return { description: null };
+      if (res.status !== 200) return { description: null, detailSignals: { httpStatus: res.status } };
       html = res.text;
+      detailSignals = { httpStatus: res.status };
     } else {
       const cap = await ctx.capFor(src);
       if (!cap) return { description: null };
-      await cap.goto(url);
+      const nav = await cap.goto(url);
       html = await cap.readHtml();
+      /** @type {any} */
+      let markers = null;
+      try {
+        markers = await cap.readJson('wallMarkers');
+      } catch {
+        markers = null;
+      }
+      detailSignals = { httpStatus: nav ? nav.status : null, cfMitigated: nav ? nav.cfMitigated : null, url: nav ? nav.url : null, wallSignals: markers };
     }
     const $ = cheerio.load(html);
     /** @type {unknown[]} */
@@ -316,9 +327,9 @@ export const exec = defineAdapter({
       }
     }
     const jp = jobPostingsFromJsonLd(docs)[0];
-    if (jp && typeof jp.description === 'string' && jp.description.trim()) return { description: jp.description, externalApplyUrl };
+    if (jp && typeof jp.description === 'string' && jp.description.trim()) return { description: jp.description, externalApplyUrl, detailSignals };
     const main = $('main, article, [role="main"], #content').first();
     const text = (main.length ? main : $('body')).text().replace(/\s+/g, ' ').trim();
-    return { description: text ? text.slice(0, 20000) : null, externalApplyUrl };
+    return { description: text ? text.slice(0, 20000) : null, externalApplyUrl, detailSignals };
   },
 });
