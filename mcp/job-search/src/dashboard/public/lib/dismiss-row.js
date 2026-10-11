@@ -27,3 +27,23 @@ export async function dismissRowOptimistic(tr, send) {
   }
   return ok;
 }
+
+/**
+ * Outcome kinds for which lib/outcome.js's handleOutcome() already shows an error toast. Anything not
+ * listed (validation, the db_unavailable and rejected_request banners, unknown future kinds) gets the
+ * fallback toast, so every failure shows exactly one toast.
+ */
+export const HANDLE_OUTCOME_TOASTS = Object.freeze(new Set([
+  'network_error', 'unparsable', 'client_bug', 'locked', 'payload_too_large', 'message', 'internal', 'not_found',
+  'easy_apply_conflict', 'withdraw_refused', 'resume_runner_busy', 'resume_refused', 'answer_refused',
+]));
+
+/**
+ * Runs handleOutcome for its side effects and adds the fallback toast only when it showed none.
+ * @param {{ kind: string }} outcome
+ * @param {{ handle: (o: any) => any, toast: () => void }} deps
+ */
+export function reportDismissFailure(outcome, deps) {
+  deps.handle(outcome);
+  if (!HANDLE_OUTCOME_TOASTS.has(outcome.kind)) deps.toast();
+}

@@ -108,6 +108,43 @@ describe('dismissRowOptimistic', () => {
   });
 });
 
+describe('exactly one error toast per failed dismissal (real handleOutcome and toast root)', () => {
+  const KINDS = [
+    'answer_refused', 'apply_excluded', 'apply_needs_override', 'client_bug', 'config_lock_mismatch', 'db_unavailable',
+    'duplicate_application', 'duplicate_candidate', 'easy_apply_conflict', 'internal', 'locked', 'message', 'network_error',
+    'not_found', 'payload_too_large', 'rejected_request', 'resume_refused', 'resume_runner_busy', 'unparsable', 'validation',
+    'withdraw_refused', 'some_future_kind',
+  ];
+
+  test('every failure kind produces exactly one toast, never zero or two', async (t) => {
+    t.mock.timers.enable({ apis: ['setTimeout'] });
+    t.mock.method(console, 'error', () => {});
+    const { initToastRoot, showToast } = await import('../src/dashboard/public/lib/toast.js');
+    const { handleOutcome } = await import('../src/dashboard/public/lib/outcome.js');
+    const { reportDismissFailure } = await import('../src/dashboard/public/lib/dismiss-row.js');
+    const root = new FakeEl('div');
+    const banners = /** @type {any} */ (new FakeEl('div'));
+    banners.querySelector = () => null;
+    initToastRoot(/** @type {any} */ (root), banners);
+    for (const kind of KINDS) {
+      root.children = [];
+      reportDismissFailure({ kind, code: 'X', message: 'm' }, {
+        handle: handleOutcome,
+        toast: () => showToast({ message: 'Could not dismiss that job. It was put back.', tone: 'error' }),
+      });
+      assert.equal(root.children.length, 1, `kind ${kind} showed ${root.children.length} toasts`);
+    }
+  });
+});
+
+describe('Dismiss column is never hidden by a breakpoint', () => {
+  test('no CSS rule sets display none on job-row__dismiss', () => {
+    const css = fs.readFileSync(path.join(HERE, '..', 'src', 'dashboard', 'public', 'app.css'), 'utf8');
+    assert.doesNotMatch(css, /job-row__dismiss[^{}]*\{[^}]*display\s*:\s*none/);
+    assert.match(css, /job-row__dismiss/);
+  });
+});
+
 describe('jobs page wiring', () => {
   const page = fs.readFileSync(path.join(HERE, '..', 'src', 'dashboard', 'public', 'pages', 'jobs.js'), 'utf8');
   test('Dismiss posts the existing passed status to POST /api/listings/:id/status and passes onDismiss to jobRow', () => {

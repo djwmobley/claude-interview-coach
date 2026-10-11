@@ -10,7 +10,7 @@ import { openFilterModal } from '../components/filter-modal.js';
 import { skeleton, emptyState } from '../components/empty-state.js';
 import { on, off } from '../lib/bus.js';
 import { createListCursor } from '../lib/list-cursor.js';
-import { dismissRowOptimistic } from '../lib/dismiss-row.js';
+import { dismissRowOptimistic, reportDismissFailure } from '../lib/dismiss-row.js';
 import { DIGIT_STAGE_ORDER } from '../components/stage-buttons.js';
 import { stageChip } from '../components/chips.js';
 
@@ -255,10 +255,15 @@ export async function render(container, params, app) {
   async function dismiss(id, tr) {
     selected.delete(id);
     const ok = await dismissRowOptimistic(tr, async () => {
-      const out = handleOutcome(await postJson(`/api/listings/${id}/status`, { status: 'passed', note: 'dismissed from Jobs list' }));
-      return out.kind === 'ok';
+      const out = await postJson(`/api/listings/${id}/status`, { status: 'passed', note: 'dismissed from Jobs list' });
+      if (out.kind === 'ok') return true;
+      // Exactly one error toast: handleOutcome's own, or the fallback when it shows none.
+      reportDismissFailure(out, {
+        handle: handleOutcome,
+        toast: () => showToast({ message: 'Could not dismiss that job. It was put back.', tone: 'error' }),
+      });
+      return false;
     });
-    if (!ok) showToast({ message: 'Could not dismiss that job. It was put back.', tone: 'error' });
     cursor.setRows([...container.querySelectorAll('.job-row')]);
   }
 
