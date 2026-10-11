@@ -75,6 +75,15 @@ export function readProjectIndexCompanies(file = path.join(repoRoot(), 'data', '
   } catch {
     return null;
   }
+  return parseProjectIndexCompanies(text);
+}
+
+/**
+ * Pure parser behind readProjectIndexCompanies: the `**Client:** X` lines of a project-index text.
+ * @param {string} text
+ * @returns {string[]}
+ */
+export function parseProjectIndexCompanies(text) {
   const out = [];
   for (const m of text.matchAll(/^\s*-\s*\*\*Client:\*\*\s*(.+?)\s*$/gm)) out.push(m[1].trim());
   return out;

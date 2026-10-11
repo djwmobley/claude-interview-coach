@@ -18,6 +18,7 @@ import { repoRoot } from '../core/config.js';
 import { linkDocument, resolveOutputPath } from '../core/documents.js';
 import { onDocumentLinked, onDocumentLinkedForApplication } from '../core/applications.js';
 import { JobSearchError } from '../core/errors.js';
+import { checkResumeFile, isValidDocxFile } from '../core/resume-content-gate.js';
 
 /** Cap on the sanitized company suffix appended to a sibling filename (spec: "max 40 chars"). */
 const COMPANY_SUFFIX_MAX = 40;
@@ -94,35 +95,54 @@ export async function linkRenderedDocument(client, input) {
 }
 
 /**
- * Is the file at `absPath` unusable for THIS listing: 0 bytes, or already linked (in ic_job_documents) to
- * a different listing_id? Total for the two states this module ever needs to distinguish; a file that is
- * neither (non-empty, and unlinked or linked to this same listing) is usable as-is.
+ * Stale or foreign resume guard, S1: reuse classification is TOTAL. An existing file at a target path is in
+ * exactly one branch:
+ *   - SAME_LISTING_CURRENT: a row in ic_job_documents links this exact rel_path to THIS listing, the file is
+ *     non-empty, is a readable DOCX, and (kind resume) passes the content gate against the current project
+ *     index. Safe to re-link (idempotent).
+ *   - DEFAULT: everything else (no row, rows only for other listings, a row for this listing but the gate or
+ *     the DOCX check fails, an empty or unreadable file, or any thrown error). Never linked; the caller
+ *     renders a fresh, listing-unique sibling instead. `conflict` says why, for the result's conflict_code.
+ * Never writes, modifies, or deletes the file.
  * @param {import('pg').ClientBase} client
  * @param {string} outputRoot
  * @param {string} absPath
  * @param {number} listingId
- * @returns {Promise<{ conflict: null } | { conflict: 'EMPTY_DOCX' } | { conflict: 'EXISTS_OTHER_LISTING', otherListingId: number }>}
+ * @param {string} kind render_doc kind (resume, cover_letter, cheatsheet)
+ * @returns {Promise<{ branch: 'SAME_LISTING_CURRENT' } | { branch: 'DEFAULT', conflict: 'EMPTY_DOCX' | 'EXISTS_OTHER_LISTING' | 'EXISTS_UNVERIFIED', otherListingId?: number }>}
  */
-async function classifyExistingFile(client, outputRoot, absPath, listingId) {
-  const relPath = path.relative(outputRoot, absPath).split(path.sep).join('/');
-  const resolved = resolveOutputPath(outputRoot, relPath);
-  const statTarget = resolved.ok ? resolved.absPath : absPath;
-  const stat = fs.statSync(statTarget);
-  if (stat.size === 0) return { conflict: 'EMPTY_DOCX' };
-  const canonicalRelPath = resolved.ok ? resolved.relPath : relPath;
-  const existing = await client.query('SELECT DISTINCT listing_id FROM ic_job_documents WHERE rel_path = $1', [canonicalRelPath]);
-  const conflicting = existing.rows.find((r) => Number(r.listing_id) !== Number(listingId));
-  if (conflicting) return { conflict: 'EXISTS_OTHER_LISTING', otherListingId: Number(conflicting.listing_id) };
-  return { conflict: null };
+export async function classifyExistingFile(client, outputRoot, absPath, listingId, kind) {
+  try {
+    const relPath = path.relative(outputRoot, absPath).split(path.sep).join('/');
+    const resolved = resolveOutputPath(outputRoot, relPath);
+    const statTarget = resolved.ok ? resolved.absPath : absPath;
+    const stat = fs.statSync(statTarget);
+    if (stat.size === 0) return { branch: 'DEFAULT', conflict: 'EMPTY_DOCX' };
+    const canonicalRelPath = resolved.ok ? resolved.relPath : relPath;
+    const rows = await client.query('SELECT DISTINCT listing_id FROM ic_job_documents WHERE rel_path = $1', [canonicalRelPath]);
+    const ids = rows.rows.map((r) => Number(r.listing_id));
+    if (!ids.includes(Number(listingId))) {
+      const other = ids.find((id) => id !== Number(listingId));
+      return other !== undefined ? { branch: 'DEFAULT', conflict: 'EXISTS_OTHER_LISTING', otherListingId: other } : { branch: 'DEFAULT', conflict: 'EXISTS_UNVERIFIED' };
+    }
+    if (!resolved.ok) return { branch: 'DEFAULT', conflict: 'EXISTS_UNVERIFIED' };
+    if (kind === 'resume') {
+      if (!checkResumeFile(resolved.absPath, path.join(path.dirname(outputRoot), 'data', 'project-index.md')).ok) return { branch: 'DEFAULT', conflict: 'EXISTS_UNVERIFIED' };
+    } else if (!isValidDocxFile(resolved.absPath)) {
+      return { branch: 'DEFAULT', conflict: 'EXISTS_UNVERIFIED' };
+    }
+    return { branch: 'SAME_LISTING_CURRENT' };
+  } catch {
+    return { branch: 'DEFAULT', conflict: 'EXISTS_UNVERIFIED' };
+  }
 }
 
 /**
- * The listing-unique sibling filenames tried, in order, once the primary attempted output path turns out
- * to belong to (or look like) a different listing's resume. First choice appends the listing's sanitized
- * company name; the second, more specific fallback also appends the listingId itself, which by
- * construction cannot collide with any other listing's sibling name. When the company name has no usable
- * text (missing, blank, or sanitizes to nothing -- sanitizeCompanyForFilename returns null), the
- * company-suffixed choice is skipped entirely and only the listingId-only name is tried.
+ * The listing-unique sibling filenames tried, in order, once the primary attempted output path is not
+ * SAME_LISTING_CURRENT. First choice appends the listing's sanitized company name; the next appends the
+ * listingId too (by construction it cannot collide with another listing's sibling); a few numbered
+ * variants follow so a regenerated resume never needs to overwrite or reuse an unverified sibling. When the
+ * company name has no usable text, the company-suffixed choice is skipped.
  * @param {string} stem the primary target's filename without its extension
  * @param {string|null} companySuffix sanitizeCompanyForFilename's output
  * @param {number} listingId
@@ -131,32 +151,28 @@ async function classifyExistingFile(client, outputRoot, absPath, listingId) {
 function siblingNameCandidates(stem, companySuffix, listingId) {
   const candidates = [];
   if (companySuffix) candidates.push(`${stem} - ${companySuffix}`);
-  candidates.push(companySuffix ? `${stem} - ${companySuffix} ${listingId}` : `${stem} - ${listingId}`);
+  const withId = companySuffix ? `${stem} - ${companySuffix} ${listingId}` : `${stem} - ${listingId}`;
+  candidates.push(withId);
+  for (let n = 2; n <= 9; n++) candidates.push(`${withId} v${n}`);
   return candidates;
 }
 
 /**
- * Resolve a primary-target conflict (EMPTY_DOCX or EXISTS_OTHER_LISTING) by rendering (or, if a usable
- * file already sits there, linking) a listing-unique sibling instead of refusing outright. Operator rule:
- * "anything that gets a resume made must be sent," and outward DOCX filenames stay human-readable, so the
- * sibling name is `<stem> - <Company>.docx`, falling back to `<stem> - <Company> <listingId>.docx` (or, with
- * no usable company text, `<stem> - <listingId>.docx`) only if the company-suffixed name is itself taken by
- * something unusable. Never overwrites an existing non-empty file belonging to another listing; never
- * passes force.
+ * Resolve a primary-target that is not SAME_LISTING_CURRENT by rendering a listing-unique sibling instead
+ * (or re-linking a sibling that IS SAME_LISTING_CURRENT, S1: an existing sibling is reused only under
+ * that branch). Picks the first candidate name that does not exist; never overwrites, never passes force,
+ * never reuses an unverified sibling.
  * @param {import('pg').ClientBase} client
  * @param {{ listingId: number, kind: string, root: string, outputRoot: string, applicationId?: number, source?: string, outName?: string, allowMissing?: string[], renderFn: typeof renderToPath }} input
- * @param {string} absTarget the primary target's absolute path (the one that conflicted)
- * @param {'EMPTY_DOCX'|'EXISTS_OTHER_LISTING'} conflictCode
+ * @param {string} absTarget the primary target's absolute path (the one that is not reusable)
+ * @param {'EMPTY_DOCX'|'EXISTS_OTHER_LISTING'|'EXISTS_UNVERIFIED'} conflictCode
  * @param {number} [otherListingId]
  * @returns {Promise<{ ok: true, document: any, application_link: any, reused: boolean, renamed_to: string, conflict_code: string } | { ok: false, code: string, conflict_code: string, otherListingId?: number }>}
  */
 async function resolveSiblingForListing(client, input, absTarget, conflictCode, otherListingId) {
   if (!input.source) {
-    // No markdown source to render from: there is nothing this function can do without one, so it refuses
-    // in exactly the pristine pre-fallback shape (no conflict_code/renamed_to noise) rather than a
-    // half-resolved result. A caller with a source always reaches the fallback below instead; this is the
-    // documented blind spot (see PR body) for a caller that omits it.
-    return conflictCode === 'EXISTS_OTHER_LISTING' ? { ok: false, code: conflictCode, otherListingId } : { ok: false, code: conflictCode };
+    // No markdown source to render from: nothing to do but refuse (the existing file stays untouched).
+    return conflictCode === 'EXISTS_OTHER_LISTING' ? { ok: false, code: conflictCode, conflict_code: conflictCode, otherListingId } : { ok: false, code: conflictCode, conflict_code: conflictCode };
   }
   const dir = path.dirname(absTarget);
   const ext = path.extname(absTarget) || '.docx';
@@ -176,38 +192,25 @@ async function resolveSiblingForListing(client, input, absTarget, conflictCode, 
       });
       return { ok: true, ...linked, reused: false, renamed_to: /** @type {string} */ (rendered.output_path), conflict_code: conflictCode };
     }
-    const candidateState = await classifyExistingFile(client, input.outputRoot, candidateAbs, input.listingId);
-    if (candidateState.conflict) continue; // this sibling name is itself unusable; try the next, more specific one
+    const candidateState = await classifyExistingFile(client, input.outputRoot, candidateAbs, input.listingId, input.kind);
+    if (candidateState.branch !== 'SAME_LISTING_CURRENT') continue; // unverified sibling: never reused, try the next name
     const linked = await linkRenderedDocument(client, {
       listingId: input.listingId, kind: input.kind, outputPath: candidateOutputPath, root: input.root, applicationId: input.applicationId,
     });
     return { ok: true, ...linked, reused: true, renamed_to: candidateOutputPath, conflict_code: conflictCode };
   }
-  // Every candidate, including the listingId-qualified one (which by construction cannot collide with any
-  // OTHER listing's sibling), is itself unusable. Exceedingly rare -- it requires a hand-placed or
-  // corrupted file sitting exactly at that fully-qualified path -- but a real dead end: refuse rather than
-  // overwrite or guess further.
+  // Every candidate name is taken by something unverified: a real dead end. Refuse rather than overwrite.
   return { ok: false, code: conflictCode, conflict_code: conflictCode, otherListingId };
 }
 
 /**
- * submit-on-resume spec section 2 / amendment A4: link an ALREADY-ON-DISK DOCX (the one renderDoc's own
- * EXISTS branch just refused to overwrite) rather than regenerating it -- "the existing DOCX is the
- * truth; the newly drafted markdown is not applied to it." Never writes to the file itself, never calls
- * Python, never passes `force`.
- *
- * Two conflict states are checked ahead of linking, each its own distinct code (never silently linking
- * something that might not actually be this listing's resume):
- *   - EMPTY_DOCX: the on-disk file is 0 bytes (a previous render that crashed mid-write, or a placeholder
- *     someone created by hand) -- there is nothing real to reuse.
- *   - EXISTS_OTHER_LISTING: an ic_job_documents row already references this exact rel_path for a
- *     DIFFERENT listing_id than the one this call is trying to link (rel_path is unique per listing, not
- *     globally, so this is a real possible state, not a defensive-only branch) -- reusing it here would
- *     silently attach one listing's resume file to a second listing's application.
- * Neither is a dead end by itself (render_doc PR "resolve cross-listing DOCX filename collisions"): when
- * `input.source` and `input.renderFn` are supplied, a conflict is resolved by rendering (or linking an
- * already-usable) listing-unique sibling file instead -- see resolveSiblingForListing. Without a source
- * (the pre-fallback callers), a conflict still refuses outright, exactly as before.
+ * submit-on-resume spec section 2 / amendment A4, tightened by the stale or foreign resume guard (S1, S2):
+ * called when renderDoc's own EXISTS branch refused to overwrite the file at `outputPath`. The existing file
+ * is linked ONLY when it is SAME_LISTING_CURRENT (see classifyExistingFile). In every other case the newly
+ * supplied source is rendered to a fresh listing-unique sibling and that is linked (resolveSiblingForListing).
+ * Never writes to, modifies, or deletes the existing file; never passes `force`. Without a `source` a
+ * non-reusable file refuses outright with its conflict code (EMPTY_DOCX, EXISTS_OTHER_LISTING, or
+ * EXISTS_UNVERIFIED). A resume whose content fails the gate at link time throws STALE_RESUME (linkDocument).
  * @param {import('pg').ClientBase} client
  * @param {{ listingId: number, kind: string, outputPath: string, root?: string, applicationId?: number, source?: string, outName?: string, allowMissing?: string[], renderFn?: typeof renderToPath }} input
  * @returns {Promise<{ ok: true, document: { id: number, kind: string, rel_path: string }, application_link: any, reused: boolean, renamed_to?: string, conflict_code?: string } | { ok: false, code: string, conflict_code?: string, otherListingId?: number }>}
@@ -216,9 +219,9 @@ export async function reuseExistingDocument(client, input) {
   const root = input.root ?? repoRoot();
   const outputRoot = path.join(root, 'output');
   const absTarget = path.isAbsolute(input.outputPath) ? input.outputPath : path.join(root, input.outputPath);
-  const state = await classifyExistingFile(client, outputRoot, absTarget, input.listingId);
+  const state = await classifyExistingFile(client, outputRoot, absTarget, input.listingId, input.kind);
 
-  if (state.conflict) {
+  if (state.branch === 'DEFAULT') {
     const renderFn = input.renderFn ?? renderToPath;
     return resolveSiblingForListing(client, { ...input, root, outputRoot, renderFn }, absTarget, state.conflict, /** @type {any} */ (state).otherListingId);
   }
@@ -232,7 +235,7 @@ export async function reuseExistingDocument(client, input) {
 /** @type {import('./_shared.js').ToolDef} */
 export const tool = {
   name: 'render_doc',
-  description: 'Preflight a resume, cover letter, or cheat sheet markdown (em-dash, en-dash, scare quotes, buzzwords, problem-comparison reframe, resume structure, role inclusion, PMP wording, Jenkon title, output naming) and render the DOCX with the repo converters. Fails closed on any check; returns LOCKED when the DOCX is open in Word. Never opens the file. An optional listingId links the render to that listing\'s application and, for a resume, moves it from drafting to docs_ready. An optional applicationId (requires listingId) scopes that link to one specific application rather than the listing\'s most recent one -- always pass both together in a one-click apply / headless run. reuse_existing links an EXISTS DOCX already on disk instead of overwriting it; if that file is EMPTY_DOCX or EXISTS_OTHER_LISTING, it renders a company-suffixed sibling and links that instead (renamed_to); mutually exclusive with force.',
+  description: 'Preflight a resume, cover letter, or cheat sheet markdown (em-dash, en-dash, scare quotes, buzzwords, problem-comparison reframe, resume structure, role inclusion, PMP wording, Jenkon title, output naming) and render the DOCX with the repo converters. Fails closed on any check; returns LOCKED when the DOCX is open in Word. Never opens the file. An optional listingId links the render to that listing\'s application and, for a resume, moves it from drafting to docs_ready. An optional applicationId (requires listingId) scopes that link to one specific application rather than the listing\'s most recent one -- always pass both together in a one-click apply / headless run. reuse_existing re-links an EXISTS DOCX already on disk ONLY when it is already linked to this same listing and (for a resume) still matches the current project index; in every other case (never linked, linked to another listing, empty, unreadable, or stale) it renders the newly supplied source to a fresh listing-unique sibling and links that instead (renamed_to); mutually exclusive with force. A resume that does not match the current project index is refused with code STALE_RESUME (missing names the employers), on every link path including force.',
   schema,
   async handler(a, deps) {
     if (a.reuse_existing && a.force) {
@@ -244,7 +247,27 @@ export const tool = {
     // pipeline. Defaults to the real renderDoc.
     const doRender = deps.renderDocFn ?? renderDoc;
     const result = await doRender({ kind: a.kind, source: a.source, outName: a.outName, checkOnly: a.checkOnly, force: a.force, allowMissing: a.allowMissing ?? [] });
+    try {
+      return await finishRender(a, deps, result);
+    } catch (err) {
+      // S3: a resume that fails the content gate at link time is a refusal, not a crash. Headless callers
+      // surface it as HEADLESS_ABORT: stale_resume.
+      if (err instanceof JobSearchError && err.code === 'STALE_RESUME') {
+        return { ...result, ok: false, code: 'STALE_RESUME', message: err.message, hint: err.hint ?? undefined, missing: String(err.details?.missing ?? '') };
+      }
+      throw err;
+    }
+  },
+};
 
+/**
+ * The linking half of the handler, split out so the handler can map a STALE_RESUME throw to a refusal.
+ * @param {any} a validated tool args
+ * @param {any} deps
+ * @param {any} result renderDoc's (or the test seam's) result
+ */
+async function finishRender(a, deps, result) {
+  {
     if (!result.ok && result.code === 'EXISTS' && a.reuse_existing && !a.checkOnly && a.listingId !== undefined) {
       // deps.renderToPathFn is a test seam ONLY, matching deps.renderDocFn above: lets a test drive the
       // EMPTY_DOCX/EXISTS_OTHER_LISTING sibling-render fallback without invoking Python. Defaults to the
@@ -271,5 +294,5 @@ export const tool = {
       applicationId: a.applicationId,
     }));
     return { ...result, ...linkOutcome };
-  },
-};
+  }
+}

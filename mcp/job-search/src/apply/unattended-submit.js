@@ -95,6 +95,9 @@ export async function clickTimeExclusionCheck(client, app, exclusionConfig) {
  * @property {() => any} loadConfig a FRESH config read (never a cached one)
  * @property {(client: import('pg').ClientBase, app: any) => Promise<{ branch: string, reason?: string }>} exclusionCheck
  * @property {() => string|null} resumeHash the linked resume file's current sha256, or null
+ * @property {() => { ok: boolean, reason?: string|null, missing?: string[] }} resumeContent the stale or foreign
+ *   resume content gate (src/core/resume-content-gate.js checkResumeFile) run on the exact file about to be
+ *   uploaded, against the CURRENT project index, on every attempt. Required: absent or throwing parks.
  * @property {(ms: number) => Promise<void>} sleep
  * @property {(f: Record<string, unknown>) => void} log
  * @property {() => Date} [now]
@@ -158,6 +161,13 @@ export async function runGuardedSubmit(p) {
     } catch {
       actualHash = null;
     }
+    /** @type {{ ok: boolean, reason?: string|null, missing?: string[] }} */
+    let resumeContent;
+    try {
+      resumeContent = typeof p.resumeContent === 'function' ? p.resumeContent() : { ok: false, reason: 'no resume content check supplied' };
+    } catch (err) {
+      resumeContent = { ok: false, reason: `resume content check threw: ${errFields(err).err_message}` };
+    }
     const usc = config ? unattendedSubmitConfig(config) : null;
     const review = !baseline ? { ok: false, reason: 'snapshot_failed' }
       : mode === 'workday' ? reviewWorkday(baseline, { expectedResume: p.expectedResume ?? null }) : reviewSingleForm(baseline);
@@ -169,6 +179,7 @@ export async function runGuardedSubmit(p) {
       markerEver: await hasSubmitRequestSentEver(client, app.id),
       exclusion,
       resume: { expected: app.resume_hash ?? null, actual: actualHash },
+      resumeContent,
       prefilledUnledgered: mode === 'workday' ? (p.prefilledUnledgered ?? null) : null,
       review,
       audit,

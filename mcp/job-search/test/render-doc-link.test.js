@@ -20,6 +20,8 @@ import { ensureAuxSchema } from '../src/core/schema.js';
 import { listEvents } from '../src/core/events.js';
 import { createApplication, getApplication } from '../src/core/applications.js';
 import { linkRenderedDocument, reuseExistingDocument } from '../src/tools/render_doc.js';
+import { linkDocument } from '../src/core/documents.js';
+import { setGateHooksForTests } from '../src/core/resume-content-gate.js';
 
 const CO = `ZZ-TEST-RENDER-DOC-LINK-${process.pid}`;
 /** @type {pg.Client} */
@@ -70,6 +72,12 @@ before(async () => {
   await ensureAuxSchema(client);
   await cleanup();
 
+  // Fixtures here are fake bytes. The stand-in gate fails exactly the files whose bytes contain "STALE"
+  // (a deterministic stale-resume marker); the real gate has its own tests (resume-content-gate.test.js).
+  setGateHooksForTests({
+    resumeGate: (abs) => (fs.readFileSync(abs, 'utf8').includes('STALE') ? { ok: false, missing: ['Advisicon'], reason: 'missing employers: Advisicon' } : { ok: true, missing: [], reason: null }),
+    docxValid: () => true,
+  });
   root = fs.mkdtempSync(path.join(os.tmpdir(), 'jobsearch-render-doc-link-'));
   fs.mkdirSync(path.join(root, 'output', 'resumes'), { recursive: true });
   fs.mkdirSync(path.join(root, 'output', 'coverletters'), { recursive: true });
@@ -203,10 +211,11 @@ describe('linkRenderedDocument: applicationId (one-click apply PR A spec item 4,
 });
 
 describe('reuseExistingDocument (submit-on-resume spec section 2, amendment A4)', () => {
-  test('a non-empty existing DOCX is linked exactly like a fresh render: ok:true, document + application_link present', async () => {
+  test('a non-empty existing DOCX already linked to THIS listing (and current) is re-linked: ok:true, document + application_link present', async () => {
     const listingId = await insertListing();
     const app = await createApplication(client, { listingId });
     fs.writeFileSync(path.join(root, 'output', 'resumes', 'Reuse Happy Path.docx'), 'fake-resume-bytes');
+    await linkDocument(client, path.join(root, 'output'), { listingId, relPath: 'resumes/Reuse Happy Path.docx', kind: 'resume' });
     const result = await reuseExistingDocument(client, {
       listingId, kind: 'resume', outputPath: 'output/resumes/Reuse Happy Path.docx', root,
     });
@@ -223,6 +232,7 @@ describe('reuseExistingDocument (submit-on-resume spec section 2, amendment A4)'
     const listingId = await insertListing();
     const app = await createApplication(client, { listingId });
     fs.writeFileSync(path.join(root, 'output', 'resumes', 'Reuse Application Scoped.docx'), 'fake-resume-bytes');
+    await linkDocument(client, path.join(root, 'output'), { listingId, relPath: 'resumes/Reuse Application Scoped.docx', kind: 'resume' });
     const result = await reuseExistingDocument(client, {
       listingId, kind: 'resume', outputPath: 'output/resumes/Reuse Application Scoped.docx', root, applicationId: app.id,
     });
@@ -236,7 +246,7 @@ describe('reuseExistingDocument (submit-on-resume spec section 2, amendment A4)'
     const result = await reuseExistingDocument(client, {
       listingId, kind: 'resume', outputPath: 'output/resumes/Empty Resume.docx', root,
     });
-    assert.deepEqual(result, { ok: false, code: 'EMPTY_DOCX' });
+    assert.deepEqual(result, { ok: false, code: 'EMPTY_DOCX', conflict_code: 'EMPTY_DOCX' });
     const docs = await client.query('SELECT id FROM ic_job_documents WHERE listing_id = $1', [listingId]);
     assert.equal(docs.rowCount, 0);
   });
@@ -266,6 +276,125 @@ describe('reuseExistingDocument (submit-on-resume spec section 2, amendment A4)'
       listingId, kind: 'resume', outputPath: 'output/resumes/Same Listing Reuse.docx', root,
     });
     assert.equal(result.ok, true);
+  });
+});
+
+describe('reuseExistingDocument: S1 total classification (stale or foreign resume guard)', () => {
+  /** @param {string} name @param {string} bytes */
+  const put = (name, bytes) => fs.writeFileSync(path.join(root, 'output', 'resumes', name), bytes);
+  const outDir = () => path.join(root, 'output');
+
+  test('no row at all (hand-made or months-old file): never linked, a fresh company-suffixed sibling is rendered and linked', async () => {
+    const listingId = await insertListing({ company: 'Fresh Sibling Co' });
+    put('Never Linked.docx', 'hand-made-bytes');
+    const calls = [];
+    const result = await reuseExistingDocument(client, {
+      listingId, kind: 'resume', outputPath: 'output/resumes/Never Linked.docx', root,
+      source: 'fx/clean.md', outName: 'Never Linked', renderFn: stubRenderFn(calls),
+    });
+    assert.equal(result.ok, true, JSON.stringify(result));
+    assert.equal(calls.length, 1);
+    assert.equal(/** @type {any} */ (result).reused, false);
+    assert.equal(/** @type {any} */ (result).conflict_code, 'EXISTS_UNVERIFIED');
+    assert.equal(/** @type {any} */ (result).document.rel_path, 'resumes/Never Linked - Fresh Sibling Co.docx');
+    const rows = await client.query('SELECT rel_path FROM ic_job_documents WHERE listing_id = $1', [listingId]);
+    assert.deepEqual(rows.rows.map((r) => r.rel_path), ['resumes/Never Linked - Fresh Sibling Co.docx']);
+    // S2: the original is untouched.
+    assert.equal(fs.readFileSync(path.join(root, 'output', 'resumes', 'Never Linked.docx'), 'utf8'), 'hand-made-bytes');
+  });
+
+  test('a row for another listing only: fresh sibling', async () => {
+    const other = await insertListing();
+    const listingId = await insertListing({ company: 'Other Row Co' });
+    put('Other Row.docx', 'other-bytes');
+    await linkDocument(client, outDir(), { listingId: other, relPath: 'resumes/Other Row.docx', kind: 'resume' });
+    const calls = [];
+    const result = await reuseExistingDocument(client, {
+      listingId, kind: 'resume', outputPath: 'output/resumes/Other Row.docx', root,
+      source: 'fx/clean.md', outName: 'Other Row', renderFn: stubRenderFn(calls),
+    });
+    assert.equal(result.ok, true, JSON.stringify(result));
+    assert.equal(calls.length, 1);
+    assert.equal(/** @type {any} */ (result).conflict_code, 'EXISTS_OTHER_LISTING');
+    assert.equal(/** @type {any} */ (result).document.rel_path, 'resumes/Other Row - Other Row Co.docx');
+  });
+
+  test('a same-listing row with a PASSING file: re-linked, nothing rendered (idempotent)', async () => {
+    const listingId = await insertListing();
+    put('Same Pass.docx', 'good-bytes');
+    await linkDocument(client, outDir(), { listingId, relPath: 'resumes/Same Pass.docx', kind: 'resume' });
+    const calls = [];
+    const result = await reuseExistingDocument(client, {
+      listingId, kind: 'resume', outputPath: 'output/resumes/Same Pass.docx', root,
+      source: 'fx/clean.md', outName: 'Same Pass', renderFn: stubRenderFn(calls),
+    });
+    assert.equal(result.ok, true);
+    assert.equal(calls.length, 0);
+    assert.equal(/** @type {any} */ (result).reused, true);
+    assert.equal(/** @type {any} */ (result).document.rel_path, 'resumes/Same Pass.docx');
+  });
+
+  test('a same-listing row whose file now FAILS the gate: not re-linked, fresh sibling instead, original untouched', async () => {
+    const listingId = await insertListing({ company: 'Gate Fail Co' });
+    put('Same Fail.docx', 'good-bytes');
+    await linkDocument(client, outDir(), { listingId, relPath: 'resumes/Same Fail.docx', kind: 'resume' });
+    put('Same Fail.docx', 'STALE-bytes'); // the index moved on, or the file was swapped under the row
+    const calls = [];
+    const result = await reuseExistingDocument(client, {
+      listingId, kind: 'resume', outputPath: 'output/resumes/Same Fail.docx', root,
+      source: 'fx/clean.md', outName: 'Same Fail', renderFn: stubRenderFn(calls),
+    });
+    assert.equal(result.ok, true, JSON.stringify(result));
+    assert.equal(calls.length, 1);
+    assert.equal(/** @type {any} */ (result).reused, false);
+    assert.equal(/** @type {any} */ (result).document.rel_path, 'resumes/Same Fail - Gate Fail Co.docx');
+    assert.equal(fs.readFileSync(path.join(root, 'output', 'resumes', 'Same Fail.docx'), 'utf8'), 'STALE-bytes');
+  });
+
+  test('an existing UNVERIFIED sibling (on disk, never linked) is not reused: the next free name is rendered', async () => {
+    const listingId = await insertListing({ company: 'Unverified Sib Co' });
+    put('Unv Primary.docx', 'hand-made-bytes');
+    put('Unv Primary - Unverified Sib Co.docx', 'hand-made-sibling-bytes');
+    const calls = [];
+    const result = await reuseExistingDocument(client, {
+      listingId, kind: 'resume', outputPath: 'output/resumes/Unv Primary.docx', root,
+      source: 'fx/clean.md', outName: 'Unv Primary', renderFn: stubRenderFn(calls),
+    });
+    assert.equal(result.ok, true, JSON.stringify(result));
+    assert.equal(calls.length, 1);
+    assert.equal(/** @type {any} */ (result).reused, false);
+    assert.equal(/** @type {any} */ (result).document.rel_path, `resumes/Unv Primary - Unverified Sib Co ${listingId}.docx`);
+    assert.equal(fs.readFileSync(path.join(root, 'output', 'resumes', 'Unv Primary - Unverified Sib Co.docx'), 'utf8'), 'hand-made-sibling-bytes');
+  });
+
+  test('a freshly rendered sibling that itself fails the gate is refused with STALE_RESUME and never linked', async () => {
+    const listingId = await insertListing({ company: 'Stale Render Co' });
+    put('Stale Render.docx', 'hand-made-bytes');
+    const staleRender = async (_req, targetAbs) => {
+      fs.writeFileSync(targetAbs, 'STALE-rendered');
+      return { ok: true, output_path: path.relative(root, targetAbs), bytes: 14, checks: [] };
+    };
+    await assert.rejects(
+      reuseExistingDocument(client, {
+        listingId, kind: 'resume', outputPath: 'output/resumes/Stale Render.docx', root,
+        source: 'fx/clean.md', outName: 'Stale Render', renderFn: staleRender,
+      }),
+      (err) => /** @type {any} */ (err).code === 'STALE_RESUME',
+    );
+    const rows = await client.query('SELECT id FROM ic_job_documents WHERE listing_id = $1', [listingId]);
+    assert.equal(rows.rowCount, 0);
+  });
+
+  test('linkRenderedDocument refuses a stale resume (STALE_RESUME) but does not gate a cover letter', async () => {
+    const listingId = await insertListing();
+    put('Stale Direct.docx', 'STALE-bytes');
+    await assert.rejects(
+      linkRenderedDocument(client, { listingId, kind: 'resume', outputPath: 'output/resumes/Stale Direct.docx', root }),
+      (err) => /** @type {any} */ (err).code === 'STALE_RESUME',
+    );
+    fs.writeFileSync(path.join(root, 'output', 'coverletters', 'Stale Letter.docx'), 'STALE-bytes');
+    const ok = await linkRenderedDocument(client, { listingId, kind: 'cover_letter', outputPath: 'output/coverletters/Stale Letter.docx', root });
+    assert.equal(ok.document.kind, 'coverletter');
   });
 });
 

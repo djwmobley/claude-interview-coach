@@ -131,7 +131,7 @@ const sleep = (/** @type {number} */ ms) => new Promise((r) => { setTimeout(r, m
 function guarded(app, cap, extra = {}) {
   return runGuardedSubmit({
     client: db, app, cap, mode: 'form', ledger: [],
-    loadConfig: () => configOn(), exclusionCheck: async () => ({ branch: 'eligible' }), resumeHash: () => resumeHash,
+    loadConfig: () => configOn(), exclusionCheck: async () => ({ branch: 'eligible' }), resumeHash: () => resumeHash, resumeContent: () => ({ ok: true }),
     sleep, log: () => {}, pollMs: 40, maxPolls: 20, settleMs: 250,
     ...extra,
   });
@@ -463,7 +463,7 @@ describe('idempotency: one click, ever', { skip: SKIP }, () => {
       const capA = capFor(pageA, app.id);
       const capB = capFor(pageB, app.id);
       const ctxA = ctxFor(app, capA);
-      const ctxB = { ...ctxFor(app, capB), submit: (/** @type {any} */ o) => runGuardedSubmit({ client: second, app, cap: capB, mode: 'form', ledger: [], loadConfig: () => configOn(), exclusionCheck: async () => ({ branch: 'eligible' }), resumeHash: () => resumeHash, sleep, log: () => {}, pollMs: 40, maxPolls: 20, settleMs: 250, ...o }) };
+      const ctxB = { ...ctxFor(app, capB), submit: (/** @type {any} */ o) => runGuardedSubmit({ client: second, app, cap: capB, mode: 'form', ledger: [], loadConfig: () => configOn(), exclusionCheck: async () => ({ branch: 'eligible' }), resumeHash: () => resumeHash, resumeContent: () => ({ ok: true }), sleep, log: () => {}, pollMs: 40, maxPolls: 20, settleMs: 250, ...o }) };
       const [ra, rb] = await Promise.all([greenhouse.run(capA, ctxA), greenhouse.run(capB, ctxB)]);
       const total = Number(await clicksOf(pageA)) + Number(await clicksOf(pageB));
       assert.equal(total, 1, `${JSON.stringify(ra)} ${JSON.stringify(rb)}`);

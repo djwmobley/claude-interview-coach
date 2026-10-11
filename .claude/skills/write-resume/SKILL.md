@@ -55,6 +55,9 @@ contract, the same 300-character description check, `LOCKED` is
   `'Jordan Reyes - [Title]'`, using the candidate's real name from the profile).
   On `EXISTS`, re-call with `reuse_existing:true` and `listingId` exactly as
   HEADLESS MODE describes; a company-suffixed sibling from `render_doc` is fine.
+- If `render_doc` returns `code: "STALE_RESUME"` (the resume does not match the
+  current project index; `missing` names the employers), output
+  `HEADLESS_ABORT: stale_resume` and stop. See HEADLESS MODE below.
 - Skip Step 8 (the cheat sheet) in this mode. Only the resume is needed.
 - If the `run:<run-id>` token is missing, output
   `HEADLESS_ABORT: missing_run_id` and stop.
@@ -82,24 +85,27 @@ apply in headless mode. There is no one to ask.
 - Proceed through Step 7's `render_doc` call passing BOTH `listingId` AND
   `applicationId` (the id from the `application:<id>` token) on every
   `render_doc` call in this run, not just the final render.
-- **`EXISTS` (submit any application whose resume is produced, spec section
-  2):** the existing DOCX on disk is the truth; the newly drafted markdown is
-  NOT applied to it. Re-call `render_doc` with `reuse_existing:true` (plus
+- **`EXISTS`:** re-call `render_doc` with `reuse_existing:true` (plus
   `listingId` and `applicationId`, as always in headless mode) instead of
-  `force:true`. This links the already-on-disk file to the listing/
-  application exactly as a fresh render would. Do not treat `EXISTS` itself as
-  a dead end.
-  - `render_doc` resolves `EMPTY_DOCX` and `EXISTS_OTHER_LISTING` itself:
-    instead of refusing, it renders a listing-unique, company-suffixed
-    sibling file (e.g. `<name> - Acme.docx`) and links that one. Neither is a
-    headless abort. The result comes back `ok:true` with `renamed_to` set to
-    the new file's path; nothing further to do beyond continuing as if this
-    had been the render all along.
+  `force:true`. Do not treat `EXISTS` itself as a dead end. `render_doc`
+  re-links the on-disk file ONLY when it is already linked to this same
+  listing and still matches the current project index. In every other case
+  (never linked to any listing, linked to another listing, empty, unreadable,
+  or stale) it ignores that file, renders the newly drafted markdown to a
+  fresh listing-unique, company-suffixed sibling (e.g. `<name> - Acme.docx`)
+  and links that one. None of these is a headless abort. The result comes back
+  `ok:true` with `renamed_to` set to the new file's path; continue as if this
+  had been the render all along. The existing file is never modified.
+- **`STALE_RESUME`:** any resume link (fresh render, `reuse_existing`, or
+  `force`) is refused with `code: "STALE_RESUME"` when the resume's text does
+  not match the current `data/project-index.md` (an employer missing from the
+  company lines, or a current role not marked Present; `missing` names them).
+  Output `HEADLESS_ABORT: stale_resume` and stop. Never retry with `force:true`.
 - **`LOCKED`** (the DOCX is open in Word) is still an unconditional dead end in
   headless mode: output `HEADLESS_ABORT: docx_locked` and stop. Never pass
   `force:true` or `reuse_existing:true` to try to get past it.
-- `no_description` (above) and `docx_locked` (`LOCKED`, above) are the only
-  named headless aborts. On any other unrecoverable condition (a `render_doc`
+- `no_description` (above), `docx_locked` (`LOCKED`, above), and
+  `stale_resume` (`STALE_RESUME`, above) are the only named headless aborts. On any other unrecoverable condition (a `render_doc`
   check that cannot be fixed without asking the candidate something only they
   would know, or any other dead end): output the single line
   `HEADLESS_ABORT: <snake_case_reason>` (a short, specific reason, e.g.

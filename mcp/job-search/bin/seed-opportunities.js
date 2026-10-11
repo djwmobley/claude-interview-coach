@@ -113,7 +113,16 @@ export async function seedOneEntry(client, entry, opts) {
       continue;
     }
     const dir = resolved.relPath.split('/')[0];
-    await linkDocument(client, opts.outputRoot, { listingId, relPath: resolved.relPath, kind: KIND_FOR_DIR[dir] ?? 'other', actor: 'seed' });
+    try {
+      await linkDocument(client, opts.outputRoot, { listingId, relPath: resolved.relPath, kind: KIND_FOR_DIR[dir] ?? 'other', actor: 'seed' });
+    } catch (err) {
+      // Stale or foreign resume guard: a seeded resume that fails the content gate is skipped with a warning.
+      if (err instanceof Error && /** @type {any} */ (err).code === 'STALE_RESUME') {
+        warnings.push(`document not linked (stale_resume): ${relPath}`);
+        continue;
+      }
+      throw err;
+    }
   }
 
   // Follow-up: attach an existing one by id, or create a new one from the given fields.
