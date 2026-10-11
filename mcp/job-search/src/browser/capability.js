@@ -20,6 +20,7 @@ import { PAGE_MARKER } from './session.js';
  * @typedef {Object} Capability
  * @property {(url: string) => Promise<{ status: number|null, url: string, cfMitigated: string|null }>} goto
  * @property {() => Promise<string>} readHtml
+ * @property {() => Promise<void>} [bringToFront] bring the page to the front of the scan Chrome window
  * @property {(name: string, arg?: unknown) => Promise<unknown>} readJson
  * @property {(maxSteps?: number) => Promise<{ steps: number, atBottom: boolean }>} scrollToBottom
  * @property {(url: string, opts?: { headers?: Record<string, string> }) => Promise<FetchAuthedJsonResult>} fetchAuthedJson
@@ -96,6 +97,11 @@ export function makeCapability(page, opts) {
       await guardUrl(finalUrl, registry, { source, lookup: opts.lookup });
       const cf = res ? res.headers()['cf-mitigated'] ?? null : null;
       return { status: res ? res.status() : null, url: finalUrl.split('?')[0], cfMitigated: cf };
+    },
+    /** Bring this capability's page to the front of the scan Chrome window (interactive detail verification). */
+    async bringToFront() {
+      checkAbort();
+      await page.bringToFront();
     },
     async readHtml() {
       checkAbort();

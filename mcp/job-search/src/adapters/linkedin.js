@@ -318,6 +318,7 @@ export const linkedin = defineAdapter({
     if (nav && (nav.status === 404 || nav.status === 410)) {
       return { description: null, reason: 'not_found' };
     }
+    const detailSignals = { httpStatus: nav ? nav.status : null, cfMitigated: nav ? nav.cfMitigated : null, url: nav ? nav.url : null };
     /** @type {any} */
     let g = null;
     try {
@@ -330,6 +331,6 @@ export const linkedin = defineAdapter({
       return { description: null, reason: 'guest_blocked' };
     }
     const externalApplyUrl = typeof g.applyHref === 'string' ? g.applyHref : null;
-    return { description: g.description ?? null, externalApplyUrl, easyApplyOnly: false };
+    return { description: g.description ?? null, externalApplyUrl, easyApplyOnly: false, detailSignals };
   },
 });

@@ -16,6 +16,7 @@ import { normalizeLegacyRow } from './normalize.js';
 import { classifyNoise } from './noise.js';
 import { JobSearchError } from './errors.js';
 import { recordEvent } from './events.js';
+import { screenPayload, recordRejection, purgeJunkDescription, ATTEMPT_COUNTING } from './store-description.js';
 import { classifyTitle } from './title-gate.js';
 import { applyTitleGate } from './title-gate-apply.js';
 import { isStickyStatus, matchTest, surfaceException, stickyEligibleFor } from './sticky-skip.js';
@@ -50,6 +51,7 @@ export function computeProfileRev(p) {
  * @property {string|null} [noiseClass] one of NOISE_CLASSES (spec R2.1)
  * @property {boolean} [detailSkipped] true when a detail fetch was queued for this row but skipped for budget reasons (spec R4.2, decision 22); kept for existing readers, always derived as `detailOutcome === 'skipped_budget'`
  * @property {string} [detailOutcome] one of scan-run.js's DETAIL_OUTCOMES (spec R4 item 2's total classification): 'fetched'|'empty'|'error'|'skipped_budget'|'skipped_gate'|'skipped_cancelled'|'not_queued'
+ * @property {{ text: string|null, cls: string }|null} [rejectedDescription] a detail fetch whose text classified non-ok upstream (scan-run.js): never stored, written to the audit trail with the row's id once known
  * @property {string|null} [embedding] pgvector literal `[a,b,...]` or null
  * @property {Date} [now]
  * @property {number} [stickyFloor] current triage floor (config/triage.json's `deterministic.floor`,
@@ -159,7 +161,9 @@ export async function insertListing(client, rec, decision, ctx) {
   // A brand-new row has no prior detail-fetch history, so detail_attempts starts fresh from THIS
   // outcome alone (spec R4 item 2): 1 for a failed/empty attempt, 0 for everything else (fetched,
   // never-attempted, or budget/gate/cancelled skips).
-  const detailAttempts = ctx.detailOutcome === 'empty' || ctx.detailOutcome === 'error' ? 1 : 0;
+  // Description chokepoint (store-description.js): a non-ok payload is stored as NULL, never as text.
+  const screen = screenPayload(rec, ctx.detailOutcome, { source: rec.source, rejectedDescription: ctx.rejectedDescription ?? null });
+  const detailAttempts = screen.detailOutcome && ATTEMPT_COUNTING.includes(screen.detailOutcome) ? 1 : 0;
   /** @param {number|null} duplicateOf */
   const insertOnce = (duplicateOf) => client.query(
     `INSERT INTO ic_job_listings
@@ -180,10 +184,10 @@ export async function insertListing(client, rec, decision, ctx) {
       rec.title, rec.company, status, rec.posted_at, rec.url_normalized,
       rec.source, rec.external_id, rec.url_normalized, rec.dedup_hash,
       rec.company_norm, rec.title_norm, rec.location, rec.location_norm, rec.remote_mode, rec.remote_declared, rec.salary_min, rec.salary_max, rec.salary_raw,
-      rec.posted_at, now, ctx.pageIndex ?? null, ctx.profileRev ?? null, rec.description, rec.description_hash,
+      rec.posted_at, now, ctx.pageIndex ?? null, ctx.profileRev ?? null, screen.description, screen.description_hash,
       ctx.searchProfile ?? null, ctx.prescore ?? null, ctx.prescoreRaw ?? null, ctx.noiseClass ?? null, Boolean(ctx.detailSkipped), duplicateOf, decision.repostOf, ctx.embedding ?? null,
       rec.salary_period ?? null,
-      ctx.detailOutcome ?? null, detailAttempts,
+      screen.detailOutcome, detailAttempts,
     ],
   );
 
@@ -212,6 +216,7 @@ export async function insertListing(client, rec, decision, ctx) {
       });
     }
   }
+  if (screen.rejected) await recordRejection(client, r.rows[0].id, screen.rejected.cls, screen.rejected.text, { runId: ctx.runId ?? null, now });
   return { id: r.rows[0].id, conflictAnchor };
 }
 
@@ -229,6 +234,10 @@ export async function updateListing(client, rec, decision, ctx, flags) {
   const now = ctx.now ?? new Date();
   const repost = decision.branch === '1a-repost-same-id' || decision.branch === '1b-repost-same-url';
   const inheritedStatus = repost && decision.inherit && decision.inherit.status !== null ? decision.inherit.status : null;
+  // Description chokepoint (store-description.js): a non-ok payload is treated as NULL (so coalesce keeps
+  // the stored value), and a stored description that itself classifies blocked/transient is cleared first.
+  const screen = screenPayload(rec, ctx.detailOutcome, { source: rec.source, rejectedDescription: ctx.rejectedDescription ?? null });
+  if (screen.description === null) await purgeJunkDescription(client, target.id, { runId: ctx.runId ?? null, now });
   await client.query(
     `UPDATE ic_job_listings SET
        last_seen = $2,
@@ -253,14 +262,15 @@ export async function updateListing(client, rec, decision, ctx, flags) {
        -- offers a detail fetch for, must not erase what an earlier, eligible scan already recorded.
        detail_outcome = CASE
          WHEN $19::text IS NULL THEN detail_outcome
-         WHEN $19::text IN ('not_queued', 'skipped_gate') AND (detail_outcome = 'fetched' OR description IS NOT NULL) THEN detail_outcome
+         WHEN $19::text IN ('not_queued', 'skipped_gate', 'transient', 'too_short', 'unverified', 'blocked:cloudflare_challenge', 'blocked:indeed_verification', 'blocked:captcha', 'blocked:login_wall', 'blocked:http_403')
+              AND (detail_outcome = 'fetched' OR description IS NOT NULL OR detail_outcome IN ('too_short', 'unverified') OR detail_outcome LIKE 'blocked:%') THEN detail_outcome
          ELSE $19
        END,
        -- detail_attempts: only a failed/empty attempt increments it; a successful fetch resets it to 0
        -- (spec: "fetched resets it to 0"); every other outcome (skips, not_queued, no outcome this call)
        -- leaves it unchanged.
        detail_attempts = CASE
-         WHEN $19::text IN ('empty', 'error') THEN detail_attempts + 1
+         WHEN $19::text IN ('empty', 'error', 'too_short', 'unverified') THEN detail_attempts + 1
          WHEN $19::text = 'fetched' THEN 0
          ELSE detail_attempts
        END,
@@ -270,12 +280,13 @@ export async function updateListing(client, rec, decision, ctx, flags) {
        status = CASE WHEN $14::text IS NOT NULL THEN $14 ELSE status END
      WHERE id = $1`,
     [
-      target.id, now, flags.bumpTimesSeen ? 1 : 0, rec.salary_min, rec.salary_max, rec.salary_raw, rec.description, rec.description_hash,
+      target.id, now, flags.bumpTimesSeen ? 1 : 0, rec.salary_min, rec.salary_max, rec.salary_raw, screen.description, screen.description_hash,
       rec.posted_at, ctx.pageIndex ?? null, ctx.profileRev ?? null, ctx.prescore ?? null, repost, inheritedStatus,
       ctx.prescoreRaw ?? null, ctx.noiseClass ?? null, typeof ctx.detailSkipped === 'boolean' ? ctx.detailSkipped : null,
-      rec.salary_period ?? null, ctx.detailOutcome ?? null,
+      rec.salary_period ?? null, screen.detailOutcome,
     ],
   );
+  if (screen.rejected) await recordRejection(client, target.id, screen.rejected.cls, screen.rejected.text, { runId: ctx.runId ?? null, now });
   return target.id;
 }
 

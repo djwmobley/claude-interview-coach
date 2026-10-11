@@ -38,7 +38,7 @@ export function scanProgressPanel(opts) {
         ]))
       : [h('p', { className: 'scan-progress__none', text: 'No source activity reported yet.' })]),
     Array.isArray(run.errors) && run.errors.length
-      ? h('div', { className: 'scan-progress__errors' }, run.errors.map((e) => h('span', { className: 'badge badge--error', text: e.code ?? 'error' })))
+      ? h('div', { className: 'scan-progress__errors' }, run.errors.map((e) => h('span', { className: 'badge badge--error', text: e.code === 'DETAIL_VERIFICATION_NEEDED' && e.message ? e.message : (e.code ?? 'error') })))
       : null,
   ]);
 }

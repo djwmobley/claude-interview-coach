@@ -146,7 +146,8 @@ export const workday = defineAdapter({
     // Auto-apply PR B: a Workday listing's own URL IS the posting/apply page (it already carries the
     // `/job/...` segment src/apply/apply-target.js's isExactTarget() requires) -- surfaced regardless of
     // whether the description fetch itself succeeded.
-    if (res.status !== 200 || !info || typeof info.jobDescription !== 'string') return { description: null, externalApplyUrl: url };
-    return { description: info.jobDescription, externalApplyUrl: url };
+    const detailSignals = { httpStatus: res.status };
+    if (res.status !== 200 || !info || typeof info.jobDescription !== 'string') return { description: null, externalApplyUrl: url, detailSignals };
+    return { description: info.jobDescription, externalApplyUrl: url, detailSignals };
   },
 });

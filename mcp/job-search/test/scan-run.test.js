@@ -540,10 +540,10 @@ describe('runScan persisted', () => {
   });
 
   test('(f) a 299-char cleaned description classifies empty, 300 classifies fetched', async () => {
-    for (const [len, expected] of [[299, 'empty'], [300, 'fetched']]) {
+    for (const [len, expected] of [[299, 'too_short'], [300, 'fetched']]) {
       const CO = `ZZ-TEST-SCAN-DETAILPASS-F${len}`;
       const card = { jobkey: `f${len}f${len}f${len}f${len}f0`.slice(0, 16), title: 'Chief Technology Officer', company: CO, location: 'Houston, TX', remote: false, postedMs: Date.now(), salaryText: '$300,000 - $350,000' };
-      const fake = makeFakeSession({ indeedCards: [card], bodyText: 'x'.repeat(len) });
+      const fake = makeFakeSession({ indeedCards: [card], bodyText: 'experience '.repeat(40).slice(0, len) });
       const deps = offlineDeps({ connectSession: fake.connectSession });
       await client.query(`INSERT INTO ic_source_state (source, manual_disable) VALUES ('indeed', false) ON CONFLICT (source) DO UPDATE SET manual_disable = false, disabled_until = NULL, consecutive_walls = 0`);
       try {
@@ -569,7 +569,7 @@ describe('runScan persisted', () => {
       id: 7000000101, updated_at: '2026-08-23T10:00:00-04:00', requisition_id: 'ZD', title: 'Chief Technology Officer',
       company_name: CO, first_published: '2026-08-23T10:00:00-04:00',
     }];
-    const longContent = 'ZZ-TEST-SCAN-D synthetic detail. Reports to the CEO. Base $300,000 - $350,000. '
+    const longContent = 'ZZ-TEST-SCAN-D synthetic detail. Reports to the CEO. Base $300,000 - $350,000. Responsibilities include delivery and requirements include experience. '
       + 'This synthetic posting exists purely to exercise the scan detail-fetch retry-gate logic end to '
       + 'end across two separate scan runs of the same board and the same listing, well past the 300 '
       + 'character detail-fetch minimum length this pipeline enforces before counting a fetch as successful.';
@@ -628,7 +628,7 @@ describe('runScan persisted', () => {
         assert.equal(r.status, 'ok', JSON.stringify(r.errors));
         assert.equal(r.stats.detail_empty, 1, `scan ${scanNum} must attempt (and get 'empty' from) the short-content detail fetch`);
         const row = await client.query(`SELECT detail_outcome, detail_attempts FROM ic_job_listings WHERE company = $1`, [CO]);
-        assert.equal(row.rows[0].detail_outcome, 'empty');
+        assert.equal(row.rows[0].detail_outcome, 'too_short');
         assert.equal(row.rows[0].detail_attempts, scanNum, `attempts must be ${scanNum} after scan ${scanNum}`);
       }
       const r4 = await runScanWaiting({ profile: PROFILE, sources: ['greenhouse'], dryRun: false, wait: true }, deps, { trigger: 'cli', log: () => {}, now: FIXTURE_NOW });
@@ -636,7 +636,7 @@ describe('runScan persisted', () => {
       assert.equal(r4.stats.detail_empty, 0, 'scan 4 must NOT re-attempt: attempts is already at the cap (3)');
       const row4 = await client.query(`SELECT detail_outcome, detail_attempts FROM ic_job_listings WHERE company = $1`, [CO]);
       assert.equal(row4.rows[0].detail_attempts, 3, 'attempts stays capped, never incremented past the config max');
-      assert.equal(row4.rows[0].detail_outcome, 'empty', 'not_queued (scan 4) never overwrites the prior empty outcome');
+      assert.equal(row4.rows[0].detail_outcome, 'too_short', 'not_queued (scan 4) never overwrites the prior too_short outcome');
     } finally {
       await client.query(`DELETE FROM ic_job_review_queue WHERE candidate_id IN (SELECT id FROM ic_job_listings WHERE company = $1)`, [CO]);
       await client.query(`DELETE FROM ic_scan_run_items WHERE listing_id IN (SELECT id FROM ic_job_listings WHERE company = $1)`, [CO]);

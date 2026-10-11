@@ -159,7 +159,7 @@ function describeWarning(entry) {
   // In-run Google re-auth (spec A6/A10): these two carry their own `message` (never a `remedy`), unlike
   // every other warning code above -- fall through to it rather than the bare code below, or the
   // operator-facing text (e.g. "approve it and Gmail resumes next run") would be silently dropped.
-  if (entry.code === 'AUTH_REAUTH_PENDING' || entry.code === 'AUTH_REAUTH_FAILED') {
+  if (entry.code === 'AUTH_REAUTH_PENDING' || entry.code === 'AUTH_REAUTH_FAILED' || entry.code === 'DETAIL_VERIFICATION_NEEDED') {
     return entry.message ?? entry.code;
   }
   return `${entry.code}${entry.remedy ? `. ${entry.remedy}` : ''}`;
@@ -1003,6 +1003,28 @@ function detailsBySourceLines(stats) {
 }
 
 /**
+ * Detail-block fix (S6): one line for detail pages that came back as a verification or challenge page this
+ * run, "Blocked detail pages: N (source: reason, ...)". Null when none (and for runs that predate this field).
+ * @param {Record<string, any>|undefined} stats
+ * @returns {string|null}
+ */
+export function blockedDetailLine(stats) {
+  const by = stats && stats.detail_blocked_by_source;
+  if (!by || typeof by !== 'object') return null;
+  let total = 0;
+  /** @type {string[]} */
+  const parts = [];
+  for (const [src, reasons] of Object.entries(by)) {
+    for (const [reason, n] of Object.entries(/** @type {Record<string, number>} */ (reasons))) {
+      total += Number(n) || 0;
+      parts.push(`${src}: ${reason}`);
+    }
+  }
+  if (total === 0) return null;
+  return `Blocked detail pages: ${total} (${parts.join(', ')})`;
+}
+
+/**
  * Plain-text rendering (spec R1.2, no em-dashes, US English).
  * @param {Awaited<ReturnType<typeof buildScanReport>>} data
  * @param {import('./urlguard.js').Registry} [registry] when given, a listing's url is printed if it passes urlguard (R1.5)
@@ -1047,6 +1069,8 @@ export function renderReportText(data, registry, googleAuthState, dashboardHealt
     lines.push(`  fetched ${s.fetched ?? 0} | new ${s.new ?? 0} | updated ${s.updated ?? 0} | repost ${s.repost ?? 0} | ambiguous ${s.ambiguous ?? 0} | detail_skipped_budget ${s.detail_skipped_budget ?? 0}`);
     if (Object.keys(r.pages_by_source).length) lines.push(`  pages by source: ${Object.entries(r.pages_by_source).map(([k, v]) => `${k}=${v}`).join(', ')}`);
     for (const dline of detailsBySourceLines(s)) lines.push(`  ${dline}`);
+    const blockedLine = blockedDetailLine(s);
+    if (blockedLine) lines.push(`  ${blockedLine}`);
     const triageLine = renderTriageLine(s.triage);
     if (triageLine) lines.push(`  ${triageLine}`);
     for (const e of r.errors.slice(0, 5)) lines.push(`  error: ${e.source ?? 'run'} ${e.code}: ${errorLineMessage(e).slice(0, 200)}`);
@@ -1133,7 +1157,8 @@ export function renderReportHtml(data, registry, googleAuthState, dashboardHealt
       const errs = r.errors.slice(0, 5).map((e) => `<br>error: ${esc(e.source ?? 'run')} ${esc(e.code)}: ${esc(errorLineMessage(e).slice(0, 200))}`).join('');
       const triageLine = renderTriageLine(s.triage);
       const triageHtml = triageLine ? `<br>${esc(triageLine)}` : '';
-      const detailsHtml = detailsBySourceLines(s).map((dline) => `<br>${esc(dline)}`).join('');
+      const blockedHtmlLine = blockedDetailLine(s);
+      const detailsHtml = detailsBySourceLines(s).map((dline) => `<br>${esc(dline)}`).join('') + (blockedHtmlLine ? `<br>${esc(blockedHtmlLine)}` : '');
       parts.push(`<li>${banner}run #${r.run_id}, profile ${esc(r.profile)}, status ${esc(r.status)}, started ${esc(r.started_at)}, duration ${r.duration_seconds ?? '?'}s<br>fetched ${s.fetched ?? 0}, new ${s.new ?? 0}, updated ${s.updated ?? 0}, repost ${s.repost ?? 0}, ambiguous ${s.ambiguous ?? 0}, detail_skipped_budget ${s.detail_skipped_budget ?? 0}${detailsHtml}${triageHtml}${errs}</li>`);
     }
     parts.push('</ul>');
@@ -1209,6 +1234,8 @@ export function renderReportMarkdown(data, registry, googleAuthState, dashboardH
     lines.push(`  fetched ${s.fetched ?? 0}, new ${s.new ?? 0}, updated ${s.updated ?? 0}, repost ${s.repost ?? 0}, ambiguous ${s.ambiguous ?? 0}, detail_skipped_budget ${s.detail_skipped_budget ?? 0}`);
     if (Object.keys(r.pages_by_source).length) lines.push(`  pages by source: ${Object.entries(r.pages_by_source).map(([k, v]) => `${k}=${v}`).join(', ')}`);
     for (const dline of detailsBySourceLines(s)) lines.push(`  ${dline}`);
+    const blockedLine2 = blockedDetailLine(s);
+    if (blockedLine2) lines.push(`  ${blockedLine2}`);
     const triageLine = renderTriageLine(s.triage);
     if (triageLine) lines.push(`  ${triageLine}`);
     for (const e of r.errors.slice(0, 5)) lines.push(`  error: ${e.source ?? 'run'} ${e.code}: ${errorLineMessage(e).slice(0, 200)}`);

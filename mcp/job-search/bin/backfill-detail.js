@@ -93,7 +93,8 @@ import { fileURLToPath } from 'node:url';
 import { loadConfig, getEnv } from '../src/core/config.js';
 import { connectDedicated as defaultConnectDedicated } from '../src/core/db.js';
 import { JobSearchError, errFields } from '../src/core/errors.js';
-import { normalizeListing, DETAIL_MIN_CHARS } from '../src/core/normalize.js';
+import { normalizeListing } from '../src/core/normalize.js';
+import { classifyDetail, isBlockedClass } from '../src/browser/detail-classify.js';
 import { prescore } from '../src/core/prescore.js';
 import { classifyNoise, weightedPrescore, getDefaultNoiseRules } from '../src/core/noise.js';
 import { updateListing } from '../src/core/upsert.js';
@@ -236,7 +237,11 @@ async function fetchDetailNoDedup(s, ctx, row, profile, noiseRules, noiseKnownSo
     return { outcome: 'error', warning: `detail fetch failed for ${row.source} #${row.id}: ${errFields(err).err_code}` };
   }
   if (d && d.reason === 'not_found') return { outcome: 'error', warning: null };
-  if (d && d.description) {
+  // Detail-block fix: classify the text together with the adapter's page signals before it can become a description.
+  const sig = d && d.detailSignals ? d.detailSignals : {};
+  const cls = d ? classifyDetail({ text: d.description, url: sig.url ?? row.url, source: row.source, httpStatus: sig.httpStatus ?? null, cfMitigated: sig.cfMitigated ?? null, wallSignals: sig.wallSignals ?? null }) : 'empty';
+  if (d && cls !== 'ok' && cls !== 'empty') return { outcome: cls, warning: null, rejected: d.description ? { text: String(d.description), cls } : null };
+  if (d && cls === 'ok') {
     const rec2 = normalizeListing({
       title: row.title, company: row.company, url: row.url, location: row.location,
       remoteMode: row.remote_mode, remoteDeclared: row.remote_declared,
@@ -246,8 +251,7 @@ async function fetchDetailNoDedup(s, ctx, row, profile, noiseRules, noiseKnownSo
     const psRaw2 = prescore(rec2, profile);
     const noiseClass2 = classifyNoise(rec2, { rules: noiseRules, knownSources: noiseKnownSources });
     const ps2 = weightedPrescore(psRaw2, noiseClass2, { rules: noiseRules });
-    const outcome = rec2.description && rec2.description.length >= DETAIL_MIN_CHARS ? 'fetched' : 'empty';
-    return { outcome, rec: rec2, ps: ps2, psRaw: psRaw2, noiseClass: noiseClass2, warning: null };
+    return { outcome: 'fetched', rec: rec2, ps: ps2, psRaw: psRaw2, noiseClass: noiseClass2, warning: null };
   }
   return { outcome: 'empty', warning: null };
 }
@@ -414,7 +418,10 @@ export async function runBackfill(args, deps, client) {
     return profileCache.get(name);
   }
 
+  /** @type {Record<string, number>} */
   const byOutcome = { fetched: 0, empty: 0, error: 0, skipped_budget: 0 };
+  /** Sources whose detail fetches came back blocked: the rest of their rows are skipped this run (detail-block fix). */
+  const blockedSources = new Set();
   /** @type {Set<string>} */
   const budgetExhaustedSources = new Set();
   const printedRows = [];
@@ -433,12 +440,13 @@ export async function runBackfill(args, deps, client) {
     const ctx = makeCtx(cfgName);
     /** @type {any} */
     let result;
-    if (budgetExhaustedSources.has(cfgName)) {
+    if (budgetExhaustedSources.has(cfgName) || blockedSources.has(cfgName)) {
       result = { outcome: 'skipped_budget', warning: null };
     } else {
       const profile = await profileFor(row.search_profile);
       result = await fetchDetailNoDedup({ name: cfgName, adapter: bySourceCfg.get(cfgName).adapter, cfg: bySourceCfg.get(cfgName).cfg }, ctx, row, profile, noiseRules, noiseKnownSources);
       if (result.outcome === 'skipped_budget') budgetExhaustedSources.add(cfgName);
+      if (isBlockedClass(result.outcome)) blockedSources.add(cfgName);
       if (result.warning) log({ evt: 'backfill_detail_warning', message: result.warning });
     }
 
@@ -453,6 +461,7 @@ export async function runBackfill(args, deps, client) {
       noiseClass: result.noiseClass ?? null,
       detailSkipped: result.outcome === 'skipped_budget',
       detailOutcome: result.outcome,
+      rejectedDescription: result.rejected ?? null,
     };
     await updateListing(client, detailRec, decision, writeCtx, { bumpTimesSeen: false });
 

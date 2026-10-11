@@ -13,6 +13,8 @@
  * `wallMarkers` extractor). This module never scans description text.
  */
 
+export { classifyDetail, normalizeDetailText, isBlockedClass, detailWallKey, DETAIL_BLOCK_REASONS, DETAIL_CLASSIFICATIONS } from './detail-classify.js';
+
 export const KINDS = Object.freeze(['ok', 'empty', 'wall', 'unrecognized']);
 
 const WALL_PATH = /\/(login|checkpoint|authwall|uas)(\/|$|\?)/i;

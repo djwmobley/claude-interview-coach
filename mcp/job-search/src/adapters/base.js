@@ -103,6 +103,7 @@ export const KEYWORD_RE = /^[\p{L}\p{N} .,+'/&-]{1,80}$/u;
  * missing field as "this adapter has nothing to say about the apply target", never as an error.
  * @typedef {Object} FetchDetailResult
  * @property {string|null} description
+ * @property {{ httpStatus?: number|null, cfMitigated?: string|null, url?: string|null, wallSignals?: any }|null} [detailSignals] scalars gathered while fetching (HTTP status, cf-mitigated header, final URL, wallMarkers booleans) that scan-run.js feeds to classifyDetail together with the description text; optional, so a legacy adapter is unaffected
  * @property {string|null} [externalApplyUrl] a candidate apply-page URL discovered on the listing page
  *   (an anchor href, a decoded LinkedIn safety/go wrapper, or the listing's own URL when the ATS's apply
  *   page IS the listing page). Never itself redirect-chased or classified by the adapter -- that is

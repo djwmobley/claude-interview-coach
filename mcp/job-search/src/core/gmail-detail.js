@@ -46,7 +46,8 @@
  * (collectGmailManualApply) and counted as "stuck ineligible".
  */
 import * as cheerio from 'cheerio';
-import { normalizeUrl, DETAIL_MIN_CHARS, htmlToText } from './normalize.js';
+import { normalizeUrl, htmlToText } from './normalize.js';
+import { storeDescription } from './store-description.js';
 import { decodeMailgunHref, isLensaHost } from '../adapters/gmail-parsers.js';
 import { jobPostingsFromJsonLd } from '../adapters/exec-generic.js';
 import { reserveBudget as defaultReserveBudget, refundBudget } from './budget.js';
@@ -367,26 +368,35 @@ export async function runGmailDetail(client, deps) {
       /** @type {string|null} */
       let description = null;
       let failed = false;
+      /** @type {number|null} */
+      let httpStatus = null;
       try {
         const r = await deps.fetchOnce(String(rec.final));
+        httpStatus = r.status;
         if (r.status === 200) description = jobPostingDescription(r.text);
         else failed = true;
       } catch (err) {
         failed = true;
         deps.log({ evt: 'gmail_detail_fetch_failed', listing_id: id, ...errFields(err) });
       }
-      const outcome = failed ? 'error' : description && description.length >= DETAIL_MIN_CHARS ? 'fetched' : 'empty';
-      await client.query(
-        `UPDATE ic_job_listings SET description = CASE WHEN $2 = 'fetched' THEN $3 ELSE description END, detail_outcome = $2,
-                detail_attempts = detail_attempts + 1 WHERE id = $1`,
-        [targetId, outcome, description],
-      );
+      // Detail-block fix: the description goes through the single chokepoint (store-description.js). A
+      // 403/429/503 is classified (blocked/transient) rather than lumped into 'error'; any other failed
+      // fetch stays 'error' and never touches the description.
+      /** @type {string} */
+      let outcome;
+      if (failed && httpStatus !== 403 && httpStatus !== 429 && httpStatus !== 503) {
+        outcome = 'error';
+        await client.query(`UPDATE ic_job_listings SET detail_outcome = 'error', detail_attempts = detail_attempts + 1 WHERE id = $1`, [targetId]);
+      } else {
+        const stored = await storeDescription(client, targetId, failed ? null : description, { source: 'gmail', url: String(rec.final), httpStatus });
+        outcome = stored.outcome;
+      }
       if (targetId !== id) {
         await client.query('UPDATE ic_job_listings SET detail_attempts = detail_attempts + 1 WHERE id = $1', [id]);
         if (outcome === 'fetched') await mergeInto(client, id, targetId);
       }
       if (outcome === 'fetched') stats.fetched_by.generic++;
-      else if (outcome === 'empty') stats.empty++;
+      else if (outcome === 'empty' || outcome === 'too_short' || outcome === 'unverified') stats.empty++;
       else stats.error++;
       rec.outcome = outcome;
       await saveTarget(client, id, row.url, rec);
