@@ -19,6 +19,7 @@ import { ensureAuxSchema } from '../src/core/schema.js';
 import { withClient, closePool } from '../src/core/db.js';
 import { createDashboardServer } from '../src/dashboard/server.js';
 import { createCalendarCache } from '../src/dashboard/calendar-cache.js';
+import { setGateHooksForTests } from '../src/core/resume-content-gate.js';
 
 const CO = `ZZ-TEST-DASHBOARD-${process.pid}`;
 const SRC = `zz-test-dashboard-${process.pid}`;
@@ -66,6 +67,8 @@ async function cleanup() {
 }
 
 before(async () => {
+  // Fixtures here are fake resume bytes; the content gate has its own tests (resume-content-gate.test.js).
+  setGateHooksForTests({ resumeGate: () => ({ ok: true, missing: [], reason: null }), docxValid: () => true });
   verifyClient = new pg.Client(pgConnectionConfig());
   await verifyClient.connect();
   await ensureAuxSchema(verifyClient);

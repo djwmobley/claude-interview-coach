@@ -773,3 +773,8 @@ describe('POST /api/listings/:id/apply-now: A1 freshness and A2 busy runner', ()
     }
   });
 });
+
+// Fixtures here are fake resume bytes; the stale or foreign resume content gate has its own tests
+// (resume-content-gate.test.js), so these suites stand it in with an always-pass gate.
+import { setGateHooksForTests } from '../src/core/resume-content-gate.js';
+setGateHooksForTests({ resumeGate: () => ({ ok: true, missing: [], reason: null }), docxValid: () => true });

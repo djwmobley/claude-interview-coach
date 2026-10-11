@@ -24,7 +24,7 @@ const CONFIG_ON = {
 function okState(patch = {}) {
   return {
     ats: 'greenhouse', config: CONFIG_ON, markerEver: false, exclusion: { branch: 'eligible' },
-    resume: { expected: 'abc', actual: 'abc' }, prefilledUnledgered: [], review: { ok: true }, audit: { ok: true, problems: [] },
+    resume: { expected: 'abc', actual: 'abc' }, resumeContent: { ok: true }, prefilledUnledgered: [], review: { ok: true }, audit: { ok: true, problems: [] },
     count: { used: 0, cap: 5 }, ...patch,
   };
 }
@@ -53,6 +53,9 @@ describe('classifyPreSubmit', () => {
     ['exclusion check failed', { exclusion: { branch: 'check_failed' } }, 'exclusion'],
     ['no approved hash', { resume: { expected: null, actual: null } }, 'resume_hash_missing'],
     ['hash drift', { resume: { expected: 'abc', actual: 'def' } }, 'resume_hash_mismatch'],
+    ['stale resume content', { resumeContent: { ok: false, reason: 'missing employers: Advisicon' } }, 'stale_resume'],
+    ['no content verdict at all', { resumeContent: undefined }, 'stale_resume'],
+    ['content verdict not exactly ok:true', { resumeContent: { ok: 'yes' } }, 'stale_resume'],
     ['review page unrecognized', { review: { ok: false, reason: 'step_form' } }, 'review_unverified'],
     ['missing required answer', { audit: { ok: false, problems: ['required_empty:Why us'] } }, 'audit_failed'],
     ['audit ok but problems listed', { audit: { ok: true, problems: ['x'] } }, 'audit_failed'],

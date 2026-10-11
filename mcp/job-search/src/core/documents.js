@@ -11,6 +11,7 @@ import fs from 'node:fs';
 import path from 'node:path';
 import { JobSearchError } from './errors.js';
 import { recordEvent } from './events.js';
+import { checkResumeFile } from './resume-content-gate.js';
 
 /** The six directories under output/ this module knows about, exact and case-sensitive. */
 export const DOCUMENT_DIRS = Object.freeze(['resumes', 'coverletters', 'cheatsheets', 'markdown', 'research', 'reports']);
@@ -283,6 +284,18 @@ export async function linkDocument(client, outputRoot, input) {
   const resolved = resolveOutputPath(outputRoot, input.relPath);
   if (!resolved.ok) throw new JobSearchError('VALIDATION', `cannot link document: ${resolved.reason}`, { details: { reason: resolved.reason } });
   if (!DOCUMENT_KINDS.includes(input.kind)) throw new JobSearchError('VALIDATION', `document kind must be one of ${DOCUMENT_KINDS.join(', ')}`);
+  // Stale or foreign resume guard (S3): the single choke point every resume link goes through (render_doc,
+  // the dashboard manual-link route, bin/seed-opportunities.js). The gate reads the file and the CURRENT
+  // project index; it never writes either.
+  if (input.kind === 'resume') {
+    const verdict = checkResumeFile(resolved.absPath, path.join(path.dirname(outputRoot), 'data', 'project-index.md'));
+    if (!verdict.ok) {
+      throw new JobSearchError('STALE_RESUME', `cannot link resume ${resolved.relPath}: ${verdict.reason}`, {
+        hint: 'the resume does not match the current project index; regenerate it from the current data',
+        details: { rel_path: resolved.relPath, missing: verdict.missing.join('; ').slice(0, 300) },
+      });
+    }
+  }
   const actor = input.actor ?? 'mcp';
   // `xmax = 0` is the standard upsert idiom for "this RETURNING row came from the INSERT branch, not the
   // ON CONFLICT DO UPDATE branch" (a freshly inserted row has no prior deleting transaction id). Only the

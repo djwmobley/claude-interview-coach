@@ -278,6 +278,22 @@ describe('upload_resume (G7)', () => {
     assert.ok(!drv.calls.some((c) => c[0] === 'uploadFile'));
     assert.equal((await getLease(client, leaseId)).stop_reason, 'resume_hash_mismatch');
   });
+  test('a stale resume (fails the content gate) is never uploaded: visible stop_reason stale_resume', async () => {
+    const outputRoot = fs.mkdtempSync(path.join(os.tmpdir(), 'easytool-out-'));
+    const { token, leaseId } = await setup({ outputRoot });
+    const drv = fakeDriver([step({ resumeCards: [{ name: 'Old.pdf', selected: true }], fields: [{ ref: 'e4-f', kind: 'file', question: 'Upload resume', required: false, options: [], value: '', filled: false }] })]);
+    setGateHooksForTests({ resumeGate: () => ({ ok: false, missing: ['Advisicon'], reason: 'missing employers: Advisicon' }), docxValid: () => true });
+    try {
+      const r = /** @type {any} */ (await toolFor(drv, { token, outputRoot }).handler({ action: 'upload_resume' }, deps));
+      assert.equal(r.stopped, true);
+      assert.equal(r.stop_reason, 'stale_resume');
+      assert.match(r.message, /stale/);
+    } finally {
+      setGateHooksForTests({ resumeGate: () => ({ ok: true, missing: [], reason: null }), docxValid: () => true });
+    }
+    assert.ok(!drv.calls.some((c) => c[0] === 'uploadFile'));
+    assert.equal((await getLease(client, leaseId)).stop_reason, 'stale_resume');
+  });
   test('verified upload marks the resume uploaded', async () => {
     const outputRoot = fs.mkdtempSync(path.join(os.tmpdir(), 'easytool-out-'));
     const { token, leaseId } = await setup({ outputRoot });
@@ -327,3 +343,8 @@ describe('finish (G8)', () => {
     assert.equal((await getLease(client, leaseId)).stop_reason, 'finish_not_at_review_form');
   });
 });
+
+// Fixtures here are fake resume bytes; the stale or foreign resume content gate has its own tests
+// (resume-content-gate.test.js), so these suites stand it in with an always-pass gate.
+import { setGateHooksForTests } from '../src/core/resume-content-gate.js';
+setGateHooksForTests({ resumeGate: () => ({ ok: true, missing: [], reason: null }), docxValid: () => true });

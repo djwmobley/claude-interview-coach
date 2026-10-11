@@ -40,6 +40,7 @@ import { runGuardedSubmit, clickTimeExclusionCheck } from './unattended-submit.j
 import { SUBMIT_GATE_KIND } from './submit-gate.js';
 import { classifyExclusion, loadExclusionConfig, walkDuplicateRoot } from './exclusions.js';
 import { resolveOutputPath } from '../core/documents.js';
+import { checkResumeFile } from '../core/resume-content-gate.js';
 import { hostsForAts } from './ats-detect.js';
 import { parseAnswerBank, matchQuestion } from './answers.js';
 import { buildRegistry, guardUrl } from '../core/urlguard.js';
@@ -180,6 +181,20 @@ function hashLinkedFile(outputRoot, relPath) {
   return crypto.createHash('sha256').update(fs.readFileSync(resolved.absPath)).digest('hex');
 }
 
+/**
+ * Stale or foreign resume guard (S3), submit time: the content gate on the EXACT file about to be uploaded,
+ * against the CURRENT project index (read fresh on every call). Total: no linked path, an unresolvable path,
+ * or any unreadable input is a failing verdict, never a pass.
+ * @param {string} outputRoot
+ * @param {string|null} relPath
+ * @returns {{ ok: boolean, reason?: string|null, missing?: string[] }}
+ */
+function checkLinkedResume(outputRoot, relPath) {
+  if (!relPath) return { ok: false, reason: 'no resume is linked' };
+  const resolved = resolveOutputPath(outputRoot, relPath);
+  if (!resolved.ok) return { ok: false, reason: `the linked resume path is not usable (${resolved.reason})` };
+  return checkResumeFile(resolved.absPath, path.join(path.dirname(outputRoot), 'data', 'project-index.md'));
+}
 /**
  * @typedef {Object} WorkerDeps
  * @property {import('../core/config.js').LoadedConfig} [config]
@@ -620,6 +635,7 @@ export async function runApplyWorker(applicationId, deps = {}) {
         client: c, app, cap, mode: 'form', submitSelector: o.submitSelector, scopeSelector: o.scopeSelector, ledger: o.ledger,
         loadConfig: p.loadFreshConfig, exclusionCheck: p.clickTimeExclusionCheck,
         resumeHash: () => hashLinkedFile(outRoot, documents.resumePath),
+        resumeContent: () => checkLinkedResume(outRoot, documents.resumePath),
         sleep: p.sleep, log: (/** @type {any} */ f) => lg(f), ...p.submitTiming,
       }),
       // apply pipeline slice 6: account-holding adapters (Workday) reach credentials and Gmail
@@ -668,6 +684,7 @@ export async function runApplyWorker(applicationId, deps = {}) {
       expectedResume: documents.resumePath ? path.basename(documents.resumePath) : null,
       loadConfig: () => fresh, exclusionCheck: runClickTimeExclusion,
       resumeHash: () => hashLinkedFile(outputRoot, documents.resumePath),
+      resumeContent: () => checkLinkedResume(outputRoot, documents.resumePath),
       sleep, log, ...submitTiming,
     });
     if (r.outcome === 'needs_human' && r.gate && r.gate.soft) {

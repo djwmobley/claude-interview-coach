@@ -38,6 +38,7 @@ export const PRE_SUBMIT_REASONS = Object.freeze(/** @type {Record<string, { soft
   exclusion: { soft: false, label: 'The apply exclusion check at submit time no longer allows this application.' },
   resume_hash_missing: { soft: false, label: 'No approved resume hash is on record, so the uploaded resume cannot be verified.' },
   resume_hash_mismatch: { soft: false, label: 'The linked resume file changed on disk since Approve.' },
+  stale_resume: { soft: false, label: 'The resume to upload does not match the current project index (a missing employer or current role), so it is stale or foreign.' },
   prefilled_unledgered: { soft: false, label: 'The site prefilled answers that no server-side answer wrote; review them before submitting.' },
   review_unverified: { soft: false, label: 'The page right before Submit did not match the expected review shape.' },
   audit_failed: { soft: false, label: 'A required field is empty, unverifiable, or not answered from your own data.' },
@@ -79,6 +80,7 @@ export function unattendedSubmitConfig(config) {
  * @property {boolean} markerEver
  * @property {{ branch: string, reason?: string }} exclusion
  * @property {{ expected: string|null, actual: string|null }} resume
+ * @property {{ ok: boolean, reason?: string|null, missing?: string[] }} resumeContent content-gate verdict for the exact file about to be uploaded
  * @property {string[]|null} [prefilledUnledgered] Workday only
  * @property {{ ok: boolean, reason?: string|null }} review
  * @property {{ ok: boolean, problems: string[] }} audit
@@ -105,6 +107,13 @@ export function classifyPreSubmit(state) {
   if (s.exclusion.branch !== 'eligible') return park('exclusion', `${String(s.exclusion.branch)}${s.exclusion.reason ? `: ${String(s.exclusion.reason).slice(0, 200)}` : ''}`);
   if (typeof s.resume.expected !== 'string' || !s.resume.expected) return park('resume_hash_missing');
   if (s.resume.actual !== s.resume.expected) return park('resume_hash_mismatch');
+  // Stale or foreign resume guard (S3): the content of the exact file about to be uploaded, checked against
+  // the CURRENT project index on every attempt. A matching hash never short-circuits this, and a missing or
+  // malformed verdict parks (total: anything but an explicit ok:true is a refusal).
+  if (!s.resumeContent || typeof s.resumeContent !== 'object' || s.resumeContent.ok !== true) {
+    const why = s.resumeContent && typeof s.resumeContent.reason === 'string' ? s.resumeContent.reason : 'no content verdict';
+    return park('stale_resume', why.slice(0, 300));
+  }
   if (s.ats === 'workday' && (!Array.isArray(s.prefilledUnledgered) || s.prefilledUnledgered.length > 0)) {
     return park('prefilled_unledgered', Array.isArray(s.prefilledUnledgered) ? s.prefilledUnledgered.join(', ').slice(0, 300) : 'missing');
   }

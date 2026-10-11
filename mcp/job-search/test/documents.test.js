@@ -17,11 +17,14 @@ import {
   resolveOutputPath, listOutputFiles, suggestDocuments, linkDocument, unlinkDocument, listDocuments,
   DOCUMENT_DIRS, DOC_STOPWORDS, tokenize, companyTokensFor, titleTokensFor,
 } from '../src/core/documents.js';
+import { setGateHooksForTests } from '../src/core/resume-content-gate.js';
 
 /** @type {string} */
 let root;
 
 before(() => {
+  // These fixtures are fake bytes; the content gate has its own tests (resume-content-gate.test.js).
+  setGateHooksForTests({ resumeGate: () => ({ ok: true, missing: [], reason: null }), docxValid: () => true });
   root = fs.mkdtempSync(path.join(os.tmpdir(), 'jobsearch-output-'));
   for (const dir of DOCUMENT_DIRS) fs.mkdirSync(path.join(root, dir), { recursive: true });
 });
