@@ -19,11 +19,33 @@ import { credentialPrompt } from './credential-prompt.js';
 import { withdrawControl } from './withdraw-control.js';
 import { resumeControl, partialDraftWarning } from './resume-control.js';
 import { confirmButton } from './confirm-button.js';
-import { withdrawButtonVisible, resumeButtonVisible, ledgerLineText, pendingChoiceOptions, displayPendingQuestion, applyControlsState } from '../lib/format.js';
+import { withdrawButtonVisible, resumeButtonVisible, ledgerLineText, pendingChoiceOptions, displayPendingQuestion, applyControlsState, manualNoApplicationControls } from '../lib/format.js';
 import { postingLink } from './posting-link.js';
 
 /** Apply exclusion gate (src/apply/exclusions.js): branches that are never overridable from the dashboard. */
 const HARD_EXCLUSION_BRANCHES = new Set(['blocked_company', 'already_applied_listing', 'already_applied_history']);
+
+/** "/write-resume <id>" style command with a Copy button (clipboard failure falls back to a select-and-copy toast). @param {string} command */
+function commandCopyRow(command) {
+  return h('div', { className: 'application-card__copy-row' }, [
+    h('code', { className: 'application-card__copy-code', text: command }),
+    h('button', {
+      className: 'btn btn--small',
+      attrs: { type: 'button' },
+      text: 'Copy',
+      on: {
+        click: async () => {
+          try {
+            await navigator.clipboard.writeText(command);
+            showToast({ message: 'Copied to clipboard.' });
+          } catch {
+            showToast({ message: 'Could not copy automatically; select and copy the command.', tone: 'error' });
+          }
+        },
+      },
+    }),
+  ]);
+}
 
 /**
  * @param {{ listing: any, application: any|null, ats: any, documents: any[], onChanged: () => void, applyExclusion?: { branch: string|null, reason: string|null, error?: string }|null }} opts
@@ -79,10 +101,13 @@ export function applicationCard(opts) {
     : null;
 
   if (!application && applyControlsState(listing, opts.manualLocked) === 'manual') {
+    const manualControls = manualNoApplicationControls(listing, opts.manualLocked);
     return h('div', { className: 'application-card' }, [
       h('h3', { text: 'Application' }),
       h('p', { className: 'application-card__hint', text: 'This job is not LinkedIn Easy Apply (or is reserved for you). Open the posting, apply there, then mark it applied.' }),
       postingLink(listing),
+      manualControls.writeResumeCommand ? h('p', { className: 'application-card__hint', text: manualControls.hint }) : null,
+      manualControls.writeResumeCommand ? commandCopyRow(manualControls.writeResumeCommand) : null,
       confirmButton({
         label: 'I applied',
         confirmLabel: 'Confirm applied',
@@ -139,24 +164,7 @@ export function applicationCard(opts) {
     ]);
   };
 
-  const copyRow = h('div', { className: 'application-card__copy-row' }, [
-    h('code', { className: 'application-card__copy-code', text: command }),
-    h('button', {
-      className: 'btn btn--small',
-      attrs: { type: 'button' },
-      text: 'Copy',
-      on: {
-        click: async () => {
-          try {
-            await navigator.clipboard.writeText(command);
-            showToast({ message: 'Copied to clipboard.' });
-          } catch {
-            showToast({ message: 'Could not copy automatically; select and copy the command.', tone: 'error' });
-          }
-        },
-      },
-    }),
-  ]);
+  const copyRow = commandCopyRow(command);
 
   const unknownAtsNote = ats && ats.ats === 'unknown'
     ? h('p', { className: 'application-card__note', text: 'Unknown ATS: apply by hand after approving documents.' })

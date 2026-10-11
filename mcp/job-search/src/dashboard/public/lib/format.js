@@ -547,6 +547,24 @@ export function applyControlsState(listing, manualLocked) {
   return typeof branch === 'string' && NON_EASY_APPLY_BRANCHES.includes(branch) ? 'manual' : 'create';
 }
 
+/**
+ * What the application card shows for a listing with NO application when applyControlsState() is 'manual'
+ * (apply-by-hand: a manual-only lock, or an external / no_control / closed apply page). The create decision
+ * itself is unchanged: Create application and Apply now stay hidden. The only addition is the manual
+ * /write-resume copy command, so a resume can still be produced for a job Damian applies to by hand.
+ * @param {any} listing @param {boolean} [manualLocked]
+ * @returns {{ showCreate: boolean, writeResumeCommand: string|null, hint: string }}
+ */
+export function manualNoApplicationControls(listing, manualLocked) {
+  const manual = applyControlsState(listing, manualLocked) === 'manual';
+  const id = listing && typeof listing === 'object' ? listing.id : null;
+  return {
+    showCreate: !manual,
+    writeResumeCommand: manual && id != null ? `/write-resume ${id}` : null,
+    hint: manual ? 'Apply-by-hand listing: copy the command below to draft a resume in Claude Code.' : '',
+  };
+}
+
 /** manual_apply_url when it is a safe http(s) URL, else the listing's own posting URL, else null. @param {any} listing */
 export function manualPostingUrl(listing) {
   if (listing && typeof listing === 'object' && isSafeHttpUrl(listing.manual_apply_url)) return /** @type {string} */ (listing.manual_apply_url);
