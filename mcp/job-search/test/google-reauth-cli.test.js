@@ -100,13 +100,13 @@ describe('makeOpenUrl', () => {
 });
 
 describe('launchOsBrowserDiagnosed', () => {
-  test('captures exit code and stderr; win32 uses powershell, hidden, not detached', async () => {
+  test('captures exit code and stderr; win32 uses explorer.exe, hidden, not detached', async () => {
     const s = fakeSpawn({ exitCode: 1, stderr: 'some error text' });
     const r = await launchOsBrowserDiagnosed({ url: URL_OK, spawnImpl: /** @type {any} */ (s.fn), platform: 'win32' });
     assert.equal(r.spawned, true);
     assert.equal(r.exitCode, 1);
     assert.equal(r.stderr, 'some error text');
-    assert.equal(s.calls[0].cmd, 'powershell.exe');
+    assert.equal(s.calls[0].cmd, 'explorer.exe');
     assert.equal(s.calls[0].opts.windowsHide, true);
     assert.notEqual(s.calls[0].opts.detached, true);
     assert.deepEqual(s.calls[0].opts.stdio, ['ignore', 'ignore', 'pipe']);

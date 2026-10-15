@@ -92,29 +92,17 @@ export function assertLaunchableUrl(url) {
 }
 
 /**
- * Base64-encode UTF-16LE text for `powershell.exe -EncodedCommand`, PowerShell's own documented way to
- * hand it a command string with zero shell/cmd metacharacter interpretation (no quoting layer for `&`,
- * `%`, `^`, `!`, `<`, `>`, `|` to survive at all -- the command never passes through a shell parser).
- * @param {string} text
- */
-export function encodePowerShellCommand(text) {
-  return Buffer.from(text, 'utf16le').toString('base64');
-}
-
-/**
- * Build the win32 argv for launching the default browser on `dashboardUrl` via `Start-Process`, with
- * every single quote in the URL doubled (PowerShell's own single-quoted-string escape) before it is
- * embedded in the `-FilePath '...'` argument. The whole command then travels as an `-EncodedCommand`
- * base64 blob, so nothing about the URL (including a literal `&`) is ever interpreted by cmd.exe or by
- * PowerShell's own command-line tokenizer.
+ * Build the win32 argv for launching the default browser on `url`: `explorer.exe <url>`, spawned with
+ * shell:false and the URL as ONE argv element. No cmd.exe (which split URLs at `&`, 2026-09-17 incident)
+ * and no PowerShell (Windows Defender blocks and alerts on powershell.exe with base64-encoded commands, 2026-10-15).
+ * Node quotes the element for CreateProcess, explorer.exe hands it to the shell association for http(s),
+ * and nothing re-tokenizes it. explorer.exe commonly exits non-zero (typically 1) even when it succeeded,
+ * so no caller may treat its exit code as a launch failure.
  * @param {string} url
  * @returns {[string, string[]]}
  */
 export function buildWin32LaunchArgv(url) {
-  const escaped = url.replace(/'/g, "''");
-  const psCommand = `Start-Process -FilePath '${escaped}'`;
-  const encoded = encodePowerShellCommand(psCommand);
-  return ['powershell.exe', ['-NoProfile', '-NonInteractive', '-ExecutionPolicy', 'Bypass', '-EncodedCommand', encoded]];
+  return ['explorer.exe', [url]];
 }
 
 /**
@@ -240,10 +228,11 @@ export function launchOsBrowser({ dashboardUrl, spawnImpl, platform }) {
 
 /**
  * Diagnosed variant of launchOsBrowser (2026-10-04 reauth consent-link fix): instead of a detached,
- * stdio-ignored fire-and-forget spawn (which reports success the moment powershell.exe starts, even if
- * Start-Process itself then fails), this waits for the launcher to exit and captures its exit code and
- * stderr so a failed launch leaves evidence in the log. Never rejects; every failure is a field on the
- * resolved result. The launcher (powershell / open / xdg-open) returns as soon as it has handed the URL
+ * stdio-ignored fire-and-forget spawn (which reports success the moment the launcher starts, even if
+ * the launch itself then fails), this waits for the launcher to exit and captures its exit code and
+ * stderr so a failed launch leaves evidence in the log (explorer.exe exits non-zero on success, so the
+ * code is recorded, never judged). Never rejects; every failure is a field on the
+ * resolved result. The launcher (explorer.exe / open / xdg-open) returns as soon as it has handed the URL
  * to the shell, so waiting on it is cheap; `timeoutMs` bounds the wait and kills a hung launcher.
  * @param {{ url: string, spawnImpl: typeof import('node:child_process').spawn, platform: NodeJS.Platform, timeoutMs?: number }} o
  * @returns {Promise<{ spawned: boolean, exitCode: number|null, signal: string|null, stderr: string, error: string|null, timedOut: boolean }>}

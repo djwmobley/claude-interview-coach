@@ -8,18 +8,14 @@
 import { test, describe } from 'node:test';
 import assert from 'node:assert/strict';
 import { EventEmitter } from 'node:events';
-import { execFile } from 'node:child_process';
-import { promisify } from 'node:util';
 import {
   openDashboard,
   assertLoopbackCdpUrl,
   assertLaunchableUrl,
   launchOsBrowser,
-  encodePowerShellCommand,
+  launchOsBrowserDiagnosed,
   buildWin32LaunchArgv,
 } from '../src/core/open-dashboard.js';
-
-const execFileP = promisify(execFile);
 
 const DASHBOARD_URL = 'http://127.0.0.1:7311/';
 const CDP_URL = 'http://127.0.0.1:9222';
@@ -160,14 +156,10 @@ describe('openDashboard', () => {
     const r = await openDashboard({ dashboardUrl: DASHBOARD_URL, cdpUrl: CDP_URL, fetchImpl, spawnImpl, platform: 'win32', log });
     assert.deepEqual(r, { ok: true, mode: 'os_browser' });
     assert.equal(calls.length, 1);
-    // 2026-09-17 incident fix: no more `cmd.exe /c start` (an unquoted URL there gets split at every `&`
-    // by cmd's own parser) -- win32 now hands the URL to powershell.exe -EncodedCommand instead, which
-    // never passes the URL through any shell/cmd tokenizer.
-    assert.equal(calls[0].cmd, 'powershell.exe');
-    assert.deepEqual(calls[0].args.slice(0, 4), ['-NoProfile', '-NonInteractive', '-ExecutionPolicy', 'Bypass']);
-    assert.equal(calls[0].args[4], '-EncodedCommand');
-    const decoded = Buffer.from(calls[0].args[5], 'base64').toString('utf16le');
-    assert.equal(decoded, `Start-Process -FilePath '${DASHBOARD_URL}'`);
+    // No cmd.exe (splits at `&`, 2026-09-17) and no PowerShell (Defender blocks encoded PowerShell
+    // commands, 2026-10-15): win32 spawns explorer.exe with the URL as a single argv element, no shell.
+    assert.equal(calls[0].cmd, 'explorer.exe');
+    assert.deepEqual(calls[0].args, [DASHBOARD_URL]);
     assert.equal(calls[0].opts.detached, true);
     assert.equal(calls[0].opts.shell, false);
     assert.ok(lines.some((l) => l.evt === 'open_dashboard' && l.mode === 'os_browser'));
@@ -223,39 +215,62 @@ describe('openDashboard', () => {
   });
 });
 
-describe('win32 launch encoding (2026-09-17 incident fix)', () => {
-  test('(a) buildWin32LaunchArgv: EncodedCommand decodes to the exact URL, quote-doubled, with &, %2F, %20 intact', () => {
-    const url = "http://127.0.0.1:7311/?a=1&b=x%2Fy%20z&note=it's%20a%20test&c=d";
-    const [cmd, args] = buildWin32LaunchArgv(url);
-    assert.equal(cmd, 'powershell.exe');
-    assert.deepEqual(args.slice(0, 4), ['-NoProfile', '-NonInteractive', '-ExecutionPolicy', 'Bypass']);
-    assert.equal(args[4], '-EncodedCommand');
-    assert.equal(args.length, 6);
-    const decoded = Buffer.from(args[5], 'base64').toString('utf16le');
-    const expectedEscapedUrl = url.replace(/'/g, "''");
-    assert.equal(decoded, `Start-Process -FilePath '${expectedEscapedUrl}'`);
-    assert.ok(decoded.includes('&'), 'decoded command must retain the literal &');
-    assert.ok(decoded.includes('%2F'), 'decoded command must retain %2F untouched');
-    assert.ok(decoded.includes('%20'), 'decoded command must retain %20 untouched');
-    assert.ok(decoded.includes("''"), "a single quote in the URL must be doubled in the decoded command");
-    assert.equal((decoded.match(/'/g) || []).length, (url.match(/'/g) || []).length * 2 + 2, 'every URL quote doubled, plus the two -FilePath wrapper quotes');
+describe('win32 launch argv (2026-09-17 split-at-& fix; 2026-10-15 no-PowerShell fix)', () => {
+  const longUrl = `http://127.0.0.1:7311/?payload=${'x'.repeat(3000)}&tail=end`;
+  const URLS = /** @type {Array<[string, string]>} */ ([
+    ['plain dashboard URL', DASHBOARD_URL],
+    ['URL with &', 'http://127.0.0.1:7311/?a=1&b=2&c=3'],
+    ['URL with %2F', 'http://127.0.0.1:7311/?redirect=http%3A%2F%2Fx%2Fy&z=1'],
+    ['URL with %20', 'http://127.0.0.1:7311/?q=a%20b%20c&z=1'],
+    ['URL with a single quote', "http://127.0.0.1:7311/?note=it's&c=d"],
+    ['mixed &, %2F, %20 and quote', "http://127.0.0.1:7311/?a=1&b=x%2Fy%20z&note=it's%20a%20test&c=d"],
+    ['3000+ char URL ending in &tail=end', longUrl],
+  ]);
+
+  test('fixture sanity: the long URL is 3000+ chars and ends in &tail=end', () => {
+    assert.ok(longUrl.length >= 3000);
+    assert.ok(longUrl.endsWith('&tail=end'));
   });
 
-  test('(b) win32-only round-trip: real powershell.exe -EncodedCommand decodes byte-equal for a 3000+ char URL with shell metacharacters and a quote', async (t) => {
-    if (process.platform !== 'win32') {
-      t.skip('win32-only round-trip test');
-      return;
-    }
-    const specialChars = "&%^!=:/?#'";
-    const filler = 'x'.repeat(3000 - specialChars.length - 40);
-    const url = `http://127.0.0.1:7311/?payload=${filler}${specialChars}&tail=end`;
-    assert.ok(url.length >= 3000, `fixture URL should be >= 3000 chars, got ${url.length}`);
-    const escaped = url.replace(/'/g, "''");
-    const psCommand = `Write-Output '${escaped}'`;
-    const encoded = encodePowerShellCommand(psCommand);
-    const { stdout } = await execFileP('powershell.exe', ['-NoProfile', '-NonInteractive', '-ExecutionPolicy', 'Bypass', '-EncodedCommand', encoded], { encoding: 'utf8', maxBuffer: 1024 * 1024 });
-    assert.equal(stdout.replace(/\r?\n$/, ''), url, 'stdout must be byte-equal to the original URL');
-  });
+  for (const [label, url] of URLS) {
+    test(`buildWin32LaunchArgv: ${label} is a single, byte-equal argv element for explorer.exe`, () => {
+      const [cmd, args] = buildWin32LaunchArgv(url);
+      assert.equal(cmd, 'explorer.exe');
+      assert.equal(args.length, 1);
+      assert.equal(args[0], url);
+    });
+
+    test(`launchOsBrowser (injected spawn): ${label} spawns explorer.exe with the exact URL, shell false`, async () => {
+      const { fn: spawnImpl, calls } = fakeSpawn('spawn');
+      await launchOsBrowser({ dashboardUrl: url, spawnImpl, platform: 'win32' });
+      assert.equal(calls.length, 1);
+      assert.equal(calls[0].cmd, 'explorer.exe');
+      assert.deepEqual(calls[0].args, [url]);
+      assert.equal(calls[0].opts.shell, false);
+    });
+
+    test(`launchOsBrowserDiagnosed (injected spawn): ${label} spawns explorer.exe with the exact URL, shell false`, async () => {
+      const calls = /** @type {Array<{ cmd: string, args: string[], opts: any }>} */ ([]);
+      const spawnImpl = /** @type {any} */ ((/** @type {string} */ cmd, /** @type {string[]} */ args, /** @type {any} */ opts) => {
+        calls.push({ cmd, args, opts });
+        const child = /** @type {any} */ (new EventEmitter());
+        child.stderr = null;
+        queueMicrotask(() => {
+          child.emit('spawn');
+          child.emit('exit', 1, null); // explorer.exe commonly exits 1 on success
+        });
+        return child;
+      });
+      const r = await launchOsBrowserDiagnosed({ url, spawnImpl, platform: 'win32' });
+      assert.equal(r.spawned, true);
+      assert.equal(r.error, null);
+      assert.equal(r.exitCode, 1, 'a non-zero explorer.exe exit is recorded, not turned into an error');
+      assert.equal(calls.length, 1);
+      assert.equal(calls[0].cmd, 'explorer.exe');
+      assert.deepEqual(calls[0].args, [url]);
+      assert.equal(calls[0].opts.shell, false);
+    });
+  }
 
   describe('(c) invalid_url branch: assertLaunchableUrl / launchOsBrowser refuse before ever spawning', () => {
     test('assertLaunchableUrl throws VALIDATION with details.reason === "invalid_url" for javascript:, file:, and a non-string', () => {
