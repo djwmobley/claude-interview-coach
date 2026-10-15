@@ -316,21 +316,20 @@ describe('render_doc rendering', () => {
     assert.equal(detectLocked(path.join(outDir, 'nothing.docx')).locked, false);
   });
 
-  test('LOCKED: an exclusively held file is detected on Windows', async () => {
+  test('LOCKED: a file that cannot be opened read-write is detected on Windows', async () => {
     const outDir = path.join(root, 'output', 'cheatsheets');
     fs.mkdirSync(outDir, { recursive: true });
     const target = path.join(outDir, 'held.docx');
     fs.writeFileSync(target, 'x');
     if (process.platform !== 'win32') return;
-    // Simulate Word's share lock with a child process holding the file open exclusively.
-    const { spawn } = await import('node:child_process');
-    const ps = spawn('powershell', ['-NoProfile', '-Command', `$f=[System.IO.File]::Open('${target.replace(/'/g, "''")}','Open','ReadWrite','None'); Start-Sleep -Seconds 6; $f.Close()`], { stdio: 'ignore', windowsHide: true });
-    await new Promise((r) => setTimeout(r, 2500));
+    // No child process (a spawned PowerShell trips Windows Defender): the read-only attribute makes the
+    // r+ open fail with EPERM, the same branch detectLocked takes for a Word share lock.
+    fs.chmodSync(target, 0o444);
     try {
       const d = detectLocked(target);
       assert.equal(d.locked, true, d.reason);
     } finally {
-      ps.kill();
+      fs.chmodSync(target, 0o666);
     }
   });
 

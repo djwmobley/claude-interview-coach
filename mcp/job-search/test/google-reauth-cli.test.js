@@ -90,6 +90,42 @@ describe('makeOpenUrl', () => {
     assert.match(String(ev.stderr), /Start-Process/);
   });
 
+  test('the SHORT start URL is launched, while the full consent URL still goes to stdout', async () => {
+    /** @type {string[]} */
+    const out = [];
+    let launchedWith = '';
+    const START = 'http://127.0.0.1:7312/start';
+    const openUrl = makeOpenUrl({
+      noLaunch: false,
+      write: (s) => out.push(s),
+      log: () => {},
+      launch: async (url) => {
+        launchedWith = url;
+        return { spawned: true, exitCode: 0, signal: null, stderr: '', error: null, timedOut: false, refusedReason: null };
+      },
+    });
+    await openUrl(URL_OK, START);
+    assert.equal(launchedWith, START);
+    assert.deepEqual(out, [URL_OK]);
+  });
+
+  test('a refused launch (url_too_long) prints a manual-open hint after the URL and logs the reason', async () => {
+    /** @type {string[]} */
+    const out = [];
+    /** @type {any[]} */
+    const logs = [];
+    const openUrl = makeOpenUrl({
+      noLaunch: false,
+      write: (s) => out.push(s),
+      log: (f) => logs.push(f),
+      launch: async () => ({ spawned: false, exitCode: null, signal: null, stderr: '', error: 'too long', timedOut: false, refusedReason: 'url_too_long' }),
+    });
+    await openUrl(URL_OK, 'http://127.0.0.1:7312/start');
+    assert.equal(out[0], URL_OK);
+    assert.match(out[1], /url_too_long/);
+    assert.equal(logs.find((l) => l.evt === 'google_reauth_launch_result').refused_reason, 'url_too_long');
+  });
+
   test('a launch that throws is logged, never rethrown', async () => {
     /** @type {any[]} */
     const logs = [];
@@ -100,13 +136,13 @@ describe('makeOpenUrl', () => {
 });
 
 describe('launchOsBrowserDiagnosed', () => {
-  test('captures exit code and stderr; win32 uses powershell, hidden, not detached', async () => {
+  test('captures exit code and stderr; win32 uses explorer.exe, hidden, not detached', async () => {
     const s = fakeSpawn({ exitCode: 1, stderr: 'some error text' });
     const r = await launchOsBrowserDiagnosed({ url: URL_OK, spawnImpl: /** @type {any} */ (s.fn), platform: 'win32' });
     assert.equal(r.spawned, true);
     assert.equal(r.exitCode, 1);
     assert.equal(r.stderr, 'some error text');
-    assert.equal(s.calls[0].cmd, 'powershell.exe');
+    assert.equal(s.calls[0].cmd, 'explorer.exe');
     assert.equal(s.calls[0].opts.windowsHide, true);
     assert.notEqual(s.calls[0].opts.detached, true);
     assert.deepEqual(s.calls[0].opts.stdio, ['ignore', 'ignore', 'pipe']);

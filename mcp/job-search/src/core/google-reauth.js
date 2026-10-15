@@ -388,7 +388,7 @@ function bindServer(port) {
  *   redirectUris?: string[],
  *   timeoutMs?: number,
  *   signal: AbortSignal,
- *   openUrl?: (url: string) => (void|Promise<void>),
+ *   openUrl?: (url: string, startUrl?: string) => (void|Promise<void>),
  *   log?: (fields: Record<string, string|number|boolean|null>) => void,
  *   now?: Date,
  *   lockFile?: string,
@@ -507,6 +507,9 @@ async function reauthorizeGoogleCore(opts, portRef) {
     }
 
     const boundPath = new URL(chosenUri).pathname;
+    // Fixed short path for launching; never collides with the OAuth callback path.
+    const startPath = boundPath === '/start' ? '/start-reauth' : '/start';
+    const startUrl = `http://127.0.0.1:${Number(new URL(chosenUri).port)}${startPath}`;
     const state = crypto.randomBytes(32).toString('hex');
     const loginHint = loginHintFromFilename(tokenFile);
     const oldScopes = Array.isArray(/** @type {any} */ (startBase).scopes) ? /** @type {any} */ (startBase).scopes.map(String) : (typeof (/** @type {any} */ (startBase).scope) === 'string' ? /** @type {any} */ (startBase).scope.split(/\s+/).filter(Boolean) : []);
@@ -598,6 +601,19 @@ async function reauthorizeGoogleCore(opts, portRef) {
             res.writeHead(400).end();
             return;
           }
+          // Short launch URL (2026-10-15): the OS launcher cannot be trusted with the ~2800-char consent
+          // URL (ShellExecute caps near 2083), so callers launch http://127.0.0.1:<port>/start instead,
+          // which 302s to this session's own authUrl. The Location is ALWAYS the in-process authUrl,
+          // never anything taken from the request, so this is not an open redirect. Idempotent (a
+          // refresh works); does not touch handledRef, which only the OAuth callback consumes.
+          if (url.pathname === startPath && req.method === 'GET') {
+            if (expired) {
+              res.writeHead(200, { 'content-type': 'text/html' }).end(EXPIRED_HTML);
+              return;
+            }
+            res.writeHead(302, { location: authUrl, 'cache-control': 'no-store' }).end();
+            return;
+          }
           if (url.pathname !== boundPath) {
             res.writeHead(404).end();
             return;
@@ -666,7 +682,7 @@ async function reauthorizeGoogleCore(opts, portRef) {
       // hit without this executor function itself blocking (a Promise executor cannot usefully be
       // awaited by its caller anyway; errors are caught and logged, never left unhandled).
       if (openUrl) {
-        Promise.resolve(openUrl(authUrl)).catch((err) => {
+        Promise.resolve(openUrl(authUrl, startUrl)).catch((err) => {
           log({ evt: 'google_reauth_open_url_failed', err_message: String(err instanceof Error ? err.message : err).slice(0, 200) });
         });
       }
@@ -686,7 +702,7 @@ async function reauthorizeGoogleCore(opts, portRef) {
  *   redirectUris?: string[],
  *   timeoutMs?: number,
  *   signal: AbortSignal,
- *   openUrl?: (url: string) => (void|Promise<void>),
+ *   openUrl?: (url: string, startUrl?: string) => (void|Promise<void>),
  *   log?: (fields: Record<string, string|number|boolean|null>) => void,
  *   now?: Date,
  *   finishNow?: Date,
