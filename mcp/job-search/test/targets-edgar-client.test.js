@@ -121,24 +121,31 @@ describe('request pacing, budgets, and blocking', () => {
   test('requests are sequential and at least 250 ms apart', async () => {
     const { edgar, sleeps } = make([{ match: () => true, body: '{}' }]);
     assert.equal(MIN_REQUEST_GAP_MS, 250);
-    for (let i = 0; i < 4; i += 1) await edgar.search(`https://efts.sec.gov/LATEST/search-index?q=${i}`);
+    for (let i = 0; i < 4; i += 1) await edgar.search(`https://efts.sec.gov/LATEST/search-index?q=${i}`, 'discovery_fts');
     assert.equal(sleeps.length, 3, 'the first request needs no wait');
     assert.ok(sleeps.every((ms) => ms >= 250));
   });
-  test('budgets: form_d 90, 8k 50, fts 50, discovery 10, 200 total; over budget makes no request', async () => {
-    assert.deepEqual({ ...EDGAR_BUDGETS }, { form_d: 90, '8k': 50, fts: 50, discovery: 10 });
+  test('budgets: per-source documents and per-source discovery, 200 total; over budget makes no request', async () => {
+    assert.deepEqual({ ...EDGAR_BUDGETS }, { form_d: 80, '8k': 45, fts: 45, discovery_form_d: 6, discovery_8k: 6, discovery_fts: 18 });
+    assert.equal(Object.values(EDGAR_BUDGETS).reduce((a, b) => a + b, 0), 200);
     assert.equal(EDGAR_TOTAL_CAP, 200);
     const { edgar, calls } = make([{ match: () => true, body: '{}' }]);
-    for (let i = 0; i < 10; i += 1) assert.equal((await edgar.search(`https://efts.sec.gov/LATEST/search-index?q=${i}`, 'discovery')).ok, true);
-    const over = await edgar.search('https://efts.sec.gov/LATEST/search-index?q=over', 'discovery');
+    for (let i = 0; i < 18; i += 1) assert.equal((await edgar.search(`https://efts.sec.gov/LATEST/search-index?q=${i}`, 'discovery_fts')).ok, true);
+    const over = await edgar.search('https://efts.sec.gov/LATEST/search-index?q=over', 'discovery_fts');
     assert.deepEqual([over.ok, over.reason], [false, 'capped']);
-    assert.equal(calls.length, 10);
-    assert.equal(edgar.hasBudget('discovery'), false);
+    assert.equal(calls.length, 18);
+    assert.equal(edgar.hasBudget('discovery_fts'), false);
+    // PR2b: full-text queries cannot use up Form D or 8-K discovery.
+    assert.equal(edgar.hasBudget('discovery_form_d'), true);
+    assert.equal(edgar.hasBudget('discovery_8k'), true);
+    assert.equal((await edgar.search('https://efts.sec.gov/LATEST/search-index?q=fd', 'discovery_form_d')).ok, true);
+    assert.equal((await edgar.search('https://efts.sec.gov/LATEST/search-index?q=k8', 'discovery_8k')).ok, true);
+    assert.equal(edgar.hasBudget('discovery'), false, 'the old shared discovery budget is gone');
     assert.equal(edgar.hasBudget('form_d'), true);
     assert.equal(edgar.hasBudget('nonsense'), false);
   });
   test('the 200 total cap holds even when each budget still has room', async () => {
-    const { edgar, calls } = make([{ match: () => true, body: '{}' }], { budgets: { form_d: 150, '8k': 150, fts: 150, discovery: 150 } });
+    const { edgar, calls } = make([{ match: () => true, body: '{}' }], { budgets: { form_d: 150, '8k': 150, fts: 150, discovery_fts: 150 } });
     let ok = 0;
     for (let i = 0; i < 260; i += 1) if ((await edgar.document(`https://www.sec.gov/Archives/edgar/data/1/000000000000000001/f${i}.htm`, i % 2 ? 'form_d' : '8k')).ok) ok += 1;
     assert.equal(ok, 200);
@@ -150,7 +157,7 @@ describe('request pacing, budgets, and blocking', () => {
     const f = async () => seq.shift();
     const ft = fastTiming();
     const client = createEdgarClient({ guard: createFetchGuard({ fetch: f, userAgent: UA }), timing: ft.timing });
-    const r = await client.search('https://efts.sec.gov/LATEST/search-index?q=x');
+    const r = await client.search('https://efts.sec.gov/LATEST/search-index?q=x', 'discovery_fts');
     assert.equal(r.ok, true);
     assert.equal(r.text, 'fine');
     assert.ok(ft.sleeps.includes(30_000), 'capped Retry-After was slept');
@@ -160,7 +167,7 @@ describe('request pacing, budgets, and blocking', () => {
   for (const status of [429, 403, 503]) {
     test(`${status} twice: the whole EDGAR side is aborted for the run and nothing else is requested`, async () => {
       const { edgar, calls } = make([{ match: () => true, status, body: 'slow down' }]);
-      const first = await edgar.search('https://efts.sec.gov/LATEST/search-index?q=a');
+      const first = await edgar.search('https://efts.sec.gov/LATEST/search-index?q=a', 'discovery_fts');
       assert.deepEqual([first.ok, first.reason, first.status], [false, 'blocked', status]);
       assert.equal(calls.length, 2, 'exactly one retry');
       assert.equal(edgar.blocked, true);
@@ -178,12 +185,12 @@ describe('request pacing, budgets, and blocking', () => {
   });
   test('a refused URL (outside the registry) and a network failure are classified, not thrown', async () => {
     const { edgar } = make([{ match: () => true, body: '{}' }]);
-    assert.equal((await edgar.search('https://example.com/x')).reason, 'refused');
+    assert.equal((await edgar.search('https://example.com/x', 'discovery_fts')).reason, 'refused');
     const ft = fastTiming();
     /** @type {any} */
     const boom = async () => { throw new Error('ECONNRESET'); };
     const c2 = createEdgarClient({ guard: createFetchGuard({ fetch: boom, userAgent: UA }), timing: ft.timing });
-    assert.equal((await c2.search('https://efts.sec.gov/LATEST/search-index?q=x')).reason, 'network_error');
+    assert.equal((await c2.search('https://efts.sec.gov/LATEST/search-index?q=x', 'discovery_fts')).reason, 'network_error');
   });
   test('searchJson helper round-trips through the parser', () => {
     const r = parseSearchResponse(searchJson([{ adsh: '0001234567-26-000001', ciks: ['1'], display_names: ['A'], file_date: '2026-10-01', form: 'D' }], 55));

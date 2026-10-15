@@ -7,8 +7,11 @@
     <cik>0001234567</cik>
     <entityName>Northwind Logistics Inc</entityName>
     <issuerPreviousNameList>
-      <previousName>Northwind Freight Holdings</previousName>
+      <value>Northwind Freight Holdings</value>
     </issuerPreviousNameList>
+    <edgarPreviousNameList>
+      <value>None</value>
+    </edgarPreviousNameList>
     <entityType>Corporation</entityType>
     <yearOfInc><value>2011</value></yearOfInc>
   </primaryIssuer>

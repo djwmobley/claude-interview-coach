@@ -93,7 +93,7 @@ describe('recorded full-text run', () => {
     assert.deepEqual(stats.reasons, {
       'parsed:ok': 1, 'unparseable:hit_shape_unknown': 1, 'unparseable:company_missing': 1, 'out_of_scope:query_disabled': 1,
     });
-    assert.equal(stats.discovery_total, 3);
+    assert.equal(stats.discovery_total, 6, 'sum of per-form totals: 8-K and 8-K/A are separate requests');
   });
 
   test('normal hit: cleaned company, raw names kept as aliases, acquirer from the sentence, windowed text', async () => {
@@ -155,14 +155,18 @@ describe('recorded full-text run', () => {
     assert.equal(classify(it).rule, 'excl_blocked_suspect');
   });
 
-  test('budget stop is run_cap; fetch failure is doc_fetch_failed; oversized name is name_too_long', async () => {
+  test('budget stop is run_cap; a failed read is a flagged needs-review signal; oversized name is name_too_long', async () => {
     const hit = (/** @type {number} */ n, /** @type {string} */ name) => ({ adsh: `0008888888-26-00020${n}`, ciks: ['0008888888'], display_names: [name], file_date: '2026-10-08', form: '8-K', _id: `0008888888-26-00020${n}:ex99.htm` });
-    const search = searchJson([hit(1, 'A Co  (CIK 0008888888)'), hit(2, 'B Co  (CIK 0008888888)'), hit(3, 'N'.repeat(300))]);
+    const search = searchJson([hit(1, 'Alpha Freight Systems Inc  (CIK 0008888888)'), hit(2, 'Beta Freight Systems Inc  (CIK 0008888888)'), hit(3, 'N'.repeat(300))]);
     const replay = createReplayFetch([{ match: /search-index/, body: search }, { match: /ex99\.htm/, status: 404, body: '' }]);
     const edgar = createEdgarClient({ guard: createFetchGuard({ fetch: replay.fetch, userAgent: UA }), timing: { ...fastTiming().timing, budgets: { fts: 1 } } });
     const out = await runFts({ edgar, now: NOW, blocked: BLOCKED, queries: [Q_PE] });
-    assert.deepEqual(out.stats.reasons, { 'unparseable:doc_fetch_failed': 1, 'out_of_scope:run_cap': 1, 'unparseable:name_too_long': 1 });
+    assert.deepEqual(out.stats.reasons, { 'parsed:ok': 1, 'out_of_scope:run_cap': 1, 'unparseable:name_too_long': 1 });
     assert.equal(out.stats.capped, 1);
+    const failed = out.items.find((i) => i.outcome === 'parsed');
+    assert.ok(failed && failed.signal);
+    assert.equal(failed.signal.doc_fetch, 'failed');
+    assert.deepEqual(classify(failed).rule, 'doc_fetch_failed');
   });
 
   test('skips: no SEC contact and a blocked client make zero requests', async () => {

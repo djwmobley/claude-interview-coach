@@ -16,8 +16,9 @@
  *   4 date             null, invalid, >7d future -> needs-review; older than the window -> not-target
  *   5 size             confidence-enum total mapping (see sizeStep; plan section 15: unknown or low size
  *                      continues and is flagged size_verified=false)
- *   6 form_d_issuer    fund-like issuer, fund industry group, or SIC 6799 -> needs-review; absent SIC -> needs-review
- *   7 trigger_specific departure role must be CTO-level and not ambiguous; gap needs a hiring VP/Director/
+ *   6 form_d_issuer    both fund signals -> not-target fund_issuer; one -> needs-review fund_signal_conflict;
+ *                      fund-like issuer, fund industry group, or SIC 6799 -> needs-review; absent SIC -> needs-review
+ *   7 trigger_specific a failed or partial document read (doc_fetch) -> needs-review; departure role must be CTO-level and not ambiguous; gap needs a hiring VP/Director/
  *                      Head of Engineering listing, no CTO-level listing, and a complete listing group
  *                      (departure_signal is informational only)
  *   8 final            target
@@ -27,7 +28,8 @@
  *     pe_firm, text, evidence_url, evidence_source, event_date, filing_date,
  *     size: { low, high, basis, confidence }, employees, offering_amount (IGNORED, never size),
  *     issuer: { name, sic, industry_group }, role, listings: [{ title, description }], listings_truncated,
- *     departure_ambiguous, departure_signal (informational) }
+ *     departure_ambiguous, departure_signal (informational),
+ *     doc_fetch: 'ok'|'partial'|'failed', unread_hit_docs (informational), issuer.fund_signals: { nav_range, pooled_group } }
  */
 import fs from 'node:fs';
 import path from 'node:path';
@@ -331,13 +333,31 @@ function classifyInner(signal, opts, inputs) {
       inputs.issuer_sic = sic || null;
       const industry = normalizeName(sig.issuer?.industry_group).toLowerCase();
       inputs.issuer_industry_group = industry || null;
-      const fundIndustry = industry !== '' && p.fund_industry_groups.some((g) => industry.includes(g.toLowerCase()));
+      // PR2b fund signals (adapter-supplied): aggregateNetAssetValueRange present AND a pooled investment
+      // fund industry group. Both -> not-target fund_issuer (exclusion already ran at step 2). Exactly one is a
+      // conflict -> needs-review. Neither continues (size then follows Item 5, unknown size stays unverified).
+      const fsig = sig.issuer?.fund_signals;
+      const hasFundSignals = fsig !== null && typeof fsig === 'object';
+      if (hasFundSignals) {
+        const nav = fsig.nav_range === true;
+        const pooled = fsig.pooled_group === true;
+        inputs.fund_signals = { nav_range: nav, pooled_group: pooled };
+        if (nav && pooled) return verdict('not-target', 'fund_issuer');
+        if (nav !== pooled) return verdict('needs-review', 'fund_signal_conflict');
+      }
+      const fundIndustry = !hasFundSignals && industry !== '' && p.fund_industry_groups.some((g) => industry.includes(g.toLowerCase()));
       if (fundLike || fundIndustry || (sic && p.fund_sic_codes.includes(sic))) return verdict('needs-review', 'form_d_fund_issuer');
       if (!sic) return verdict('needs-review', 'form_d_sic_unavailable');
       return null;
     },
 
     trigger_specific: () => {
+      // PR2b: a chosen document that failed to fetch means the filing was not (fully) read. Never clean.
+      const df = sig.doc_fetch;
+      if (df !== undefined && df !== null && df !== 'ok') {
+        inputs.doc_fetch = typeof df === 'string' ? df.slice(0, 20) : 'invalid';
+        return df === 'failed' ? verdict('needs-review', 'doc_fetch_failed') : verdict('needs-review', 'doc_fetch_failed_partial');
+      }
       if (kind === 'exec_departure') {
         inputs.role = normalizeName(sig.role) || null;
         if (!isCtoLevelTitle(sig.role)) return verdict('needs-review', 'departure_role_not_cto_level');
@@ -460,7 +480,8 @@ export const EMITTABLE_RULES = Object.freeze([
   'excl_blocked_company', 'excl_blocked_suspect', 'excl_unknown_company', 'excl_applied_before', 'excl_unmapped_branch', 'excl_blocklist_unavailable',
   'evidence_missing', 'evidence_invalid', 'date_missing', 'date_invalid', 'date_future', 'date_stale',
   'size_invalid', 'size_out_of_band', 'size_out_of_band_medium',
-  'form_d_issuer_unknown', 'form_d_fund_issuer', 'form_d_sic_unavailable',
+  'form_d_issuer_unknown', 'form_d_fund_issuer', 'form_d_sic_unavailable', 'fund_issuer', 'fund_signal_conflict',
+  'doc_fetch_failed', 'doc_fetch_failed_partial',
   'departure_role_not_cto_level', 'departure_ambiguous', 'gap_no_hiring_listing', 'gap_cto_level_listing_present', 'gap_listings_truncated',
   'target_all_checks_passed',
 ]);

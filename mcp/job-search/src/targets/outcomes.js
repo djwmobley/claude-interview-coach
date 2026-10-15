@@ -34,11 +34,14 @@ export const COMMON_REASONS = Object.freeze(['adapter_exception', 'name_too_long
  * @property {number|null} discovery_total how many hits the source says exist
  * @property {number} read how many were actually read
  * @property {Record<string, number>} extra adapter-specific counters (message cap, row cap, truncation flags)
+ * @property {{ source: 'complete'|'partial', forms: Record<string, { status: 'complete'|'partial'|'none', total: number|null, read: number, pages: Array<{ from: number, hits: number, ok: boolean, reason: string|null }> }> }|null} coverage
+ *   per-form discovery coverage (PR2b); null for sources with no discovery. The source is complete ONLY when
+ *   every form request returned all its pages, anything else is partial (undercoverage).
  */
 
 /** @returns {SourceStats} */
 export function newStats() {
-  return { raw: 0, parsed: 0, unparseable: 0, out_of_scope: 0, capped: 0, reasons: {}, skipped: null, warnings: [], discovery_total: null, read: 0, extra: {} };
+  return { raw: 0, parsed: 0, unparseable: 0, out_of_scope: 0, capped: 0, reasons: {}, skipped: null, warnings: [], discovery_total: null, read: 0, extra: {}, coverage: null };
 }
 
 /**

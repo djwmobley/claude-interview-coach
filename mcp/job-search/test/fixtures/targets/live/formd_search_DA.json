@@ -1,0 +1,171 @@
+{
+ "took": 1,
+ "timed_out": false,
+ "hits": {
+  "total": {
+   "value": 3,
+   "relation": "eq"
+  },
+  "max_score": null,
+  "hits": [
+   {
+    "_index": "edgar_file",
+    "_id": "0002157441-26-000002:primary_doc.xml",
+    "_score": null,
+    "_source": {
+     "ciks": [
+      "0002157441"
+     ],
+     "period_ending": null,
+     "file_num": [
+      "021-599298"
+     ],
+     "display_names": [
+      "American Ventures QP Opportunity Fund LLC, Series VI Strategic Space  (CIK 0002157441)"
+     ],
+     "xsl": "xslFormDX01",
+     "schema_version": "X0708",
+     "sequence": 1,
+     "root_forms": [
+      "D"
+     ],
+     "file_date": "2026-10-15",
+     "biz_states": [
+      "FL"
+     ],
+     "sics": [],
+     "form": "D/A",
+     "adsh": "0002157441-26-000002",
+     "film_num": [
+      "261463753"
+     ],
+     "biz_locations": [
+      "Palm Beach Gardens, FL"
+     ],
+     "file_type": "D/A",
+     "ma_i_individual": null,
+     "file_description": null,
+     "inc_states": [
+      "DE"
+     ],
+     "items": [
+      "06B",
+      "3C",
+      "3C.7"
+     ]
+    },
+    "sort": [
+     1792022400000,
+     "0002157441-26-000002:primary_doc.xml"
+    ]
+   },
+   {
+    "_index": "edgar_file",
+    "_id": "0002145349-26-000002:primary_doc.xml",
+    "_score": null,
+    "_source": {
+     "ciks": [
+      "0002145349"
+     ],
+     "period_ending": null,
+     "file_num": [
+      "021-590660"
+     ],
+     "display_names": [
+      "Persentic Inc  (CIK 0002145349)"
+     ],
+     "xsl": "xslFormDX01",
+     "schema_version": "X0708",
+     "sequence": 1,
+     "root_forms": [
+      "D"
+     ],
+     "file_date": "2026-10-15",
+     "biz_states": [
+      "WY"
+     ],
+     "sics": [],
+     "form": "D/A",
+     "adsh": "0002145349-26-000002",
+     "film_num": [
+      "261462435"
+     ],
+     "biz_locations": [
+      "Sheridan, WY"
+     ],
+     "file_type": "D/A",
+     "ma_i_individual": null,
+     "file_description": null,
+     "inc_states": [
+      "WY"
+     ],
+     "items": [
+      "06C"
+     ]
+    },
+    "sort": [
+     1792022400000,
+     "0002145349-26-000002:primary_doc.xml"
+    ]
+   },
+   {
+    "_index": "edgar_file",
+    "_id": "0002140490-26-000002:primary_doc.xml",
+    "_score": null,
+    "_source": {
+     "ciks": [
+      "0002140490",
+      "0002140489"
+     ],
+     "period_ending": null,
+     "file_num": [
+      "021-589699",
+      "021-589699-01"
+     ],
+     "display_names": [
+      "Unpopular Ventures Preferred, LP - F3  (CIK 0002140490)",
+      "Unpopular Ventures Preferred QP, LP - F3  (CIK 0002140489)"
+     ],
+     "xsl": "xslFormDX01",
+     "schema_version": "X0708",
+     "sequence": 1,
+     "root_forms": [
+      "D"
+     ],
+     "file_date": "2026-10-15",
+     "biz_states": [
+      "WA"
+     ],
+     "sics": [],
+     "form": "D/A",
+     "adsh": "0002140490-26-000002",
+     "film_num": [
+      "261460953",
+      "261460954"
+     ],
+     "biz_locations": [
+      "Lynnwood, WA",
+      "Lynnwood, WA"
+     ],
+     "file_type": "D/A",
+     "ma_i_individual": null,
+     "file_description": null,
+     "inc_states": [
+      "DE",
+      "DE"
+     ],
+     "items": [
+      "06B",
+      "3C",
+      "3C.1",
+      "3C.7"
+     ]
+    },
+    "sort": [
+     1792022400000,
+     "0002140490-26-000002:primary_doc.xml"
+    ]
+   }
+  ]
+ }
+}
