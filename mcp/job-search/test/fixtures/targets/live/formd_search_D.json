@@ -1,0 +1,115 @@
+{
+ "took": 1,
+ "timed_out": false,
+ "hits": {
+  "total": {
+   "value": 2,
+   "relation": "eq"
+  },
+  "max_score": null,
+  "hits": [
+   {
+    "_index": "edgar_file",
+    "_id": "0002160438-26-000001:primary_doc.xml",
+    "_score": null,
+    "_source": {
+     "ciks": [
+      "0002160438"
+     ],
+     "period_ending": null,
+     "file_num": [
+      "021-601415"
+     ],
+     "display_names": [
+      "Meme Meta LP  (CIK 0002160438)"
+     ],
+     "xsl": "xslFormDX01",
+     "schema_version": "X0708",
+     "sequence": 1,
+     "root_forms": [
+      "D"
+     ],
+     "file_date": "2026-10-15",
+     "biz_states": [
+      "CA"
+     ],
+     "sics": [],
+     "form": "D",
+     "adsh": "0002160438-26-000001",
+     "film_num": [
+      "261462727"
+     ],
+     "biz_locations": [
+      "San Jose, CA"
+     ],
+     "file_type": "D",
+     "ma_i_individual": null,
+     "file_description": null,
+     "inc_states": [
+      "DE"
+     ],
+     "items": [
+      "06C",
+      "3C",
+      "3C.1"
+     ]
+    },
+    "sort": [
+     1792022400000,
+     "0002160438-26-000001:primary_doc.xml"
+    ]
+   },
+   {
+    "_index": "edgar_file",
+    "_id": "0002157441-26-000002:primary_doc.xml",
+    "_score": null,
+    "_source": {
+     "ciks": [
+      "0002157441"
+     ],
+     "period_ending": null,
+     "file_num": [
+      "021-599298"
+     ],
+     "display_names": [
+      "American Ventures QP Opportunity Fund LLC, Series VI Strategic Space  (CIK 0002157441)"
+     ],
+     "xsl": "xslFormDX01",
+     "schema_version": "X0708",
+     "sequence": 1,
+     "root_forms": [
+      "D"
+     ],
+     "file_date": "2026-10-15",
+     "biz_states": [
+      "FL"
+     ],
+     "sics": [],
+     "form": "D/A",
+     "adsh": "0002157441-26-000002",
+     "film_num": [
+      "261463753"
+     ],
+     "biz_locations": [
+      "Palm Beach Gardens, FL"
+     ],
+     "file_type": "D/A",
+     "ma_i_individual": null,
+     "file_description": null,
+     "inc_states": [
+      "DE"
+     ],
+     "items": [
+      "06B",
+      "3C",
+      "3C.7"
+     ]
+    },
+    "sort": [
+     1792022400000,
+     "0002157441-26-000002:primary_doc.xml"
+    ]
+   }
+  ]
+ }
+}

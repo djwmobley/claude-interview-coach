@@ -28,6 +28,7 @@ const BASE = Object.freeze({
   event_date: '2026-09-20',
   evidence_url: 'https://www.sec.gov/Archives/edgar/data/1234567/000123456726000042/0001234567-26-000042-index.htm',
   evidence_source: 'edgar_8k',
+  doc_fetch: 'ok',
   size: { low: 120_000_000, high: 300_000_000, basis: 'stated', confidence: 'high' },
   text: 'Example Capital completed its acquisition of Northwind Logistics.',
 });
@@ -345,7 +346,8 @@ describe('size (plan section 15)', () => {
 });
 
 describe('Form D issuer', () => {
-  const formD = (/** @type {any} */ issuer) => ({ evidence_source: 'edgar_form_d', issuer });
+  const NO_FUND = { nav_range: false, pooled_group: false };
+  const formD = (/** @type {any} */ issuer) => ({ evidence_source: 'edgar_form_d', issuer: issuer && typeof issuer === 'object' && !('fund_signals' in issuer) ? { ...issuer, fund_signals: NO_FUND } : issuer });
   test('fund-like names are needs-review', () => {
     for (const name of ['Northwind Growth Fund II LP', 'Northwind Partners Fund', 'Northwind Opportunity SPV', 'Northwind L.P.', 'Northwind Funds Inc', 'NORTHWIND FUND']) {
       const v = run(formD({ name, sic: '7372' }));
@@ -363,11 +365,17 @@ describe('Form D issuer', () => {
   test('an operating-company issuer passes', () => {
     assert.equal(run(formD({ name: 'Northwind Logistics Inc', sic: '4731' })).class, 'target');
   });
-  test('fund industry groups map to the fund path', () => {
+  test('fund industry groups are the adapter fund signal: a pooled group without a NAV range is a conflict, never a clean pass', () => {
     for (const g of ['Pooled Investment Fund', 'pooled investment fund', 'Hedge Fund', 'Private Equity Fund', 'Venture Capital Fund', 'Other Investment Fund', 'Investing']) {
-      assert.equal(run(formD({ name: 'Northwind Logistics Inc', sic: '4731', industry_group: g })).rule, 'form_d_fund_issuer', g);
+      assert.equal(run(formD({ name: 'Northwind Logistics Inc', sic: '4731', industry_group: g, fund_signals: { nav_range: false, pooled_group: true } })).rule, 'fund_signal_conflict', g);
     }
     assert.equal(run(formD({ name: 'Northwind Logistics Inc', sic: '4731', industry_group: 'Other Technology' })).class, 'target');
+  });
+  test('missing or malformed fund_signals is signal_field_invalid, never a pass', () => {
+    for (const fs of [undefined, null, 'yes', 7, [], [true, true], {}, { nav_range: true }, { nav_range: 'true', pooled_group: false }, { nav_range: 1, pooled_group: 0 }]) {
+      const v = run({ evidence_source: 'edgar_form_d', issuer: { name: 'Northwind Logistics Inc', sic: '4731', fund_signals: fs } });
+      assert.deepEqual([v.class, v.rule, v.inputs.invalid_field], ['needs-review', 'signal_field_invalid', 'fund_signals'], JSON.stringify(fs));
+    }
   });
   test('an absent SIC is needs-review form_d_sic_unavailable; a fund name still reports the fund path first', () => {
     for (const sic of [undefined, null, '', '   ']) {

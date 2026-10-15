@@ -70,7 +70,8 @@ describe('recorded 8-K Item 5.02 run', () => {
       'unparseable:section_not_found': 1,
       'unparseable:hit_shape_unknown': 1,
     });
-    assert.equal(stats.discovery_total, 7);
+    assert.equal(stats.discovery_total, 14, 'sum of the per-form totals (the replay serves the same page for 8-K and 8-K/A)');
+    assert.equal(stats.coverage?.source, 'complete');
   });
 
   test('a clear CTO resignation: parsed, role bound, cover date used, a flagged-unverified target', async () => {
@@ -123,8 +124,11 @@ describe('recorded 8-K Item 5.02 run', () => {
     assert.ok(calls.every((c) => c.method === 'GET' && c.headers['user-agent'] === UA));
     const docs = calls.filter((c) => c.url.endsWith('form8k.htm')).map((c) => c.url);
     assert.equal(docs.length, 5);
-    assert.ok(calls[0].url.includes('forms=8-K%2C8-K%2FA'));
-    assert.ok(calls[0].url.includes('startdt=2026-09-15'), 'a 30-day window');
+    const searches = calls.filter((c) => c.url.includes('search-index'));
+    assert.equal(searches.length, 2, 'one discovery request per form type');
+    assert.ok(searches[0].url.includes('forms=8-K&') && !searches[0].url.includes('8-K%2F'), searches[0].url);
+    assert.ok(searches[1].url.includes('forms=8-K%2FA'), searches[1].url);
+    assert.ok(searches[0].url.includes('startdt=2026-09-15'), 'a 30-day window');
   });
 });
 
@@ -180,13 +184,19 @@ describe('document handling', () => {
     const { items } = await one(departure(), { display_names: ['N'.repeat(250) + '  (CIK 0001111111)'] });
     assert.equal(items[0].reason, 'name_too_long');
   });
-  test('fetch failures are doc_fetch_failed; a budget stop is run_cap', async () => {
+  test('a failed document read is a flagged needs-review signal; a budget stop is run_cap', async () => {
     const routes = [
       { match: /search-index/, file: 'edgar_8k/search_page1.json' },
       { match: /form8k\.htm/, status: 404, body: 'gone' },
     ];
     const r = await runWith(routes);
-    assert.equal(r.stats.reasons['unparseable:doc_fetch_failed'], 5);
+    // PR2b: a failed document read is a flagged signal (needs-review), not a dropped unparseable item.
+    const failed = r.items.filter((i) => i.outcome === 'parsed');
+    assert.equal(failed.length, 5);
+    for (const it of failed) {
+      assert.equal(it.signal.doc_fetch, 'failed');
+      assert.deepEqual([classify(it).class, classify(it).rule], ['needs-review', 'doc_fetch_failed']);
+    }
     const capped = await runWith(standardRoutes(), { budgets: { '8k': 2 } });
     assert.equal(capped.stats.reasons['out_of_scope:run_cap'], 3);
     assert.equal(capped.stats.capped, 3);
@@ -201,7 +211,8 @@ describe('document handling', () => {
     ];
     const { items, calls } = await runWith([{ match: /search-index/, body: searchJson(hits) }]);
     assert.deepEqual(items.map((i) => i.reason), ['accession_malformed', 'cik_malformed', 'hit_shape_unknown', 'hit_shape_unknown']);
-    assert.equal(calls.length, 1, 'only the discovery request was made');
+    assert.equal(calls.length, 2, 'only the two discovery requests (8-K, 8-K/A) were made');
+    assert.ok(calls.every((c) => c.url.includes('search-index')));
   });
   test('a blocked or unreachable search skips the adapter; a missing SEC contact skips with zero requests', async () => {
     const blocked = await runWith([{ match: /search-index/, status: 503, body: '' }]);

@@ -31,7 +31,7 @@ const DOC = (/** @type {string} */ cik, /** @type {string} */ folder) => `https:
 /** The standard recorded world: search page, five documents, one submissions JSON. */
 function standardRoutes() {
   return [
-    { match: /efts\.sec\.gov\/LATEST\/search-index\?.*forms=D%2CD%2FA/, file: 'form_d/search_page1.json' },
+    { match: /efts\.sec\.gov\/LATEST\/search-index\?/, file: 'form_d/search_page1.json' },
     { match: DOC('1234567', '000123456726000042'), file: 'form_d/operating.xml' },
     { match: DOC('2345678', '000234567826000011'), file: 'form_d/fund.xml' },
     { match: DOC('1234567', '000123456726000077'), file: 'form_d/amendment.xml' },
@@ -76,8 +76,9 @@ describe('recorded Form D run', () => {
       [stats.parsed, stats.unparseable, stats.out_of_scope],
       [4, 2, 1],
     );
-    assert.equal(stats.discovery_total, 7);
-    assert.equal(stats.read, 7);
+    assert.equal(stats.discovery_total, 14, 'sum of per-form totals (the replay serves the same page for D and D/A)');
+    assert.equal(stats.read, 7, 'hits are merged by accession');
+    assert.equal(stats.coverage?.source, 'complete');
     assert.deepEqual(stats.reasons, {
       'parsed:ok': 4, 'out_of_scope:fund_like_name_prefilter': 1, 'unparseable:accession_malformed': 1, 'unparseable:hit_shape_unknown': 1,
     });
@@ -91,7 +92,10 @@ describe('recorded Form D run', () => {
       assert.equal(c.headers['user-agent'], UA);
       assert.equal(c.headers.authorization, undefined);
     }
-    assert.ok(calls[0].url.includes('forms=D%2CD%2FA'));
+    const searches = calls.filter((c) => c.url.includes('search-index'));
+    assert.equal(searches.length, 2, 'one discovery request per form type');
+    assert.ok(/forms=D&/.test(searches[0].url), searches[0].url);
+    assert.ok(searches[1].url.includes('forms=D%2FA'), searches[1].url);
     assert.ok(calls[0].url.includes('dateRange=custom'));
     assert.ok(calls[0].url.includes('startdt=2026-10-01'));
     assert.ok(calls[0].url.includes('enddt=2026-10-15'));
@@ -107,7 +111,8 @@ describe('recorded Form D run', () => {
     assert.equal(s.aliases[0], 'Northwind Logistics Inc', 'the issuer legal name is always the first alias');
     assert.ok(s.aliases.includes('Northwind Freight Holdings'), 'previous / former names');
     assert.ok(s.aliases.some((a) => a.includes('CIK 0001234567')), 'raw display names are kept as aliases');
-    assert.deepEqual(s.issuer, { name: 'Northwind Logistics Inc', sic: '7372', industry_group: 'Other Technology' });
+    assert.deepEqual(s.issuer, { name: 'Northwind Logistics Inc', sic: '7372', industry_group: 'Other Technology', fund_signals: { nav_range: false, pooled_group: false } });
+    assert.equal(it.extracted.prev_names_dropped, 1, 'the "None" edgarPreviousNameList value is dropped and counted');
     assert.equal(s.investor, 'Example Capital Partners LLC');
     assert.equal(s.acquirer, null);
     assert.equal(s.pe_firm, null);
@@ -131,7 +136,8 @@ describe('recorded Form D run', () => {
     assert.ok(it && it.signal);
     assert.equal(it.signal.issuer.industry_group, 'Pooled Investment Fund');
     assert.equal(it.signal.issuer.sic, null);
-    assert.equal(classify(it).rule, 'form_d_fund_issuer');
+    assert.deepEqual(it.signal.issuer.fund_signals, { nav_range: false, pooled_group: true });
+    assert.equal(classify(it).rule, 'fund_signal_conflict', 'pooled group without a net asset value range is a conflict');
   });
 
   test('a fund-like display name is pre-filtered, counted, and persisted as out_of_scope', async () => {
@@ -398,13 +404,16 @@ describe('caps, skips, and accounting', () => {
       { match: /submissions/, status: 404, body: '' },
     ];
     const { stats } = await runWith(routes);
-    assert.equal(stats.discovery_total, 250);
+    assert.equal(stats.discovery_total, 500, '250 per form request');
     assert.equal(stats.read, 1);
-    assert.equal(stats.extra.discovery_not_read, 249);
+    assert.equal(stats.extra.discovery_not_read, 498, '249 unread per form request');
+    assert.equal(stats.coverage?.source, 'partial', 'undercoverage is never reported complete');
+    assert.equal(stats.coverage?.forms.D.status, 'partial');
+    assert.equal(stats.extra.undercoverage, 1);
   });
   test('an unreadable search response is one counted unparseable hit_shape_unknown', async () => {
     const { items, stats } = await runWith([{ match: /search-index/, body: '<html>captcha</html>' }]);
-    assert.equal(stats.raw, 1);
+    assert.equal(stats.raw, 2, 'one per form request');
     assert.equal(items[0].reason, 'hit_shape_unknown');
   });
   test('a blocked search (429 twice) skips the adapter with sec_blocked and warns', async () => {

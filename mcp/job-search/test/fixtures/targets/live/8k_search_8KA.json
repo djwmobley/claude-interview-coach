@@ -1,0 +1,113 @@
+{
+ "took": 1,
+ "timed_out": false,
+ "hits": {
+  "total": {
+   "value": 2,
+   "relation": "eq"
+  },
+  "max_score": null,
+  "hits": [
+   {
+    "_index": "edgar_file",
+    "_id": "0001026655-26-000067:cmt-20260928.htm",
+    "_score": 10.353351,
+    "_source": {
+     "ciks": [
+      "0001026655"
+     ],
+     "period_ending": "2026-09-28",
+     "file_num": [
+      "001-12505"
+     ],
+     "display_names": [
+      "CORE MOLDING TECHNOLOGIES INC  (CMT)  (CIK 0001026655)"
+     ],
+     "xsl": null,
+     "sequence": 1,
+     "root_forms": [
+      "8-K"
+     ],
+     "file_date": "2026-09-28",
+     "biz_states": [
+      "OH"
+     ],
+     "sics": [
+      "3089"
+     ],
+     "form": "8-K/A",
+     "adsh": "0001026655-26-000067",
+     "film_num": [
+      "261412533"
+     ],
+     "biz_locations": [
+      "Columbus, OH"
+     ],
+     "file_type": "8-K/A",
+     "ma_i_individual": null,
+     "file_description": "8-K/A",
+     "inc_states": [
+      "DE"
+     ],
+     "items": [
+      "5.02",
+      "9.01"
+     ]
+    }
+   },
+   {
+    "_index": "edgar_file",
+    "_id": "0001705696-26-000094:vici-20260921.htm",
+    "_score": 8.159279,
+    "_source": {
+     "ciks": [
+      "0001705696",
+      "0001920791"
+     ],
+     "period_ending": "2026-09-18",
+     "file_num": [
+      "001-38372",
+      "333-264352-01"
+     ],
+     "display_names": [
+      "VICI PROPERTIES INC.  (VICI)  (CIK 0001705696)",
+      "VICI Properties L.P.  (CIK 0001920791)"
+     ],
+     "xsl": null,
+     "sequence": 1,
+     "root_forms": [
+      "8-K"
+     ],
+     "file_date": "2026-09-22",
+     "biz_states": [
+      "NY"
+     ],
+     "sics": [
+      "6798",
+      "6798"
+     ],
+     "form": "8-K/A",
+     "adsh": "0001705696-26-000094",
+     "film_num": [
+      "261395324",
+      "261395325"
+     ],
+     "biz_locations": [
+      "New York, NY",
+      "New York, NY"
+     ],
+     "file_type": "8-K/A",
+     "ma_i_individual": null,
+     "file_description": "8-K/A",
+     "inc_states": [
+      "MD",
+      "DE"
+     ],
+     "items": [
+      "5.02"
+     ]
+    }
+   }
+  ]
+ }
+}

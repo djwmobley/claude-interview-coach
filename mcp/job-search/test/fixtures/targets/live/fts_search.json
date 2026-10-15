@@ -1,0 +1,308 @@
+{
+ "took": 1,
+ "timed_out": false,
+ "hits": {
+  "total": {
+   "value": 6,
+   "relation": "eq"
+  },
+  "max_score": null,
+  "hits": [
+   {
+    "_index": "edgar_file",
+    "_id": "0001193125-26-422320:d140608dex991.htm",
+    "_score": 9.073318,
+    "_source": {
+     "ciks": [
+      "0001818201"
+     ],
+     "period_ending": "2026-10-14",
+     "file_num": [
+      "001-39447"
+     ],
+     "display_names": [
+      "CCC Intelligent Solutions Holdings Inc.  (CCC)  (CIK 0001818201)"
+     ],
+     "xsl": null,
+     "sequence": "3",
+     "root_forms": [
+      "8-K"
+     ],
+     "file_date": "2026-10-15",
+     "biz_states": [
+      "IL"
+     ],
+     "sics": [
+      "7372"
+     ],
+     "form": "8-K",
+     "adsh": "0001193125-26-422320",
+     "film_num": [
+      "261461388"
+     ],
+     "biz_locations": [
+      "Chicago, IL"
+     ],
+     "file_type": "EX-99.1",
+     "ma_i_individual": null,
+     "file_description": "EX-99.1",
+     "inc_states": [
+      "DE"
+     ],
+     "items": [
+      "1.01",
+      "7.01",
+      "9.01"
+     ]
+    }
+   },
+   {
+    "_index": "edgar_file",
+    "_id": "0001193125-26-422320:d140608dex21.htm",
+    "_score": 2.3534088,
+    "_source": {
+     "ciks": [
+      "0001818201"
+     ],
+     "period_ending": "2026-10-14",
+     "file_num": [
+      "001-39447"
+     ],
+     "display_names": [
+      "CCC Intelligent Solutions Holdings Inc.  (CCC)  (CIK 0001818201)"
+     ],
+     "xsl": null,
+     "sequence": "2",
+     "root_forms": [
+      "8-K"
+     ],
+     "file_date": "2026-10-15",
+     "biz_states": [
+      "IL"
+     ],
+     "sics": [
+      "7372"
+     ],
+     "form": "8-K",
+     "adsh": "0001193125-26-422320",
+     "film_num": [
+      "261461388"
+     ],
+     "biz_locations": [
+      "Chicago, IL"
+     ],
+     "file_type": "EX-2.1",
+     "ma_i_individual": null,
+     "file_description": "EX-2.1",
+     "inc_states": [
+      "DE"
+     ],
+     "items": [
+      "1.01",
+      "7.01",
+      "9.01"
+     ]
+    }
+   },
+   {
+    "_index": "edgar_file",
+    "_id": "0001193125-26-406024:d107296dex991.htm",
+    "_score": 7.9116797,
+    "_source": {
+     "ciks": [
+      "0001351636"
+     ],
+     "period_ending": "2026-09-28",
+     "file_num": [
+      "001-38107"
+     ],
+     "display_names": [
+      "SOUNDTHINKING, INC.  (SSTI)  (CIK 0001351636)"
+     ],
+     "xsl": null,
+     "sequence": "7",
+     "root_forms": [
+      "8-K"
+     ],
+     "file_date": "2026-09-29",
+     "biz_states": [
+      "CA"
+     ],
+     "sics": [
+      "7372"
+     ],
+     "form": "8-K",
+     "adsh": "0001193125-26-406024",
+     "film_num": [
+      "261419170"
+     ],
+     "biz_locations": [
+      "Fremont, CA"
+     ],
+     "file_type": "EX-99.1",
+     "ma_i_individual": null,
+     "file_description": "EX-99.1",
+     "inc_states": [
+      "DE"
+     ],
+     "items": [
+      "1.01",
+      "5.02",
+      "7.01",
+      "9.01"
+     ]
+    }
+   },
+   {
+    "_index": "edgar_file",
+    "_id": "0001193125-26-406024:d107296dex21.htm",
+    "_score": 1.6615291,
+    "_source": {
+     "ciks": [
+      "0001351636"
+     ],
+     "period_ending": "2026-09-28",
+     "file_num": [
+      "001-38107"
+     ],
+     "display_names": [
+      "SOUNDTHINKING, INC.  (SSTI)  (CIK 0001351636)"
+     ],
+     "xsl": null,
+     "sequence": "2",
+     "root_forms": [
+      "8-K"
+     ],
+     "file_date": "2026-09-29",
+     "biz_states": [
+      "CA"
+     ],
+     "sics": [
+      "7372"
+     ],
+     "form": "8-K",
+     "adsh": "0001193125-26-406024",
+     "film_num": [
+      "261419170"
+     ],
+     "biz_locations": [
+      "Fremont, CA"
+     ],
+     "file_type": "EX-2.1",
+     "ma_i_individual": null,
+     "file_description": "EX-2.1",
+     "inc_states": [
+      "DE"
+     ],
+     "items": [
+      "1.01",
+      "5.02",
+      "7.01",
+      "9.01"
+     ]
+    }
+   },
+   {
+    "_index": "edgar_file",
+    "_id": "0001213900-26-106418:ea0307552-8k_tavia.htm",
+    "_score": 6.9410567,
+    "_source": {
+     "ciks": [
+      "0002020385"
+     ],
+     "period_ending": "2026-09-28",
+     "file_num": [
+      "001-42430"
+     ],
+     "display_names": [
+      "Tavia Acquisition Corp.  (TAVI, TAVIR, TAVIU)  (CIK 0002020385)"
+     ],
+     "xsl": null,
+     "sequence": 1,
+     "root_forms": [
+      "8-K"
+     ],
+     "file_date": "2026-10-02",
+     "biz_states": [
+      "DE"
+     ],
+     "sics": [
+      "6770"
+     ],
+     "form": "8-K",
+     "adsh": "0001213900-26-106418",
+     "film_num": [
+      "261437022"
+     ],
+     "biz_locations": [
+      "Newark, DE"
+     ],
+     "file_type": "8-K",
+     "ma_i_individual": null,
+     "file_description": "CURRENT REPORT",
+     "inc_states": [
+      "E9"
+     ],
+     "items": [
+      "1.01",
+      "5.02"
+     ]
+    }
+   },
+   {
+    "_index": "edgar_file",
+    "_id": "0001493152-26-043135:form8-k.htm",
+    "_score": 6.5149593,
+    "_source": {
+     "ciks": [
+      "0001948864"
+     ],
+     "period_ending": "2026-09-17",
+     "file_num": [
+      "001-42274"
+     ],
+     "display_names": [
+      "HEALTHY CHOICE WELLNESS CORP.  (HCWC)  (CIK 0001948864)"
+     ],
+     "xsl": null,
+     "sequence": 1,
+     "root_forms": [
+      "8-K"
+     ],
+     "file_date": "2026-09-17",
+     "biz_states": [
+      "FL"
+     ],
+     "sics": [
+      "5411"
+     ],
+     "form": "8-K",
+     "adsh": "0001493152-26-043135",
+     "film_num": [
+      "261387132"
+     ],
+     "biz_locations": [
+      "Hollywood, FL"
+     ],
+     "file_type": "8-K",
+     "file_description": "8-K",
+     "inc_states": [
+      "DE"
+     ],
+     "items": [
+      "1.01",
+      "2.01",
+      "2.02",
+      "3.02",
+      "3.03",
+      "4.01",
+      "5.01",
+      "5.02",
+      "5.03",
+      "9.01"
+     ]
+    }
+   }
+  ]
+ }
+}

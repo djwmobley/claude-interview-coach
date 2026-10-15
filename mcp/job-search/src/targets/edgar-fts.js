@@ -7,6 +7,11 @@
  * fetched (read-capped) for an excerpt window and the sentence pattern "acquired by | merger with |
  * investment from <Name>". The FULL document is scanned for blocked names before any truncation.
  *
+ * PR2b: one discovery request per form type (each configured form plus its amendment form) from the source's
+ * own reserved budget; ONE signal per accession; up to 3 hit documents read per accession (the filing's own
+ * form, then EX-99.*, then the rest); doc_fetch = ok | partial | failed rides on the signal and the classifier
+ * turns a failed or partial read into needs-review. Company identity is the primary filer CIK.
+ *
  * FTS contact rule (15.3): role only, never a name. Dedup key: edgar_fts|<query id>|<adsh>.
  */
 import fs from 'node:fs';
@@ -14,9 +19,10 @@ import path from 'node:path';
 import { z } from 'zod';
 import { getEnv } from '../core/config.js';
 import { normalizeCompany } from '../core/normalize.js';
+import { validCik, validAdsh, indexUrl, daysBefore } from './edgar-client.js';
 import {
-  validCik, validAdsh, validFilename, indexUrl, docUrl, searchUrl, daysBefore, parseSearchResponse,
-} from './edgar-client.js';
+  discoverByForm, formsToRequests, mergeCoverage, groupByAccession, primaryFiler, chooseDocs, readDocs, evidenceOf,
+} from './edgar-shared.js';
 import { createCollector } from './outcomes.js';
 import {
   sanitizeName, sanitizeText, makeExcerpt, boundExtracted, findBlockedHits, buildSignalText, contentHash,
@@ -25,7 +31,8 @@ import { htmlToPlain, extractCoverDate, extractParty, analyzeDeparture, queryTer
 import { cleanDisplayName } from './form-d.js';
 
 export const FTS_SOURCE = 'edgar_fts';
-export const FTS_PARSER_VERSION = 'fts-1';
+export const FTS_PARSER_VERSION = 'fts-2';
+export const FTS_MAX_PAGES = 1;
 export const FTS_REASONS = Object.freeze([
   'hit_shape_unknown', 'doc_fetch_failed', 'company_missing', 'accession_malformed', 'cik_malformed', 'unknown_shape',
   'run_cap', 'query_disabled',
@@ -96,6 +103,8 @@ export async function runFts(ctx) {
   }
   const enddt = daysBefore(ctx.now, 0);
   let discoveryTotal = 0;
+  /** @type {Array<{ source: 'complete'|'partial', forms: Record<string, import('./edgar-shared.js').FormCoverage> }>} */
+  const coverages = [];
 
   for (const q of queries) {
     if (!q.enabled) {
@@ -103,66 +112,91 @@ export async function runFts(ctx) {
       continue;
     }
     if (edgar.blocked) { c.warn(`query_skipped_blocked:${q.id}`); continue; }
-    const r = await edgar.search(searchUrl({ q: q.q, forms: q.forms, dateRange: 'custom', startdt: daysBefore(ctx.now, q.window_days), enddt }), 'discovery');
-    if (!r.ok) { c.warn(`discovery_${r.reason ?? 'failed'}:${q.id}`); continue; }
-    const parsed = parseSearchResponse(r.text);
-    if (!parsed.ok) { c.add('unparseable', 'hit_shape_unknown', { key: `${q.id}|discovery`, extracted: { query_id: q.id } }); continue; }
-    discoveryTotal += parsed.total ?? parsed.hits.length;
-    if (parsed.total !== null && parsed.total > parsed.hits.length) c.bump('discovery_not_read', parsed.total - parsed.hits.length);
-    for (const hit of parsed.hits) {
+    // One request per form type (the configured forms plus each amendment form), from FTS's own budget.
+    const disc = await discoverByForm({
+      edgar,
+      forms: formsToRequests(q.forms),
+      params: { q: q.q, dateRange: 'custom', startdt: daysBefore(ctx.now, q.window_days), enddt },
+      budget: 'discovery_fts',
+      maxPages: FTS_MAX_PAGES,
+      label: q.id,
+    });
+    coverages.push(disc.coverage);
+    for (const p of disc.problems) c.warn(`${p}:${q.id}`);
+    for (const [form, fc] of Object.entries(disc.coverage.forms)) {
+      if (fc.pages.some((p) => !p.ok && p.reason === 'hit_shape_unknown')) c.add('unparseable', 'hit_shape_unknown', { key: `${q.id}|discovery:${form}`, extracted: { query_id: q.id } });
+    }
+    discoveryTotal += disc.total;
+    if (disc.notRead > 0) c.bump('discovery_not_read', disc.notRead);
+    for (const [adsh, group] of groupByAccession(disc.hits)) {
       c.stats.read += 1;
-      const badKey = `${q.id}|bad:${contentHash(hit).slice(0, 16)}`;
-      await c.guard(badKey, () => processHit(q, hit, badKey));
+      const badKey = `${q.id}|bad:${contentHash(group[0]).slice(0, 16)}`;
+      await c.guard(adsh ? `${q.id}|${adsh}` : badKey, () => processAccession(q, adsh, group, badKey));
     }
   }
   c.stats.discovery_total = discoveryTotal;
+  c.stats.coverage = coverages.length > 0 ? mergeCoverage(coverages) : null;
+  if (c.stats.coverage && c.stats.coverage.source !== 'complete') c.bump('undercoverage', 1);
   c.stats.warnings.push(...edgar.warnings.filter((w) => !c.stats.warnings.includes(w)));
   return { items: c.items, stats: c.stats };
 
   /**
+   * One signal per accession (per query).
    * @param {{ id: string } & z.infer<typeof ftsQuerySchema>} q
-   * @param {import('./edgar-client.js').SearchHit} hit
+   * @param {string} adshRaw
+   * @param {Array<import('./edgar-client.js').SearchHit>} group
    * @param {string} badKey
    */
-  async function processHit(q, hit, badKey) {
-    if (!hit.shape_ok) { c.add('unparseable', 'hit_shape_unknown', { key: badKey, extracted: { query_id: q.id } }); return; }
-    const adsh = validAdsh(hit.adsh);
+  async function processAccession(q, adshRaw, group, badKey) {
+    if (group.some((h) => !h.shape_ok)) { c.add('unparseable', 'hit_shape_unknown', { key: badKey, extracted: { query_id: q.id } }); return; }
+    const adsh = validAdsh(adshRaw);
     if (!adsh) { c.add('unparseable', 'accession_malformed', { key: badKey, extracted: { query_id: q.id } }); return; }
-    const cik = validCik(hit.ciks[0]);
+    const who = primaryFiler(group);
+    const cik = validCik(who.cik);
     if (!cik) { c.add('unparseable', 'cik_malformed', { key: `${q.id}|${adsh}`, extracted: { query_id: q.id } }); return; }
     const key = `${q.id}|${adsh}`;
-    const rawNames = hit.display_names.slice(0, 5);
+    const rawNames = who.all_names.slice(0, 10);
     const cleaned = rawNames.map(cleanDisplayName).filter(Boolean);
-    const base = { query_id: q.id, accession: adsh, cik, form: hit.form, file_date: hit.file_date, display_names: rawNames };
-    const companyName = sanitizeName(cleaned[0] ?? '');
+    const form = group.find((h) => h.form)?.form ?? null;
+    const fileDate = group.find((h) => h.file_date)?.file_date ?? null;
+    const base = { query_id: q.id, accession: adsh, cik, form, file_date: fileDate, display_names: rawNames, hit_count: group.length, cik_conflict: who.conflict };
+    const primaryClean = cleanDisplayName(who.primary_name);
+    const companyName = sanitizeName(primaryClean);
     if (!companyName.value) { c.add('unparseable', 'company_missing', { key, url: indexUrl(cik, adsh), extracted: base }); return; }
     if ([...cleaned, ...rawNames].map(sanitizeName).some((n) => n.too_long)) {
       c.add('unparseable', 'name_too_long', { key, url: indexUrl(cik, adsh), extracted: base });
       return;
     }
-    const filename = validFilename(hit.filename);
-    if (!filename) { c.add('unparseable', 'hit_shape_unknown', { key, url: indexUrl(cik, adsh), extracted: { ...base, issue: 'filename_missing_or_invalid' } }); return; }
-    if (!edgar.hasBudget('fts')) { c.add('out_of_scope', 'run_cap', { key, url: indexUrl(cik, adsh), extracted: base }); return; }
-    const doc = await edgar.document(docUrl(cik, adsh, filename), 'fts');
-    if (!doc.ok) {
-      if (doc.reason === 'capped') c.add('out_of_scope', 'run_cap', { key, url: indexUrl(cik, adsh), extracted: base });
-      else c.add('unparseable', 'doc_fetch_failed', { key, url: indexUrl(cik, adsh), extracted: { ...base, fetch_reason: doc.reason, status: doc.status } });
-      return;
-    }
-    const filingDate = typeof hit.file_date === 'string' && /^\d{4}-\d{2}-\d{2}$/.test(hit.file_date) ? hit.file_date : null;
+    const filingDate = typeof fileDate === 'string' && /^\d{4}-\d{2}-\d{2}$/.test(fileDate) ? fileDate : null;
     if (!filingDate) { c.add('unparseable', 'unknown_shape', { key, url: indexUrl(cik, adsh), extracted: { ...base, issue: 'filing_date_missing' } }); return; }
-    const plain = htmlToPlain(doc.text);
-    const scan = findBlockedHits(plain, ctx.blocked, { minLength: ctx.blockedMinLength });
-    const window = sanitizeText(windowAround(plain, queryTerms(q.q), FTS_WINDOW_CHARS), FTS_WINDOW_CHARS);
-    const party = extractParty(plain);
+    const chosen = chooseDocs(group);
+    if (chosen.chosen.length === 0) { c.add('unparseable', 'hit_shape_unknown', { key, url: indexUrl(cik, adsh), extracted: { ...base, issue: 'filename_missing_or_invalid' } }); return; }
+    if (!edgar.hasBudget('fts')) { c.add('out_of_scope', 'run_cap', { key, url: indexUrl(cik, adsh), extracted: base }); return; }
+    const read = await readDocs(edgar, 'fts', cik, adsh, chosen.chosen);
+    if (read.status === 'failed' && read.docs.every((d) => d.reason === 'capped')) { c.add('out_of_scope', 'run_cap', { key, url: indexUrl(cik, adsh), extracted: base }); return; }
+    const evidence = evidenceOf(read.docs);
+    const okDocs = read.docs.filter((d) => d.ok).map((d) => ({ ...d, plain: htmlToPlain(d.text) }));
+
+    // Every document read is scanned in FULL, with every raw display name of every hit and every name extracted
+    // from any document, before anything is truncated.
+    const parties = okDocs.map((d) => extractParty(d.plain)).filter((p) => p !== null);
+    const scan = findBlockedHits(
+      [...rawNames, ...parties.map((p) => p.name), ...okDocs.map((d) => d.plain)].join(' \n '),
+      ctx.blocked,
+      { minLength: ctx.blockedMinLength },
+    );
+    const terms = queryTerms(q.q);
+    const windows = okDocs.map((d) => `[${d.doc_type} ${d.filename}] ${sanitizeText(windowAround(d.plain, terms, FTS_WINDOW_CHARS), FTS_WINDOW_CHARS)}`);
+    const party = parties[0] ?? null;
     let role = null;
     let ambiguous = false;
     if (q.trigger_kind === 'exec_departure') {
-      const a = analyzeDeparture(plain);
+      const mainPlain = okDocs.map((d) => d.plain).join('\n');
+      const a = analyzeDeparture(mainPlain);
       role = a.role;
       ambiguous = a.kind !== 'departure';
     }
-    const aliases = [...new Set([...cleaned.slice(1), ...rawNames.map((n) => sanitizeText(n, 400))])];
+    const aliases = [...new Set([...cleaned.filter((n) => n !== primaryClean), ...rawNames.map((n) => sanitizeText(n, 400))])];
     const signal = {
       trigger_kind: q.trigger_kind,
       company: companyName.value,
@@ -170,22 +204,27 @@ export async function runFts(ctx) {
       acquirer: party?.kind === 'acquirer' ? party.name : null,
       investor: party?.kind === 'investor' ? party.name : null,
       pe_firm: null,
-      text: buildSignalText(scan.hits, [window]),
+      text: buildSignalText(scan.hits, windows),
       evidence_url: indexUrl(cik, adsh),
       evidence_source: 'edgar_fts',
-      event_date: extractCoverDate(plain),
+      event_date: okDocs.map((d) => extractCoverDate(d.plain)).find(Boolean) ?? null,
       filing_date: filingDate,
       role,
       ...(q.trigger_kind === 'exec_departure' ? { departure_ambiguous: ambiguous } : {}),
+      doc_fetch: read.status,
+      unread_hit_docs: chosen.unread,
     };
     c.add('parsed', 'ok', {
       key,
       signal,
       contact: role ? { role, name: null } : null,
       url: signal.evidence_url,
-      excerpt: makeExcerpt(window),
+      excerpt: makeExcerpt(windows[0] ?? companyName.value),
       extracted: boundExtracted({
         ...base,
+        doc_fetch: read.status,
+        unread_hit_docs: chosen.unread,
+        evidence,
         trigger_kind: q.trigger_kind,
         company: companyName.value,
         company_norm: normalizeCompany(companyName.value).company_norm,
@@ -193,10 +232,11 @@ export async function runFts(ctx) {
         event_date: signal.event_date,
         filing_date: filingDate,
         party: party ?? null,
+        party_names: parties.map((p) => p.name),
         blocked_hits: scan.hits.map((h) => h.entry),
         scanned_chars: scan.scanned_chars,
-        doc_truncated: doc.truncated,
-        amendment: /\/A$/i.test(String(hit.form ?? '')),
+        doc_truncated: okDocs.some((d) => d.truncated),
+        amendment: /\/A$/i.test(String(form ?? '')),
       }),
     });
   }

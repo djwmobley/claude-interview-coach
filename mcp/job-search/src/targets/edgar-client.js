@@ -10,6 +10,8 @@
  *   createEdgarClient   sequential, at least minGapMs between requests, per-budget caps (form_d 90, 8-K 50,
  *                       full-text 50, shared discovery 10; 200 total), one backoff retry on 429/403/503 then
  *                       the whole EDGAR side is aborted for the run (sec_blocked), never hammered.
+ *                       PR2b: discovery is reserved PER SOURCE (discovery_form_d, discovery_8k, discovery_fts), so
+ *                       full-text queries can never use up Form D or 8-K discovery.
  *
  * The client calls the network only through the fetch guard (GET, registry hosts).
  */
@@ -22,7 +24,9 @@ import { FetchRefused } from './fetch-guard.js';
 import { sanitizeText } from './signal-text.js';
 
 export const SEC_CONTACT_FILE = 'target-sec-contact.json';
-export const EDGAR_BUDGETS = Object.freeze({ form_d: 90, '8k': 50, fts: 50, discovery: 10 });
+export const EDGAR_BUDGETS = Object.freeze({
+  form_d: 80, '8k': 45, fts: 45, discovery_form_d: 6, discovery_8k: 6, discovery_fts: 18,
+});
 export const EDGAR_TOTAL_CAP = 200;
 export const MIN_REQUEST_GAP_MS = 250;
 export const BACKOFF_MS = 2000;
@@ -146,6 +150,8 @@ export function daysBefore(now, days) {
  * @property {string|null} file_date
  * @property {string|null} form
  * @property {string[]|null} items null when the source field is absent
+ * @property {string|null} file_type the hit document's type ("8-K", "EX-99.1", "D"); null when absent
+ * @property {string[]} sics SIC codes the search index carries for the filer (may be empty)
  * @property {string|null} filename from _id "<adsh>:<filename>"
  * @property {boolean} shape_ok true when the hit had an object _source
  */
@@ -182,6 +188,8 @@ export function parseSearchResponse(text) {
       file_date: src && typeof src.file_date === 'string' ? src.file_date : null,
       form: src && typeof src.form === 'string' ? src.form : (src && typeof src.file_type === 'string' ? src.file_type : null),
       items: src && Array.isArray(src.items) ? strArray(src.items) : null,
+      file_type: src && typeof src.file_type === 'string' ? src.file_type : null,
+      sics: src ? strArray(src.sics) : [],
       filename: colon > 0 ? id.slice(colon + 1) : null,
       shape_ok: Boolean(src),
     });
@@ -215,7 +223,8 @@ export function createEdgarClient({ guard, timing = {} }) {
   const budgets = { ...EDGAR_BUDGETS, ...(timing.budgets ?? {}) };
   const totalCap = timing.totalCap ?? EDGAR_TOTAL_CAP;
   /** @type {Record<string, number>} */
-  const used = { form_d: 0, '8k': 0, fts: 0, discovery: 0 };
+  /** @type {Record<string, number>} */
+  const used = Object.fromEntries(Object.keys(budgets).map((k) => [k, 0]));
   let total = 0;
   let lastAt = -Infinity;
   let blocked = false;
@@ -274,7 +283,7 @@ export function createEdgarClient({ guard, timing = {} }) {
     get warnings() { return [...warnings]; },
     budgets,
     /** @param {string} url @param {string} budget */
-    search: (url, budget = 'discovery') => request(url, budget, { maxBytes: SEARCH_READ_BYTES }),
+    search: (url, budget) => request(url, budget, { maxBytes: SEARCH_READ_BYTES }),
     /** @param {string} url @param {string} budget */
     document: (url, budget) => request(url, budget, { maxBytes: DOC_READ_BYTES }),
   };

@@ -1,0 +1,64 @@
+{
+ "took": 1,
+ "timed_out": false,
+ "hits": {
+  "total": {
+   "value": 1,
+   "relation": "eq"
+  },
+  "max_score": null,
+  "hits": [
+   {
+    "_index": "edgar_file",
+    "_id": "0001193125-26-417083:d332956d8k.htm",
+    "_score": 10.469603,
+    "_source": {
+     "ciks": [
+      "0002128626"
+     ],
+     "period_ending": "2026-10-01",
+     "file_num": [
+      "001-43376"
+     ],
+     "display_names": [
+      "Vylor Inc.  (VYLR)  (CIK 0002128626)"
+     ],
+     "xsl": null,
+     "sequence": 1,
+     "root_forms": [
+      "8-K"
+     ],
+     "file_date": "2026-10-07",
+     "biz_states": [
+      "IA"
+     ],
+     "sics": [
+      "0100"
+     ],
+     "form": "8-K",
+     "adsh": "0001193125-26-417083",
+     "film_num": [
+      "261447721"
+     ],
+     "biz_locations": [
+      "Johnston, IA"
+     ],
+     "file_type": "8-K",
+     "ma_i_individual": null,
+     "file_description": "8-K",
+     "inc_states": [
+      "DE"
+     ],
+     "items": [
+      "2.01",
+      "2.03",
+      "3.02",
+      "4.01",
+      "5.02",
+      "9.01"
+     ]
+    }
+   }
+  ]
+ }
+}
