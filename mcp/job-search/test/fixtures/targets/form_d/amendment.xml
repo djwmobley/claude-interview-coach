@@ -1,0 +1,21 @@
+<?xml version="1.0"?>
+<edgarSubmission>
+  <schemaVersion>X0708</schemaVersion>
+  <submissionType>D/A</submissionType>
+  <primaryIssuer>
+    <cik>0001234567</cik>
+    <entityName>Northwind Logistics Inc</entityName>
+    <entityType>Corporation</entityType>
+  </primaryIssuer>
+  <offeringData>
+    <industryGroup><industryGroupType>Other Technology</industryGroupType></industryGroup>
+    <issuerSize><revenueRange>$25,000,001 - $100,000,000</revenueRange></issuerSize>
+    <typeOfFiling>
+      <newOrAmendment>
+        <isAmendment>true</isAmendment>
+        <previousAccessionNumber>0001234567-26-000042</previousAccessionNumber>
+      </newOrAmendment>
+      <dateOfFirstSale><value>2026-10-05</value></dateOfFirstSale>
+    </typeOfFiling>
+  </offeringData>
+</edgarSubmission>

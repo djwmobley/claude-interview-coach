@@ -1,0 +1,14 @@
+{
+  "hits": {
+    "total": { "value": 7, "relation": "eq" },
+    "hits": [
+      { "_id": "0001111111-26-000101:form8k.htm", "_source": { "adsh": "0001111111-26-000101", "ciks": ["0001111111"], "display_names": ["Contoso Industrial Corp  (CIK 0001111111)"], "file_date": "2026-10-02", "form": "8-K", "items": ["5.02", "9.01"] } },
+      { "_id": "0002222222-26-000102:form8k.htm", "_source": { "adsh": "0002222222-26-000102", "ciks": ["0002222222"], "display_names": ["Fabrikam Holdings Inc  (CIK 0002222222)"], "file_date": "2026-09-30", "form": "8-K", "items": ["5.02"] } },
+      { "_id": "0003333333-26-000103:form8k.htm", "_source": { "adsh": "0003333333-26-000103", "ciks": ["0003333333"], "display_names": ["Tailspin Systems Inc  (CIK 0003333333)"], "file_date": "2026-10-05", "form": "8-K", "items": ["5.02", "7.01"] } },
+      { "_id": "0004444444-26-000104:form8k.htm", "_source": { "adsh": "0004444444-26-000104", "ciks": ["0004444444"], "display_names": ["Wingtip Retail Group  (CIK 0004444444)"], "file_date": "2026-10-03", "form": "8-K", "items": ["5.02"] } },
+      { "_id": "0005555555-26-000105:form8k.htm", "_source": { "adsh": "0005555555-26-000105", "ciks": ["0005555555"], "display_names": ["Adventure Works Ltd  (CIK 0005555555)"], "file_date": "2026-10-05", "form": "8-K", "items": ["5.02"] } },
+      { "_id": "0006666666-26-000106:form8k.htm", "_source": { "adsh": "0006666666-26-000106", "ciks": ["0006666666"], "display_names": ["Litware Inc  (CIK 0006666666)"], "file_date": "2026-10-05", "form": "8-K", "items": ["8.01"] } },
+      { "_id": "0007777777-26-000107:form8k.htm", "_source": { "adsh": "0007777777-26-000107", "ciks": ["0007777777"], "display_names": ["Proseware Inc  (CIK 0007777777)"], "file_date": "2026-10-05", "form": "8-K" } }
+    ]
+  }
+}

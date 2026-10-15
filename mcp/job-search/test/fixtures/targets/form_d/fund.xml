@@ -1,0 +1,23 @@
+<?xml version="1.0"?>
+<edgarSubmission>
+  <schemaVersion>X0708</schemaVersion>
+  <submissionType>D</submissionType>
+  <primaryIssuer>
+    <cik>0002345678</cik>
+    <entityName>Harbor Technology Holdings</entityName>
+    <entityType>Limited Partnership</entityType>
+  </primaryIssuer>
+  <relatedPersonsList>
+    <relatedPersonInfo>
+      <relatedPersonName><firstName>Sam</firstName><lastName>Roe</lastName></relatedPersonName>
+    </relatedPersonInfo>
+  </relatedPersonsList>
+  <offeringData>
+    <industryGroup><industryGroupType>Pooled Investment Fund</industryGroupType></industryGroup>
+    <issuerSize><revenueRange>Decline to Disclose</revenueRange></issuerSize>
+    <typeOfFiling>
+      <newOrAmendment><isAmendment>false</isAmendment></newOrAmendment>
+      <dateOfFirstSale><value>2026-10-02</value></dateOfFirstSale>
+    </typeOfFiling>
+  </offeringData>
+</edgarSubmission>

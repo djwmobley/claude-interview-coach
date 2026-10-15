@@ -14,17 +14,20 @@
  *   2 exclusion        blocked company -> not-target; suspect / unknown / applied / unavailable list -> needs-review
  *   3 evidence         missing or failing the evidence registry (src/core/target-evidence.js) -> needs-review
  *   4 date             null, invalid, >7d future -> needs-review; older than the window -> not-target
- *   5 size             confidence-enum total mapping (see sizeStep)
- *   6 form_d_issuer    fund-like issuer or SIC 6799 -> needs-review
- *   7 trigger_specific departure role must be CTO-level; gap needs a hiring VP/Director/Head of Engineering
- *                      listing, no CTO-level listing, and a departure signal ruled out
+ *   5 size             confidence-enum total mapping (see sizeStep; plan section 15: unknown or low size
+ *                      continues and is flagged size_verified=false)
+ *   6 form_d_issuer    fund-like issuer, fund industry group, or SIC 6799 -> needs-review; absent SIC -> needs-review
+ *   7 trigger_specific departure role must be CTO-level and not ambiguous; gap needs a hiring VP/Director/
+ *                      Head of Engineering listing, no CTO-level listing, and a complete listing group
+ *                      (departure_signal is informational only)
  *   8 final            target
  *
  * Signal shape (all optional; anything missing is handled by the step that needs it):
  *   { trigger_kind: 'pe_deal'|'exec_departure'|'leadership_gap', company, aliases[], acquirer, investor,
  *     pe_firm, text, evidence_url, evidence_source, event_date, filing_date,
  *     size: { low, high, basis, confidence }, employees, offering_amount (IGNORED, never size),
- *     issuer: { name, sic }, role, listings: [{ title, description }], departure_signal }
+ *     issuer: { name, sic, industry_group }, role, listings: [{ title, description }], listings_truncated,
+ *     departure_ambiguous, departure_signal (informational) }
  */
 import fs from 'node:fs';
 import path from 'node:path';
@@ -60,6 +63,7 @@ export const targetRulesSchema = z.object({
     confidence_cap_by_basis: z.record(z.enum(['high', 'medium', 'low', 'none'])),
     fund_name_tokens: z.array(z.string().min(1)),
     fund_sic_codes: z.array(z.string().min(1)),
+    fund_industry_groups: z.array(z.string().min(1)),
     stripped_match_min_length: z.number().int().min(1),
   }),
 }).superRefine((cfg, ctx) => {
@@ -208,6 +212,7 @@ export function effectiveConfidence(confidence, basis, caps) {
  * @property {'target'|'needs-review'|'not-target'} class
  * @property {string} rule
  * @property {Record<string, unknown>} inputs JSON-safe snapshot of what the verdict was based on
+ * @property {boolean} size_verified true only when size was known in band at medium or high confidence
  */
 
 /**
@@ -230,7 +235,7 @@ export function classifySignal(signal, opts = {}) {
     return classifyInner(signal, opts, inputs);
   } catch (err) {
     inputs.error = err instanceof Error ? err.message.slice(0, 200) : 'unknown';
-    return { class: 'needs-review', rule: 'classifier_error', inputs };
+    return { class: 'needs-review', rule: 'classifier_error', inputs, size_verified: false };
   }
 }
 
@@ -243,7 +248,7 @@ export function classifySignal(signal, opts = {}) {
 function classifyInner(signal, opts, inputs) {
   if (!signal || typeof signal !== 'object' || Array.isArray(signal)) {
     inputs.signal_type = signal === null ? 'null' : Array.isArray(signal) ? 'array' : typeof signal;
-    return { class: 'needs-review', rule: 'invalid_input', inputs };
+    return { class: 'needs-review', rule: 'invalid_input', inputs, size_verified: false };
   }
   const rules = opts.rules ?? loadTargetRules();
   const p = rules.params;
@@ -324,7 +329,11 @@ function classifyInner(signal, opts, inputs) {
       const fundLike = words.some((w) => p.fund_name_tokens.includes(w));
       const sic = String(sig.issuer?.sic ?? '').trim();
       inputs.issuer_sic = sic || null;
-      if (fundLike || (sic && p.fund_sic_codes.includes(sic))) return verdict('needs-review', 'form_d_fund_issuer');
+      const industry = normalizeName(sig.issuer?.industry_group).toLowerCase();
+      inputs.issuer_industry_group = industry || null;
+      const fundIndustry = industry !== '' && p.fund_industry_groups.some((g) => industry.includes(g.toLowerCase()));
+      if (fundLike || fundIndustry || (sic && p.fund_sic_codes.includes(sic))) return verdict('needs-review', 'form_d_fund_issuer');
+      if (!sic) return verdict('needs-review', 'form_d_sic_unavailable');
       return null;
     },
 
@@ -332,6 +341,8 @@ function classifyInner(signal, opts, inputs) {
       if (kind === 'exec_departure') {
         inputs.role = normalizeName(sig.role) || null;
         if (!isCtoLevelTitle(sig.role)) return verdict('needs-review', 'departure_role_not_cto_level');
+        inputs.departure_ambiguous = sig.departure_ambiguous === true;
+        if (sig.departure_ambiguous === true) return verdict('needs-review', 'departure_ambiguous');
         return null;
       }
       if (kind === 'leadership_gap') {
@@ -339,10 +350,12 @@ function classifyInner(signal, opts, inputs) {
         const titles = listings.map((l) => normalizeName(l?.title)).filter(Boolean);
         inputs.listing_titles = titles.slice(0, 20);
         inputs.reports_to_ceo_hint = listings.some((l) => REPORTS_TO_CEO_RE.test(normalizeName(l?.description)));
+        // Informational only (plan section 15): a missed departure still leaves a real gap target.
+        inputs.departure_signal = sig.departure_signal === true ? true : (sig.departure_signal === false ? false : null);
+        inputs.listings_truncated = sig.listings_truncated === true;
         if (titles.some(isCtoLevelTitle)) return verdict('needs-review', 'gap_cto_level_listing_present');
         if (!titles.some(isHiringLeadershipTitle)) return verdict('needs-review', 'gap_no_hiring_listing');
-        inputs.departure_signal = sig.departure_signal === false ? false : (sig.departure_signal ?? null);
-        if (sig.departure_signal !== false) return verdict('needs-review', 'gap_departure_not_ruled_out');
+        if (sig.listings_truncated === true) return verdict('needs-review', 'gap_listings_truncated');
       }
       return null;
     },
@@ -361,9 +374,9 @@ function classifyInner(signal, opts, inputs) {
     const declared = registry.get(rule);
     if (declared !== cls) {
       inputs.rule_drift = { rule, wanted: cls, declared: declared ?? null };
-      return { class: 'needs-review', rule: 'classifier_error', inputs: { ...inputs } };
+      return { class: 'needs-review', rule: 'classifier_error', inputs: { ...inputs }, size_verified: false };
     }
-    return { class: cls, rule, inputs: { ...inputs } };
+    return { class: cls, rule, inputs: { ...inputs }, size_verified: inputs.size_verified === true };
   }
 
   const ordered = [...rules.steps].sort((a, b) => a.priority - b.priority);
@@ -371,24 +384,24 @@ function classifyInner(signal, opts, inputs) {
     const h = handlers[step.id];
     if (!h) {
       inputs.unknown_step = step.id;
-      return { class: 'needs-review', rule: 'classifier_error', inputs: { ...inputs } };
+      return { class: 'needs-review', rule: 'classifier_error', inputs: { ...inputs }, size_verified: false };
     }
     const v = h();
     if (v) return v;
   }
   inputs.no_terminal_step = true;
-  return { class: 'needs-review', rule: 'classifier_error', inputs: { ...inputs } };
+  return { class: 'needs-review', rule: 'classifier_error', inputs: { ...inputs }, size_verified: false };
 }
 
 /**
- * Size step (5). Confidence enum {high, medium, low, none} with a total mapping:
- *   none (incl. Form D offering amount, unknown enum value, no size)  -> needs-review size_none
- *   a non-number / negative / reversed bound                          -> needs-review size_invalid
- *   exactly one bound known                                           -> needs-review size_one_bound
- *   out of band entirely, effective confidence high                   -> not-target size_out_of_band
- *   in band, confidence medium or high                                -> continue
- *   in band, confidence low                                           -> needs-review size_low_confidence
- *   anything else (straddling, out of band below high)                -> needs-review size_not_clearly_in_band
+ * Size step (5), plan section 15. Confidence enum {high, medium, low, none} with a total mapping:
+ *   a non-number / negative / reversed bound                           -> needs-review size_invalid
+ *   entirely out of band, effective confidence high                    -> not-target size_out_of_band
+ *   entirely out of band, effective confidence medium                  -> needs-review size_out_of_band_medium
+ *   in band (contained), effective confidence medium or high           -> continue, size_verified=true
+ *   everything else: no size, confidence none or low, exactly one bound known (treated as unknown),
+ *   a range straddling a band edge, out of band at low confidence      -> continue, size_verified=false
+ * A Form D offering amount is never size (the basis cap forces confidence none).
  * @param {Record<string, any>} sig
  * @param {TargetRules['params']} p
  * @param {Record<string, unknown>} inputs
@@ -403,15 +416,18 @@ function sizeStep(sig, p, inputs, verdict) {
   const conf = size ? effectiveConfidence(size.confidence, basis, p.confidence_cap_by_basis) : 'none';
   inputs.size_basis = basis;
   inputs.size_confidence = conf;
-  if (conf === 'none') return verdict('needs-review', 'size_none');
+  inputs.size_verified = false;
+  /** @param {string} status */
+  const unverified = (status) => { inputs.size_status = status; return null; };
+  if (!size || conf === 'none') return unverified('unknown');
 
   const known = (/** @type {unknown} */ v) => v !== null && v !== undefined;
   const lowKnown = known(size.low);
   const highKnown = known(size.high);
   const bad = (/** @type {unknown} */ v) => typeof v !== 'number' || !Number.isFinite(v) || v < 0;
   if ((lowKnown && bad(size.low)) || (highKnown && bad(size.high))) return verdict('needs-review', 'size_invalid');
-  if (!lowKnown && !highKnown) return verdict('needs-review', 'size_none');
-  if (lowKnown !== highKnown) return verdict('needs-review', 'size_one_bound');
+  if (!lowKnown && !highKnown) return unverified('unknown');
+  if (lowKnown !== highKnown) return unverified('one_bound');
   if (size.low > size.high) return verdict('needs-review', 'size_invalid');
   inputs.size_low = size.low;
   inputs.size_high = size.high;
@@ -420,9 +436,15 @@ function sizeStep(sig, p, inputs, verdict) {
   const inBand = size.low >= band.low && size.high <= band.high;
   const outOfBand = size.high < band.low || size.low > band.high;
   if (outOfBand && conf === 'high') return verdict('not-target', 'size_out_of_band');
-  if (inBand && (conf === 'high' || conf === 'medium')) return null;
-  if (inBand) return verdict('needs-review', 'size_low_confidence');
-  return verdict('needs-review', 'size_not_clearly_in_band');
+  if (outOfBand && conf === 'medium') return verdict('needs-review', 'size_out_of_band_medium');
+  if (inBand && (conf === 'high' || conf === 'medium')) {
+    inputs.size_verified = true;
+    inputs.size_status = 'in_band';
+    return null;
+  }
+  if (outOfBand) return unverified('out_of_band_low_confidence');
+  if (inBand) return unverified('low_confidence');
+  return unverified('straddles_band');
 }
 
 // ---------------------------------------------------------------------------
@@ -437,9 +459,9 @@ export const EMITTABLE_RULES = Object.freeze([
   'invalid_input', 'classifier_error', 'trigger_kind_unrecognized',
   'excl_blocked_company', 'excl_blocked_suspect', 'excl_unknown_company', 'excl_applied_before', 'excl_unmapped_branch', 'excl_blocklist_unavailable',
   'evidence_missing', 'evidence_invalid', 'date_missing', 'date_invalid', 'date_future', 'date_stale',
-  'size_none', 'size_invalid', 'size_one_bound', 'size_out_of_band', 'size_low_confidence', 'size_not_clearly_in_band',
-  'form_d_issuer_unknown', 'form_d_fund_issuer',
-  'departure_role_not_cto_level', 'gap_no_hiring_listing', 'gap_cto_level_listing_present', 'gap_departure_not_ruled_out',
+  'size_invalid', 'size_out_of_band', 'size_out_of_band_medium',
+  'form_d_issuer_unknown', 'form_d_fund_issuer', 'form_d_sic_unavailable',
+  'departure_role_not_cto_level', 'departure_ambiguous', 'gap_no_hiring_listing', 'gap_cto_level_listing_present', 'gap_listings_truncated',
   'target_all_checks_passed',
 ]);
 
@@ -499,12 +521,27 @@ const CLASS_RANK = Object.freeze({ 'target': 3, 'needs-review': 2, 'not-target':
  * @property {string} company
  * @property {'target'|'needs-review'|'not-target'} class
  * @property {string|null|undefined} trigger_date
+ * @property {string} [rule] the verdict rule; an excl_blocked_* rule marks the signal as carrying a blocked-party hint
+ * @property {boolean} [blocked_hint] explicit blocked-party hint (also true when the rule is excl_blocked_*)
  */
+
+/** Verdict rules that mean "a blocked party was named somewhere in this signal". */
+export const BLOCKED_HINT_RULES = Object.freeze(['excl_blocked_company', 'excl_blocked_suspect']);
+
+/** @param {{ rule?: string, blocked_hint?: boolean }} t */
+function carriesBlockedHint(t) {
+  return t.blocked_hint === true || (typeof t.rule === 'string' && BLOCKED_HINT_RULES.includes(t.rule));
+}
 
 /**
  * Per company group keep the best outcome (target > needs-review > not-target), then the newest trigger
  * date (null/invalid sorts oldest), then the highest id. Every collapsed id is returned so the caller can
  * log it. A blank or unresolvable company never groups with anything.
+ *
+ * Blocked-party hints survive dedup (plan section 15.3): when ANY member of a group (the winner or a
+ * collapsed sibling) carries a blocked-party hint and the winner would be a target, the kept row is
+ * forced to needs-review with rule dedup_blocked_sibling (original_class / original_rule preserved).
+ * A winner that is already needs-review or not-target is left alone: the hint cannot make it worse.
  * @template {ClassifiedSignal} T
  * @param {T[]} items
  * @returns {{ kept: Array<T & { collapsed_ids: Array<number|string> }>, collapsed: Array<{ kept_id: number|string, company_norm: string, collapsed_ids: Array<number|string> }> }}
@@ -533,7 +570,16 @@ export function dedupSignals(items) {
     const sorted = [...g].sort((a, b) => rank(b) - rank(a) || (dayOf(b) === dayOf(a) ? 0 : dayOf(b) > dayOf(a) ? 1 : -1) || idCmp(a, b));
     const winner = sorted[0];
     const others = sorted.slice(1).map((s) => s.id);
-    kept.push({ ...winner, collapsed_ids: others });
+    const hintFrom = sorted.filter(carriesBlockedHint).map((t) => t.id);
+    const row = /** @type {any} */ ({ ...winner, collapsed_ids: others, blocked_hint: hintFrom.length > 0 });
+    if (hintFrom.length > 0 && winner.class === 'target') {
+      row.original_class = winner.class;
+      row.original_rule = winner.rule ?? null;
+      row.class = 'needs-review';
+      row.rule = 'dedup_blocked_sibling';
+      row.blocked_hint_from = hintFrom;
+    }
+    kept.push(row);
     if (others.length) collapsed.push({ kept_id: winner.id, company_norm: key, collapsed_ids: others });
   }
   return { kept, collapsed };

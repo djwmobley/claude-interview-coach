@@ -12,6 +12,8 @@ import { checkConfigLock, writeConfigLock, loadConfig, writeTriageCandidateLock,
 import { errFields } from '../src/core/errors.js';
 import { lintNoiseFixtures } from '../src/core/noise.js';
 import { lintTargetRules } from '../src/core/target-classify.js';
+import { loadFtsQueries } from '../src/targets/edgar-fts.js';
+import { loadAlertPatterns } from '../src/targets/google-alerts.js';
 
 /**
  * Run config/noise-rules.json against config/noise-fixtures.json (spec R2, decision 8): a config-lock
@@ -65,6 +67,31 @@ function lintTargets(cfg) {
   return true;
 }
 
+/**
+ * Validate config/target-fts-queries.json and config/target-alert-patterns.json (target finder PR2): both
+ * must be keyed objects whose entries pass their zod schemas, and every alert regex must compile with only
+ * the declared named groups. A config-lock write or check fails on an invalid file.
+ * @param {import('../src/core/config.js').LoadedConfig} cfg
+ */
+function lintTargetSources(cfg) {
+  const fts = loadFtsQueries(cfg.configDir);
+  const alerts = loadAlertPatterns(cfg.configDir);
+  let ok = true;
+  if (!fts.ok) {
+    process.stdout.write(`target-fts-queries.json invalid: ${fts.reason}\n`);
+    ok = false;
+  } else {
+    process.stdout.write(`target-fts-queries.json: ${fts.queries.length} quer${fts.queries.length === 1 ? 'y' : 'ies'} valid (${fts.queries.filter((q) => q.enabled).length} enabled)\n`);
+  }
+  if (!alerts.ok) {
+    process.stdout.write(`target-alert-patterns.json invalid: ${alerts.reason}\n`);
+    ok = false;
+  } else {
+    process.stdout.write(`target-alert-patterns.json: ${alerts.patterns.length} pattern(s) valid (${alerts.patterns.filter((p) => p.enabled).length} enabled)\n`);
+  }
+  return ok;
+}
+
 function main() {
   const write = process.argv.includes('--write');
   /** @type {import('../src/core/config.js').LoadedConfig} */
@@ -80,6 +107,9 @@ function main() {
     process.exit(1);
   }
   if (!lintTargets(cfg)) {
+    process.exit(1);
+  }
+  if (!lintTargetSources(cfg)) {
     process.exit(1);
   }
   if (write) {

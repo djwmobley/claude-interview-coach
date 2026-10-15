@@ -1,0 +1,9 @@
+{
+  "cik": "1234567",
+  "name": "Northwind Logistics Inc",
+  "sic": "7372",
+  "sicDescription": "Services-Prepackaged Software",
+  "formerNames": [
+    { "name": "Northwind Freight Holdings", "from": "2011-01-01T00:00:00.000Z", "to": "2019-06-01T00:00:00.000Z" }
+  ]
+}

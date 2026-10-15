@@ -1,5 +1,5 @@
 {
-  "sha256": "d0e612719920d8f300ea09af28e4eaca18f64e01142f91997f4d31189886b191",
+  "sha256": "e174d255dac4386bd6c18c44a41abb674d3845506124a7c8c583df00929b172f",
   "files": [
     "adapters.json",
     "ats-boards.json",
@@ -12,7 +12,9 @@
     "triage.json",
     "triage-output-schema.json",
     "triage-mcp-empty.json",
-    "target-rules.json"
+    "target-rules.json",
+    "target-fts-queries.json",
+    "target-alert-patterns.json"
   ],
-  "updated_at": "2026-10-15T18:04:51.257Z"
+  "updated_at": "2026-10-15T21:44:10.954Z"
 }

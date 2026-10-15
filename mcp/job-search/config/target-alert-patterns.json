@@ -1,0 +1,5 @@
+{
+  "_comment": "Target finder Google Alerts routing (src/targets/google-alerts.js). A keyed object by pattern id; keys starting with an underscore are comments. label_regex matches the alert label in the subject (Google Alert - <label>); headline_regex uses the named groups company, acquirer, investor, pe_firm, role, date. Among patterns that match, the lowest priority number wins within a trigger kind, and every distinct kind is kept. Regexes come from this file only, never from email text. Every pattern ships DISABLED until the real alert labels and headlines are known (open question 5). Config-locked: edit deliberately, then run node bin/config-lock.js --write.",
+  "example_pe_acquired": { "priority": 100, "label_regex": "private equity|acquisition", "headline_regex": "^(?<company>.+?) (?:acquired by|to be acquired by) (?<acquirer>.+?)$", "trigger_kind": "pe_deal", "enabled": false },
+  "example_cto_departure": { "priority": 200, "label_regex": "chief technology officer|cto", "headline_regex": "^(?<company>.+?) (?:CTO|chief technology officer) (?:resigns|steps down|departs)", "trigger_kind": "exec_departure", "enabled": false }
+}

@@ -728,6 +728,12 @@ export const CONFIG_FILES = Object.freeze([
   // and blocked-affiliates.json are deliberately NOT members (same treatment as noise-fixtures.json and
   // apply-exclusions.json).
   'target-rules.json',
+  // Target finder (PR2): the EDGAR full-text query declarations and the Google Alerts routing patterns are
+  // routing declarations the source adapters read at runtime, so a change to either is config drift and must
+  // be deliberate. config/target-sec-contact.json is deliberately NOT a member: it holds a personal contact
+  // address, is gitignored, and is checked at run time by src/targets/edgar-client.js (missing means the
+  // EDGAR adapters skip with a warning and the run proceeds).
+  'target-fts-queries.json', 'target-alert-patterns.json',
 ]);
 
 /** Bare filename of the rubric (never in CONFIG_FILES; see the note above). */

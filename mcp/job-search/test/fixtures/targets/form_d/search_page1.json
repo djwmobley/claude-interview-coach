@@ -1,0 +1,14 @@
+{
+  "hits": {
+    "total": { "value": 7, "relation": "eq" },
+    "hits": [
+      { "_id": "0001234567-26-000042:primary_doc.xml", "_source": { "adsh": "0001234567-26-000042", "ciks": ["0001234567"], "display_names": ["Northwind Logistics Inc  (NWLG)  (CIK 0001234567)"], "file_date": "2026-10-07", "form": "D" } },
+      { "_id": "0002345678-26-000011:primary_doc.xml", "_source": { "adsh": "0002345678-26-000011", "ciks": ["0002345678"], "display_names": ["Harbor Technology Holdings  (CIK 0002345678)"], "file_date": "2026-10-06", "form": "D" } },
+      { "_id": "0009999999-26-000005:primary_doc.xml", "_source": { "adsh": "0009999999-26-000005", "ciks": ["0009999999"], "display_names": ["Summit Growth Fund III LP  (CIK 0009999999)"], "file_date": "2026-10-06", "form": "D" } },
+      { "_id": "0001234567-26-000077:primary_doc.xml", "_source": { "adsh": "0001234567-26-000077", "ciks": ["0001234567"], "display_names": ["Northwind Logistics Inc  (CIK 0001234567)"], "file_date": "2026-10-12", "form": "D/A" } },
+      { "_id": "bad-accession:primary_doc.xml", "_source": { "adsh": "12345", "ciks": ["0001111111"], "display_names": ["Broken Accession Co  (CIK 0001111111)"], "file_date": "2026-10-10", "form": "D" } },
+      { "_id": "0007777777-26-000001:primary_doc.xml" },
+      { "_id": "0003456789-26-000019:primary_doc.xml", "_source": { "adsh": "0003456789-26-000019", "ciks": ["0003456789"], "display_names": ["Lakeshore Manufacturing Corp  (CIK 0003456789)"], "file_date": "2026-10-09", "form": "D" } }
+    ]
+  }
+}

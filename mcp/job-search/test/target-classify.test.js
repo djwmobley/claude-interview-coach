@@ -110,8 +110,8 @@ describe('totality', () => {
     // Swap the priorities of date and size: a stale date and a missing size now report size first.
     const swapped = RULES.steps.map((s) => (s.id === 'date' ? { ...s, priority: 500 } : s.id === 'size' ? { ...s, priority: 400 } : s));
     const rules = { ...RULES, steps: [...swapped].reverse() };
-    const v = classifySignal({ ...BASE, event_date: daysAgo(400), size: null }, { rules, now: NOW, blocked: OK_LIST });
-    assert.equal(v.rule, 'size_none');
+    const v = classifySignal({ ...BASE, event_date: daysAgo(400), size: { low: 3e8, high: 1e8, basis: 'stated', confidence: 'high' } }, { rules, now: NOW, blocked: OK_LIST });
+    assert.equal(v.rule, 'size_invalid');
   });
 
   test('every verdict carries its inputs', () => {
@@ -241,71 +241,106 @@ describe('evidence step', () => {
   });
 });
 
-describe('size', () => {
+describe('size (plan section 15)', () => {
   const sz = (/** @type {any} */ low, /** @type {any} */ high, /** @type {any} */ basis, /** @type {any} */ confidence) => ({ size: { low, high, basis, confidence } });
-  test('missing size and confidence none are size_none', () => {
-    assert.equal(run({ size: undefined }).rule, 'size_none');
-    assert.equal(run(sz(1e8, 2e8, 'stated', 'none')).rule, 'size_none');
-    assert.equal(run(sz(null, null, 'stated', 'high')).rule, 'size_none');
+  test('unknown size and confidence none continue as a target flagged size_verified=false', () => {
+    for (const patch of [{ size: undefined }, sz(1e8, 2e8, 'stated', 'none'), sz(null, null, 'stated', 'high')]) {
+      const v = run(patch);
+      assert.equal(v.class, 'target');
+      assert.equal(v.rule, 'target_all_checks_passed');
+      assert.equal(v.size_verified, false);
+      assert.equal(v.inputs.size_verified, false);
+    }
   });
   test('the confidence enum is a total mapping: unknown values behave as none', () => {
     for (const c of ['HIGH', 'certain', '', null, undefined, 5, {}, []]) assert.equal(effectiveConfidence(c, 'stated', {}), 'none');
     for (const c of SIZE_CONFIDENCES) assert.equal(effectiveConfidence(c, 'stated', {}), c);
   });
   test('confidence x position table', () => {
-    /** @type {Array<[string, number, number, string, string]>} */
+    /** @type {Array<[string, number, number, string, string, boolean]>} */
     const table = [
-      ['high', 1e8, 3e8, 'target', 'target_all_checks_passed'],
-      ['medium', 1e8, 3e8, 'target', 'target_all_checks_passed'],
-      ['low', 1e8, 3e8, 'needs-review', 'size_low_confidence'],
-      ['high', 1e6, 5e6, 'not-target', 'size_out_of_band'],
-      ['high', 2e9, 5e9, 'not-target', 'size_out_of_band'],
-      ['medium', 1e6, 5e6, 'needs-review', 'size_not_clearly_in_band'],
-      ['low', 2e9, 5e9, 'needs-review', 'size_not_clearly_in_band'],
-      ['high', 1e7, 2e8, 'needs-review', 'size_not_clearly_in_band'],
-      ['high', 5e8, 2e9, 'needs-review', 'size_not_clearly_in_band'],
+      ['high', 1e8, 3e8, 'target', 'target_all_checks_passed', true],
+      ['medium', 1e8, 3e8, 'target', 'target_all_checks_passed', true],
+      ['low', 1e8, 3e8, 'target', 'target_all_checks_passed', false],
+      ['high', 1e6, 5e6, 'not-target', 'size_out_of_band', false],
+      ['high', 2e9, 5e9, 'not-target', 'size_out_of_band', false],
+      ['medium', 1e6, 5e6, 'needs-review', 'size_out_of_band_medium', false],
+      ['medium', 2e9, 5e9, 'needs-review', 'size_out_of_band_medium', false],
+      ['low', 2e9, 5e9, 'target', 'target_all_checks_passed', false],
+      ['high', 1e7, 2e8, 'target', 'target_all_checks_passed', false],
+      ['medium', 5e8, 2e9, 'target', 'target_all_checks_passed', false],
     ];
-    for (const [conf, lo, hi, cls, rule] of table) {
+    for (const [conf, lo, hi, cls, rule, verified] of table) {
       const v = run(sz(lo, hi, 'stated', conf));
-      assert.deepEqual([v.class, v.rule], [cls, rule], `${conf} ${lo}-${hi}`);
+      assert.deepEqual([v.class, v.rule, v.size_verified], [cls, rule, verified], `${conf} ${lo}-${hi}`);
     }
   });
-  test('band edges are inclusive', () => {
-    assert.equal(run(sz(5e7, 1e9, 'stated', 'high')).class, 'target');
+  test('a straddling range is recorded as such and never verified', () => {
+    const v = run(sz(2.5e7, 1e8, 'form_d_revenue_range', 'medium'));
+    assert.equal(v.class, 'target');
+    assert.equal(v.size_verified, false);
+    assert.equal(v.inputs.size_status, 'straddles_band');
   });
-  test('one bound known, reversed bounds, and non-numeric bounds are needs-review', () => {
-    assert.equal(run(sz(1e8, null, 'stated', 'high')).rule, 'size_one_bound');
-    assert.equal(run(sz(null, 1e8, 'stated', 'high')).rule, 'size_one_bound');
+  test('band edges are inclusive and verified', () => {
+    const v = run(sz(5e7, 1e9, 'stated', 'high'));
+    assert.equal(v.class, 'target');
+    assert.equal(v.size_verified, true);
+  });
+  test('one bound known is treated as unknown: continues, unverified, even when it looks out of band', () => {
+    for (const patch of [sz(1e8, null, 'stated', 'high'), sz(null, 1e8, 'stated', 'high'), sz(5e9, null, 'stated', 'high'), sz(null, 1e6, 'stated', 'high')]) {
+      const v = run(patch);
+      assert.equal(v.class, 'target');
+      assert.equal(v.size_verified, false);
+      assert.equal(v.inputs.size_status, 'one_bound');
+    }
+  });
+  test('reversed and non-numeric bounds are needs-review size_invalid', () => {
     assert.equal(run(sz(3e8, 1e8, 'stated', 'high')).rule, 'size_invalid');
     assert.equal(run(sz('100M', 2e8, 'stated', 'high')).rule, 'size_invalid');
     assert.equal(run(sz(-1, 2e8, 'stated', 'high')).rule, 'size_invalid');
     assert.equal(run(sz(NaN, 2e8, 'stated', 'high')).rule, 'size_invalid');
   });
   test('a Form D offering amount is never size', () => {
-    // as a basis: forced to none even at claimed high confidence
-    assert.equal(run(sz(1e8, 2e8, 'form_d_offering_amount', 'high')).rule, 'size_none');
-    // as a stray field: never read, so a signal with only an offering amount has no size
-    const v = run({ size: undefined, offering_amount: 150_000_000 });
-    assert.equal(v.rule, 'size_none');
-    // an out-of-band offering amount must not produce a not-target either
-    assert.equal(run({ size: undefined, offering_amount: 1_000 }).class, 'needs-review');
+    // as a basis: forced to none even at claimed high confidence, and an out-of-band offering never excludes
+    for (const patch of [sz(1e8, 2e8, 'form_d_offering_amount', 'high'), sz(1e3, 2e3, 'form_d_offering_amount', 'high')]) {
+      const v = run(patch);
+      assert.equal(v.class, 'target');
+      assert.equal(v.size_verified, false);
+      assert.equal(v.inputs.size_confidence, 'none');
+    }
+    // as a stray field: never read
+    for (const amount of [150_000_000, 1_000]) {
+      const v = run({ size: undefined, offering_amount: amount });
+      assert.equal(v.class, 'target');
+      assert.equal(v.size_verified, false);
+      assert.equal(v.inputs.size_status, 'unknown');
+    }
   });
-  test('a Form D revenue range is capped at medium: in band passes, out of band is only needs-review', () => {
-    assert.equal(run(sz(1e8, 2e8, 'form_d_revenue_range', 'high')).class, 'target');
+  test('a Form D revenue range is capped at medium: in band is verified, out of band is needs-review (not not-target)', () => {
+    const inBand = run(sz(1e8, 2e8, 'form_d_revenue_range', 'high'));
+    assert.equal(inBand.class, 'target');
+    assert.equal(inBand.size_verified, true);
     const out = run(sz(1e6, 5e6, 'form_d_revenue_range', 'high'));
     assert.equal(out.class, 'needs-review');
+    assert.equal(out.rule, 'size_out_of_band_medium');
     assert.equal(out.inputs.size_confidence, 'medium');
   });
-  test('headcount conversion is capped at low and never reaches target', () => {
+  test('headcount conversion is capped at low: continues unverified, never excludes', () => {
     const conv = sizeFromHeadcount(400, RULES.params.headcount_revenue_per_employee);
     assert.deepEqual(conv, { low: 60_000_000, high: 160_000_000, basis: 'headcount', confidence: 'low' });
     const v = run({ size: undefined, employees: 400 });
-    assert.equal(v.class, 'needs-review');
-    assert.equal(v.rule, 'size_low_confidence');
-    assert.equal(run(sz(6e7, 1.6e8, 'headcount', 'high')).rule, 'size_low_confidence');
-    assert.equal(run({ size: undefined, employees: 2 }).class, 'needs-review');
+    assert.equal(v.class, 'target');
+    assert.equal(v.size_verified, false);
+    assert.equal(v.inputs.size_status, 'low_confidence');
+    assert.equal(run(sz(6e7, 1.6e8, 'headcount', 'high')).size_verified, false);
+    assert.equal(run({ size: undefined, employees: 2 }).class, 'target');
     assert.equal(sizeFromHeadcount(0, RULES.params.headcount_revenue_per_employee), null);
     assert.equal(sizeFromHeadcount('400', RULES.params.headcount_revenue_per_employee), null);
+  });
+  test('size_verified is false on every non-target verdict', () => {
+    assert.equal(run({ event_date: daysAgo(400) }).size_verified, false);
+    assert.equal(run({ company: 'Advisicon Holdings' }).size_verified, false);
+    assert.equal(classifySignal(null, { rules: RULES, now: NOW, blocked: OK_LIST }).size_verified, false);
   });
 });
 
@@ -327,6 +362,18 @@ describe('Form D issuer', () => {
   });
   test('an operating-company issuer passes', () => {
     assert.equal(run(formD({ name: 'Northwind Logistics Inc', sic: '4731' })).class, 'target');
+  });
+  test('fund industry groups map to the fund path', () => {
+    for (const g of ['Pooled Investment Fund', 'pooled investment fund', 'Hedge Fund', 'Private Equity Fund', 'Venture Capital Fund', 'Other Investment Fund', 'Investing']) {
+      assert.equal(run(formD({ name: 'Northwind Logistics Inc', sic: '4731', industry_group: g })).rule, 'form_d_fund_issuer', g);
+    }
+    assert.equal(run(formD({ name: 'Northwind Logistics Inc', sic: '4731', industry_group: 'Other Technology' })).class, 'target');
+  });
+  test('an absent SIC is needs-review form_d_sic_unavailable; a fund name still reports the fund path first', () => {
+    for (const sic of [undefined, null, '', '   ']) {
+      assert.equal(run(formD({ name: 'Northwind Logistics Inc', sic })).rule, 'form_d_sic_unavailable', String(sic));
+    }
+    assert.equal(run(formD({ name: 'Northwind Growth Fund LP' })).rule, 'form_d_fund_issuer');
   });
 });
 
@@ -373,10 +420,25 @@ describe('gap trigger and departure role', () => {
     assert.equal(v.class, 'target');
     assert.equal(v.inputs.reports_to_ceo_hint, true);
   });
-  test('a departure signal, or an unknown one, is needs-review', () => {
-    for (const d of [true, undefined, null, 'no', 0]) {
-      assert.equal(run({ ...GAP, listings: [{ title: 'VP of Engineering' }], departure_signal: d }).rule, 'gap_departure_not_ruled_out', String(d));
+  test('departure_signal is informational only: true, unknown, and garbage values all still yield a target', () => {
+    for (const d of [true, false, undefined, null, 'no', 0]) {
+      const v = run({ ...GAP, listings: [{ title: 'VP of Engineering' }], departure_signal: d });
+      assert.equal(v.class, 'target', String(d));
+      assert.equal(v.rule, 'target_all_checks_passed');
     }
+    assert.equal(run({ ...GAP, listings: [{ title: 'VP of Engineering' }], departure_signal: true }).inputs.departure_signal, true);
+  });
+  test('a truncated listing group is needs-review, but a CTO-level listing is still reported first', () => {
+    assert.equal(run({ ...GAP, listings: [{ title: 'VP of Engineering' }], listings_truncated: true }).rule, 'gap_listings_truncated');
+    assert.equal(run({ ...GAP, listings: [{ title: 'VP of Engineering' }, { title: 'CTO' }], listings_truncated: true }).rule, 'gap_cto_level_listing_present');
+    assert.equal(run({ ...GAP, listings: [{ title: 'VP of Engineering' }], listings_truncated: 'yes' }).class, 'target');
+  });
+  test('an ambiguous departure (verb not bound to the role-holder) is needs-review', () => {
+    const dep = { trigger_kind: 'exec_departure', role: 'Chief Technology Officer' };
+    assert.equal(run({ ...dep, departure_ambiguous: true }).rule, 'departure_ambiguous');
+    assert.equal(run({ ...dep, departure_ambiguous: false }).class, 'target');
+    assert.equal(run({ ...dep, departure_ambiguous: 'true' }).class, 'target');
+    assert.equal(run({ trigger_kind: 'exec_departure', role: 'Chief Financial Officer', departure_ambiguous: true }).rule, 'departure_role_not_cto_level');
   });
   test('an exec_departure must name a CTO-level role', () => {
     assert.equal(run({ trigger_kind: 'exec_departure', role: 'Chief Financial Officer' }).rule, 'departure_role_not_cto_level');
@@ -435,6 +497,46 @@ describe('dedup after classification', () => {
     ]);
     assert.equal(kept.length, 1);
     assert.equal(kept[0].id, 2);
+  });
+  test('a blocked-party hint on any sibling forces a would-be target group to needs-review', () => {
+    const { kept, collapsed } = dedupSignals([
+      { id: 1, company: 'Acme', class: /** @type {const} */ ('needs-review'), rule: 'excl_blocked_suspect', trigger_date: '2026-09-01' },
+      { id: 2, company: 'Acme Inc', class: /** @type {const} */ ('target'), rule: 'target_all_checks_passed', trigger_date: '2026-10-10' },
+    ]);
+    assert.equal(kept.length, 1);
+    assert.equal(kept[0].id, 2);
+    assert.equal(kept[0].class, 'needs-review');
+    assert.equal(kept[0].rule, 'dedup_blocked_sibling');
+    assert.equal(kept[0].original_class, 'target');
+    assert.deepEqual(kept[0].blocked_hint_from, [1]);
+    assert.deepEqual(collapsed[0].collapsed_ids, [1]);
+  });
+  test('the hint also comes from an explicit blocked_hint flag or a blocked-company sibling; it never worsens a non-target', () => {
+    const flagged = dedupSignals([
+      { id: 1, company: 'Acme', class: /** @type {const} */ ('not-target'), trigger_date: '2026-09-01', blocked_hint: true },
+      { id: 2, company: 'Acme', class: /** @type {const} */ ('target'), trigger_date: '2026-10-10' },
+    ]).kept[0];
+    assert.equal(flagged.class, 'needs-review');
+    const blockedCo = dedupSignals([
+      { id: 1, company: 'Acme', class: /** @type {const} */ ('not-target'), rule: 'excl_blocked_company', trigger_date: '2026-09-01' },
+      { id: 2, company: 'Acme', class: /** @type {const} */ ('target'), trigger_date: '2026-10-10' },
+    ]).kept[0];
+    assert.equal(blockedCo.class, 'needs-review');
+    const stays = dedupSignals([
+      { id: 1, company: 'Acme', class: /** @type {const} */ ('needs-review'), rule: 'excl_blocked_suspect', trigger_date: '2026-09-01' },
+      { id: 2, company: 'Acme', class: /** @type {const} */ ('not-target'), rule: 'date_stale', trigger_date: '2026-10-10' },
+    ]).kept[0];
+    assert.equal(stays.class, 'needs-review');
+    assert.equal(stays.rule, 'excl_blocked_suspect');
+    assert.equal(stays.blocked_hint, true);
+  });
+  test('a group with no hint is unchanged', () => {
+    const { kept } = dedupSignals([
+      { id: 1, company: 'Acme', class: /** @type {const} */ ('target'), rule: 'target_all_checks_passed', trigger_date: '2026-10-01' },
+      { id: 2, company: 'Acme', class: /** @type {const} */ ('not-target'), rule: 'date_stale', trigger_date: '2026-01-01' },
+    ]);
+    assert.equal(kept[0].class, 'target');
+    assert.equal(kept[0].blocked_hint, false);
   });
   test('countByClass gives the weekly not-target count', () => {
     assert.deepEqual(countByClass([{ class: 'target' }, { class: 'not-target' }, { class: 'not-target' }, { class: 'needs-review' }, { class: 'bogus' }]), { 'target': 1, 'needs-review': 1, 'not-target': 2 });
