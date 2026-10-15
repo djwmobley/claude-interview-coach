@@ -33,6 +33,9 @@ import { JobSearchError, errFields } from './errors.js';
 
 const RELOAD_TIMEOUT_MS = 3000;
 
+/** ShellExecute historically caps URLs near 2083 chars; stay safely under it. Longer URLs are refused. */
+export const WIN32_MAX_LAUNCH_URL_LENGTH = 2000;
+
 /**
  * Only 127.0.0.0/8, ::1, and the literal hostname "localhost" are accepted. Anything else throws
  * VALIDATION -- this is a total classification (every hostname is either loopback or refused), not a
@@ -92,29 +95,27 @@ export function assertLaunchableUrl(url) {
 }
 
 /**
- * Base64-encode UTF-16LE text for `powershell.exe -EncodedCommand`, PowerShell's own documented way to
- * hand it a command string with zero shell/cmd metacharacter interpretation (no quoting layer for `&`,
- * `%`, `^`, `!`, `<`, `>`, `|` to survive at all -- the command never passes through a shell parser).
- * @param {string} text
- */
-export function encodePowerShellCommand(text) {
-  return Buffer.from(text, 'utf16le').toString('base64');
-}
-
-/**
- * Build the win32 argv for launching the default browser on `dashboardUrl` via `Start-Process`, with
- * every single quote in the URL doubled (PowerShell's own single-quoted-string escape) before it is
- * embedded in the `-FilePath '...'` argument. The whole command then travels as an `-EncodedCommand`
- * base64 blob, so nothing about the URL (including a literal `&`) is ever interpreted by cmd.exe or by
- * PowerShell's own command-line tokenizer.
+ * Build the win32 argv for launching the default browser on `url`: `explorer.exe <url>`, spawned with
+ * shell:false and the URL as ONE argv element. No cmd.exe (which split URLs at `&`, 2026-09-17 incident)
+ * and no PowerShell (Windows Defender blocks and alerts on powershell.exe with base64-encoded commands, 2026-10-15).
+ * Node quotes the element for CreateProcess, explorer.exe hands it to the shell association for http(s),
+ * and nothing re-tokenizes it. explorer.exe commonly exits non-zero (typically 1) even when it succeeded,
+ * so no caller may treat its exit code as a launch failure.
  * @param {string} url
  * @returns {[string, string[]]}
  */
 export function buildWin32LaunchArgv(url) {
-  const escaped = url.replace(/'/g, "''");
-  const psCommand = `Start-Process -FilePath '${escaped}'`;
-  const encoded = encodePowerShellCommand(psCommand);
-  return ['powershell.exe', ['-NoProfile', '-NonInteractive', '-ExecutionPolicy', 'Bypass', '-EncodedCommand', encoded]];
+  // Total classification: invalid input throws invalid_url, a URL over the limit throws url_too_long,
+  // everything else maps to the explorer.exe argv. A refused URL is never launched truncated.
+  assertLaunchableUrl(url);
+  if (url.length > WIN32_MAX_LAUNCH_URL_LENGTH) {
+    throw new JobSearchError(
+      'VALIDATION',
+      `open-dashboard: launch URL is ${url.length} chars, over the ${WIN32_MAX_LAUNCH_URL_LENGTH}-char limit ShellExecute handles safely; not launching (reason: url_too_long)`,
+      { details: { reason: 'url_too_long', length: url.length } },
+    );
+  }
+  return ['explorer.exe', [url]];
 }
 
 /**
@@ -239,29 +240,50 @@ export function launchOsBrowser({ dashboardUrl, spawnImpl, platform }) {
 }
 
 /**
+ * The reauth openUrl used by scan-run.js's interactive path: launches the SHORT loopback start URL the
+ * reauth helper serves (its /start 302s to the consent URL), falling back to the url itself only when no
+ * startUrl was supplied. A refusal (invalid_url / url_too_long) rejects; reauthorizeGoogle logs it and
+ * the run proceeds.
+ * @param {{ spawnImpl: typeof import('node:child_process').spawn, platform: NodeJS.Platform }} o
+ * @returns {(url: string, startUrl?: string) => Promise<void>}
+ */
+export function makeStartUrlLauncher({ spawnImpl, platform }) {
+  return async (url, startUrl) => {
+    await launchOsBrowser({ dashboardUrl: startUrl ?? url, spawnImpl, platform });
+  };
+}
+
+/**
  * Diagnosed variant of launchOsBrowser (2026-10-04 reauth consent-link fix): instead of a detached,
- * stdio-ignored fire-and-forget spawn (which reports success the moment powershell.exe starts, even if
- * Start-Process itself then fails), this waits for the launcher to exit and captures its exit code and
- * stderr so a failed launch leaves evidence in the log. Never rejects; every failure is a field on the
- * resolved result. The launcher (powershell / open / xdg-open) returns as soon as it has handed the URL
+ * stdio-ignored fire-and-forget spawn (which reports success the moment the launcher starts, even if
+ * the launch itself then fails), this waits for the launcher to exit and captures its exit code and
+ * stderr so a failed launch leaves evidence in the log (explorer.exe exits non-zero on success, so the
+ * code is recorded, never judged). Never rejects; every failure is a field on the
+ * resolved result. The launcher (explorer.exe / open / xdg-open) returns as soon as it has handed the URL
  * to the shell, so waiting on it is cheap; `timeoutMs` bounds the wait and kills a hung launcher.
  * @param {{ url: string, spawnImpl: typeof import('node:child_process').spawn, platform: NodeJS.Platform, timeoutMs?: number }} o
- * @returns {Promise<{ spawned: boolean, exitCode: number|null, signal: string|null, stderr: string, error: string|null, timedOut: boolean }>}
+ * @returns {Promise<{ spawned: boolean, exitCode: number|null, signal: string|null, stderr: string, error: string|null, timedOut: boolean, refusedReason: string|null }>}
  */
 export function launchOsBrowserDiagnosed({ url, spawnImpl, platform, timeoutMs = 15000 }) {
   return new Promise((resolve) => {
-    const result = { spawned: false, exitCode: /** @type {number|null} */ (null), signal: /** @type {string|null} */ (null), stderr: '', error: /** @type {string|null} */ (null), timedOut: false };
+    const result = { spawned: false, exitCode: /** @type {number|null} */ (null), signal: /** @type {string|null} */ (null), stderr: '', error: /** @type {string|null} */ (null), timedOut: false, refusedReason: /** @type {string|null} */ (null) };
+    /** @type {string} */
+    let cmd;
+    /** @type {string[]} */
+    let cmdArgs;
     try {
       assertLaunchableUrl(url);
+      [cmd, cmdArgs] = platform === 'win32'
+        ? buildWin32LaunchArgv(url)
+        : platform === 'darwin'
+          ? ['open', [url]]
+          : ['xdg-open', [url]];
     } catch (err) {
-      resolve({ ...result, error: String(err instanceof Error ? err.message : err).slice(0, 300) });
+      // refusedReason is 'invalid_url' or 'url_too_long': the URL was never launched.
+      const reason = /** @type {any} */ (err)?.details?.reason;
+      resolve({ ...result, refusedReason: typeof reason === 'string' ? reason : 'invalid_url', error: String(err instanceof Error ? err.message : err).slice(0, 300) });
       return;
     }
-    const [cmd, cmdArgs] = platform === 'win32'
-      ? buildWin32LaunchArgv(url)
-      : platform === 'darwin'
-        ? ['open', [url]]
-        : ['xdg-open', [url]];
     /** @type {any} */
     let child;
     try {

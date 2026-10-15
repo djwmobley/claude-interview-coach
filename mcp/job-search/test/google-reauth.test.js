@@ -682,3 +682,69 @@ describe('reauthorizeGoogle: requested scopes (2026-10-05)', () => {
     for (const s of [READ, SEND, CAL]) assert.ok(written.scopes.includes(s));
   });
 });
+
+describe('reauthorizeGoogle: short loopback /start launch URL (2026-10-15)', () => {
+  /** Raw GET that does NOT follow redirects, so the 302 and its Location can be asserted. */
+  function rawGet(/** @type {number} */ port, /** @type {string} */ reqPath) {
+    return new Promise((resolve, reject) => {
+      http.get({ host: '127.0.0.1', port, path: reqPath }, (res) => {
+        res.resume();
+        res.on('end', () => resolve({ status: res.statusCode, location: res.headers.location ?? null }));
+      }).on('error', reject);
+    });
+  }
+
+  test('openUrl gets (authUrl, startUrl); /start 302s to exactly this session authUrl; other paths 404; the request cannot choose the target', async () => {
+    const file = writeToken({});
+    const controller = new AbortController();
+    const calls = [];
+    const port = await freePort();
+    /** @type {any} */
+    const seen = {};
+    const result = await reauthorizeGoogle({
+      tokenFile: file,
+      redirectUris: [`http://localhost:${port}/oauth2callback`],
+      signal: controller.signal,
+      lockFile: freshLockFile(),
+      timeoutMs: 10000,
+      deps: { makeOAuthClient: fakeMakeOAuthClient(calls) },
+      async openUrl(authUrl, startUrl) {
+        await tick();
+        seen.authUrl = authUrl;
+        seen.startUrl = startUrl;
+        seen.start = await rawGet(port, '/start');
+        seen.startAgain = await rawGet(port, '/start');
+        seen.startWithQuery = await rawGet(port, '/start?next=https://evil.example/');
+        seen.other = await rawGet(port, '/elsewhere');
+        seen.startPrefix = await rawGet(port, '/start/x');
+        controller.abort();
+      },
+    });
+    assert.equal(result.outcome, 'aborted');
+    assert.equal(seen.startUrl, `http://127.0.0.1:${port}/start`);
+    assert.ok(seen.startUrl.length < 60, 'the launch URL must be short');
+    assert.equal(seen.start.status, 302);
+    assert.equal(seen.start.location, seen.authUrl, 'Location is exactly the session authUrl');
+    assert.equal(seen.startAgain.location, seen.authUrl, 'idempotent');
+    assert.equal(seen.startWithQuery.location, seen.authUrl, 'a query string never changes the target (no open redirect)');
+    assert.equal(seen.other.status, 404);
+    assert.equal(seen.startPrefix.status, 404);
+  });
+
+  test('after the run times out the grace-window server no longer redirects', async () => {
+    const file = writeToken({});
+    const port = await freePort();
+    const result = await reauthorizeGoogle({
+      tokenFile: file,
+      redirectUris: [`http://localhost:${port}/oauth2callback`],
+      signal: new AbortController().signal,
+      lockFile: freshLockFile(),
+      timeoutMs: 50,
+      deps: { makeOAuthClient: fakeMakeOAuthClient([]) },
+    });
+    assert.equal(result.outcome, 'timeout');
+    const r = /** @type {any} */ (await rawGet(port, '/start'));
+    assert.equal(r.status, 200, 'expired page, not a redirect');
+    assert.equal(r.location, null);
+  });
+});
