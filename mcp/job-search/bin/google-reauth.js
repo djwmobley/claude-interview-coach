@@ -52,19 +52,23 @@ export function parseArgs(argv) {
  *   noLaunch: boolean,
  *   write: (s: string) => void,
  *   log: (f: Record<string, string|number|boolean|null>) => void,
- *   launch: (url: string) => Promise<{ spawned: boolean, exitCode: number|null, signal: string|null, stderr: string, error: string|null, timedOut: boolean }>,
+ *   launch: (url: string) => Promise<{ spawned: boolean, exitCode: number|null, signal: string|null, stderr: string, error: string|null, timedOut: boolean, refusedReason?: string|null }>,
  * }} o
  */
 export function makeOpenUrl(o) {
-  return async (/** @type {string} */ url) => {
+  return async (/** @type {string} */ url, /** @type {string|undefined} */ startUrl) => {
+    // The full consent URL always goes to stdout (attended fallback: copy it by hand).
     o.write(url);
     if (o.noLaunch) {
       o.log({ evt: 'google_reauth_launch_skipped', reason: 'no_launch_flag' });
       return;
     }
     try {
-      const r = await o.launch(url);
+      // Launch the short loopback start URL (302s to the consent URL), not the ~2800-char consent URL.
+      const r = await o.launch(startUrl ?? url);
+      if (r.refusedReason) o.write(`Could not open a browser (${r.refusedReason}); open the consent URL above manually.`);
       o.log({
+        refused_reason: r.refusedReason ?? null,
         evt: 'google_reauth_launch_result',
         spawned: r.spawned,
         exit_code: r.exitCode,

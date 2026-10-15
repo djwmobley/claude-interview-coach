@@ -35,7 +35,7 @@ import { loadConfig, getEnv, packageRoot } from './config.js';
 import { classifyGoogleTokenState } from './google.js';
 import { reauthorizeGoogle, resolveRedirectUris } from './google-reauth.js';
 import { reauthPendingMessage } from './reauth-consent.js';
-import { launchOsBrowser } from './open-dashboard.js';
+import { makeStartUrlLauncher } from './open-dashboard.js';
 import { connectDedicated as defaultConnectDedicated, withTransaction } from './db.js';
 import { JobSearchError, errFields } from './errors.js';
 import { log as defaultLog } from './logger.js';
@@ -99,7 +99,7 @@ export const CLOSE_ALL_TIMEOUT_MS = 10000;
  * @property {typeof defaultSpawn} [spawn] unattended Google re-auth (spec A6): the child_process.spawn
  *   used to fire-and-forget bin/google-reauth.js. Tests inject a fake to assert the spawn args (command,
  *   detached/windowsHide/stdio) without actually launching a process.
- * @property {(url: string) => (void|Promise<void>)} [openUrl] interactive Google re-auth (spec A5): passed
+ * @property {(url: string, startUrl?: string) => (void|Promise<void>)} [openUrl] interactive Google re-auth (spec A5): passed
  *   through to reauthorizeGoogle() as its own openUrl. Tests inject a no-op so no real browser opens.
  * @property {typeof reauthorizeGoogle} [reauthorizeGoogle] test seam over the real function.
  * @property {string} [reauthLockFile] test seam: reauth lock path read for the AUTH_REAUTH_PENDING
@@ -733,9 +733,10 @@ async function executeRun(p) {
         const doReauth = deps.reauthorizeGoogle ?? reauthorizeGoogle;
         // Production default: actually pop the OS browser (dashboard-triggered runs are interactive by
         // default -- someone needs to SEE the consent tab). Tests always inject deps.openUrl instead.
-        const doOpenUrl = deps.openUrl ?? (async (/** @type {string} */ url) => {
-          await launchOsBrowser({ dashboardUrl: url, spawnImpl: deps.spawn ?? defaultSpawn, platform: process.platform });
-        });
+        // Launch the SHORT loopback start URL (the helper's /start 302s to the consent URL), never the
+        // ~2800-char consent URL itself: a rejection (e.g. url_too_long) is logged by reauthorizeGoogle
+        // and the run proceeds (unattended: warn and proceed).
+        const doOpenUrl = deps.openUrl ?? makeStartUrlLauncher({ spawnImpl: deps.spawn ?? defaultSpawn, platform: process.platform });
         return doReauth({
           tokenFile: env.GOOGLE_TOKEN_FILE,
           redirectUris: resolveRedirectUris(env.GOOGLE_OAUTH_REDIRECT_URIS),

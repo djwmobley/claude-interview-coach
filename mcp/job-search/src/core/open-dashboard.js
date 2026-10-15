@@ -33,6 +33,9 @@ import { JobSearchError, errFields } from './errors.js';
 
 const RELOAD_TIMEOUT_MS = 3000;
 
+/** ShellExecute historically caps URLs near 2083 chars; stay safely under it. Longer URLs are refused. */
+export const WIN32_MAX_LAUNCH_URL_LENGTH = 2000;
+
 /**
  * Only 127.0.0.0/8, ::1, and the literal hostname "localhost" are accepted. Anything else throws
  * VALIDATION -- this is a total classification (every hostname is either loopback or refused), not a
@@ -102,6 +105,16 @@ export function assertLaunchableUrl(url) {
  * @returns {[string, string[]]}
  */
 export function buildWin32LaunchArgv(url) {
+  // Total classification: invalid input throws invalid_url, a URL over the limit throws url_too_long,
+  // everything else maps to the explorer.exe argv. A refused URL is never launched truncated.
+  assertLaunchableUrl(url);
+  if (url.length > WIN32_MAX_LAUNCH_URL_LENGTH) {
+    throw new JobSearchError(
+      'VALIDATION',
+      `open-dashboard: launch URL is ${url.length} chars, over the ${WIN32_MAX_LAUNCH_URL_LENGTH}-char limit ShellExecute handles safely; not launching (reason: url_too_long)`,
+      { details: { reason: 'url_too_long', length: url.length } },
+    );
+  }
   return ['explorer.exe', [url]];
 }
 
@@ -227,6 +240,20 @@ export function launchOsBrowser({ dashboardUrl, spawnImpl, platform }) {
 }
 
 /**
+ * The reauth openUrl used by scan-run.js's interactive path: launches the SHORT loopback start URL the
+ * reauth helper serves (its /start 302s to the consent URL), falling back to the url itself only when no
+ * startUrl was supplied. A refusal (invalid_url / url_too_long) rejects; reauthorizeGoogle logs it and
+ * the run proceeds.
+ * @param {{ spawnImpl: typeof import('node:child_process').spawn, platform: NodeJS.Platform }} o
+ * @returns {(url: string, startUrl?: string) => Promise<void>}
+ */
+export function makeStartUrlLauncher({ spawnImpl, platform }) {
+  return async (url, startUrl) => {
+    await launchOsBrowser({ dashboardUrl: startUrl ?? url, spawnImpl, platform });
+  };
+}
+
+/**
  * Diagnosed variant of launchOsBrowser (2026-10-04 reauth consent-link fix): instead of a detached,
  * stdio-ignored fire-and-forget spawn (which reports success the moment the launcher starts, even if
  * the launch itself then fails), this waits for the launcher to exit and captures its exit code and
@@ -235,22 +262,28 @@ export function launchOsBrowser({ dashboardUrl, spawnImpl, platform }) {
  * resolved result. The launcher (explorer.exe / open / xdg-open) returns as soon as it has handed the URL
  * to the shell, so waiting on it is cheap; `timeoutMs` bounds the wait and kills a hung launcher.
  * @param {{ url: string, spawnImpl: typeof import('node:child_process').spawn, platform: NodeJS.Platform, timeoutMs?: number }} o
- * @returns {Promise<{ spawned: boolean, exitCode: number|null, signal: string|null, stderr: string, error: string|null, timedOut: boolean }>}
+ * @returns {Promise<{ spawned: boolean, exitCode: number|null, signal: string|null, stderr: string, error: string|null, timedOut: boolean, refusedReason: string|null }>}
  */
 export function launchOsBrowserDiagnosed({ url, spawnImpl, platform, timeoutMs = 15000 }) {
   return new Promise((resolve) => {
-    const result = { spawned: false, exitCode: /** @type {number|null} */ (null), signal: /** @type {string|null} */ (null), stderr: '', error: /** @type {string|null} */ (null), timedOut: false };
+    const result = { spawned: false, exitCode: /** @type {number|null} */ (null), signal: /** @type {string|null} */ (null), stderr: '', error: /** @type {string|null} */ (null), timedOut: false, refusedReason: /** @type {string|null} */ (null) };
+    /** @type {string} */
+    let cmd;
+    /** @type {string[]} */
+    let cmdArgs;
     try {
       assertLaunchableUrl(url);
+      [cmd, cmdArgs] = platform === 'win32'
+        ? buildWin32LaunchArgv(url)
+        : platform === 'darwin'
+          ? ['open', [url]]
+          : ['xdg-open', [url]];
     } catch (err) {
-      resolve({ ...result, error: String(err instanceof Error ? err.message : err).slice(0, 300) });
+      // refusedReason is 'invalid_url' or 'url_too_long': the URL was never launched.
+      const reason = /** @type {any} */ (err)?.details?.reason;
+      resolve({ ...result, refusedReason: typeof reason === 'string' ? reason : 'invalid_url', error: String(err instanceof Error ? err.message : err).slice(0, 300) });
       return;
     }
-    const [cmd, cmdArgs] = platform === 'win32'
-      ? buildWin32LaunchArgv(url)
-      : platform === 'darwin'
-        ? ['open', [url]]
-        : ['xdg-open', [url]];
     /** @type {any} */
     let child;
     try {

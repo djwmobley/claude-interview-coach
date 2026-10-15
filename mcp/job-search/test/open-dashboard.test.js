@@ -14,7 +14,9 @@ import {
   assertLaunchableUrl,
   launchOsBrowser,
   launchOsBrowserDiagnosed,
+  makeStartUrlLauncher,
   buildWin32LaunchArgv,
+  WIN32_MAX_LAUNCH_URL_LENGTH,
 } from '../src/core/open-dashboard.js';
 
 const DASHBOARD_URL = 'http://127.0.0.1:7311/';
@@ -217,6 +219,12 @@ describe('openDashboard', () => {
 
 describe('win32 launch argv (2026-09-17 split-at-& fix; 2026-10-15 no-PowerShell fix)', () => {
   const longUrl = `http://127.0.0.1:7311/?payload=${'x'.repeat(3000)}&tail=end`;
+  /** A URL of exactly n chars ending in &tail=end. */
+  const urlOfLength = (/** @type {number} */ n) => {
+    const head = 'http://127.0.0.1:7311/?payload=';
+    const tail = '&tail=end';
+    return head + 'x'.repeat(n - head.length - tail.length) + tail;
+  };
   const URLS = /** @type {Array<[string, string]>} */ ([
     ['plain dashboard URL', DASHBOARD_URL],
     ['URL with &', 'http://127.0.0.1:7311/?a=1&b=2&c=3'],
@@ -224,12 +232,62 @@ describe('win32 launch argv (2026-09-17 split-at-& fix; 2026-10-15 no-PowerShell
     ['URL with %20', 'http://127.0.0.1:7311/?q=a%20b%20c&z=1'],
     ['URL with a single quote', "http://127.0.0.1:7311/?note=it's&c=d"],
     ['mixed &, %2F, %20 and quote', "http://127.0.0.1:7311/?a=1&b=x%2Fy%20z&note=it's%20a%20test&c=d"],
-    ['3000+ char URL ending in &tail=end', longUrl],
+    ['2000-char URL ending in &tail=end', urlOfLength(2000)],
   ]);
 
   test('fixture sanity: the long URL is 3000+ chars and ends in &tail=end', () => {
     assert.ok(longUrl.length >= 3000);
     assert.ok(longUrl.endsWith('&tail=end'));
+    assert.equal(urlOfLength(2000).length, 2000);
+    assert.equal(urlOfLength(2001).length, 2001);
+  });
+
+  test('length boundary: 2000 chars launches, 2001 is refused with url_too_long', () => {
+    assert.doesNotThrow(() => buildWin32LaunchArgv(urlOfLength(2000)));
+    assert.throws(() => buildWin32LaunchArgv(urlOfLength(2001)), (/** @type {any} */ e) => e.code === 'VALIDATION' && e.details.reason === 'url_too_long');
+    assert.equal(WIN32_MAX_LAUNCH_URL_LENGTH, 2000);
+  });
+
+  test('a 3000+ char URL is refused with the distinct url_too_long error and is never spawned', async () => {
+    assert.throws(() => buildWin32LaunchArgv(longUrl), (/** @type {any} */ e) => e.code === 'VALIDATION' && e.details.reason === 'url_too_long' && e.details.length === longUrl.length);
+    const { fn: spawnImpl, calls } = fakeSpawn('spawn');
+    await assert.rejects(
+      () => launchOsBrowser({ dashboardUrl: longUrl, spawnImpl, platform: 'win32' }),
+      (/** @type {any} */ e) => e.details.reason === 'url_too_long',
+    );
+    const r = await launchOsBrowserDiagnosed({ url: longUrl, spawnImpl, platform: 'win32' });
+    assert.equal(r.spawned, false);
+    assert.equal(r.refusedReason, 'url_too_long');
+    assert.equal(calls.length, 0);
+  });
+
+  test('makeStartUrlLauncher (scan-run.js interactive reauth): launches the short start URL, not the long consent URL', async () => {
+    const { fn: spawnImpl, calls } = fakeSpawn('spawn');
+    const START = 'http://127.0.0.1:7312/start';
+    await makeStartUrlLauncher({ spawnImpl, platform: 'win32' })(longUrl, START);
+    assert.equal(calls.length, 1);
+    assert.equal(calls[0].cmd, 'explorer.exe');
+    assert.deepEqual(calls[0].args, [START]);
+    assert.equal(calls[0].opts.shell, false);
+    // Without a startUrl it falls back to the url itself, and a too-long one is refused, never spawned.
+    await assert.rejects(() => makeStartUrlLauncher({ spawnImpl, platform: 'win32' })(longUrl), (/** @type {any} */ e) => e.details.reason === 'url_too_long');
+    assert.equal(calls.length, 1);
+  });
+
+  test('invalid input to buildWin32LaunchArgv throws invalid_url instead of building an argv', () => {
+    for (const bad of ['javascript:alert(1)', 'not a url', '', null, undefined, 42]) {
+      assert.throws(() => buildWin32LaunchArgv(/** @type {any} */ (bad)), (/** @type {any} */ e) => e.details.reason === 'invalid_url');
+    }
+  });
+
+  test('openDashboard with a too-long dashboardUrl logs open_dashboard_failed and does not throw', async () => {
+    const { fn: fetchImpl } = fetchStub([{ match: () => true, throw: new Error('unreachable') }]);
+    const { fn: spawnImpl, calls } = fakeSpawn('spawn');
+    const { log, lines } = collectLog();
+    const r = await openDashboard({ dashboardUrl: longUrl, cdpUrl: CDP_URL, fetchImpl, spawnImpl, platform: 'win32', log });
+    assert.deepEqual(r, { ok: false, mode: null });
+    assert.equal(calls.length, 0);
+    assert.ok(lines.some((l) => l.evt === 'open_dashboard_failed'));
   });
 
   for (const [label, url] of URLS) {

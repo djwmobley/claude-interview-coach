@@ -90,6 +90,42 @@ describe('makeOpenUrl', () => {
     assert.match(String(ev.stderr), /Start-Process/);
   });
 
+  test('the SHORT start URL is launched, while the full consent URL still goes to stdout', async () => {
+    /** @type {string[]} */
+    const out = [];
+    let launchedWith = '';
+    const START = 'http://127.0.0.1:7312/start';
+    const openUrl = makeOpenUrl({
+      noLaunch: false,
+      write: (s) => out.push(s),
+      log: () => {},
+      launch: async (url) => {
+        launchedWith = url;
+        return { spawned: true, exitCode: 0, signal: null, stderr: '', error: null, timedOut: false, refusedReason: null };
+      },
+    });
+    await openUrl(URL_OK, START);
+    assert.equal(launchedWith, START);
+    assert.deepEqual(out, [URL_OK]);
+  });
+
+  test('a refused launch (url_too_long) prints a manual-open hint after the URL and logs the reason', async () => {
+    /** @type {string[]} */
+    const out = [];
+    /** @type {any[]} */
+    const logs = [];
+    const openUrl = makeOpenUrl({
+      noLaunch: false,
+      write: (s) => out.push(s),
+      log: (f) => logs.push(f),
+      launch: async () => ({ spawned: false, exitCode: null, signal: null, stderr: '', error: 'too long', timedOut: false, refusedReason: 'url_too_long' }),
+    });
+    await openUrl(URL_OK, 'http://127.0.0.1:7312/start');
+    assert.equal(out[0], URL_OK);
+    assert.match(out[1], /url_too_long/);
+    assert.equal(logs.find((l) => l.evt === 'google_reauth_launch_result').refused_reason, 'url_too_long');
+  });
+
   test('a launch that throws is logged, never rethrown', async () => {
     /** @type {any[]} */
     const logs = [];
