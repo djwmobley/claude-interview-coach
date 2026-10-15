@@ -1,0 +1,4 @@
+{
+  "_comment": "Target finder exclusion list (src/core/target-exclusion.js). Copy to blocked-affiliates.json (gitignored, personal data) in this directory, or let seedBlockedAffiliates() do it. blocked_affiliates: the current employer's parent, affiliates, and clients, ON TOP OF the built-ins in src/apply/exclusions.js BUILT_IN_BLOCKED which can never be removed. Matching is whole-token subset on the company, whole-phrase on other parties and text, and a space-stripped substring check that can only produce needs-review. While this file is missing or invalid, no signal can be classified target (rule excl_blocklist_unavailable).",
+  "blocked_affiliates": []
+}

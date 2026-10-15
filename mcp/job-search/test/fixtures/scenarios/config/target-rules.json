@@ -1,0 +1,53 @@
+{
+  "_comment": "Target finder classifier rules (src/core/target-classify.js). Steps run in ascending priority; the first step that yields a verdict wins. Every rule id the code can emit is listed in verdict_rules with the only class it may produce; the fixture lint (test/target-rules-lint.test.js, bin/config-lock.js) fails when a rule is missing, a priority repeats, or a fixture in target-rules-fixtures.json no longer holds. Config-locked: edit deliberately, then run node bin/config-lock.js --write.",
+  "steps": [
+    { "id": "trigger_kind", "priority": 100 },
+    { "id": "exclusion", "priority": 200 },
+    { "id": "evidence", "priority": 300 },
+    { "id": "date", "priority": 400 },
+    { "id": "size", "priority": 500 },
+    { "id": "form_d_issuer", "priority": 600 },
+    { "id": "trigger_specific", "priority": 700 },
+    { "id": "final", "priority": 800 }
+  ],
+  "verdict_rules": [
+    { "rule": "invalid_input", "step": "input", "class": "needs-review" },
+    { "rule": "classifier_error", "step": "input", "class": "needs-review" },
+    { "rule": "trigger_kind_unrecognized", "step": "trigger_kind", "class": "needs-review" },
+    { "rule": "excl_blocked_company", "step": "exclusion", "class": "not-target" },
+    { "rule": "excl_blocked_suspect", "step": "exclusion", "class": "needs-review" },
+    { "rule": "excl_unknown_company", "step": "exclusion", "class": "needs-review" },
+    { "rule": "excl_applied_before", "step": "exclusion", "class": "needs-review" },
+    { "rule": "excl_unmapped_branch", "step": "exclusion", "class": "needs-review" },
+    { "rule": "excl_blocklist_unavailable", "step": "exclusion", "class": "needs-review" },
+    { "rule": "evidence_missing", "step": "evidence", "class": "needs-review" },
+    { "rule": "evidence_invalid", "step": "evidence", "class": "needs-review" },
+    { "rule": "date_missing", "step": "date", "class": "needs-review" },
+    { "rule": "date_invalid", "step": "date", "class": "needs-review" },
+    { "rule": "date_future", "step": "date", "class": "needs-review" },
+    { "rule": "date_stale", "step": "date", "class": "not-target" },
+    { "rule": "size_none", "step": "size", "class": "needs-review" },
+    { "rule": "size_invalid", "step": "size", "class": "needs-review" },
+    { "rule": "size_one_bound", "step": "size", "class": "needs-review" },
+    { "rule": "size_out_of_band", "step": "size", "class": "not-target" },
+    { "rule": "size_low_confidence", "step": "size", "class": "needs-review" },
+    { "rule": "size_not_clearly_in_band", "step": "size", "class": "needs-review" },
+    { "rule": "form_d_issuer_unknown", "step": "form_d_issuer", "class": "needs-review" },
+    { "rule": "form_d_fund_issuer", "step": "form_d_issuer", "class": "needs-review" },
+    { "rule": "departure_role_not_cto_level", "step": "trigger_specific", "class": "needs-review" },
+    { "rule": "gap_no_hiring_listing", "step": "trigger_specific", "class": "needs-review" },
+    { "rule": "gap_cto_level_listing_present", "step": "trigger_specific", "class": "needs-review" },
+    { "rule": "gap_departure_not_ruled_out", "step": "trigger_specific", "class": "needs-review" },
+    { "rule": "target_all_checks_passed", "step": "final", "class": "target" }
+  ],
+  "params": {
+    "windows_days": { "pe_deal": 120, "exec_departure": 120, "leadership_gap": 60 },
+    "future_tolerance_days": 7,
+    "size_band": { "low": 50000000, "high": 1000000000 },
+    "headcount_revenue_per_employee": { "low": 150000, "high": 400000 },
+    "confidence_cap_by_basis": { "form_d_revenue_range": "medium", "headcount": "low", "form_d_offering_amount": "none" },
+    "fund_name_tokens": ["fund", "funds", "lp", "spv"],
+    "fund_sic_codes": ["6799"],
+    "stripped_match_min_length": 4
+  }
+}

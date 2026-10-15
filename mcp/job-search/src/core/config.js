@@ -724,6 +724,10 @@ export const CONFIG_FILES = Object.freeze([
   // separately by its own gitignored sidecar (see triageCandidateLockPath() below), which an unattended
   // scan warns about (RUBRIC_UNLOCKED) instead of refusing to run.
   'triage.json', 'triage-output-schema.json', 'triage-mcp-empty.json',
+  // Target finder (PR1): the classifier rules are config-locked like noise-rules.json. The fixtures file
+  // and blocked-affiliates.json are deliberately NOT members (same treatment as noise-fixtures.json and
+  // apply-exclusions.json).
+  'target-rules.json',
 ]);
 
 /** Bare filename of the rubric (never in CONFIG_FILES; see the note above). */
