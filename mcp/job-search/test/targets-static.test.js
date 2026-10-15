@@ -61,7 +61,7 @@ describe('no send path in target code', () => {
   test('regular expressions are built from operator config or blocked entries only, never from document text', () => {
     const where = files.filter((f) => /new RegExp\(/.test(read(f)));
     assert.deepEqual(where.sort(), ['google-alerts.js', 'signal-text.js', 'text-extract.js']);
-    const te = read('text-extract.js').split('\n').filter((l) => /new RegExp\(/.test(l));
+    const te = read('text-extract.js').split(/\r?\n/).filter((l) => /new RegExp\(/.test(l));
     assert.equal(te.length, 5, 'every dynamic regex in text-extract.js is built from module constants');
     for (const l of te) assert.match(l, /\$\{(?:NAME_RE_SRC|CONTACT_TITLE_SRC|PARTY_NAME)\}/, l);
   });

@@ -148,7 +148,7 @@ describe('blocked_affiliates config', () => {
   });
   test('the real blocked-affiliates.json is gitignored and the example is tracked', () => {
     const gi = fs.readFileSync(path.join(HERE, '..', '..', '..', '.gitignore'), 'utf8');
-    assert.ok(gi.split('\n').includes('mcp/job-search/config/blocked-affiliates.json'));
-    assert.ok(!gi.split('\n').includes('mcp/job-search/config/blocked-affiliates.example.json'));
+    assert.ok(gi.split(/\r?\n/).map((l) => l.trim()).includes('mcp/job-search/config/blocked-affiliates.json'));
+    assert.ok(!gi.split(/\r?\n/).map((l) => l.trim()).includes('mcp/job-search/config/blocked-affiliates.example.json'));
   });
 });
