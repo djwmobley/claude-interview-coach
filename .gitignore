@@ -46,3 +46,7 @@ mcp/job-search/data/apply-answers.md
 # triage-candidate.md above): its own presence/validity is checked at run time by src/apply/exclusions.js,
 # not at config-lock time.
 mcp/job-search/config/apply-exclusions.json
+# Target finder: blocked affiliates (Advisicon parent, affiliates, clients) are personal data, never
+# committed. mcp/job-search/config/blocked-affiliates.example.json (tracked, empty) documents the format
+# and is the seed source. Never a CONFIG_FILES member (same treatment as apply-exclusions.json above).
+mcp/job-search/config/blocked-affiliates.json

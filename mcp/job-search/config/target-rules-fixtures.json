@@ -1,0 +1,36 @@
+{
+  "_comment": "Fixtures for config/target-rules.json. Each case shallow-merges patch over base (a null patch value deletes the key), classifies with now fixed to the value below and an empty affiliate list, and must yield exactly expected_class and expected_rule. Not hashed into config.lock.json (same treatment as noise-fixtures.json); bin/config-lock.js and test/target-rules-lint.test.js run it.",
+  "now": "2026-10-15",
+  "base": {
+    "trigger_kind": "pe_deal",
+    "company": "Northwind Logistics",
+    "acquirer": "Example Capital",
+    "event_date": "2026-09-20",
+    "evidence_url": "https://www.sec.gov/Archives/edgar/data/1234567/000123456726000042/0001234567-26-000042-index.htm",
+    "evidence_source": "edgar_8k",
+    "size": { "low": 120000000, "high": 300000000, "basis": "stated", "confidence": "high" },
+    "text": "Example Capital completed its acquisition of Northwind Logistics."
+  },
+  "fixtures": [
+    { "name": "clean pe deal in band is a target", "patch": {}, "expected_class": "target", "expected_rule": "target_all_checks_passed" },
+    { "name": "unrecognized trigger kind", "patch": { "trigger_kind": "rumor" }, "expected_class": "needs-review", "expected_rule": "trigger_kind_unrecognized" },
+    { "name": "built-in blocked company", "patch": { "company": "Advisicon Holdings" }, "expected_class": "not-target", "expected_rule": "excl_blocked_company" },
+    { "name": "blocked name in acquirer field", "patch": { "acquirer": "Immunotec Capital" }, "expected_class": "needs-review", "expected_rule": "excl_blocked_suspect" },
+    { "name": "confidential company", "patch": { "company": "Confidential" }, "expected_class": "needs-review", "expected_rule": "excl_unknown_company" },
+    { "name": "missing evidence url", "patch": { "evidence_url": null }, "expected_class": "needs-review", "expected_rule": "evidence_missing" },
+    { "name": "edgar source with a non-edgar host", "patch": { "evidence_url": "https://example.com/Archives/edgar/data/1/000123456726000042/x.htm" }, "expected_class": "needs-review", "expected_rule": "evidence_invalid" },
+    { "name": "null event date and no filing date", "patch": { "event_date": null }, "expected_class": "needs-review", "expected_rule": "date_missing" },
+    { "name": "impossible calendar date", "patch": { "event_date": "2026-02-30" }, "expected_class": "needs-review", "expected_rule": "date_invalid" },
+    { "name": "date more than 7 days in the future", "patch": { "event_date": "2026-10-23" }, "expected_class": "needs-review", "expected_rule": "date_future" },
+    { "name": "pe deal older than 120 days", "patch": { "event_date": "2026-06-01" }, "expected_class": "not-target", "expected_rule": "date_stale" },
+    { "name": "no size", "patch": { "size": null }, "expected_class": "needs-review", "expected_rule": "size_none" },
+    { "name": "out of band at high confidence", "patch": { "size": { "low": 1000000, "high": 5000000, "basis": "stated", "confidence": "high" } }, "expected_class": "not-target", "expected_rule": "size_out_of_band" },
+    { "name": "only one size bound", "patch": { "size": { "low": 100000000, "high": null, "basis": "stated", "confidence": "high" } }, "expected_class": "needs-review", "expected_rule": "size_one_bound" },
+    { "name": "form d offering amount is never size", "patch": { "size": { "low": 100000000, "high": 200000000, "basis": "form_d_offering_amount", "confidence": "high" } }, "expected_class": "needs-review", "expected_rule": "size_none" },
+    { "name": "form d fund issuer", "patch": { "evidence_source": "edgar_form_d", "issuer": { "name": "Northwind Growth Fund II LP", "sic": "6799" } }, "expected_class": "needs-review", "expected_rule": "form_d_fund_issuer" },
+    { "name": "departure of a non cto-level role", "patch": { "trigger_kind": "exec_departure", "role": "Chief Financial Officer" }, "expected_class": "needs-review", "expected_rule": "departure_role_not_cto_level" },
+    { "name": "cto departure in band", "patch": { "trigger_kind": "exec_departure", "role": "Chief Technology Officer" }, "expected_class": "target", "expected_rule": "target_all_checks_passed" },
+    { "name": "gap with a hiring VP engineering listing", "patch": { "trigger_kind": "leadership_gap", "evidence_source": "listings", "evidence_url": "https://boards.example.com/northwind/jobs/42", "listings": [{ "title": "VP of Engineering" }], "departure_signal": false }, "expected_class": "target", "expected_rule": "target_all_checks_passed" },
+    { "name": "gap with a CTO-level listing present", "patch": { "trigger_kind": "leadership_gap", "evidence_source": "listings", "evidence_url": "https://boards.example.com/northwind/jobs/42", "listings": [{ "title": "VP of Engineering" }, { "title": "Head of Technology" }], "departure_signal": false }, "expected_class": "needs-review", "expected_rule": "gap_cto_level_listing_present" }
+  ]
+}

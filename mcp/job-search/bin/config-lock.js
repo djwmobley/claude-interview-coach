@@ -11,6 +11,7 @@ import path from 'node:path';
 import { checkConfigLock, writeConfigLock, loadConfig, writeTriageCandidateLock, triageCandidatePresent } from '../src/core/config.js';
 import { errFields } from '../src/core/errors.js';
 import { lintNoiseFixtures } from '../src/core/noise.js';
+import { lintTargetRules } from '../src/core/target-classify.js';
 
 /**
  * Run config/noise-rules.json against config/noise-fixtures.json (spec R2, decision 8): a config-lock
@@ -39,6 +40,31 @@ function lintNoise(cfg) {
   return true;
 }
 
+/**
+ * Run config/target-rules.json through its lint and config/target-rules-fixtures.json through the
+ * classifier (target finder PR1): a rule/fixture drift fails a config-lock write or check.
+ * @param {import('../src/core/config.js').LoadedConfig} cfg
+ */
+function lintTargets(cfg) {
+  let rules;
+  let fixtures;
+  try {
+    rules = JSON.parse(fs.readFileSync(path.join(cfg.configDir, 'target-rules.json'), 'utf8'));
+    fixtures = JSON.parse(fs.readFileSync(path.join(cfg.configDir, 'target-rules-fixtures.json'), 'utf8'));
+  } catch (err) {
+    process.stdout.write(`target-rules.json or target-rules-fixtures.json missing or invalid: ${err instanceof Error ? err.message : String(err)}\n`);
+    return false;
+  }
+  const result = lintTargetRules(rules, fixtures);
+  if (!result.ok) {
+    process.stdout.write(`target-rules.json FAILED lint (${result.failures.length}):\n`);
+    for (const f of result.failures) process.stdout.write(`  ${f}\n`);
+    return false;
+  }
+  process.stdout.write(`target-rules.json: lint ok, ${result.fixtureCount} fixture(s) all match\n`);
+  return true;
+}
+
 function main() {
   const write = process.argv.includes('--write');
   /** @type {import('../src/core/config.js').LoadedConfig} */
@@ -51,6 +77,9 @@ function main() {
     process.exit(1);
   }
   if (!lintNoise(cfg)) {
+    process.exit(1);
+  }
+  if (!lintTargets(cfg)) {
     process.exit(1);
   }
   if (write) {
