@@ -1,0 +1,6 @@
+{
+  "_comment": "Target finder EDGAR full-text queries (src/targets/edgar-fts.js). A keyed object by query id; keys starting with an underscore are comments. Order comes from the integer priority (ties broken by id), never from file position. Every query ships DISABLED: Damian approves the enabled set. Config-locked: edit deliberately, then run node bin/config-lock.js --write.",
+  "pe_acquired_by_sponsor": { "priority": 100, "q": "\"acquired by\" \"private equity\"", "forms": "8-K", "trigger_kind": "pe_deal", "window_days": 30, "enabled": false },
+  "pe_recapitalization": { "priority": 110, "q": "recapitalization \"private equity\"", "forms": "8-K", "trigger_kind": "pe_deal", "window_days": 30, "enabled": false },
+  "cto_departure_text": { "priority": 200, "q": "\"Chief Technology Officer\" resigned", "forms": "8-K", "trigger_kind": "exec_departure", "window_days": 30, "enabled": false }
+}

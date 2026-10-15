@@ -50,3 +50,8 @@ mcp/job-search/config/apply-exclusions.json
 # committed. mcp/job-search/config/blocked-affiliates.example.json (tracked, empty) documents the format
 # and is the seed source. Never a CONFIG_FILES member (same treatment as apply-exclusions.json above).
 mcp/job-search/config/blocked-affiliates.json
+# Target finder (PR2): the SEC EDGAR User-Agent contact (a name and an email address) is personal data,
+# never committed. mcp/job-search/config/target-sec-contact.example.json (tracked, placeholder) documents
+# the format. No default: when the file is missing or invalid every EDGAR adapter skips with a warning and
+# the run proceeds. Never a CONFIG_FILES member (checked at run time by src/targets/edgar-client.js).
+mcp/job-search/config/target-sec-contact.json

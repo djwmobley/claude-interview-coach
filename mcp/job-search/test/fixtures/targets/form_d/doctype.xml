@@ -1,0 +1,12 @@
+<?xml version="1.0"?>
+<!DOCTYPE edgarSubmission [
+  <!ENTITY xxe SYSTEM "file:///etc/passwd">
+]>
+<edgarSubmission>
+  <submissionType>D</submissionType>
+  <primaryIssuer>
+    <cik>0005678901</cik>
+    <entityName>&xxe;</entityName>
+    <entityType>Corporation</entityType>
+  </primaryIssuer>
+</edgarSubmission>

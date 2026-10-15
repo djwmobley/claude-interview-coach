@@ -1,0 +1,17 @@
+<?xml version="1.0"?>
+<edgarSubmission>
+  <submissionType>D</submissionType>
+  <primaryIssuer>
+    <cik>0003456789</cik>
+    <entityName>Lakeshore Manufacturing Corp</entityName>
+    <entityType>Corporation</entityType>
+  </primaryIssuer>
+  <offeringData>
+    <industryGroup><industryGroupType>Manufacturing</industryGroupType></industryGroup>
+    <issuerSize><revenueRange>Decline to Disclose</revenueRange></issuerSize>
+    <typeOfFiling>
+      <newOrAmendment><isAmendment>false</isAmendment></newOrAmendment>
+      <dateOfFirstSale><value>2026-10-08</value></dateOfFirstSale>
+    </typeOfFiling>
+  </offeringData>
+</edgarSubmission>

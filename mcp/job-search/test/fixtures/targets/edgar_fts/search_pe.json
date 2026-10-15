@@ -1,0 +1,10 @@
+{
+  "hits": {
+    "total": { "value": 3, "relation": "eq" },
+    "hits": [
+      { "_id": "0008888888-26-000201:ex99.htm", "_source": { "adsh": "0008888888-26-000201", "ciks": ["0008888888"], "display_names": ["Globex Packaging Inc  (GLBX)  (CIK 0008888888)", "Globex Packaging Holdings  (CIK 0008888889)"], "file_date": "2026-10-08", "form": "8-K", "items": ["1.01", "8.01"] } },
+      { "_id": "no-colon-id", "_source": { "adsh": "0009999999-26-000202", "ciks": ["0009999999"], "display_names": ["Initech Corp  (CIK 0009999999)"], "file_date": "2026-10-08", "form": "8-K" } },
+      { "_id": "0001212121-26-000203:ex99.htm", "_source": { "adsh": "0001212121-26-000203", "ciks": ["0001212121"], "display_names": [], "file_date": "2026-10-08", "form": "8-K" } }
+    ]
+  }
+}

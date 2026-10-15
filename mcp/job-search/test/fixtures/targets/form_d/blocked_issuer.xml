@@ -1,0 +1,17 @@
+<?xml version="1.0"?>
+<edgarSubmission>
+  <submissionType>D</submissionType>
+  <primaryIssuer>
+    <cik>0004567890</cik>
+    <entityName>Advisicon Holdings LLC</entityName>
+    <entityType>Limited Liability Company</entityType>
+  </primaryIssuer>
+  <offeringData>
+    <industryGroup><industryGroupType>Other Technology</industryGroupType></industryGroup>
+    <issuerSize><revenueRange>$25,000,001 - $100,000,000</revenueRange></issuerSize>
+    <typeOfFiling>
+      <newOrAmendment><isAmendment>false</isAmendment></newOrAmendment>
+      <dateOfFirstSale><value>2026-10-09</value></dateOfFirstSale>
+    </typeOfFiling>
+  </offeringData>
+</edgarSubmission>
