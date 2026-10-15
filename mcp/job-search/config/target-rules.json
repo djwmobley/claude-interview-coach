@@ -34,6 +34,7 @@
     { "rule": "form_d_sic_unavailable", "step": "form_d_issuer", "class": "needs-review" },
     { "rule": "fund_issuer", "step": "form_d_issuer", "class": "not-target" },
     { "rule": "fund_signal_conflict", "step": "form_d_issuer", "class": "needs-review" },
+    { "rule": "signal_field_invalid", "step": "trigger_specific", "class": "needs-review" },
     { "rule": "doc_fetch_failed", "step": "trigger_specific", "class": "needs-review" },
     { "rule": "doc_fetch_failed_partial", "step": "trigger_specific", "class": "needs-review" },
     { "rule": "departure_role_not_cto_level", "step": "trigger_specific", "class": "needs-review" },

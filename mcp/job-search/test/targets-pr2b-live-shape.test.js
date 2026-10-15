@@ -564,7 +564,7 @@ describe('Form D fund sizing (rule E)', () => {
 
 describe('classifier: new reasons are total', () => {
   const base = {
-    trigger_kind: 'pe_deal', company: 'Northwind Logistics', acquirer: 'Example Capital', event_date: '2026-09-20',
+    doc_fetch: 'ok', trigger_kind: 'pe_deal', company: 'Northwind Logistics', acquirer: 'Example Capital', event_date: '2026-09-20',
     evidence_url: 'https://www.sec.gov/Archives/edgar/data/1234567/000123456726000042/0001234567-26-000042-index.htm', evidence_source: 'edgar_8k',
     size: { low: 120000000, high: 300000000, basis: 'stated', confidence: 'high' }, text: 'Example Capital completed its acquisition.',
   };
@@ -572,10 +572,16 @@ describe('classifier: new reasons are total', () => {
   test('doc_fetch: failed, partial, unknown value, ok, absent', () => {
     assert.equal(v({ doc_fetch: 'failed' }).rule, 'doc_fetch_failed');
     assert.equal(v({ doc_fetch: 'partial' }).rule, 'doc_fetch_failed_partial');
-    assert.equal(v({ doc_fetch: 7 }).rule, 'doc_fetch_failed_partial');
+    for (const bad of [7, 'weird', '', true, {}, [], 'OK', 'Partial']) {
+      const r = v({ doc_fetch: bad });
+      assert.deepEqual([r.class, r.rule, r.inputs.invalid_field], ['needs-review', 'signal_field_invalid', 'doc_fetch'], String(bad));
+    }
+    const missing = v({ doc_fetch: undefined });
+    assert.equal(missing.rule, 'signal_field_invalid', 'missing doc_fetch on an EDGAR document source');
+    assert.equal(v({ doc_fetch: null }).rule, 'signal_field_invalid');
+    assert.equal(v({ evidence_source: 'listings', evidence_url: 'https://boards.example.com/n/jobs/1', doc_fetch: undefined }).class, 'target', 'non-document sources do not carry doc_fetch');
+    assert.equal(v({ evidence_source: 'listings', evidence_url: 'https://boards.example.com/n/jobs/1', doc_fetch: 'weird' }).rule, 'signal_field_invalid', 'a present value is always validated');
     assert.equal(v({ doc_fetch: 'ok' }).rule, 'target_all_checks_passed');
-    assert.equal(v({}).rule, 'target_all_checks_passed');
-    assert.equal(v({ doc_fetch: null }).rule, 'target_all_checks_passed');
   });
   test('a blocked company still wins over a failed document read (exclusion first)', () => {
     const r = v({ company: 'Advisicon Holdings', doc_fetch: 'failed' });
@@ -587,13 +593,12 @@ describe('classifier: new reasons are total', () => {
     assert.equal(f({ nav_range: true, pooled_group: false }).rule, 'fund_signal_conflict');
     assert.equal(f({ nav_range: false, pooled_group: true }).rule, 'fund_signal_conflict');
     assert.equal(f({ nav_range: false, pooled_group: false }).rule, 'target_all_checks_passed');
-    assert.equal(f({ nav_range: 'yes', pooled_group: 1 }).rule, 'target_all_checks_passed');
-    assert.equal(f({}).rule, 'target_all_checks_passed');
-    assert.equal(f(null).rule, 'target_all_checks_passed');
+    for (const bad of [{ nav_range: 'yes', pooled_group: 1 }, {}, null, undefined, 'x', [], { nav_range: true }]) assert.equal(f(bad).rule, 'signal_field_invalid', JSON.stringify(bad));
   });
-  test('legacy fund paths without adapter fund_signals are unchanged', () => {
-    const r = v({ evidence_source: 'edgar_form_d', issuer: { name: 'Northwind Logistics Holdings', sic: '4731', industry_group: 'Pooled Investment Fund' } });
-    assert.equal(r.rule, 'form_d_fund_issuer');
+  test('a fund-like name or SIC 6799 with clean fund signals still goes to the legacy fund path', () => {
+    const ns = { nav_range: false, pooled_group: false };
+    assert.equal(v({ evidence_source: 'edgar_form_d', issuer: { name: 'Northwind Growth Fund LP', sic: '4731', fund_signals: ns } }).rule, 'form_d_fund_issuer');
+    assert.equal(v({ evidence_source: 'edgar_form_d', issuer: { name: 'Northwind Logistics Holdings', sic: '6799', fund_signals: ns } }).rule, 'form_d_fund_issuer');
   });
   test('an unregistered rule drift still degrades to needs-review, never to a pass', () => {
     const rules = { ...RULES, verdict_rules: RULES.verdict_rules.filter((x) => x.rule !== 'doc_fetch_failed') };

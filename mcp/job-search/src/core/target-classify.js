@@ -18,7 +18,7 @@
  *                      continues and is flagged size_verified=false)
  *   6 form_d_issuer    both fund signals -> not-target fund_issuer; one -> needs-review fund_signal_conflict;
  *                      fund-like issuer, fund industry group, or SIC 6799 -> needs-review; absent SIC -> needs-review
- *   7 trigger_specific a failed or partial document read (doc_fetch) -> needs-review; departure role must be CTO-level and not ambiguous; gap needs a hiring VP/Director/
+ *   7 trigger_specific a failed, partial, missing (EDGAR document sources) or invalid doc_fetch -> needs-review; departure role must be CTO-level and not ambiguous; gap needs a hiring VP/Director/
  *                      Head of Engineering listing, no CTO-level listing, and a complete listing group
  *                      (departure_signal is informational only)
  *   8 final            target
@@ -336,28 +336,38 @@ function classifyInner(signal, opts, inputs) {
       // PR2b fund signals (adapter-supplied): aggregateNetAssetValueRange present AND a pooled investment
       // fund industry group. Both -> not-target fund_issuer (exclusion already ran at step 2). Exactly one is a
       // conflict -> needs-review. Neither continues (size then follows Item 5, unknown size stays unverified).
+      // Total classification: fund_signals must be an object whose nav_range and pooled_group are both
+      // booleans. Missing, malformed, or non-boolean -> needs-review signal_field_invalid (never a pass).
       const fsig = sig.issuer?.fund_signals;
-      const hasFundSignals = fsig !== null && typeof fsig === 'object';
-      if (hasFundSignals) {
-        const nav = fsig.nav_range === true;
-        const pooled = fsig.pooled_group === true;
-        inputs.fund_signals = { nav_range: nav, pooled_group: pooled };
-        if (nav && pooled) return verdict('not-target', 'fund_issuer');
-        if (nav !== pooled) return verdict('needs-review', 'fund_signal_conflict');
+      const valid = fsig !== null && typeof fsig === 'object' && !Array.isArray(fsig)
+        && typeof fsig.nav_range === 'boolean' && typeof fsig.pooled_group === 'boolean';
+      if (!valid) {
+        inputs.invalid_field = 'fund_signals';
+        return verdict('needs-review', 'signal_field_invalid');
       }
-      const fundIndustry = !hasFundSignals && industry !== '' && p.fund_industry_groups.some((g) => industry.includes(g.toLowerCase()));
-      if (fundLike || fundIndustry || (sic && p.fund_sic_codes.includes(sic))) return verdict('needs-review', 'form_d_fund_issuer');
+      const nav = fsig.nav_range;
+      const pooled = fsig.pooled_group;
+      inputs.fund_signals = { nav_range: nav, pooled_group: pooled };
+      if (nav && pooled) return verdict('not-target', 'fund_issuer');
+      if (nav !== pooled) return verdict('needs-review', 'fund_signal_conflict');
+      if (fundLike || (sic && p.fund_sic_codes.includes(sic))) return verdict('needs-review', 'form_d_fund_issuer');
       if (!sic) return verdict('needs-review', 'form_d_sic_unavailable');
       return null;
     },
 
     trigger_specific: () => {
       // PR2b: a chosen document that failed to fetch means the filing was not (fully) read. Never clean.
+      // Total classification of doc_fetch: ok | partial | failed. Required for the EDGAR document sources
+      // (edgar_fts, edgar_8k); optional elsewhere, but a present value must still be one of the three.
       const df = sig.doc_fetch;
-      if (df !== undefined && df !== null && df !== 'ok') {
-        inputs.doc_fetch = typeof df === 'string' ? df.slice(0, 20) : 'invalid';
-        return df === 'failed' ? verdict('needs-review', 'doc_fetch_failed') : verdict('needs-review', 'doc_fetch_failed_partial');
+      const needsDocFetch = sig.evidence_source === 'edgar_fts' || sig.evidence_source === 'edgar_8k';
+      const absent = df === undefined || df === null;
+      if ((absent && needsDocFetch) || (!absent && !['ok', 'partial', 'failed'].includes(df))) {
+        inputs.invalid_field = 'doc_fetch';
+        return verdict('needs-review', 'signal_field_invalid');
       }
+      if (df === 'failed') { inputs.doc_fetch = df; return verdict('needs-review', 'doc_fetch_failed'); }
+      if (df === 'partial') { inputs.doc_fetch = df; return verdict('needs-review', 'doc_fetch_failed_partial'); }
       if (kind === 'exec_departure') {
         inputs.role = normalizeName(sig.role) || null;
         if (!isCtoLevelTitle(sig.role)) return verdict('needs-review', 'departure_role_not_cto_level');
@@ -480,7 +490,7 @@ export const EMITTABLE_RULES = Object.freeze([
   'excl_blocked_company', 'excl_blocked_suspect', 'excl_unknown_company', 'excl_applied_before', 'excl_unmapped_branch', 'excl_blocklist_unavailable',
   'evidence_missing', 'evidence_invalid', 'date_missing', 'date_invalid', 'date_future', 'date_stale',
   'size_invalid', 'size_out_of_band', 'size_out_of_band_medium',
-  'form_d_issuer_unknown', 'form_d_fund_issuer', 'form_d_sic_unavailable', 'fund_issuer', 'fund_signal_conflict',
+  'form_d_issuer_unknown', 'form_d_fund_issuer', 'form_d_sic_unavailable', 'fund_issuer', 'fund_signal_conflict', 'signal_field_invalid',
   'doc_fetch_failed', 'doc_fetch_failed_partial',
   'departure_role_not_cto_level', 'departure_ambiguous', 'gap_no_hiring_listing', 'gap_cto_level_listing_present', 'gap_listings_truncated',
   'target_all_checks_passed',
