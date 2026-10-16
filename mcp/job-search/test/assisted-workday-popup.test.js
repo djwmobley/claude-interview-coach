@@ -19,11 +19,12 @@ import { createAssistedDriver } from '../src/apply/assisted/driver.js';
 import { WORKDAY_PROFILE } from '../src/apply/assisted/profiles/workday.js';
 import { LINKEDIN_PROFILE } from '../src/apply/assisted/profiles/linkedin.js';
 import { matchCandidates } from '../src/apply/answers.js';
-import { launchHeadlessChrome, findChromeBinary } from './helpers/headless-chrome.js';
+import { launchHeadlessChrome } from './helpers/headless-chrome.js';
+import { browserSkip } from './helpers/browser-gate.js';
 
 const HERE = path.dirname(fileURLToPath(import.meta.url));
 const FIXTURES = path.join(HERE, 'fixtures', 'assisted-workday');
-const SKIP = findChromeBinary() ? false : 'no Chrome/Edge binary on this machine';
+const SKIP = browserSkip();
 /** The bank's how_did_you_hear value and its ranked fallback (application 5). */
 const BANK_CANDIDATES = [{ value: 'Job Board', rank: 1 }, { value: 'Internet Search', rank: 2 }];
 

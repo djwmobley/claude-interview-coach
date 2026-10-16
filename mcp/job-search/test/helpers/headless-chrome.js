@@ -36,6 +36,10 @@ export function findChromeBinary() {
  * @returns {Promise<null | { wsUrl: string, baseUrl: string, close: () => Promise<void> }>}
  */
 export async function launchHeadlessChrome(fixtureDir) {
+  // Defense in depth (see test/helpers/browser-gate.js): never launch unless the operator opted in.
+  if (process.env.JOBSEARCH_BROWSER_TESTS !== '1') {
+    throw new Error('refusing to launch a real browser: JOBSEARCH_BROWSER_TESTS=1 is not set');
+  }
   const bin = findChromeBinary();
   if (!bin) return null;
   const profile = fs.mkdtempSync(path.join(os.tmpdir(), 'easy-apply-test-chrome-'));

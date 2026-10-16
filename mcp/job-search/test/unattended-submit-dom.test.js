@@ -38,11 +38,12 @@ import { smartrecruiters } from '../src/apply/adapters/smartrecruiters.js';
 import { icims } from '../src/apply/adapters/icims.js';
 import { resumeParkedApplication } from '../src/apply/resume-gate.js';
 import { loadExclusionConfig } from '../src/apply/exclusions.js';
-import { launchHeadlessChrome, findChromeBinary } from './helpers/headless-chrome.js';
+import { launchHeadlessChrome } from './helpers/headless-chrome.js';
+import { browserSkip } from './helpers/browser-gate.js';
 
 const HERE = path.dirname(fileURLToPath(import.meta.url));
 const FIXTURES = path.join(HERE, 'fixtures', 'unattended-submit');
-const SKIP = findChromeBinary() ? false : 'no Chrome/Edge binary on this machine';
+const SKIP = browserSkip();
 const CO = `ZZ-TEST-UNATTENDED-${process.pid}`;
 const ALL_ATS = ['greenhouse', 'lever', 'smartrecruiters', 'icims', 'dayforce', 'workday'];
 
