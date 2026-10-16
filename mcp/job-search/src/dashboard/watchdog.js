@@ -37,6 +37,7 @@ import path from 'node:path';
 import http from 'node:http';
 import { execFile as nodeExecFile, spawn as nodeSpawn } from 'node:child_process';
 import { errFields } from '../core/errors.js';
+import { assertRealShellAllowed } from '../core/test-guard.js';
 import { recordWatchdogRun } from '../core/watchdog-state.js';
 
 export const HEALTH_PROBE_TIMEOUT_MS = 5000;
@@ -175,6 +176,7 @@ export function findListeningPid(port, opts = {}) {
  */
 export function getProcessInfo(pid, opts = {}) {
   const run = opts.execFileImpl ?? nodeExecFile;
+  if (run === nodeExecFile) assertRealShellAllowed('spawn powershell for Get-CimInstance Win32_Process');
   const script = `Get-CimInstance Win32_Process -Filter "ProcessId=${Number(pid)}" | Select-Object Name,CommandLine | ConvertTo-Json -Compress`;
   return new Promise((resolve) => {
     run('powershell.exe', ['-NoLogo', '-NoProfile', '-NonInteractive', '-Command', script], { windowsHide: true }, (err, stdout) => {

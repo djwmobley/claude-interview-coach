@@ -28,7 +28,8 @@ import { makeAssistedApplyTool } from '../src/tools/assisted_apply.js';
 import { connectCdp } from '../src/browser/cdp-target.js';
 import { createAssistedDriver } from '../src/apply/assisted/driver.js';
 import { WORKDAY_PROFILE } from '../src/apply/assisted/profiles/workday.js';
-import { launchHeadlessChrome, findChromeBinary } from './helpers/headless-chrome.js';
+import { launchHeadlessChrome } from './helpers/headless-chrome.js';
+import { browserSkip } from './helpers/browser-gate.js';
 
 const HERE = path.dirname(fileURLToPath(import.meta.url));
 const CO = `ZZ-TEST-WDTOOL-${process.pid}`;
@@ -324,7 +325,7 @@ describe('assisted_apply, Workday profile, fake driver', () => {
   });
 });
 
-const SKIP = findChromeBinary() ? false : 'no Chrome/Edge binary on this machine';
+const SKIP = browserSkip();
 
 describe('assisted_apply over the real driver, synthetic policy fixture', { skip: SKIP }, () => {
   /** @type {any} */

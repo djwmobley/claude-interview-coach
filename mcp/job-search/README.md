@@ -914,6 +914,8 @@ is never opened afterwards. The `/write-resume`, `/write-cover-letter`, and
 
 ## Tests
 
+The default run never launches a real browser. To run the real-browser suites by hand, set `JOBSEARCH_BROWSER_TESTS=1` (for example `JOBSEARCH_BROWSER_TESTS=1 node --test test/easy-apply-driver.test.js`); those files are gated through `test/helpers/browser-gate.js` and `test/no-real-browser.test.js` fails if a new one is not.
+
 `npm test` (== `node bin/run-tests.js`) is the only supported way to run the suite. It NEVER touches the
 real, shared `ic_context` database: `bin/bootstrap-test-db.js` first creates or refreshes a throwaway
 `<name>_test` database (`ic_context_test` for the default local setup) by `pg_dump --schema-only` of the

@@ -14,6 +14,7 @@ import { getEnv, loadConfig, repoRoot } from '../src/core/config.js';
 import { withClient, closePool } from '../src/core/db.js';
 import { createLogger, dailyLogPath, pruneLogs } from '../src/core/logger.js';
 import { errFields } from '../src/core/errors.js';
+import { assertRealBrowserAllowed } from '../src/core/test-guard.js';
 import { makeCalendarProvider } from '../src/core/calendar-provider.js';
 import { createCredentials } from '../src/core/credentials.js';
 import { startupDb } from '../src/core/startup.js';
@@ -212,6 +213,7 @@ async function main() {
     // execFile (no shell) even though `port` is our own validated integer: never build a shell string
     // from data that flows toward a shell, even trusted-looking data.
     const url = `http://127.0.0.1:${port}/`;
+    assertRealBrowserAllowed('open the dashboard URL in the OS browser (cmd start / open / xdg-open)');
     if (process.platform === 'win32') execFile('cmd.exe', ['/c', 'start', '""', url], () => {});
     else if (process.platform === 'darwin') execFile('open', [url], () => {});
     else execFile('xdg-open', [url], () => {});

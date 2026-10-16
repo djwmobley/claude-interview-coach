@@ -18,11 +18,12 @@ import { fileURLToPath } from 'node:url';
 import { connectCdp } from '../src/browser/cdp-target.js';
 import { createEasyApplyDriver, PAGE_FUNCTION } from '../src/apply/easy-apply-driver.js';
 import { verifyResumeCards } from '../src/apply/easy-apply-guard.js';
-import { launchHeadlessChrome, findChromeBinary } from './helpers/headless-chrome.js';
+import { launchHeadlessChrome } from './helpers/headless-chrome.js';
+import { browserSkip } from './helpers/browser-gate.js';
 
 const HERE = path.dirname(fileURLToPath(import.meta.url));
 const FIXTURES = path.join(HERE, 'fixtures', 'easy-apply');
-const SKIP = findChromeBinary() ? false : 'no Chrome/Edge binary on this machine';
+const SKIP = browserSkip();
 
 /** @type {Awaited<ReturnType<typeof launchHeadlessChrome>>} */
 let chrome = null;

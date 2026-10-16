@@ -9,6 +9,7 @@ import fs from 'node:fs';
 import path from 'node:path';
 import { execFile } from 'node:child_process';
 import { JobSearchError } from '../../core/errors.js';
+import { assertRealBrowserAllowed } from '../../core/test-guard.js';
 import { resolveOutputPath, listOutputFiles, linkDocument, unlinkDocument, DOCUMENT_KINDS } from '../../core/documents.js';
 import { sendJson, applySandboxHtmlHeaders } from '../http.js';
 
@@ -56,6 +57,7 @@ export function register(router, deps) {
     const resolved = resolveOutputPath(deps.outputRoot, b.path ?? '');
     if (!resolved.ok) throw new JobSearchError('VALIDATION', `cannot open document: ${resolved.reason}`, { details: { reason: resolved.reason } });
     if (process.platform !== 'win32') throw new JobSearchError('VALIDATION', 'open/reveal is only supported on Windows');
+    assertRealBrowserAllowed('open a document with explorer/rundll32 (OS URL handler)');
     await new Promise((resolve, reject) => {
       if (b.reveal) {
         execFile('explorer', ['/select,', resolved.absPath], (err) => {

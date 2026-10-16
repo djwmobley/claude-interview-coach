@@ -20,11 +20,12 @@ import { fileURLToPath } from 'node:url';
 import { connectCdp } from '../src/browser/cdp-target.js';
 import { createAssistedDriver } from '../src/apply/assisted/driver.js';
 import { WORKDAY_PROFILE } from '../src/apply/assisted/profiles/workday.js';
-import { launchHeadlessChrome, findChromeBinary } from './helpers/headless-chrome.js';
+import { launchHeadlessChrome } from './helpers/headless-chrome.js';
+import { browserSkip } from './helpers/browser-gate.js';
 
 const HERE = path.dirname(fileURLToPath(import.meta.url));
 const FIXTURES = path.join(HERE, 'fixtures', 'assisted-workday');
-const SKIP = findChromeBinary() ? false : 'no Chrome/Edge binary on this machine';
+const SKIP = browserSkip();
 
 /** @type {any} */
 let chrome = null;

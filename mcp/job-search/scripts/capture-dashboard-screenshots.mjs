@@ -17,6 +17,7 @@ import os from 'node:os';
 import { fileURLToPath } from 'node:url';
 import { chromium } from 'playwright-core';
 import { bootstrapTestDb } from '../bin/bootstrap-test-db.js';
+import { assertRealBrowserAllowed } from '../src/core/test-guard.js';
 
 const HERE = path.dirname(fileURLToPath(import.meta.url));
 const ROOT = path.join(HERE, '..');
@@ -177,6 +178,7 @@ async function main() {
   const port = app.server.address().port;
   process.stdout.write(`capture-dashboard-screenshots: dashboard listening on http://127.0.0.1:${port}/\n`);
 
+  assertRealBrowserAllowed('launch a real browser for screenshots');
   const browser = await chromium.launch({ executablePath, headless: true });
   const consoleErrors = [];
   const viewports = [

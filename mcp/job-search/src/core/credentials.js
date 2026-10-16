@@ -16,6 +16,7 @@ import crypto from 'node:crypto';
 import path from 'node:path';
 import { packageRoot } from './config.js';
 import { JobSearchError } from './errors.js';
+import { assertRealShellAllowed } from './test-guard.js';
 
 /** Every credential target this pipeline ever touches lives under this prefix. */
 export const CREDENTIAL_PREFIX = 'ic-jobsearch/';
@@ -88,6 +89,7 @@ function credScriptPath() {
  */
 function runCredScript(op, args, stdinText, opts = {}) {
   const execFileFn = opts.execFileFn ?? /** @type {ExecFileFn} */ (/** @type {unknown} */ (nodeExecFile));
+  if (!opts.execFileFn) assertRealShellAllowed('spawn powershell for cred.ps1 (Windows Credential Manager)');
   const fullArgs = ['-NoProfile', '-NonInteractive', '-ExecutionPolicy', 'Bypass', '-File', credScriptPath(), '-Op', op, ...args];
   return new Promise((resolve, reject) => {
     const child = execFileFn('powershell.exe', fullArgs, { windowsHide: true }, (err, stdout, stderr) => {

@@ -20,6 +20,7 @@ import path from 'node:path';
 import { fileURLToPath } from 'node:url';
 import { loadConfig, getEnv } from '../src/core/config.js';
 import { LOCK_KEY } from '../src/core/scan-run.js';
+import { connectSession } from '../src/browser/session.js';
 import { tool as searchJobs } from '../src/tools/search_jobs.js';
 import { wrapHandler } from '../src/tools/_shared.js';
 import { newClient, upsertTestProfile, cleanupScan, makeFixtureFetch, fakeLookup, memoryReserve, runScanWaiting } from './helpers/scan-fixtures.js';
@@ -187,10 +188,12 @@ describe('scenario 3: concurrent CLI + MCP', () => {
 });
 
 describe('scenario 4: CDP down', () => {
-  test('a browser source with SCAN_CDP_URL at a closed loopback port degrades to partial + BROWSER_UNAVAILABLE through the real session module', async () => {
+  test('a browser source with SCAN_CDP_URL at a closed loopback port degrades to partial + BROWSER_UNAVAILABLE through the real session module with a refusing fake chromium', async () => {
     const env = { ...getEnv(), SCAN_CDP_URL: 'http://127.0.0.1:9' };
-    // connectSession deliberately NOT overridden: this exercises browser/session.js connectOverCDP against a closed port.
-    const r = await runScanWaiting({ profile: PROFILE, sources: ['indeed'], dryRun: true, wait: true }, scenDeps({ env }), { trigger: 'mcp', log: () => {} });
+    // The real browser/session.js connectSession runs, but with a fake chromium whose connectOverCDP is refused
+    // like a closed port: under the test runner the real playwright connect is blocked (real_browser_blocked_in_tests).
+    const refusing = { connectOverCDP: async () => { throw Object.assign(new Error('connect ECONNREFUSED 127.0.0.1:9'), { code: 'ECONNREFUSED' }); } };
+    const r = await runScanWaiting({ profile: PROFILE, sources: ['indeed'], dryRun: true, wait: true }, scenDeps({ env, connectSession: (o) => connectSession({ ...o, chromium: refusing }) }), { trigger: 'mcp', log: () => {} });
     assert.equal(r.ok, true, JSON.stringify(r.errors));
     assert.equal(r.status, 'partial', JSON.stringify(r.errors));
     assert.ok(r.errors.some((/** @type {any} */ e) => e.code === 'BROWSER_UNAVAILABLE'), JSON.stringify(r.errors));
