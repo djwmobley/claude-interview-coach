@@ -16,6 +16,7 @@ import { z } from 'zod';
 import { JobSearchError } from '../core/errors.js';
 import { untrusted } from '../core/compact.js';
 import { loadBlockedAffiliates } from '../core/target-exclusion.js';
+import { blockedSql, effectiveClassSql } from '../targets/effective.js';
 
 export const schema = {
   id: z.number().int().positive().optional(),
@@ -108,7 +109,8 @@ export const tool = {
       const params = [];
       const add = (/** @type {string} */ sql, /** @type {unknown} */ v) => { params.push(v); where.push(sql.replace('?', `$${params.length}`)); };
       if (a.id) add('t.id = ?', a.id);
-      if (a.class) add('t.class = ?', a.class);
+      // The effective class (blocked first, then the manual decision, then the machine verdict): one shared definition.
+      if (a.class) add(`${effectiveClassSql('t')} = ?`, a.class);
       if (a.trigger_kind) add('t.trigger_kind = ?', a.trigger_kind);
       if (a.status === 'open') where.push('t.decision IS NULL');
       else if (a.status && a.status !== 'any') add('t.decision = ?', a.status);
@@ -116,9 +118,10 @@ export const tool = {
       const rows = await q.query(
         `SELECT t.id, t.company, t.class, t.reason, t.verdict_rule, t.verdict_inputs, t.trigger_kind, t.trigger_date, t.evidence_url,
                 t.contact_role, t.contact_name, t.pe_firm, t.size_low, t.size_high, t.size_basis, t.size_confidence, t.size_verified,
-                t.listing_ids, t.decision, t.decision_class, t.created_at, t.updated_at
+                t.listing_ids, t.decision, t.decision_class, t.created_at, t.updated_at,
+                ${effectiveClassSql('t')} AS eff_class, ${blockedSql('t')} AS is_blocked
          FROM ic_targets t ${where.length ? `WHERE ${where.join(' AND ')}` : ''}
-         ORDER BY CASE t.class WHEN 'target' THEN 0 WHEN 'needs-review' THEN 1 ELSE 2 END, t.trigger_date DESC NULLS LAST, t.id DESC
+         ORDER BY CASE ${effectiveClassSql('t')} WHEN 'target' THEN 0 WHEN 'needs-review' THEN 1 ELSE 2 END, t.trigger_date DESC NULLS LAST, t.id DESC
          LIMIT $${params.length}`,
         params,
       );
@@ -142,21 +145,23 @@ export const tool = {
       }
       const targets = rows.rows.map((/** @type {any} */ r) => {
         const inputs = r.verdict_inputs && typeof r.verdict_inputs === 'object' ? r.verdict_inputs : {};
-        const blocked = String(r.verdict_rule ?? '').startsWith('excl_blocked') || r.verdict_rule === 'dedup_blocked_sibling' || inputs.blocked_hint === true;
+        const blocked = Boolean(r.is_blocked);
         return {
           id: Number(r.id),
-          company: u(r.company),
-          class: r.class,
+          // A blocked row never shows its company, URL, contact or PE firm (plan 18.3).
+          company: blocked ? u('[blocked]') : u(r.company),
+          class: r.eff_class,
+          machine_class: r.class,
           verdict_rule: r.verdict_rule,
           verdict_inputs: safeInputs(inputs),
           blocked,
           blocked_rule: blocked ? r.verdict_rule : null,
           trigger_kind: r.trigger_kind,
           trigger_date: r.trigger_date instanceof Date ? r.trigger_date.toISOString().slice(0, 10) : (r.trigger_date ?? null),
-          evidence_url: u(r.evidence_url),
-          contact_role: u(r.contact_role),
-          contact_name: u(r.contact_name),
-          pe_firm: u(r.pe_firm),
+          evidence_url: blocked ? null : u(r.evidence_url),
+          contact_role: blocked ? null : u(r.contact_role),
+          contact_name: blocked ? null : u(r.contact_name),
+          pe_firm: blocked ? null : u(r.pe_firm),
           size: { low: r.size_low === null ? null : Number(r.size_low), high: r.size_high === null ? null : Number(r.size_high), basis: r.size_basis, confidence: r.size_confidence },
           size_verified: r.size_verified,
           listing_ids: r.listing_ids ?? [],
@@ -169,8 +174,8 @@ export const tool = {
             parse_reason: s.parse_reason,
             doc_fetch: s.doc_fetch ?? null,
             blocked_hit: Boolean(s.blocked_hit),
-            url: u(s.url),
-            excerpt: u(String(s.excerpt ?? '').slice(0, EXCERPT_CHARS)),
+            url: blocked ? null : u(s.url),
+            excerpt: blocked ? null : u(String(s.excerpt ?? '').slice(0, EXCERPT_CHARS)),
             fetched_at: s.fetched_at instanceof Date ? s.fetched_at.toISOString() : s.fetched_at,
           })),
         };

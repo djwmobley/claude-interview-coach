@@ -184,3 +184,35 @@ describe('filters and coverage', () => {
     assert.equal(walk(out.sources).some((s) => /error/i.test(s)), false);
   });
 });
+
+describe('the effective class (PR4, plan 18.2)', () => {
+  test('a manual verdict is the class; the machine class is kept beside it; the class filter and order use the effective class', async () => {
+    const manual = await seedTarget({ company: 'Zzeff Manual', n: 'em', class: 'needs-review', rule: 'size_not_clearly_in_band' });
+    await client.query(`UPDATE ic_targets SET decision = 'reclassified', decision_class = 'target', decision_version = 1 WHERE id = $1`, [manual]);
+    const plain = await seedTarget({ company: 'Zzeff Plain', n: 'ep', class: 'needs-review', rule: 'size_not_clearly_in_band' });
+    const call = async (/** @type {any} */ a) => /** @type {any} */ (await tool.handler({ status: 'any', limit: 50, ...a }, makeDeps()));
+    const t = (await call({ id: manual })).targets[0];
+    assert.deepEqual([t.class, t.machine_class], ['target', 'needs-review']);
+    const asTarget = (await call({ class: 'target' })).targets.map((/** @type {any} */ x) => x.id);
+    assert.ok(asTarget.includes(manual) && !asTarget.includes(plain));
+    const asReview = (await call({ class: 'needs-review' })).targets.map((/** @type {any} */ x) => x.id);
+    assert.ok(asReview.includes(plain) && !asReview.includes(manual));
+  });
+
+  test('blocked wins over a manual target; the blocked company is [blocked] and no URL, contact or PE firm leaks', async () => {
+    const id = await seedTarget({
+      company: 'Zorbco Holdings LLC', n: 'bm', class: 'needs-review', rule: 'excl_blocked_suspect', contact: 'John Blocked', role: 'CEO', pe: 'Zorbco Capital',
+      inputs: { trigger_kind: 'pe_deal', exclusion_branch: 'blocked_company_suspect' },
+    });
+    await client.query(`UPDATE ic_targets SET decision = 'reclassified', decision_class = 'target', decision_version = 1 WHERE id = $1`, [id]);
+    await seedSignal(id, 'Investor Zorbco Holdings bought it', { blocked_hits: ['Zorbco Holdings'] });
+    const out = /** @type {any} */ (await tool.handler({ id, status: 'any', limit: 20 }, makeDeps()));
+    const t = out.targets[0];
+    assert.deepEqual([t.class, t.machine_class, t.blocked], ['not-target', 'needs-review', true]);
+    assert.ok(t.company.includes('[blocked]'));
+    assert.deepEqual([t.evidence_url, t.contact_name, t.contact_role, t.pe_firm, t.signals[0].url, t.signals[0].excerpt], [null, null, null, null, null, null]);
+    assert.doesNotMatch(JSON.stringify(out), /zorbco|john blocked/i);
+    const asTarget = /** @type {any} */ (await tool.handler({ class: 'target', status: 'any', limit: 50 }, makeDeps()));
+    assert.ok(!asTarget.targets.some((/** @type {any} */ x) => x.id === id), 'a blocked row is never in the target class');
+  });
+});

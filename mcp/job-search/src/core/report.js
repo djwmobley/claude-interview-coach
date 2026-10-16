@@ -954,7 +954,8 @@ export function renderTargetsLine(t, ctx = {}) {
   if (!t || typeof t !== 'object') return expected ? 'targets: [NO TARGETS RUN]' : null;
   if (t.ran !== true) {
     if (t.skipped === 'weekend' && !expected) return null;
-    const why = t.error ?? t.skipped;
+    // A stage that wrote its started marker and never wrote a result died mid-run (plan 18.7): closed code crashed.
+    const why = t.error ?? t.skipped ?? (t.state === 'started' ? 'crashed' : undefined);
     return expected || why ? `targets: [NO TARGETS RUN]${why ? ` (${closedReason(why)})` : ''}` : null;
   }
   const head = `targets: ${t.new_targets ?? 0} new, ${t.new_needs_review ?? 0} new needs-review, ${t.not_target_week ?? 0} not-target this week`;

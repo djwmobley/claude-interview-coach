@@ -516,3 +516,20 @@ textarea.notes-textarea { min-height: 100px; }
 .ready-resume { margin-right: 6px; font-size: 12px; }
 .ready-new { margin-left: 6px; color: var(--cyan); }
 .ready-warn { color: var(--yellow); font-size: 12px; margin: 0 0 8px; }
+
+/* Targets page and Home tile (plan 18.3, 18.4): reuses .approval-section (thin cyan accent); color only on chips. */
+.targets-row { cursor: pointer; }
+.targets-row:hover { background: var(--hover); }
+.targets-company { color: var(--text-strong); margin-right: 6px; }
+.targets-counts { margin-bottom: 10px; }
+.targets-pager { display: flex; align-items: center; gap: 8px; margin-top: 10px; }
+.targets-title { color: var(--text-strong); margin: 0 0 8px; word-break: break-word; }
+.targets-chips { display: flex; flex-wrap: wrap; gap: 6px; margin-bottom: 10px; }
+.targets-fact { display: flex; gap: 8px; margin-bottom: 4px; word-break: break-word; }
+.targets-fact__label { color: var(--muted); min-width: 90px; }
+.targets-inputs { margin: 6px 0 0; color: var(--muted); font-size: 12px; }
+.targets-signal { border-top: 1px solid var(--border); padding: 6px 0; }
+.targets-signal__head { color: var(--muted); font-size: 12px; }
+.targets-excerpt { white-space: pre-wrap; word-break: break-word; background: var(--surface); border: 1px solid var(--border); border-radius: 4px; padding: 6px 8px; margin: 4px 0 0; font-size: 12px; max-height: 160px; overflow: auto; }
+.targets-form { margin-top: 8px; }
+.targets-tile__row { display: grid; grid-template-columns: repeat(3, 1fr); gap: 8px; margin-bottom: 8px; }

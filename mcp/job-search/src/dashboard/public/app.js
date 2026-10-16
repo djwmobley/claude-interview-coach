@@ -34,6 +34,7 @@ const RAIL_SECTIONS = Object.freeze([
     { route: 'home', label: 'Home', key: 'h' },
     { route: 'jobs', label: 'Jobs', key: 'j' },
     { route: 'ready', label: 'Ready', key: 'a' },
+    { route: 'targets', label: 'Targets', key: 't' },
     { route: 'pipeline', label: 'Pipeline', key: 'p' },
     { route: 'followups', label: 'Follow-ups', key: 'f' },
     { route: 'review', label: 'Review', key: 'r' },
@@ -53,6 +54,7 @@ const PAGE_LOADERS = Object.freeze({
   home: () => import('./pages/home.js'),
   jobs: () => import('./pages/jobs.js'),
   ready: () => import('./pages/ready.js'),
+  targets: () => import('./pages/targets.js'),
   'job-detail': () => import('./pages/job-detail.js'),
   pipeline: () => import('./pages/pipeline.js'),
   followups: () => import('./pages/followups.js'),
@@ -306,7 +308,7 @@ document.addEventListener('keydown', (ev) => {
 
 function showHelpOverlay() {
   const rows = [
-    ['g h / g j / g p / g f / g r', 'Go to Home / Jobs / Pipeline / Follow-ups / Review'],
+    ['g h / g j / g a / g t / g p / g f / g r', 'Go to Home / Jobs / Ready / Targets / Pipeline / Follow-ups / Review'],
     ['/', 'Focus search'],
     ['j / k', 'Move row down / up in a list'],
     ['Enter', 'Open the focused row'],

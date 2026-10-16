@@ -28,6 +28,7 @@ import { runFts, loadFtsQueries } from './edgar-fts.js';
 import { runGoogleAlerts, makeGmailTokenProvider, ALERT_WINDOW_DAYS } from './google-alerts.js';
 import { runGapSource } from './gap-source.js';
 import { persistItems, recordSourceState } from './store.js';
+import { effectiveClassSql } from './effective.js';
 import {
   etDay, addDays, businessDayAnchors, sliceDays, backlogDays,
 } from './dates.js';
@@ -418,7 +419,10 @@ export async function runTargets(deps, opts = {}) {
     const gapRan = Boolean(results.gap) && results.gap.status !== 'failed';
     const gapSince = gapRan ? startedDb : new Date(new Date(startedDb).getTime() - GAP_RECENT_DAYS * DAY_MS);
     const dryItems = Object.values(results).flatMap((r) => r.items);
-    counts = await classifyPhase({ client, rules, blocked, now, cutoff, gapSince, dryRun, dryItems });
+    // A gap target can only be called stale against a COMPLETE gap snapshot (a row-capped or failed gap run
+    // proves nothing about which listings vanished).
+    const gapComplete = Boolean(results.gap) && results.gap.status === 'complete';
+    counts = await classifyPhase({ client, rules, blocked, now, cutoff, gapSince, dryRun, dryItems, gapComplete });
     await beatNow();
 
     // ---- status and row -------------------------------------------------------------------------------
@@ -445,7 +449,7 @@ export async function runTargets(deps, opts = {}) {
           JSON.stringify(Object.fromEntries(Object.entries(results).map(([k, r]) => [k, r.days]))),
           JSON.stringify(Object.fromEntries(Object.entries(results).filter(([, r]) => r.backlog_days !== null).map(([k, r]) => [k, r.backlog_days]))),
           JSON.stringify(Object.fromEntries(Object.entries(results).filter(([, r]) => r.reason).map(([k, r]) => [k, r.reason]))),
-          JSON.stringify({ counts, flags, dry_run: false })],
+          JSON.stringify({ counts, flags, dry_run: false, sources: summary })],
       );
     }
     return { status, run_id: runId, dry_run: dryRun, sources: summary, counts, flags, attention };
@@ -506,8 +510,9 @@ function intOrNull(v) {
  * @param {Date|string} o.gapSince listings signals fetched before this are not part of the snapshot
  * @param {boolean} o.dryRun
  * @param {Array<import('./outcomes.js').TargetItem>} o.dryItems
+ * @param {boolean} [o.gapComplete] the gap source finished a complete snapshot this run (enables stale evidence)
  */
-export async function classifyPhase({ client, rules, blocked, now, cutoff, gapSince, dryRun, dryItems }) {
+export async function classifyPhase({ client, rules, blocked, now, cutoff, gapSince, dryRun, dryItems, gapComplete = false }) {
   /** @type {Array<{ id: number|string, signal: any, contact: any, extracted: any }>} */
   let rows;
   if (dryRun) {
@@ -538,6 +543,7 @@ export async function classifyPhase({ client, rules, blocked, now, cutoff, gapSi
   const counts = {
     signals_classified: classified.length, groups: kept.length, kept_target: 0, kept_needs_review: 0, kept_not_target: 0,
     new_targets: 0, new_needs_review: 0, changed: 0, regressed: 0, ungroupable: 0, blocked_sibling_forced: 0, not_target_week: 0,
+    new_evidence: 0, stale_marked: 0,
   };
   for (const k of kept) {
     if (k.class === 'target') counts.kept_target += 1;
@@ -606,9 +612,37 @@ export async function classifyPhase({ client, rules, blocked, now, cutoff, gapSi
         else if (k.class === 'needs-review') counts.new_needs_review += 1;
       }
       const linked = [k.id, ...k.collapsed_ids].filter((n) => Number.isInteger(n));
-      if (linked.length) await client.query(`UPDATE ic_target_signals SET target_id = $1 WHERE id = ANY($2::int[])`, [targetId, linked]);
+      if (linked.length) {
+        // New evidence (plan 18.6): only a target that already has a human decision, and only when a linked
+        // signal was not attached to it before. A badge, never a resurfacing; no decision column is touched.
+        const fresh = await client.query(`SELECT 1 FROM ic_target_signals WHERE id = ANY($1::int[]) AND target_id IS DISTINCT FROM $2 LIMIT 1`, [linked, targetId]);
+        if (fresh.rowCount) {
+          const flagged = await client.query(`UPDATE ic_targets SET new_evidence_at = now() WHERE id = $1 AND decision IS NOT NULL`, [targetId]);
+          counts.new_evidence += flagged.rowCount ?? 0;
+        }
+        await client.query(`UPDATE ic_target_signals SET target_id = $1 WHERE id = ANY($2::int[])`, [targetId, linked]);
+      }
     }
-    const wk = await client.query(`SELECT count(*)::int AS n FROM ic_targets WHERE class = 'not-target' AND created_at >= now() - interval '7 days'`);
+    if (gapComplete) {
+      // Stale evidence (plan 18.6, O6): a gap target none of whose listing signals was refreshed by this
+      // complete gap snapshot. Badge only; class and decision are untouched. Cleared when a signal returns.
+      const GAP_SIGNAL = `FROM ic_target_signals s WHERE s.target_id = t.id AND s.source = 'listings'`;
+      const marked = await client.query(
+        `UPDATE ic_targets t SET stale_evidence_at = now()
+         WHERE t.trigger_kind = 'leadership_gap' AND t.stale_evidence_at IS NULL
+           AND EXISTS (SELECT 1 ${GAP_SIGNAL})
+           AND NOT EXISTS (SELECT 1 ${GAP_SIGNAL} AND s.fetched_at >= $1::timestamptz)`,
+        [gapSince],
+      );
+      counts.stale_marked = marked.rowCount ?? 0;
+      await client.query(
+        `UPDATE ic_targets t SET stale_evidence_at = NULL
+         WHERE t.stale_evidence_at IS NOT NULL AND EXISTS (SELECT 1 ${GAP_SIGNAL} AND s.fetched_at >= $1::timestamptz)`,
+        [gapSince],
+      );
+    }
+    // The weekly not-target count follows the effective class and leaves out discarded rows (plan 18.6).
+    const wk = await client.query(`SELECT count(*)::int AS n FROM ic_targets t WHERE ${effectiveClassSql('t')} = 'not-target' AND t.decision IS DISTINCT FROM 'discarded' AND t.created_at >= now() - interval '7 days'`);
     counts.not_target_week = wk.rows[0].n;
   });
   return counts;

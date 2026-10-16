@@ -229,6 +229,47 @@ export function reviewVerdictChip(verdict) {
   return { label: 'not reviewed', fg: '--muted', bg: '--tag-bg', style: O };
 }
 
+/**
+ * Target finder chips (plan 18.3). Total: an unknown class, status or badge gets the closed fallback.
+ * @param {string} cls effective class
+ * @returns {Chip}
+ */
+export function targetClassChip(cls) {
+  /** @type {Record<string, Chip>} */
+  const table = {
+    target: { label: 'Target', fg: '--green', bg: '--green-dim', style: O },
+    'needs-review': { label: 'Needs review', fg: '--yellow', bg: '--yellow-dim', style: O },
+    'not-target': { label: 'Not a target', fg: '--muted', bg: '--tag-bg', style: O },
+  };
+  return table[cls] ?? { label: 'Unknown', fg: '--muted-2', bg: '--tag-bg', style: O };
+}
+
+/** @param {string} status open | reclassified | discarded | approved @returns {Chip} */
+export function targetStatusChip(status) {
+  /** @type {Record<string, Chip>} */
+  const table = {
+    open: { label: 'Open', fg: '--muted', bg: '--tag-bg', style: O },
+    reclassified: { label: 'Reclassified', fg: '--accent', bg: '--accent-dim', style: O },
+    discarded: { label: 'Discarded', fg: '--muted-2', bg: '--tag-bg', style: O },
+    approved: { label: 'Approved', fg: '--green', bg: '--green-dim', style: O },
+  };
+  return table[status] ?? { label: 'Unknown', fg: '--muted-2', bg: '--tag-bg', style: O };
+}
+
+/** @param {string} kind blocked | new_evidence | stale_evidence | size_verified | size_unverified | size_unknown @returns {Chip} */
+export function targetBadge(kind) {
+  /** @type {Record<string, Chip>} */
+  const table = {
+    blocked: { label: 'Blocked', fg: '--red', bg: '--red-dim', style: O },
+    new_evidence: { label: 'New evidence', fg: '--cyan', bg: '--cyan-dim', style: O },
+    stale_evidence: { label: 'Stale evidence', fg: '--yellow', bg: '--yellow-dim', style: O },
+    size_verified: { label: 'Size verified', fg: '--green', bg: '--green-dim', style: O },
+    size_unverified: { label: 'Size unverified', fg: '--yellow', bg: '--yellow-dim', style: O },
+    size_unknown: { label: 'Size unknown', fg: '--muted', bg: '--tag-bg', style: O },
+  };
+  return table[kind] ?? { label: 'Unknown', fg: '--muted-2', bg: '--tag-bg', style: O };
+}
+
 /** Turn a token slug like "--purple-dim" into the CSS class suffix "purple-dim". @param {string} token */
 function slug(token) {
   return String(token).replace(/^--/, '');
