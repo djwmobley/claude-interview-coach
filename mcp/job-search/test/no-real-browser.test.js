@@ -121,3 +121,65 @@ test('every test file with a real-browser launch indicator calls the shared brow
   }
   assert.deepEqual(violations, [], `Ungated real-browser tests found:\n${violations.join('\n')}`);
 });
+
+// ---------------------------------------------------------------------------------------------------
+// Production modules (src/, bin/, scripts/): the runtime guard. Any module that can start or drive a real
+// browser, or open an OS URL handler, must call assertRealBrowserAllowed() from src/core/test-guard.js so
+// the launch throws real_browser_blocked_in_tests under the test runner. Same total classification:
+// indicator present means the guard call must be present, otherwise the module is named as a violation.
+// Blind spots: the check is textual, so it proves a call exists in the module, not that it precedes every
+// launch path; a launch reached through a module with no indicator in its own text (a wrapper that takes
+// the command as data) is not seen; the identity check `spawnImpl === spawn` is bypassed by wrapping spawn.
+// ---------------------------------------------------------------------------------------------------
+const PROD_INDICATORS = [
+  ['connects or launches a browser via playwright/puppeteer', /\bconnectOverCDP\s*\(|\b(?:from\s+|import\s*\(\s*|require\s*\(\s*)['"](?:puppeteer|playwright)(?:-core)?['"]|\b(?:chromium|firefox|webkit|puppeteer)\s*\.\s*launch\s*\(|\blaunchPersistentContext\s*\(/],
+  ['names an OS URL handler or browser executable', /['"`](?:explorer(?:\.exe)?|rundll32|xdg-open|msedge(?:\.exe)?|chrome\.exe)['"`]/i],
+  ['defines the scan Chrome process listing (listScanProfileProcesses)', /export\s+(?:async\s+)?function\s+listScanProfileProcesses\b/],
+  ['passes --remote-debugging-port (starts Chrome)', /--remote-debugging-port/],
+  ['drives Chrome tabs over CDP with the real fetch/WebSocket', /Page\.reload/],
+];
+const PROD_GATE = /\bassertRealBrowserAllowed\s*\(/;
+const PROD_GATE_IMPORT = /test-guard\.js/;
+const PROD_DIRS = ['src', 'bin', 'scripts'];
+
+/** @param {string} text @returns {string[]} */
+export function classifyProd(text) {
+  const code = stripComments(text);
+  const hits = PROD_INDICATORS.filter(([, re]) => re.test(code)).map(([name]) => name);
+  if (hits.length === 0) return [];
+  if (PROD_GATE_IMPORT.test(code) && PROD_GATE.test(code)) return [];
+  return [`${hits.join(', ')} but does not call assertRealBrowserAllowed (src/core/test-guard.js)`];
+}
+
+test('classifyProd: indicators need the runtime guard', () => {
+  assert.ok(classifyProd("return ['explorer.exe', [url]];").length > 0);
+  assert.ok(classifyProd("await chromium.connectOverCDP(u);").length > 0);
+  assert.ok(classifyProd("const a = ['--remote-debugging-port=1'];").length > 0);
+  assert.equal(classifyProd("const x = fs.readFileSync(p); // explorer.exe in a comment").length, 0);
+  assert.equal(classifyProd("import { assertRealBrowserAllowed } from './test-guard.js';\nassertRealBrowserAllowed('x');\nspawn('xdg-open', []);").length, 0);
+});
+
+test('every production module that can launch or drive a real browser calls the runtime guard', () => {
+  /** @type {string[]} */
+  const files = [];
+  for (const d of PROD_DIRS) walk(path.join(ROOT, d), files);
+  assert.ok(files.length > 50, `scanner found suspiciously few files (${files.length})`);
+  /** @type {string[]} */
+  const violations = [];
+  for (const f of files) {
+    if (f.endsWith('\0UNREADABLE_DIR')) {
+      violations.push(f.replace('\0', ': '));
+      continue;
+    }
+    if (path.resolve(f) === path.join(ROOT, 'src', 'core', 'test-guard.js')) continue;
+    let text;
+    try {
+      text = fs.readFileSync(f, 'utf8');
+    } catch (err) {
+      violations.push(`${path.relative(ROOT, f)}: unreadable (${/** @type {any} */ (err).code ?? 'error'})`);
+      continue;
+    }
+    for (const reason of classifyProd(text)) violations.push(`${path.relative(ROOT, f)}: ${reason}`);
+  }
+  assert.deepEqual(violations, [], `Production modules with an unguarded real-browser launch:\n${violations.join('\n')}`);
+});

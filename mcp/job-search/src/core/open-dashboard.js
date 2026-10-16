@@ -29,7 +29,9 @@
  * spawnImpl) so tests exercise all three modes and the failure path without touching a real Chrome or
  * the real OS shell.
  */
+import { spawn as realSpawn } from 'node:child_process';
 import { JobSearchError, errFields } from './errors.js';
+import { assertRealBrowserAllowed } from './test-guard.js';
 
 const RELOAD_TIMEOUT_MS = 3000;
 
@@ -214,6 +216,7 @@ export function launchOsBrowser({ dashboardUrl, spawnImpl, platform }) {
     // Synchronous throw inside a Promise executor rejects the returned promise; nothing is ever spawned
     // for a URL that fails this check (spec: "do not launch, return/log a refusal with reason invalid_url").
     assertLaunchableUrl(dashboardUrl);
+    if (spawnImpl === realSpawn) assertRealBrowserAllowed('open a URL in the OS browser (explorer/open/xdg-open)');
     const [cmd, cmdArgs] = platform === 'win32'
       ? buildWin32LaunchArgv(dashboardUrl)
       : platform === 'darwin'
@@ -284,6 +287,7 @@ export function launchOsBrowserDiagnosed({ url, spawnImpl, platform, timeoutMs =
       resolve({ ...result, refusedReason: typeof reason === 'string' ? reason : 'invalid_url', error: String(err instanceof Error ? err.message : err).slice(0, 300) });
       return;
     }
+    if (spawnImpl === realSpawn) assertRealBrowserAllowed('open a URL in the OS browser (explorer/open/xdg-open)');
     /** @type {any} */
     let child;
     try {
@@ -335,8 +339,20 @@ export function launchOsBrowserDiagnosed({ url, spawnImpl, platform, timeoutMs =
  * @returns {Promise<{ ok: boolean, mode: 'reloaded'|'opened_tab'|'os_browser'|null }>}
  */
 export async function openDashboard(o) {
-  const fetchImpl = o.fetchImpl ?? fetch;
-  const WebSocketImpl = o.WebSocketImpl ?? WebSocket;
+  // Driving the scan Chrome's tabs over CDP with the real fetch/WebSocket reloads real browser tabs.
+  // The guard fires at the moment a real fetch or WebSocket is actually used, so a test that injects only
+  // one of them (the other is never reached) is unaffected.
+  const fetchImpl = o.fetchImpl ?? /** @type {typeof fetch} */ ((...args) => {
+    assertRealBrowserAllowed('drive a real Chrome over CDP (HTTP /json)');
+    return fetch(...args);
+  });
+  const WebSocketImpl = o.WebSocketImpl ?? /** @type {typeof WebSocket} */ (/** @type {unknown} */ (class extends WebSocket {
+    /** @param {ConstructorParameters<typeof WebSocket>} args */
+    constructor(...args) {
+      assertRealBrowserAllowed('drive a real Chrome over CDP (WebSocket reload)');
+      super(...args);
+    }
+  }));
   const spawnImpl = o.spawnImpl ?? /** @type {typeof import('node:child_process').spawn} */ (/** @type {unknown} */ (undefined));
   const platform = o.platform ?? process.platform;
 

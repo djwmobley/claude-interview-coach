@@ -65,6 +65,7 @@ import fs from 'node:fs';
 import path from 'node:path';
 import { getEnv } from '../core/config.js';
 import { JobSearchError } from '../core/errors.js';
+import { assertRealBrowserAllowed } from '../core/test-guard.js';
 import { log } from '../core/logger.js';
 import { POST_ALLOWED, hostMatches } from '../core/urlguard.js';
 import { connectDedicated } from '../core/db.js';
@@ -238,6 +239,7 @@ export async function connectSession(opts = {}) {
   const cdpUrl = opts.cdpUrl ?? getEnv().SCAN_CDP_URL;
   let chromium = opts.chromium;
   if (!chromium) {
+    assertRealBrowserAllowed('connect playwright to a real Chrome over CDP');
     let playwright;
     try {
       playwright = await import('playwright-core');

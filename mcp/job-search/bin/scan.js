@@ -46,6 +46,7 @@ import { fileURLToPath } from 'node:url';
 import { getEnv, loadConfig, checkConfigLock, checkTriageCandidateLock } from '../src/core/config.js';
 import { createLogger, dailyLogPath, pruneLogs } from '../src/core/logger.js';
 import { errFields } from '../src/core/errors.js';
+import { assertRealBrowserAllowed } from '../src/core/test-guard.js';
 import { runScan } from '../src/core/scan-run.js';
 import { probeDevToolsProtocol, selfHealingLaunch } from '../src/core/chrome-launch.js';
 import { connectDedicated } from '../src/core/db.js';
@@ -195,6 +196,7 @@ export async function launchChrome(env, log, deps = {}) {
 
   const spawnImpl = deps.spawn ?? spawn;
   const spawnChromeOnce = async () => {
+    if (spawnImpl === spawn) assertRealBrowserAllowed('spawn the real scan Chrome');
     if (!env.CHROME_EXECUTABLE) throw new Error('CHROME_EXECUTABLE is not set; cannot launch the scan Chrome');
     if (!fs.existsSync(env.CHROME_EXECUTABLE)) throw new Error('CHROME_EXECUTABLE does not exist');
     fs.mkdirSync(env.SCAN_PROFILE_DIR, { recursive: true });
