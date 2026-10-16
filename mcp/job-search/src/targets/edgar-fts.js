@@ -21,7 +21,7 @@ import { getEnv } from '../core/config.js';
 import { normalizeCompany } from '../core/normalize.js';
 import { validCik, validAdsh, indexUrl, daysBefore } from './edgar-client.js';
 import {
-  discoverByForm, formsToRequests, mergeCoverage, groupByAccession, primaryFiler, chooseDocs, readDocs, evidenceOf,
+  discoverByForm, formsToRequests, mergeCoverage, groupByAccession, primaryFiler, chooseDocs, readDocs, evidenceOf, fetchStatusWithInvalid,
 } from './edgar-shared.js';
 import { createCollector } from './outcomes.js';
 import {
@@ -89,6 +89,9 @@ export function parseFtsQueries(raw) {
  * @param {number} [ctx.blockedMinLength]
  * @param {string} [ctx.configDir]
  * @param {Array<{ id: string } & z.infer<typeof ftsQuerySchema>>} [ctx.queries] injected instead of reading the file
+ * @param {{ start: string, end: string }} [ctx.window] one-day slice from the runner (YYYY-MM-DD, ET); replaces each query's window_days
+ * @param {number} [ctx.maxPages] pages per form request (default FTS_MAX_PAGES)
+ * @param {(adsh: string, queryId: string) => boolean} [ctx.covered] accession already stored with a read document (resume)
  */
 export async function runFts(ctx) {
   const c = createCollector(FTS_SOURCE, FTS_REASONS, FTS_PARSER_VERSION);
@@ -101,8 +104,9 @@ export async function runFts(ctx) {
     if (!loaded.ok) { c.skip(`config_invalid:${loaded.reason}`); return { items: c.items, stats: c.stats }; }
     queries = loaded.queries;
   }
-  const enddt = daysBefore(ctx.now, 0);
+  const enddt = ctx.window?.end ?? daysBefore(ctx.now, 0);
   let discoveryTotal = 0;
+  let overflow = false;
   /** @type {Array<{ source: 'complete'|'partial', forms: Record<string, import('./edgar-shared.js').FormCoverage> }>} */
   const coverages = [];
 
@@ -116,12 +120,13 @@ export async function runFts(ctx) {
     const disc = await discoverByForm({
       edgar,
       forms: formsToRequests(q.forms),
-      params: { q: q.q, dateRange: 'custom', startdt: daysBefore(ctx.now, q.window_days), enddt },
+      params: { q: q.q, dateRange: 'custom', startdt: ctx.window?.start ?? daysBefore(ctx.now, q.window_days), enddt },
       budget: 'discovery_fts',
-      maxPages: FTS_MAX_PAGES,
+      maxPages: ctx.maxPages ?? FTS_MAX_PAGES,
       label: q.id,
     });
     coverages.push(disc.coverage);
+    if (disc.overflow) overflow = true;
     for (const p of disc.problems) c.warn(`${p}:${q.id}`);
     for (const [form, fc] of Object.entries(disc.coverage.forms)) {
       if (fc.pages.some((p) => !p.ok && p.reason === 'hit_shape_unknown')) c.add('unparseable', 'hit_shape_unknown', { key: `${q.id}|discovery:${form}`, extracted: { query_id: q.id } });
@@ -135,6 +140,7 @@ export async function runFts(ctx) {
     }
   }
   c.stats.discovery_total = discoveryTotal;
+  c.stats.overflow = overflow;
   c.stats.coverage = coverages.length > 0 ? mergeCoverage(coverages) : null;
   if (c.stats.coverage && c.stats.coverage.source !== 'complete') c.bump('undercoverage', 1);
   c.stats.warnings.push(...edgar.warnings.filter((w) => !c.stats.warnings.includes(w)));
@@ -155,7 +161,10 @@ export async function runFts(ctx) {
     const cik = validCik(who.cik);
     if (!cik) { c.add('unparseable', 'cik_malformed', { key: `${q.id}|${adsh}`, extracted: { query_id: q.id } }); return; }
     const key = `${q.id}|${adsh}`;
-    const rawNames = who.all_names.slice(0, 10);
+    if (ctx.covered?.(adsh, q.id)) { c.bump('covered_skip'); return; }
+    // D5: exclusion runs over ALL display names; the 10-name cap applies only to what is stored.
+    const allNames = who.all_names;
+    const rawNames = allNames.slice(0, 10);
     const cleaned = rawNames.map(cleanDisplayName).filter(Boolean);
     const form = group.find((h) => h.form)?.form ?? null;
     const fileDate = group.find((h) => h.file_date)?.file_date ?? null;
@@ -172,7 +181,10 @@ export async function runFts(ctx) {
     const chosen = chooseDocs(group);
     if (chosen.chosen.length === 0) { c.add('unparseable', 'hit_shape_unknown', { key, url: indexUrl(cik, adsh), extracted: { ...base, issue: 'filename_missing_or_invalid' } }); return; }
     if (!edgar.hasBudget('fts')) { c.add('out_of_scope', 'run_cap', { key, url: indexUrl(cik, adsh), extracted: base }); return; }
-    const read = await readDocs(edgar, 'fts', cik, adsh, chosen.chosen);
+    const read0 = await readDocs(edgar, 'fts', cik, adsh, chosen.chosen);
+    // D6: a hit document with an invalid filename marks an otherwise clean filing partial (needs-review).
+    const read = { ...read0, status: fetchStatusWithInvalid(read0.status, chosen.invalid) };
+    const unreadHitDocs = chosen.unread + chosen.invalid;
     if (read.status === 'failed' && read.docs.every((d) => d.reason === 'capped')) { c.add('out_of_scope', 'run_cap', { key, url: indexUrl(cik, adsh), extracted: base }); return; }
     const evidence = evidenceOf(read.docs);
     const okDocs = read.docs.filter((d) => d.ok).map((d) => ({ ...d, plain: htmlToPlain(d.text) }));
@@ -181,7 +193,7 @@ export async function runFts(ctx) {
     // from any document, before anything is truncated.
     const parties = okDocs.map((d) => extractParty(d.plain)).filter((p) => p !== null);
     const scan = findBlockedHits(
-      [...rawNames, ...parties.map((p) => p.name), ...okDocs.map((d) => d.plain)].join(' \n '),
+      [...allNames, ...parties.map((p) => p.name), ...okDocs.map((d) => d.plain)].join(' \n '),
       ctx.blocked,
       { minLength: ctx.blockedMinLength },
     );
@@ -212,7 +224,7 @@ export async function runFts(ctx) {
       role,
       ...(q.trigger_kind === 'exec_departure' ? { departure_ambiguous: ambiguous } : {}),
       doc_fetch: read.status,
-      unread_hit_docs: chosen.unread,
+      unread_hit_docs: unreadHitDocs,
     };
     c.add('parsed', 'ok', {
       key,
@@ -223,7 +235,8 @@ export async function runFts(ctx) {
       extracted: boundExtracted({
         ...base,
         doc_fetch: read.status,
-        unread_hit_docs: chosen.unread,
+        unread_hit_docs: unreadHitDocs,
+        invalid_hit_docs: chosen.invalid,
         evidence,
         trigger_kind: q.trigger_kind,
         company: companyName.value,

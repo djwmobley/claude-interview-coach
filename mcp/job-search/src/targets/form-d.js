@@ -227,6 +227,9 @@ export function cleanDisplayName(raw) {
  * @param {{ params: { fund_name_tokens: string[], fund_industry_groups?: string[] } }} ctx.rules
  * @param {string[]} ctx.blocked blocked entries (built-ins plus affiliates)
  * @param {number} [ctx.blockedMinLength]
+ * @param {{ start: string, end: string }} [ctx.window] one-day slice from the runner (YYYY-MM-DD, ET); default is the last FORM_D_WINDOW_DAYS days
+ * @param {number} [ctx.maxPages] pages per form request (default FORM_D_MAX_PAGES)
+ * @param {(adsh: string) => boolean} [ctx.covered] true when the accession is already stored with a read document (resume)
  */
 export async function runFormD(ctx) {
   const c = createCollector(FORM_D_SOURCE, FORM_D_REASONS, FORM_D_PARSER_VERSION);
@@ -235,8 +238,8 @@ export async function runFormD(ctx) {
   const edgar = ctx.edgar;
   const fundTokens = new Set(ctx.rules.params.fund_name_tokens.map((t) => t.toLowerCase()));
   const fundGroups = (ctx.rules.params.fund_industry_groups ?? []).map((g) => g.toLowerCase());
-  const enddt = daysBefore(ctx.now, 0);
-  const startdt = daysBefore(ctx.now, FORM_D_WINDOW_DAYS);
+  const enddt = ctx.window?.end ?? daysBefore(ctx.now, 0);
+  const startdt = ctx.window?.start ?? daysBefore(ctx.now, FORM_D_WINDOW_DAYS);
 
   // One request per form type: D, then D/A. The live probe of 2026-10-15 showed forms=D returns almost only
   // originals and forms=D/A only amendments, so neither request stands in for the other. Hits are merged by
@@ -246,8 +249,9 @@ export async function runFormD(ctx) {
     forms: formsToRequests('D,D/A'),
     params: { dateRange: 'custom', startdt, enddt },
     budget: 'discovery_form_d',
-    maxPages: FORM_D_MAX_PAGES,
+    maxPages: ctx.maxPages ?? FORM_D_MAX_PAGES,
   });
+  c.stats.overflow = disc.overflow;
   c.stats.coverage = disc.coverage;
   c.stats.discovery_total = disc.total;
   for (const p of disc.problems) c.warn(p);
@@ -289,14 +293,17 @@ export async function runFormD(ctx) {
     const cik = validCik(who.cik);
     if (!cik) { c.add('unparseable', 'cik_malformed', { key: adsh }); return; }
     const key = adsh;
-    const rawNames = who.all_names.slice(0, 5);
+    if (ctx.covered?.(adsh)) { c.bump('covered_skip'); return; }
+    // D5: exclusion runs over ALL display names; the 5-name cap applies only to what is stored.
+    const allNames = who.all_names;
+    const rawNames = allNames.slice(0, 5);
     const cleaned = rawNames.map(cleanDisplayName).filter(Boolean);
     const baseExtracted = { accession: adsh, cik, form: hit.form, file_date: hit.file_date, display_names: rawNames };
 
     const fundish = cleaned.find((n) => n.toLowerCase().replace(/\./g, '').split(/[^a-z0-9]+/).some((w) => fundTokens.has(w)));
     if (fundish) {
       // The prefilter skips the document fetch, but exclusion still runs on the names and the hits are kept.
-      const pre = findBlockedHits(rawNames.join(' \n '), ctx.blocked, { minLength: ctx.blockedMinLength });
+      const pre = findBlockedHits(allNames.join(' \n '), ctx.blocked, { minLength: ctx.blockedMinLength });
       c.add('out_of_scope', 'fund_like_name_prefilter', { key, url: indexUrl(cik, adsh), extracted: { ...baseExtracted, matched_name: fundish, blocked_hits: pre.hits.map((h) => h.entry) } });
       return;
     }
@@ -347,7 +354,7 @@ export async function runFormD(ctx) {
     if (prev.dropped > 0) c.bump('prev_names_dropped', prev.dropped);
     const plain = doc.text.replace(/<[^>]+>/g, ' ');
     const partyNames = d.related.map((r) => r.name);
-    const scan = findBlockedHits([plain, ...rawNames, ...rawPrev, ...partyNames].join(' \n '), ctx.blocked, { minLength: ctx.blockedMinLength });
+    const scan = findBlockedHits([plain, ...allNames, ...rawPrev, ...partyNames].join(' \n '), ctx.blocked, { minLength: ctx.blockedMinLength });
     const entities = d.related.filter((r) => r.is_entity);
     const firstEntity = entities[0];
     const industry = sanitizeText(d.industry_group, 120);

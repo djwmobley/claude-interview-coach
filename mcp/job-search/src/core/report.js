@@ -19,6 +19,7 @@ import { normalizeLocation } from './normalize.js';
 import { JobSearchError } from './errors.js';
 import { UNCONFIRMED_SUBMIT_KINDS } from './applications.js';
 import { collectGmailManualApply } from './gmail-detail.js';
+import { closedReason } from '../targets/coverage.js';
 
 // Ready to apply section (spec-ready-to-apply-v1 section 8): lives in its own module, re-exported here.
 export { collectReadyToApply, readyView, renderReadyToApplyText, renderReadyToApplyHtml, renderReadyToApplyMarkdown } from './report-ready.js';
@@ -379,8 +380,8 @@ export function urlPassesRegistry(urlStr, registry) {
  */
 export async function collectRuns(client, since) {
   const r = since
-    ? await client.query(`SELECT id, profile, status, started_at, finished_at, stats, errors, pages_by_source FROM ic_scan_runs WHERE finished_at IS NOT NULL AND finished_at > $1 ORDER BY finished_at ASC`, [since])
-    : await client.query(`SELECT id, profile, status, started_at, finished_at, stats, errors, pages_by_source FROM ic_scan_runs WHERE finished_at IS NOT NULL ORDER BY finished_at DESC LIMIT 1`);
+    ? await client.query(`SELECT id, profile, status, started_at, finished_at, stats, errors, pages_by_source, dry_run FROM ic_scan_runs WHERE finished_at IS NOT NULL AND finished_at > $1 ORDER BY finished_at ASC`, [since])
+    : await client.query(`SELECT id, profile, status, started_at, finished_at, stats, errors, pages_by_source, dry_run FROM ic_scan_runs WHERE finished_at IS NOT NULL ORDER BY finished_at DESC LIMIT 1`);
   return r.rows.map((row) => ({
     run_id: Number(row.id),
     profile: row.profile,
@@ -391,6 +392,7 @@ export async function collectRuns(client, since) {
     stats: row.stats ?? {},
     errors: Array.isArray(row.errors) ? row.errors : [],
     pages_by_source: row.pages_by_source ?? {},
+    dry_run: Boolean(row.dry_run),
   }));
 }
 
@@ -761,6 +763,10 @@ export async function buildScanReport(client, opts = {}) {
   const since = effectiveSince ?? new Date(now.getTime() - 24 * 3600000);
   const runs = await collectRuns(client, effectiveSince ? since : null);
   const noScan = runs.length === 0 && isWeekdayInTz(now, timezone);
+  // Target finder stage (plan 17.5): a weekday, non-dry scan whose stats.targets.ran is not true, and any run
+  // whose stage finished with a skipped, failed or partial-with-backlog source.
+  const noTargetsRun = runs.some((r) => targetsExpected(r, timezone) && r.stats?.targets?.ran !== true);
+  const targetsAttention = runs.some((r) => r.stats?.targets?.ran === true && r.stats.targets.attention === true);
   // Loud-warning detection (scan-never-skip fix): bin/scan.js NEVER blocks an unattended run on a
   // config-lock mismatch or an unlocked rubric any more -- it proceeds and records a severity:'warning'
   // entry on the run instead, which means the run's own `status` can be 'ok'. This scan therefore looks
@@ -786,6 +792,8 @@ export async function buildScanReport(client, opts = {}) {
     dayKey: dayKeyInTz(now, timezone),
     runs,
     noScan,
+    noTargetsRun,
+    targetsAttention,
     lockMismatch,
     worstStatus,
     lookAtThese,
@@ -820,6 +828,9 @@ export function buildReportSubject(data, extra = {}) {
   else if (data.worstStatus !== 'ok') prefixes.push(`[SCAN ${String(data.worstStatus).toUpperCase()}]`);
   // Gmail intake addendum B7: the hard case only (a registered sender parsed empty or threw).
   if (gmailHealthLines(aggregateGmailStats(data.runs), /** @type {any} */ (data).parserBrokenMinEmails ?? 1).broken.length) prefixes.push('[PARSER BROKEN]');
+  // Target finder (plan 17.5): closed flags only.
+  if (/** @type {any} */ (data).noTargetsRun) prefixes.push('[NO TARGETS RUN]');
+  else if (/** @type {any} */ (data).targetsAttention) prefixes.push('[TARGETS PARTIAL]');
   const parts = [`Job scan report ${data.dayKey}`];
   const newCount = data.lookAtThese.rows.length;
   parts.push(`${newCount} to look at`);
@@ -905,6 +916,74 @@ function renderReviewBandFitClause(m, reviewBand) {
   if (unscored) extras.push(`${unscored} unscored`);
   if (extras.length) clause += ` (${extras.join(', ')})`;
   return clause;
+}
+
+/**
+ * Is a target finder stage expected for this run? A weekday (in the report timezone), non-dry scan.
+ * @param {{ started_at?: string, dry_run?: boolean }} r
+ * @param {string} [timezone]
+ * @returns {boolean}
+ */
+export function targetsExpected(r, timezone = 'America/Chicago') {
+  if (!r || r.dry_run) return false;
+  try {
+    const d = new Date(/** @type {string} */ (r.started_at));
+    return !Number.isNaN(d.getTime()) && isWeekdayInTz(d, timezone);
+  } catch {
+    return false;
+  }
+}
+
+/**
+ * The target finder digest line (plan 17.5) for one run's `stats.targets`. Closed reason codes only; raw
+ * error text never reaches the digest. Returns null when no stage was expected and none ran (a weekend, a
+ * dry run).
+ *
+ *   targets: N new, M new needs-review, K not-target this week; form_d complete, 8k partial (run_cap, backlog 4d),
+ *   fts complete, alerts skipped (gmail_auth_expired)
+ *   targets: [NO TARGETS RUN] (stage_timeout)
+ *
+ * A source with a backlog over 3 business days is flagged. Sources that are disabled by config are left out,
+ * and a complete gap source is not listed.
+ * @param {any} t
+ * @param {{ expected?: boolean }} [ctx]
+ * @returns {string|null}
+ */
+export function renderTargetsLine(t, ctx = {}) {
+  const expected = ctx.expected !== false;
+  if (!t || typeof t !== 'object') return expected ? 'targets: [NO TARGETS RUN]' : null;
+  if (t.ran !== true) {
+    if (t.skipped === 'weekend' && !expected) return null;
+    const why = t.error ?? t.skipped;
+    return expected || why ? `targets: [NO TARGETS RUN]${why ? ` (${closedReason(why)})` : ''}` : null;
+  }
+  const head = `targets: ${t.new_targets ?? 0} new, ${t.new_needs_review ?? 0} new needs-review, ${t.not_target_week ?? 0} not-target this week`;
+  /** @type {string[]} */
+  const parts = [];
+  // Fixed order (jsonb does not keep key order): the documented sources first, anything else after.
+  const order = ['form_d', '8k', 'fts', 'alerts', 'gap'];
+  const entries = Object.entries(t.sources ?? {}).sort((a, b) => (order.indexOf(a[0]) + 1 || 99) - (order.indexOf(b[0]) + 1 || 99));
+  for (const [name, s] of entries) {
+    const src = /** @type {any} */ (s);
+    if (!src || src.status === 'disabled') continue;
+    if (name === 'gap' && src.status === 'complete') continue;
+    /** @type {string[]} */
+    const notes = [];
+    if (src.reason && src.status !== 'complete') notes.push(closedReason(src.reason));
+    const backlog = Number(src.backlog_days);
+    if (Number.isFinite(backlog) && backlog > 0 && src.status !== 'complete') notes.push(`backlog ${backlog}d${backlog > 3 ? ' [OVER 3 DAYS]' : ''}`);
+    parts.push(`${name} ${String(src.status)}${notes.length ? ` (${notes.join(', ')})` : ''}`);
+  }
+  let line = parts.length ? `${head}; ${parts.join(', ')}` : head;
+  if (t.status === 'failed') line += `; run failed${t.error ? ` (${closedReason(t.error)})` : ''}`;
+  const flags = Array.isArray(t.flags) ? t.flags.filter((/** @type {unknown} */ f) => typeof f === 'string').map(closedFlag) : [];
+  if (flags.length) line += `; flags: ${[...new Set(flags)].join(', ')}`;
+  return line;
+}
+
+/** @param {string} f closed flag names only @returns {string} */
+function closedFlag(f) {
+  return ['config_reset', 'suspicious_empty_released', 'day_overflow'].includes(f) ? f : 'other';
 }
 
 /**
@@ -1073,6 +1152,8 @@ export function renderReportText(data, registry, googleAuthState, dashboardHealt
     if (blockedLine) lines.push(`  ${blockedLine}`);
     const triageLine = renderTriageLine(s.triage);
     if (triageLine) lines.push(`  ${triageLine}`);
+    const targetsLine = renderTargetsLine(s.targets, { expected: targetsExpected(r, data.timezone) });
+    if (targetsLine) lines.push(`  ${targetsLine}`);
     for (const e of r.errors.slice(0, 5)) lines.push(`  error: ${e.source ?? 'run'} ${e.code}: ${errorLineMessage(e).slice(0, 200)}`);
   }
   if (gmailAgg) {
@@ -1156,7 +1237,8 @@ export function renderReportHtml(data, registry, googleAuthState, dashboardHealt
       const banner = (r.status !== 'ok' ? `<strong>[${esc(String(r.status).toUpperCase())}]</strong> ` : '') + (hasWallclockMarker(r) ? '<strong>[WALLCLOCK]</strong> ' : '');
       const errs = r.errors.slice(0, 5).map((e) => `<br>error: ${esc(e.source ?? 'run')} ${esc(e.code)}: ${esc(errorLineMessage(e).slice(0, 200))}`).join('');
       const triageLine = renderTriageLine(s.triage);
-      const triageHtml = triageLine ? `<br>${esc(triageLine)}` : '';
+      const targetsLine = renderTargetsLine(s.targets, { expected: targetsExpected(r, data.timezone) });
+      const triageHtml = (triageLine ? `<br>${esc(triageLine)}` : '') + (targetsLine ? `<br>${esc(targetsLine)}` : '');
       const blockedHtmlLine = blockedDetailLine(s);
       const detailsHtml = detailsBySourceLines(s).map((dline) => `<br>${esc(dline)}`).join('') + (blockedHtmlLine ? `<br>${esc(blockedHtmlLine)}` : '');
       parts.push(`<li>${banner}run #${r.run_id}, profile ${esc(r.profile)}, status ${esc(r.status)}, started ${esc(r.started_at)}, duration ${r.duration_seconds ?? '?'}s<br>fetched ${s.fetched ?? 0}, new ${s.new ?? 0}, updated ${s.updated ?? 0}, repost ${s.repost ?? 0}, ambiguous ${s.ambiguous ?? 0}, detail_skipped_budget ${s.detail_skipped_budget ?? 0}${detailsHtml}${triageHtml}${errs}</li>`);
@@ -1238,6 +1320,8 @@ export function renderReportMarkdown(data, registry, googleAuthState, dashboardH
     if (blockedLine2) lines.push(`  ${blockedLine2}`);
     const triageLine = renderTriageLine(s.triage);
     if (triageLine) lines.push(`  ${triageLine}`);
+    const targetsLine = renderTargetsLine(s.targets, { expected: targetsExpected(r, data.timezone) });
+    if (targetsLine) lines.push(`  ${targetsLine}`);
     for (const e of r.errors.slice(0, 5)) lines.push(`  error: ${e.source ?? 'run'} ${e.code}: ${errorLineMessage(e).slice(0, 200)}`);
   }
   if (gmailAgg) {

@@ -30,7 +30,7 @@ mcp/job-search/
                       an unattended run WARNS on a mismatch and proceeds -- it never refuses to run
   sql/                001-011 migrations (each BEGIN/COMMIT, idempotent) + unique_indexes.sql (conditional)
   bin/                scan.js  migrate.js  backfill-embeddings.js  config-lock.js  remind.js
-                      dashboard.js  seed-opportunities.js  triage-backfill.js
+                      dashboard.js  seed-opportunities.js  triage-backfill.js  targets.js
   seed/               opportunities.example.json (synthetic; the real file is gitignored under data/)
   scripts/            register-dashboard-task.ps1
   src/server.js       MCP server (stdout carries JSON-RPC frames only)
@@ -96,6 +96,7 @@ secrets) and its tools are allowed in `.claude/settings.json`
 | `render_doc` | preflight and render resumes, cover letters, and cheat sheets through the repo's Python converters |
 | `followups` | create / list / complete / snooze / cancel follow-up threads; optional calendar event |
 | `scan_report` | on-demand version of the daily scan-report email for a date or `run_id`; never advances the report marker |
+| `targets` | read-only view of the target finder (companies to approach directly): class, verdict rule, evidence, size flag, signals and source coverage; runs in a READ ONLY transaction, SEC and Gmail text is wrapped as untrusted, blocked names are never returned |
 
 Compact row shape: `#412 | CTO | Mercy Ships | Houston, TX (hybrid) | 2026-08-21 | $250-300k | ps 72 | new | linkedin | noise:<class>`
 (the trailing `noise:<class>` segment appears only when the row's `noise_class` is not `ok`/`ok_manual`).

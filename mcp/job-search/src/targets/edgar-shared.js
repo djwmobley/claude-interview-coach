@@ -45,7 +45,8 @@ export function formsToRequests(forms) {
  * @typedef {Object} FormCoverage
  * @property {'complete'|'partial'|'none'} status
  * @property {number|null} total hits the index says exist for this form request
- * @property {number} read hits actually read
+ * @property {number} read hits actually read (raw count over pages)
+ * @property {number} distinct distinct hits (accession and file) actually seen
  * @property {Array<{ from: number, hits: number, ok: boolean, reason: string|null }>} pages
  */
 
@@ -57,6 +58,7 @@ export function formsToRequests(forms) {
  * @property {number} notRead sum over forms of (total - read), never negative
  * @property {boolean} blockedFirst the very first request was blocked (the source should be skipped)
  * @property {string[]} problems machine-readable problems (discovery_<reason>, hit_shape_unknown:<form>)
+ * @property {boolean} overflow some form has more hits than maxPages pages can hold (plan 17.2 day_overflow)
  */
 
 /**
@@ -65,7 +67,7 @@ export function formsToRequests(forms) {
  * @param {string[]} o.forms one request per entry
  * @param {Record<string, string|number|undefined>} o.params search parameters except forms/from
  * @param {string} o.budget the source's own discovery budget
- * @param {number} o.maxPages pages per form
+ * @param {number} o.maxPages pages per form (always paged from offset 0)
  * @param {string} [o.label] prefix for the coverage keys (full-text query id)
  * @returns {Promise<Discovery>}
  */
@@ -81,14 +83,16 @@ export async function discoverByForm({ edgar, forms, params, budget, maxPages, l
   let notRead = 0;
   let blockedFirst = false;
   let anyRequest = false;
+  let overflow = false;
 
   for (const form of forms) {
     const key = label ? `${label}:${form}` : form;
     /** @type {FormCoverage} */
-    const fc = { status: 'none', total: null, read: 0, pages: [] };
+    const fc = { status: 'none', total: null, read: 0, distinct: 0, pages: [] };
     cov[key] = fc;
     let allPagesOk = true;
     let exhausted = false;
+    const seenInForm = new Set();
     for (let page = 0; page < maxPages; page += 1) {
       const from = page * DISCOVERY_PAGE_SIZE;
       const r = await edgar.search(searchUrl({ ...params, forms: form, from }), budget);
@@ -108,27 +112,32 @@ export async function discoverByForm({ edgar, forms, params, budget, maxPages, l
         break;
       }
       fc.pages.push({ from, hits: parsed.hits.length, ok: true, reason: null });
-      if (page === 0) fc.total = parsed.total;
+      // The FINAL total (plan 17.2): the index total can move while we page, so the last page's total is the
+      // one the distinct hit count must equal.
+      fc.total = parsed.total;
       fc.read += parsed.hits.length;
       for (const h of parsed.hits) {
         const k = h.adsh ? `${h.adsh}|${h.filename ?? ''}` : `bad:${contentHash(h)}`;
+        seenInForm.add(k);
         if (seen.has(k)) continue;
         seen.add(k);
         hits.push(h);
       }
+      fc.distinct = seenInForm.size;
       if (parsed.hits.length < DISCOVERY_PAGE_SIZE || (fc.total !== null && fc.read >= fc.total)) { exhausted = true; break; }
     }
+    if (!exhausted && allPagesOk && fc.total !== null && fc.total > fc.read) overflow = true;
     const okPages = fc.pages.filter((p) => p.ok).length;
     if (okPages === 0) fc.status = 'none';
-    else if (allPagesOk && (fc.total !== null ? fc.read >= fc.total : exhausted)) fc.status = 'complete';
+    else if (allPagesOk && (fc.total !== null ? fc.distinct === fc.total : exhausted)) fc.status = 'complete';
     else fc.status = 'partial';
     if (fc.total !== null) {
       total += fc.total;
-      notRead += Math.max(0, fc.total - fc.read);
+      notRead += Math.max(0, fc.total - fc.distinct);
     }
   }
   const complete = Object.values(cov).length > 0 && Object.values(cov).every((c) => c.status === 'complete');
-  return { hits, coverage: { source: complete ? 'complete' : 'partial', forms: cov }, total, notRead, blockedFirst, problems };
+  return { hits, coverage: { source: complete ? 'complete' : 'partial', forms: cov }, total, notRead, blockedFirst, problems, overflow };
 }
 
 /**
@@ -231,6 +240,18 @@ export function chooseDocs(hits) {
     unread: Math.max(0, docs.length - MAX_DOCS_PER_ACCESSION),
     invalid,
   };
+}
+
+/**
+ * Final fetch status of a filing (plan 17.7, D6). A hit document with an invalid filename can never be read,
+ * so it makes an otherwise clean filing partial (needs-review); documents left unread only because of the
+ * 3-per-accession cap stay informational. A failed filing stays failed.
+ * @param {'ok'|'partial'|'failed'} readStatus
+ * @param {number} invalid hit documents with an invalid filename
+ * @returns {'ok'|'partial'|'failed'}
+ */
+export function fetchStatusWithInvalid(readStatus, invalid) {
+  return readStatus === 'ok' && invalid > 0 ? 'partial' : readStatus;
 }
 
 /**

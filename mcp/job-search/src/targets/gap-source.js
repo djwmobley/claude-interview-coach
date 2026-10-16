@@ -155,7 +155,7 @@ export async function runGapSource(ctx) {
     const listingIds = included.map((r) => Number(r.id)).filter((n) => Number.isFinite(n));
     const url = typeof newest.url_normalized === 'string' && newest.url_normalized.trim() ? newest.url_normalized.trim() : null;
     const base = { company, company_norm: norm, listing_count: group.length, included: included.length, truncated, row_cap_truncated: rowCapTruncated };
-    if (!url) { c.add('unparseable', 'listing_url_missing', { key: norm, listing_ids: listingIds, extracted: base }); return; }
+    if (!url) { c.add('unparseable', 'listing_url_missing', { key: norm, listing_ids: listingIds, extracted: { ...base, listing_ids: listingIds } }); return; }
 
     const aliasNorms = aliases.map((a) => normalizeCompany(a).company_norm);
     const knownDeparture = feedsClean && (departed.has(norm) || aliasNorms.some((a) => departed.has(a)));
@@ -188,6 +188,7 @@ export async function runGapSource(ctx) {
       extracted: boundExtracted({
         ...base,
         trigger_kind: 'leadership_gap',
+        listing_ids: listingIds,
         alias_norms: [],
         event_date: eventDate,
         departure_signal: signal.departure_signal,
