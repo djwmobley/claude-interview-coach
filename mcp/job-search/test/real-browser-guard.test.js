@@ -12,7 +12,7 @@ import os from 'node:os';
 import path from 'node:path';
 import { spawn } from 'node:child_process';
 import { assertRealBrowserAllowed, realBrowserBlocked, RealBrowserBlockedError, REAL_BROWSER_BLOCKED } from '../src/core/test-guard.js';
-import { listScanProfileProcesses, killProcessTree } from '../src/core/chrome-launch.js';
+import { killProcessTree } from '../src/core/chrome-launch.js';
 import { launchOsBrowser, launchOsBrowserDiagnosed, openDashboard } from '../src/core/open-dashboard.js';
 import { connectSession } from '../src/browser/session.js';
 import { launchChrome } from '../bin/scan.js';
@@ -45,8 +45,7 @@ describe('test-guard unit', () => {
 });
 
 describe('unguarded entry points throw under the test runner (nothing launches)', { skip: OPTED_IN }, () => {
-  test('chrome-launch: real process listing and real taskkill', async () => {
-    await assert.rejects(() => listScanProfileProcesses('x'), BLOCKED);
+  test('chrome-launch: real taskkill (the powershell listing is in real-shell-guard.test.js)', async () => {
     await assert.rejects(() => killProcessTree(1), BLOCKED);
   });
 

@@ -19,6 +19,32 @@ export class RealBrowserBlockedError extends Error {
   }
 }
 
+export const REAL_SHELL_BLOCKED = 'real_shell_blocked_in_tests';
+
+export class RealShellBlockedError extends Error {
+  /** @param {string} what */
+  constructor(what) {
+    super(`${REAL_SHELL_BLOCKED}: refusing to ${what} under the test runner; inject a fake exec (tests never spawn real powershell, there is no opt-in)`);
+    this.name = 'RealShellBlockedError';
+    this.code = REAL_SHELL_BLOCKED;
+  }
+}
+
+/** @param {NodeJS.ProcessEnv} [env] @returns {boolean} true when running under the test runner (any opt-in is ignored). */
+export function underTestRunner(env = process.env) {
+  return Boolean(env.NODE_TEST_CONTEXT) || env.JOBSEARCH_TEST_GUARD === '1';
+}
+
+/**
+ * Guard for a real powershell/pwsh spawn. Unlike assertRealBrowserAllowed there is NO opt-in variable:
+ * under the test runner a real powershell spawn is always blocked (Defender flags it).
+ * @param {string} what
+ * @param {NodeJS.ProcessEnv} [env]
+ */
+export function assertRealShellAllowed(what, env = process.env) {
+  if (underTestRunner(env)) throw new RealShellBlockedError(what);
+}
+
 /** @param {NodeJS.ProcessEnv} [env] @returns {boolean} true when running under the test runner without opt-in. */
 export function realBrowserBlocked(env = process.env) {
   const underTests = Boolean(env.NODE_TEST_CONTEXT) || env.JOBSEARCH_TEST_GUARD === '1';

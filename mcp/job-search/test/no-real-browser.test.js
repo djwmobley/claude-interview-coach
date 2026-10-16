@@ -183,3 +183,63 @@ test('every production module that can launch or drive a real browser calls the 
   }
   assert.deepEqual(violations, [], `Production modules with an unguarded real-browser launch:\n${violations.join('\n')}`);
 });
+
+// ---------------------------------------------------------------------------------------------------
+// Powershell (2026-10-15): tests never spawn real powershell. Any production module (src/, bin/, scripts/)
+// with a powershell/pwsh spawn indicator must call assertRealShellAllowed() from src/core/test-guard.js;
+// under the test runner that throws real_shell_blocked_in_tests, with no opt-in.
+// Blind spots: textual only (a call that exists but sits after the spawn, or a command assembled at runtime
+// from parts, is not seen); a module that receives 'powershell.exe' as data from another module is not seen;
+// the identity checks (`run === nodeExecFile`, `!opts.execFileFn`) are bypassed by wrapping the real exec.
+// ---------------------------------------------------------------------------------------------------
+const SHELL_INDICATORS = [
+  ['names powershell.exe / pwsh.exe as a command', /['"`](?:[^'"`]*[\/])?(?:powershell|pwsh)\.exe['"`]/i],
+  ['spawns powershell/pwsh by bare name', /\b(?:spawn|spawnSync|exec|execSync|execFile|execFileSync|fork|run)\w*\s*\(\s*['"`](?:powershell|pwsh)['"`]/i],
+  ['runs a Get-CimInstance script', /\bGet-CimInstance\b/],
+  ['invokes powershell via cmd.exe', /['"`]cmd(?:\.exe)?['"`][^;]{0,120}powershell/i],
+];
+const SHELL_GATE = /\bassertRealShellAllowed\s*\(/;
+
+/** @param {string} text @returns {string[]} */
+export function classifyShell(text) {
+  const code = stripComments(text);
+  const hits = SHELL_INDICATORS.filter(([, re]) => re.test(code)).map(([name]) => name);
+  if (hits.length === 0) return [];
+  if (PROD_GATE_IMPORT.test(code) && SHELL_GATE.test(code)) return [];
+  return [`${hits.join(', ')} but does not call assertRealShellAllowed (src/core/test-guard.js)`];
+}
+
+test('classifyShell: powershell spawn indicators need the shell guard', () => {
+  assert.ok(classifyShell("run('powershell.exe', ['-Command', x]);").length > 0);
+  // Built at runtime so this file does not itself look like a powershell spawn to test/no-encoded-powershell.test.js.
+  const bare = ['pw', 'sh'].join('');
+  assert.ok(classifyShell(`execFile('${bare}', []);`).length > 0);
+  assert.ok(classifyShell("const ps = `Get-CimInstance Win32_Process`;").length > 0);
+  assert.equal(classifyShell("const deny = ['Bash', 'PowerShell', 'WebFetch'];").length, 0, 'a tool-name list is not a spawn');
+  assert.equal(classifyShell("// powershell.exe in a comment\nconst x = 1;").length, 0);
+  assert.equal(classifyShell("import { assertRealShellAllowed } from './test-guard.js';\nassertRealShellAllowed('x');\nrun('powershell.exe', []);").length, 0);
+});
+
+test('every production module that spawns powershell calls the runtime shell guard', () => {
+  /** @type {string[]} */
+  const files = [];
+  for (const d of PROD_DIRS) walk(path.join(ROOT, d), files);
+  /** @type {string[]} */
+  const violations = [];
+  for (const f of files) {
+    if (f.endsWith('\0UNREADABLE_DIR')) {
+      violations.push(f.replace('\0', ': '));
+      continue;
+    }
+    if (path.resolve(f) === path.join(ROOT, 'src', 'core', 'test-guard.js')) continue;
+    let text;
+    try {
+      text = fs.readFileSync(f, 'utf8');
+    } catch (err) {
+      violations.push(`${path.relative(ROOT, f)}: unreadable (${/** @type {any} */ (err).code ?? 'error'})`);
+      continue;
+    }
+    for (const reason of classifyShell(text)) violations.push(`${path.relative(ROOT, f)}: ${reason}`);
+  }
+  assert.deepEqual(violations, [], `Production modules with an unguarded powershell spawn:\n${violations.join('\n')}`);
+});

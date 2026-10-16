@@ -21,7 +21,7 @@
  * whole day's scan.
  */
 import { execFile as defaultExecFile } from 'node:child_process';
-import { assertRealBrowserAllowed } from './test-guard.js';
+import { assertRealBrowserAllowed, assertRealShellAllowed } from './test-guard.js';
 
 export const PROTOCOL_PROBE_TIMEOUT_MS = 5000;
 export const MAX_LAUNCH_ATTEMPTS = 3; // 1 initial + 2 retries
@@ -118,7 +118,7 @@ export async function probeDevToolsProtocol(cdpUrl, opts = {}) {
  */
 export async function listScanProfileProcesses(profileDir, opts = {}) {
   const execFileImpl = opts.execFile ?? defaultExecFile;
-  if (execFileImpl === defaultExecFile) assertRealBrowserAllowed('run the real Chrome process listing (powershell)');
+  if (execFileImpl === defaultExecFile) assertRealShellAllowed('run the real Chrome process listing (powershell)');
   const script ='Get-CimInstance Win32_Process | Select-Object ProcessId,CommandLine | ConvertTo-Json -Compress';
   const stdout = await new Promise((resolve, reject) => {
     execFileImpl('powershell.exe', ['-NoProfile', '-NonInteractive', '-Command', script], { windowsHide: true, maxBuffer: 10 * 1024 * 1024 }, (err, out) => {

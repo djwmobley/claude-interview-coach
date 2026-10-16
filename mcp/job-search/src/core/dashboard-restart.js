@@ -22,6 +22,7 @@ import { fileURLToPath } from 'node:url';
 import { execFile as nodeExecFile } from 'node:child_process';
 import { probeDashboardHealth, findListeningPid, killProcessTree } from '../dashboard/watchdog.js';
 import { DASHBOARD_TASK_NAME } from '../dashboard/task-names.js';
+import { assertRealShellAllowed } from './test-guard.js';
 
 const PACKAGE_ROOT = path.resolve(path.dirname(fileURLToPath(import.meta.url)), '..', '..');
 
@@ -137,6 +138,7 @@ export function realLayers(o) {
     readPid: () => readPidFile(o.pidFile),
     listenerPid: () => findListeningPid(o.port),
     async processInfo(pid) {
+      assertRealShellAllowed('spawn powershell for Get-CimInstance Win32_Process');
       const ps = `$p = Get-CimInstance Win32_Process -Filter "ProcessId=${Number(pid)}"; if ($p) { [pscustomobject]@{ Name = $p.Name; CommandLine = $p.CommandLine; Started = $p.CreationDate.ToUniversalTime().ToString('o') } | ConvertTo-Json -Compress }`;
       const out = await run('powershell.exe', ['-NoLogo', '-NoProfile', '-NonInteractive', '-Command', ps]);
       const row = out ? jsonRows(out)[0] : null;
@@ -148,6 +150,7 @@ export function realLayers(o) {
       };
     },
     async findByScript() {
+      assertRealShellAllowed('spawn powershell for Get-CimInstance Win32_Process');
       const ps = `Get-CimInstance Win32_Process -Filter "Name='node.exe'" | ForEach-Object { [pscustomobject]@{ Pid = $_.ProcessId; CommandLine = $_.CommandLine } } | ConvertTo-Json -Compress`;
       const out = await run('powershell.exe', ['-NoLogo', '-NoProfile', '-NonInteractive', '-Command', ps]);
       if (!out) return [];
