@@ -10,7 +10,7 @@
  * (test_guard): a test can never start a real `claude` process through it.
  */
 import { isEtWeekday } from './dates.js';
-import { computeStageTimeout, underTestRunner, STAGE_GRACE_MS } from './stage-time.js';
+import { computeStageTimeout, underTestRunner, stageConnect, STAGE_GRACE_MS, STAGE_CONNECT_TIMEOUT_MS } from './stage-time.js';
 import { runDraftPipeline } from './drafts.js';
 import { DRAFT_SCHEMA } from './draft-prompt.js';
 import { makeClaudeCaller } from '../core/claude-spawn.js';
@@ -49,6 +49,7 @@ export function toDraftStats(r) {
  * @param {number} [p.reserveMs]
  * @param {number} [p.graceMs]
  * @param {number} [p.cap]
+ * @param {number} [p.connectTimeoutMs] bound on the connect (default 10 s); a hung connect is connect_timeout
  * @returns {Promise<Record<string, unknown>>}
  */
 export async function runDraftStage(p) {
@@ -61,16 +62,19 @@ export async function runDraftStage(p) {
     const nowMs = p.nowMs ?? Date.now();
     const t = computeStageTimeout({ scanStartMs: p.scanStartMs, scanTimeoutMs: p.scanTimeoutMs, nowMs, maxMs: p.maxStageMs ?? DRAFT_STAGE_MAX_MS, reserveMs: p.reserveMs });
     if (!t.ok) return { ran: false, skipped: 'no_time' };
-    try {
-      client = await p.connect();
-    } catch {
-      return { ran: false, error: 'stage_failed' };
-    }
-    const callModel = p.callModel ?? makeClaudeCaller({ configDir: p.configDir, schemaJson: JSON.stringify(DRAFT_SCHEMA) });
+    // The hard deadline starts BEFORE the connect (fix 1), and the connect carries its own bound inside it.
     const ac = new AbortController();
     /** @type {ReturnType<typeof setTimeout>|undefined} */
     let timer;
     const hard = new Promise((resolve) => { timer = setTimeout(() => resolve({ __timeout: true }), t.timeoutMs + (p.graceMs ?? STAGE_GRACE_MS)); });
+    const conn = /** @type {any} */ (await Promise.race([stageConnect(p.connect, p.connectTimeoutMs ?? STAGE_CONNECT_TIMEOUT_MS), hard.then(() => ({ ok: false, error: 'stage_timeout' }))]));
+    if (!conn.ok) {
+      if (timer) clearTimeout(timer);
+      log({ evt: 'target_draft_stage_connect_failed', code: conn.error });
+      return { ran: false, error: conn.error };
+    }
+    client = conn.client;
+    const callModel = p.callModel ?? makeClaudeCaller({ configDir: p.configDir, schemaJson: JSON.stringify(DRAFT_SCHEMA) });
     const work = Promise.resolve()
       .then(() => runDraftPipeline({ client: /** @type {any} */ (client), now: p.now, configDir: p.configDir, callModel, deadlineAt: nowMs + t.timeoutMs, signal: ac.signal, log, cap: p.cap }))
       .then((v) => v, (e) => ({ __error: e }));

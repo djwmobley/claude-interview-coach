@@ -84,7 +84,7 @@ const ISE_ENDS = Object.freeze(['ise', 'ised', 'ises', 'ising', 'isation', 'isat
  * @typedef {Object} GateContext
  * @property {string} company the target company as stored
  * @property {string|null} triggerKind
- * @property {string[]} blockedEntries BUILT_IN_BLOCKED plus blocked_affiliates
+ * @property {string[]} blockedEntries MENTION_FORBIDDEN (src/core/mention-forbidden.js): the current employer plus blocked_affiliates
  * @property {{ buzzwords: string[], problemComparisonPatterns: string[] }} style
  * @property {Record<string, string>} evidence signal id (string) to sanitized excerpt, only the ids sent to the drafter
  * @property {Array<{ id: string, text: string, tags?: string[] }>} facts
@@ -213,6 +213,21 @@ function gDashes(i) {
 
 const ALWAYS_QUOTE = new Set(['"', '\u{201c}', '\u{201d}', '\u{201e}', '\u{201f}', '\u{ab}', '\u{bb}', '\u{2039}', '\u{203a}', '\u{2018}', '\u{201a}', '\u{201b}', '`', '\u{b4}', '\u{ff02}', '\u{301d}', '\u{301e}', '\u{301f}', '\u{2033}', '\u{2036}']);
 const APOSTROPHE = new Set(["'", '\u{2019}', '\u{2bc}', '\u{ff07}', '\u{2032}']);
+/** The plain brackets of ordinary prose; every other Ps/Pe character is a quote mark of some script (fix 2). */
+const PLAIN_BRACKETS = new Set(['(', ')', '[', ']', '{', '}']);
+
+/**
+ * Quote class (F5, fix 2): any initial or final quote (Pi, Pf), and any opening or closing bracket (Ps, Pe) that is
+ * not one of the six plain ASCII brackets. That covers the CJK corner brackets and every other paired quote form,
+ * not a list of literals. An apostrophe-like character is judged by its neighbors instead (APOSTROPHE).
+ * @param {string} c
+ * @returns {boolean}
+ */
+function isQuoteClass(c) {
+  if (APOSTROPHE.has(c)) return false;
+  if (/[\p{Pi}\p{Pf}]/u.test(c)) return true;
+  return /[\p{Ps}\p{Pe}]/u.test(c) && !PLAIN_BRACKETS.has(c);
+}
 
 /** @param {{ f: Record<string,string> }} i */
 function gQuotes(i) {
@@ -220,7 +235,7 @@ function gQuotes(i) {
     const chars = Array.from(t);
     for (let k = 0; k < chars.length; k++) {
       const c = chars[k];
-      if (ALWAYS_QUOTE.has(c)) return false;
+      if (ALWAYS_QUOTE.has(c) || isQuoteClass(c)) return false;
       if (APOSTROPHE.has(c)) {
         const prev = chars[k - 1] ?? '';
         const next = chars[k + 1] ?? '';
@@ -249,6 +264,9 @@ function gProblemComparison(i, ctx) {
   }
   // "not X, it is Y" / "not X but Y" in one sentence.
   if (/\b(?:isn't|is not|wasn't|was not|aren't|are not|not)\b[^.;!?]{1,60}[,;]\s*(?:it's|it is|this is|that's|that is|but rather|rather)\b/.test(t)) return 'problem_comparison';
+  // "not about X but about Y" (fix 2): the same preposition after "not" and after "but", in one sentence. Also in
+  // config/style-checks.json for render_doc; here so the gate never depends on the config being current.
+  if (/\bnot (?:just |only |really |simply |merely )?(about|for|on|in|with|to|of|by|because|how|what|who|why)\b[^.;!?]{1,60}?[,;]?\s+but (?:rather |instead )?\1\b/.test(t)) return 'problem_comparison';
   return true;
 }
 
@@ -330,6 +348,10 @@ function gUrls(i, ctx) {
   const t = foldText(body(i.f));
   if (/:\/\/|\bwww\b|@/.test(t) || /\[\s*\.\s*\]|\(\s*\.\s*\)|\{\s*\.\s*\}/.test(t) || /[[({]\s*(?:dot|at)\s*[\])}]/.test(t)) return 'url';
   if (hasPhrase(t, 'dot') || hasPhrase(t, 'dot com')) return 'url';
+  // A domain split around a dot token (fix 2): a label, whitespace, a lone dot, then a label ("acme . com"), or a
+  // dot token glued to the label on its right ("acme .com"). A sentence boundary ("end. Com") has no whitespace
+  // before its dot and does not match; neither does an ellipsis or a bare dot at the start of a line.
+  if (/[a-z0-9]\s+\.\s*[a-z]{2,}\b/.test(t)) return 'url';
   const citedIds = new Set(i.s.map((x) => /^e(\d+)$/.exec(x.src)?.[1]).filter((x) => typeof x === 'string'));
   const cited = foldText([...citedIds].map((id) => ctx.evidence[/** @type {string} */ (id)] ?? '').join(' '));
   for (const m of t.matchAll(/[a-z0-9][a-z0-9-]*(?:\.[a-z0-9][a-z0-9-]*)+/g)) {

@@ -10,6 +10,7 @@
  * isEligibleTarget  effective class target (blocked first, effective.js), not discarded, not approved.
  */
 import { loadBlockedAffiliates } from '../core/target-exclusion.js';
+import { mentionForbiddenFrom } from '../core/mention-forbidden.js';
 import { getEnv } from '../core/config.js';
 import fs from 'node:fs';
 import path from 'node:path';
@@ -20,7 +21,7 @@ import { sanitizeExcerpt } from './draft-prompt.js';
 
 export const SKIP_REASONS = Object.freeze([
   'weekend', 'test_guard', 'no_time', 'facts_missing', 'facts_invalid', 'facts_placeholder', 'blocklist_unavailable', 'locked',
-  'stage_failed', 'stage_timeout',
+  'stage_failed', 'stage_timeout', 'connect_timeout',
 ]);
 
 const PACKAGE_CONFIG = path.join(path.dirname(fileURLToPath(import.meta.url)), '..', '..', 'config');
@@ -48,7 +49,9 @@ export function loadStyleChecks(configDir) {
 export function loadDraftConfig(configDir = getEnv().JOBSEARCH_CONFIG_DIR, o = {}) {
   const blocked = loadBlockedAffiliates(configDir);
   if (blocked.status !== 'ok') return { ok: false, reason: 'blocklist_unavailable' };
-  const facts = loadPitchFacts(configDir, blocked.entries);
+  // "Never target" (blocked.entries) is not "never mention": a former employer may be named in a fact or a draft.
+  const mention = mentionForbiddenFrom(blocked.entries);
+  const facts = loadPitchFacts(configDir, mention);
   if (facts.status === 'missing') return { ok: false, reason: 'facts_missing' };
   if (facts.status === 'invalid') return { ok: false, reason: facts.problem === 'placeholder' ? 'facts_placeholder' : 'facts_invalid' };
   let style;
@@ -57,7 +60,7 @@ export function loadDraftConfig(configDir = getEnv().JOBSEARCH_CONFIG_DIR, o = {
   } catch {
     return { ok: false, reason: 'facts_invalid' };
   }
-  return { ok: true, blockedEntries: blocked.entries, facts, style };
+  return { ok: true, blockedEntries: mention, facts, style };
 }
 
 /**
