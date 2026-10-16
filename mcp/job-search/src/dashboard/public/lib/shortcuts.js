@@ -26,7 +26,7 @@
 
 export const CHORD_WINDOW_MS = 600;
 
-const NAV_KEYS = Object.freeze({ h: 'home', j: 'jobs', a: 'ready', p: 'pipeline', f: 'followups', r: 'review' });
+const NAV_KEYS = Object.freeze({ h: 'home', j: 'jobs', a: 'ready', t: 'targets', p: 'pipeline', f: 'followups', r: 'review' });
 const ROW_ACTION_KEYS = Object.freeze({ m: 'maybe', s: 'shortlisted', a: 'applied', p: 'passed', x: 'skip' });
 
 export function initialKbState() {
@@ -56,7 +56,7 @@ export function reduceKeyboard(state, event) {
 
   if (event.key === '?') return { state: { ...state, helpOpen: true }, action: { type: 'open-help' } };
 
-  // Rule 3: 'g' arms a 600ms chord window. Rule 4: the next key, if h/j/p/f/r, navigates; anything else
+  // Rule 3: 'g' arms a 600ms chord window. Rule 4: the next key, if h/j/a/t/p/f/r, navigates; anything else
   // (including a repeat 'g', which restarts the window rather than double-firing) disarms with no action,
   // except a fresh 'g' which re-arms below.
   const chordActive = state.chordArmedUntil !== null && event.now <= state.chordArmedUntil;

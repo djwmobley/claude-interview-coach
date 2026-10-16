@@ -96,9 +96,33 @@ export async function runTargetsStage(p) {
       log({ evt: 'targets_stats_write_failed', run_id: p.runId, err: err instanceof Error ? err.message.slice(0, 120) : 'error' });
     }
   };
+  /**
+   * Persist an early return (plan 18.7, A8). With no stage connection yet (test_guard) a short-lived one is
+   * opened just for this write. A connect failure cannot be written by anyone; its returned object still lands
+   * in the scan's own finalize write. Best effort, never throws.
+   * @param {Record<string, unknown>} stats
+   * @returns {Promise<Record<string, unknown>>}
+   */
+  const persistEarly = async (stats) => {
+    if (client) {
+      await write(stats);
+      return stats;
+    }
+    /** @type {(import('pg').ClientBase & { end?: () => Promise<void> })|null} */
+    let tmp = null;
+    try {
+      tmp = await p.connect();
+      await tmp.query('UPDATE ic_scan_runs SET stats = stats || $2::jsonb WHERE id = $1', [p.runId, JSON.stringify({ targets: stats })]);
+    } catch (err) {
+      log({ evt: 'targets_stats_write_failed', run_id: p.runId, err: err instanceof Error ? err.message.slice(0, 120) : 'error' });
+    } finally {
+      if (tmp && typeof tmp.end === 'function') await tmp.end().catch(() => {});
+    }
+    return stats;
+  };
   try {
     if (!isEtWeekday(p.now)) return { ran: false, skipped: 'weekend' };
-    if (underTestRunner() && !p.fetch) return { ran: false, skipped: 'test_guard' };
+    if (underTestRunner() && !p.fetch) return persistEarly({ ran: false, skipped: 'test_guard' });
     const nowMs = p.nowMs ?? Date.now();
     try {
       client = await p.connect();

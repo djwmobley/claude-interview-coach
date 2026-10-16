@@ -124,7 +124,8 @@ describe('the stage in isolation', () => {
     assert.equal(connected, 0);
     const guarded = await runTargetsStage(/** @type {any} */ ({ ...base(id), fetch: undefined, connect: async () => { connected += 1; return connect(); } }));
     assert.deepEqual(guarded, { ran: false, skipped: 'test_guard' });
-    assert.equal(connected, 0, 'no connection, no network');
+    assert.equal(connected, 1, 'one short-lived database connection to persist the skip (A8); no network');
+    assert.deepEqual((await targetsStats(id)).t, { ran: false, skipped: 'test_guard' });
   });
 
   test('ran:false is written when the stage starts, and replaced by the result at the end', async () => {
@@ -195,6 +196,41 @@ describe('the scan integration: the stage can never change the scan', () => {
     }
   });
 
+  test('A8: the real stage under a test runner with no injected fetch persists test_guard on the scan row, with the skipped key and no reason key', async () => {
+    const deps = offlineDeps({ fetch: makeFixtureFetch(ZZ_MAP) });
+    const r = await runScanWaiting(args(), deps, { trigger: 'cli', log: () => {}, now: FIXTURE_NOW });
+    assert.equal(r.status, 'ok', JSON.stringify(r.errors));
+    assert.deepEqual(r.stats.targets, { ran: false, skipped: 'test_guard' });
+    const stored = (await targetsStats(r.run_id)).t;
+    assert.deepEqual(stored, { ran: false, skipped: 'test_guard' });
+    assert.equal('reason' in stored, false);
+    await client.query(`UPDATE ic_scan_runs SET started_at = $2, finished_at = now() WHERE id = $1`, [r.run_id, WEEKDAY]);
+    const data = await buildScanReport(client, { now: WEEKDAY, timezone: 'America/Chicago', sinceOverride: null });
+    for (const text of [renderReportText(data), renderReportMarkdown(data), renderReportHtml(data)]) assert.match(text, /targets: \[NO TARGETS RUN\] \(test_guard\)/);
+    assert.match(buildReportSubject(data), /^\[NO TARGETS RUN\] /);
+  });
+
+  test('A8: a connect failure and no_time both come back with the existing error / skipped keys, persisted by the scan', async () => {
+    const wrap = (/** @type {any} */ over) => offlineDeps({
+      fetch: makeFixtureFetch(ZZ_MAP),
+      runTargetsStage: /** @type {any} */ ((/** @type {any} */ p) => runTargetsStage({ ...p, fetch: async () => new Response(''), ...over(p) })),
+    });
+    const failed = await runScanWaiting(args(), wrap(() => ({ connect: async () => { throw new Error('db down'); } })), { trigger: 'cli', log: () => {}, now: FIXTURE_NOW });
+    assert.deepEqual(failed.stats.targets, { ran: false, error: 'stage_failed' });
+    assert.deepEqual((await targetsStats(failed.run_id)).t, { ran: false, error: 'stage_failed' });
+
+    const spy = spyTimers();
+    try {
+      const late = await runScanWaiting(args(), wrap((/** @type {any} */ p) => ({ scanTimeoutMs: 1, nowMs: p.scanStartMs + 60 * 60_000 })), { trigger: 'cli', log: () => {}, now: FIXTURE_NOW });
+      assert.deepEqual(late.stats.targets, { ran: false, skipped: 'no_time' });
+      const row = (await targetsStats(late.run_id)).t;
+      assert.deepEqual(row, { ran: false, skipped: 'no_time' });
+      assert.equal('reason' in row, false);
+    } finally {
+      spy.restore();
+    }
+  });
+
   test('a dry-run scan never calls the stage', async () => {
     const calls = { n: 0 };
     const deps = offlineDeps({ fetch: makeFixtureFetch(ZZ_MAP), runTargetsStage: /** @type {any} */ (async () => { calls.n += 1; return { ran: true }; }) });
@@ -226,6 +262,20 @@ describe('the report', () => {
     assert.equal(/** @type {any} */ (data).targetsAttention, true);
     assert.match(buildReportSubject(data), /^\[TARGETS PARTIAL\] /);
     assert.match(renderReportText(data), /targets: 4 new, 1 new needs-review, 12 not-target this week; form_d complete, alerts skipped \(gmail_auth_expired\)/);
+  });
+
+  test('A8: a stage that wrote its started marker and never a result renders as the closed code crashed', async () => {
+    const data = await reportFor('2026-10-14T14:00:00Z', { targets: { ran: false, state: 'started' } });
+    assert.equal(/** @type {any} */ (data).noTargetsRun, true);
+    assert.match(buildReportSubject(data), /^\[NO TARGETS RUN\] /);
+    for (const text of [renderReportText(data), renderReportMarkdown(data), renderReportHtml(data)]) assert.match(text, /targets: \[NO TARGETS RUN\] \(crashed\)/);
+    for (const [stats, code] of [[{ ran: false, skipped: 'test_guard' }, 'test_guard'], [{ ran: false, skipped: 'no_time' }, 'no_time'], [{ ran: false, error: 'stage_failed' }, 'stage_failed'], [{ ran: false, error: 'stage_timeout' }, 'stage_timeout']]) {
+      const d = await reportFor('2026-10-14T14:00:00Z', { targets: stats });
+      assert.match(renderReportText(d), new RegExp(`targets: \\[NO TARGETS RUN\\] \\(${code}\\)`));
+    }
+    const raw = await reportFor('2026-10-14T14:00:00Z', { targets: { ran: false, error: 'connect to postgres://user:secret@host failed' } });
+    assert.match(renderReportText(raw), /targets: \[NO TARGETS RUN\] \(other\)/, 'raw error text never reaches the digest');
+    assert.doesNotMatch(renderReportText(raw), /secret/);
   });
 
   test('a clean stage adds no flag', async () => {

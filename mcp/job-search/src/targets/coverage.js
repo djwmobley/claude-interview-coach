@@ -110,7 +110,7 @@ export const CLOSED_REASONS = Object.freeze([
   'sec_contact_missing', 'sec_blocked', 'gmail_auth_expired', 'config_invalid', 'no_time', 'deadline', 'timeout',
   'request_failed', 'discovery_incomplete', 'day_overflow', 'run_cap', 'doc_fetch', 'adapter_exception', 'suspicious_empty',
   'unknown_reason', 'no_coverage', 'exception', 'already_running', 'weekend', 'test_guard', 'dry_run', 'message_cap',
-  'gmail_unavailable', 'stage_failed', 'stage_timeout', 'other',
+  'gmail_unavailable', 'stage_failed', 'stage_timeout', 'crashed', 'other',
 ]);
 
 /**

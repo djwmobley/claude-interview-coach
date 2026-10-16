@@ -7,6 +7,7 @@ import { statusStrip } from '../components/status-strip.js';
 import { actionBar } from '../components/action-bar.js';
 import { scanProgressPanel } from '../components/scan-progress.js';
 import { agenda } from '../components/agenda.js';
+import { targetsTile } from '../components/targets-tile.js';
 import { skeleton, emptyState } from '../components/empty-state.js';
 import { actorBadge, chipClassName, stageChip } from '../components/chips.js';
 import { normalizeAgendaTime, shortDateTime } from '../lib/format.js';
@@ -66,9 +67,13 @@ export async function render(container, params, app) {
 
     const recentEvents = summary.recent_events ?? [];
 
+    // The Targets tile is advisory: a failure to load it never blocks Home and never raises a toast.
+    const targetsOutcome = await getJson('/api/targets/summary');
+
     setChildren(container, [
       h('h1', { className: 'page-title', text: 'Home' }),
       statusStrip({ summary }),
+      targetsOutcome.kind === 'ok' ? targetsTile({ summary: targetsOutcome.body }) : null,
       actionBar({
         running,
         disabled: false,

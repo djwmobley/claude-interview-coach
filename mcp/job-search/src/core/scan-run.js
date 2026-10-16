@@ -1825,6 +1825,20 @@ async function executeRun(p) {
       log({ evt: 'targets_stage_failed', run_id: runId, ...errFields(err) });
       /** @type {any} */ (stats).targets = { ran: false, error: 'stage_failed' };
     }
+    // Plan 18.7 (A8): the run row was finalized (and this run's own connection closed) before the stage ran,
+    // so whatever the stage returned is persisted here on a short-lived dedicated connection, including an
+    // early return that had nothing to write with (test_guard, a connect failure). Same value the stage may
+    // already have written; best effort, never changes the scan.
+    try {
+      const writer = await (deps.connectDedicated ?? defaultConnectDedicated)();
+      try {
+        await writer.query('UPDATE ic_scan_runs SET stats = stats || $2::jsonb WHERE id = $1', [runId, JSON.stringify({ targets: /** @type {any} */ (stats).targets })]);
+      } finally {
+        await writer.end().catch(() => {});
+      }
+    } catch (err) {
+      log({ evt: 'targets_stats_write_failed', run_id: runId, ...errFields(err) });
+    }
   }
 
   log({ evt: 'run_finished', run_id: runId, status, fetched: stats.fetched, new: stats.new, updated: stats.updated, errors: errors.length });

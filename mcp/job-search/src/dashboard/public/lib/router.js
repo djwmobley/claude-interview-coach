@@ -10,6 +10,7 @@ const ROUTES = Object.freeze([
   { name: 'home', shape: [] },
   { name: 'jobs', shape: ['jobs'] },
   { name: 'ready', shape: ['ready'] },
+  { name: 'targets', shape: ['targets'] },
   { name: 'job-detail', shape: ['jobs', ':id'] },
   { name: 'pipeline', shape: ['pipeline'] },
   { name: 'followups', shape: ['followups'] },
@@ -81,7 +82,7 @@ export function parseHash(hash) {
 
 /** Build a hash string for a route + params (the inverse of parseHash, used by nav links). */
 export function buildHash(route, params = {}) {
-  const table = { home: '#/', jobs: '#/jobs', 'job-detail': (p) => `#/jobs/${p.id}`, pipeline: '#/pipeline', ready: '#/ready',
+  const table = { home: '#/', jobs: '#/jobs', 'job-detail': (p) => `#/jobs/${p.id}`, pipeline: '#/pipeline', ready: '#/ready', targets: '#/targets',
     followups: '#/followups', review: '#/review', runs: '#/runs', 'run-detail': (p) => `#/runs/${p.id}`,
     reports: '#/reports', 'report-view': (p) => `#/reports/${p.day}`, calendar: '#/calendar',
     analytics: '#/analytics', companies: '#/companies', 'company-detail': (p) => `#/companies/${encodeURIComponent(p.norm)}` };
