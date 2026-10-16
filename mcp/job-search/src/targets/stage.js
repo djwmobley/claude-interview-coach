@@ -15,7 +15,7 @@ import { runTargets } from './runner.js';
 import { closedReason } from './coverage.js';
 import { isEtWeekday } from './dates.js';
 
-import { STAGE_MAX_MS, STAGE_RESERVE_MS, STAGE_GRACE_MS, computeStageTimeout, underTestRunner } from './stage-time.js';
+import { STAGE_MAX_MS, STAGE_RESERVE_MS, STAGE_GRACE_MS, computeStageTimeout, underTestRunner, stageConnect, connectBounded, STAGE_CONNECT_TIMEOUT_MS } from './stage-time.js';
 export { STAGE_MAX_MS, STAGE_RESERVE_MS, STAGE_GRACE_MS, computeStageTimeout, underTestRunner };
 const FLAG_WHITELIST = Object.freeze(['config_reset', 'suspicious_empty_released', 'day_overflow']);
 
@@ -64,6 +64,7 @@ export function toStageStats(r) {
  * @param {number} [p.maxStageMs]
  * @param {number} [p.reserveMs]
  * @param {number} [p.graceMs]
+ * @param {number} [p.connectTimeoutMs] bound on each connect (default 10 s); a hung connect is connect_timeout
  * @returns {Promise<Record<string, unknown>>}
  */
 export async function runTargetsStage(p) {
@@ -94,7 +95,7 @@ export async function runTargetsStage(p) {
     /** @type {(import('pg').ClientBase & { end?: () => Promise<void> })|null} */
     let tmp = null;
     try {
-      tmp = await p.connect();
+      tmp = await connectBounded(p.connect, p.connectTimeoutMs ?? STAGE_CONNECT_TIMEOUT_MS);
       await tmp.query('UPDATE ic_scan_runs SET stats = stats || $2::jsonb WHERE id = $1', [p.runId, JSON.stringify({ targets: stats })]);
     } catch (err) {
       log({ evt: 'targets_stats_write_failed', run_id: p.runId, err: err instanceof Error ? err.message.slice(0, 120) : 'error' });
@@ -107,12 +108,22 @@ export async function runTargetsStage(p) {
     if (!isEtWeekday(p.now)) return { ran: false, skipped: 'weekend' };
     if (underTestRunner() && !p.fetch) return persistEarly({ ran: false, skipped: 'test_guard' });
     const nowMs = p.nowMs ?? Date.now();
-    try {
-      client = await p.connect();
-    } catch {
-      return { ran: false, error: 'stage_failed' };
-    }
     const t = computeStageTimeout({ scanStartMs: p.scanStartMs, scanTimeoutMs: p.scanTimeoutMs, nowMs, maxMs: p.maxStageMs, reserveMs: p.reserveMs });
+    // The hard deadline starts BEFORE the connect (fix 1), and the connect carries its own bound inside it.
+    // With no time left there is no deadline to start; the connect (only to record no_time) keeps its own bound.
+    /** @type {ReturnType<typeof setTimeout>|undefined} */
+    let timer;
+    const hard = new Promise((resolve) => {
+      if (t.ok) timer = setTimeout(() => resolve({ __timeout: true }), t.timeoutMs + (p.graceMs ?? STAGE_GRACE_MS));
+    });
+    const connectMs = p.connectTimeoutMs ?? STAGE_CONNECT_TIMEOUT_MS;
+    const conn = /** @type {any} */ (await Promise.race([stageConnect(p.connect, connectMs), hard.then(() => ({ ok: false, error: 'stage_timeout' }))]));
+    if (!conn.ok) {
+      if (timer) clearTimeout(timer);
+      log({ evt: 'targets_stage_connect_failed', run_id: p.runId, code: conn.error });
+      return { ran: false, error: conn.error };
+    }
+    client = conn.client;
     if (!t.ok) {
       const skip = { ran: false, skipped: 'no_time' };
       await write(skip);
@@ -121,9 +132,6 @@ export async function runTargetsStage(p) {
     await write({ ran: false, state: 'started' });
     const ac = new AbortController();
     const deadlineAt = nowMs + t.timeoutMs;
-    /** @type {ReturnType<typeof setTimeout>|undefined} */
-    let timer;
-    const hard = new Promise((resolve) => { timer = setTimeout(() => resolve({ __timeout: true }), t.timeoutMs + (p.graceMs ?? STAGE_GRACE_MS)); });
     const impl = p.runTargetsImpl ?? runTargets;
     const work = Promise.resolve()
       .then(() => impl({ client: /** @type {any} */ (client), now: p.now, configDir: p.configDir, fetch: p.fetch, deadlineAt, signal: ac.signal, tokenFile: p.tokenFile, log }, { trigger: 'scan' }))

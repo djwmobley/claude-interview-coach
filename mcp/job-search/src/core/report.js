@@ -958,7 +958,7 @@ export function renderTargetsLine(t, ctx = {}) {
 }
 
 const DRAFT_SKIP_CODES = Object.freeze([
-  'test_guard', 'no_time', 'facts_missing', 'facts_invalid', 'facts_placeholder', 'blocklist_unavailable', 'locked', 'stage_failed', 'stage_timeout',
+  'test_guard', 'no_time', 'facts_missing', 'facts_invalid', 'facts_placeholder', 'blocklist_unavailable', 'locked', 'stage_failed', 'stage_timeout', 'connect_timeout',
 ]);
 
 /**

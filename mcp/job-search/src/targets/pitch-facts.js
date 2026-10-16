@@ -18,7 +18,7 @@
  */
 import fs from 'node:fs';
 import path from 'node:path';
-import { foldText, squash, hasPhrase } from './draft-text.js';
+import { foldText, squash, squashLeet, hasPhrase } from './draft-text.js';
 import { EMPLOYER_PATTERNS } from './draft-gates.js';
 
 export const FACTS_FILE = 'target-pitch-facts.json';
@@ -74,7 +74,7 @@ export function validatePitchFacts(raw, blockedEntries) {
     if (tags.some((t) => /employer/i.test(t)) || EMPLOYER_PATTERNS.some((re) => re.test(foldText(text)))) return empty('invalid', 'employer_fact');
     for (const e of blockedEntries) {
       if (typeof e !== 'string' || squash(e).length < 3) continue;
-      if (hasPhrase(text, e) || (squash(e).length >= 4 && squash(text).includes(squash(e)))) return empty('invalid', 'blocked_fact');
+      if (hasPhrase(text, e) || (squash(e).length >= 4 && squash(text).includes(squash(e))) || (squashLeet(e).length >= 4 && squashLeet(text).includes(squashLeet(e)))) return empty('invalid', 'blocked_fact');
     }
     facts.push({ id: x.id, text, tags: /** @type {string[]} */ (tags) });
   }

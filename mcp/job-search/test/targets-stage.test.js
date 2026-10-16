@@ -109,7 +109,9 @@ describe('the stage in isolation', () => {
         runTargetsImpl: async () => { throw new Error('must not run'); },
       })));
       assert.deepEqual(out, { ran: false, skipped: 'no_time' });
-      assert.equal(spy.delays.length, 0, 'zero or negative never reaches a timer, and none is started');
+      // PR5b: the connect that records no_time carries its own bound, but no stage deadline timer is started.
+      assert.ok(spy.delays.every((d) => d > 0), 'zero or negative never reaches a timer');
+      assert.ok(spy.delays.every((d) => d <= 10_000), 'only the bounded connect timer, never a stage deadline');
     } finally {
       spy.restore();
     }

@@ -27,3 +27,45 @@ export function computeStageTimeout({ scanStartMs, scanTimeoutMs, nowMs, maxMs =
 export function underTestRunner() {
   return Boolean(process.env.NODE_TEST_CONTEXT) || process.env.JOBSEARCH_TEST_GUARD === '1';
 }
+
+/** Bound on a stage's own database connect (fix 1): a hung connect becomes the closed code connect_timeout. */
+export const STAGE_CONNECT_TIMEOUT_MS = 10_000;
+
+/**
+ * Open a connection, but never wait longer than `ms` for it. A connection that arrives after the timeout is
+ * closed so it cannot leak.
+ * @template {{ end?: () => Promise<void> }} C
+ * @param {() => Promise<C>} open
+ * @param {number} ms
+ * @returns {Promise<C>}
+ */
+export async function connectBounded(open, ms) {
+  /** @type {ReturnType<typeof setTimeout>|undefined} */
+  let timer;
+  const attempt = Promise.resolve().then(open);
+  const timeout = new Promise((_, reject) => { timer = setTimeout(() => reject(new Error('connect timeout')), ms); });
+  try {
+    return /** @type {C} */ (await Promise.race([attempt, timeout]));
+  } catch (err) {
+    attempt.then((c) => (c && typeof c.end === 'function' ? c.end().catch(() => {}) : undefined), () => {});
+    throw err;
+  } finally {
+    if (timer) clearTimeout(timer);
+  }
+}
+
+/**
+ * Connect inside a stage: bounded, and the failure is classified. A timeout is connect_timeout, any other
+ * failure is stage_failed.
+ * @template {{ end?: () => Promise<void> }} C
+ * @param {() => Promise<C>} open
+ * @param {number} ms
+ * @returns {Promise<{ ok: true, client: C } | { ok: false, error: 'connect_timeout' | 'stage_failed' }>}
+ */
+export async function stageConnect(open, ms) {
+  try {
+    return { ok: true, client: await connectBounded(open, ms) };
+  } catch (err) {
+    return { ok: false, error: err instanceof Error && err.message === 'connect timeout' ? 'connect_timeout' : 'stage_failed' };
+  }
+}

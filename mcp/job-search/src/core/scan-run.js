@@ -62,6 +62,7 @@ import { ADAPTERS, getAdapter } from '../adapters/index.js';
 import { runTriage } from './triage.js';
 import { runTargetsStage } from '../targets/stage.js';
 import { runDraftStage } from '../targets/draft-stage.js';
+import { connectBounded } from '../targets/stage-time.js';
 import { createSnapshotSaver } from './linkedin-snapshot.js';
 import { persistApplyTargetForListing, buildScanProbeRegistry } from './apply-target-persist.js';
 
@@ -72,28 +73,8 @@ export const LOCK_KEY = 730193001;
 export const A8_CONNECT_TIMEOUT_MS = 10_000;
 export const A8_STATEMENT_TIMEOUT_MS = 15_000;
 
-/**
- * Open a connection, but never wait longer than `ms` for it. A connection that arrives after the timeout is
- * closed so it cannot leak.
- * @template {{ end?: () => Promise<void> }} C
- * @param {() => Promise<C>} open
- * @param {number} ms
- * @returns {Promise<C>}
- */
-export async function connectBounded(open, ms) {
-  /** @type {ReturnType<typeof setTimeout>|undefined} */
-  let timer;
-  const attempt = Promise.resolve().then(open);
-  const timeout = new Promise((_, reject) => { timer = setTimeout(() => reject(new Error('connect timeout')), ms); });
-  try {
-    return /** @type {C} */ (await Promise.race([attempt, timeout]));
-  } catch (err) {
-    attempt.then((c) => (c && typeof c.end === 'function' ? c.end().catch(() => {}) : undefined), () => {});
-    throw err;
-  } finally {
-    if (timer) clearTimeout(timer);
-  }
-}
+// connectBounded lives in src/targets/stage-time.js (the target stages share it); re-exported here.
+export { connectBounded };
 export const HEARTBEAT_MS = 20000;
 export const USER_AGENT = 'job-search-mcp/0.1 (interview-coach; read-only scanner)';
 /** Bound on session.closeAll() at the end of a run (independent review Finding 1): page.close() takes no

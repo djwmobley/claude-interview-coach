@@ -26,7 +26,11 @@ import { JobSearchError } from '../core/errors.js';
 import { normalizeCompany, normalizeTitle } from '../core/normalize.js';
 
 /** Built-in blocked companies (spec: "Built-ins can never be removed by config"). */
-export const BUILT_IN_BLOCKED = Object.freeze(['Immunotec', 'Advisicon']);
+export const BUILT_IN_ROLES = Object.freeze(/** @type {Record<string, string>} */ ({
+  Immunotec: 'former_employer',
+  Advisicon: 'current_employer',
+}));
+export const BUILT_IN_BLOCKED = Object.freeze(Object.keys(BUILT_IN_ROLES));
 
 /** The closed, total branch enum, in evaluation/precedence order (spec amendment: previously_withdrawn
  * sits between already_applied_listing and already_applied_history). */
