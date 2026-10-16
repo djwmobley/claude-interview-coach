@@ -61,11 +61,39 @@ import { makeCapability } from '../browser/capability.js';
 import { ADAPTERS, getAdapter } from '../adapters/index.js';
 import { runTriage } from './triage.js';
 import { runTargetsStage } from '../targets/stage.js';
+import { runDraftStage } from '../targets/draft-stage.js';
 import { createSnapshotSaver } from './linkedin-snapshot.js';
 import { persistApplyTargetForListing, buildScanProbeRegistry } from './apply-target-persist.js';
 
 /** Advisory lock key shared by MCP and CLI (spec section 5). */
 export const LOCK_KEY = 730193001;
+
+/** Plan 19.7 (F13): the stats write after the target stages gets a bounded connect and a bounded statement. */
+export const A8_CONNECT_TIMEOUT_MS = 10_000;
+export const A8_STATEMENT_TIMEOUT_MS = 15_000;
+
+/**
+ * Open a connection, but never wait longer than `ms` for it. A connection that arrives after the timeout is
+ * closed so it cannot leak.
+ * @template {{ end?: () => Promise<void> }} C
+ * @param {() => Promise<C>} open
+ * @param {number} ms
+ * @returns {Promise<C>}
+ */
+export async function connectBounded(open, ms) {
+  /** @type {ReturnType<typeof setTimeout>|undefined} */
+  let timer;
+  const attempt = Promise.resolve().then(open);
+  const timeout = new Promise((_, reject) => { timer = setTimeout(() => reject(new Error('connect timeout')), ms); });
+  try {
+    return /** @type {C} */ (await Promise.race([attempt, timeout]));
+  } catch (err) {
+    attempt.then((c) => (c && typeof c.end === 'function' ? c.end().catch(() => {}) : undefined), () => {});
+    throw err;
+  } finally {
+    if (timer) clearTimeout(timer);
+  }
+}
 export const HEARTBEAT_MS = 20000;
 export const USER_AGENT = 'job-search-mcp/0.1 (interview-coach; read-only scanner)';
 /** Bound on session.closeAll() at the end of a run (independent review Finding 1): page.close() takes no
@@ -90,7 +118,7 @@ export const CLOSE_ALL_TIMEOUT_MS = 10000;
  * @typedef {Object} RunDeps
  * @property {import('./config.js').LoadedConfig|null} [config]
  * @property {import('./config.js').Env} [env]
- * @property {() => Promise<import('pg').Client>} [connectDedicated]
+ * @property {(opts?: { connectTimeoutMs?: number, statementTimeoutMs?: number }) => Promise<import('pg').Client>} [connectDedicated]
  * @property {(opts: { cdpUrl: string }) => Promise<import('../browser/session.js').Session>} [connectSession]
  * @property {typeof fetch} [fetch]
  * @property {import('./urlguard.js').Lookup} [lookup]
@@ -98,6 +126,9 @@ export const CLOSE_ALL_TIMEOUT_MS = 10000;
  * @property {() => number} [random]
  * @property {typeof reserveBudget} [reserveBudget] tests inject an in-memory reservation so fixture runs never consume the real daily budget
  * @property {typeof runTargetsStage} [runTargetsStage] test seam over the target finder stage (src/targets/stage.js)
+ * @property {typeof runDraftStage} [runTargetDraftStage] test seam over the target draft stage (src/targets/draft-stage.js)
+ * @property {Parameters<typeof runDraftStage>[0]['callModel']} [targetCallModel] explicit model caller for the draft stage; without it the
+ *   stage refuses to run under a test runner (so no test can start a real claude process by accident)
  * @property {typeof fetch} [targetsFetch] explicit fetch for the target finder stage; without it the stage refuses to run
  *   under a test runner (so no test can reach the real SEC or Gmail by accident)
  * @property {typeof defaultSpawn} [spawn] unattended Google re-auth (spec A6): the child_process.spawn
@@ -1825,14 +1856,34 @@ async function executeRun(p) {
       log({ evt: 'targets_stage_failed', run_id: runId, ...errFields(err) });
       /** @type {any} */ (stats).targets = { ran: false, error: 'stage_failed' };
     }
+    // Target draft stage (plan 19.2). Right after the targets stage, on its own connection, weekdays only,
+    // with its own 6-minute deadline inside the scan's. Warn and proceed: it never throws and never changes
+    // this run's status. Its closed-code result rides along in stats.target_drafts (digest: drafts: n awaiting,
+    // m parked) and is persisted by the write below.
+    try {
+      const draftStage = deps.runTargetDraftStage ?? runDraftStage;
+      const drafts = await draftStage({
+        connect: () => (deps.connectDedicated ?? defaultConnectDedicated)(),
+        now,
+        scanStartMs: runStartMs,
+        scanTimeoutMs: runTimeoutMs,
+        configDir: env.JOBSEARCH_CONFIG_DIR,
+        callModel: deps.targetCallModel,
+        log,
+      });
+      /** @type {any} */ (stats).target_drafts = drafts;
+    } catch (err) {
+      log({ evt: 'target_draft_stage_failed', run_id: runId, ...errFields(err) });
+    }
     // Plan 18.7 (A8): the run row was finalized (and this run's own connection closed) before the stage ran,
     // so whatever the stage returned is persisted here on a short-lived dedicated connection, including an
     // early return that had nothing to write with (test_guard, a connect failure). Same value the stage may
-    // already have written; best effort, never changes the scan.
+    // already have written; best effort, never changes the scan. PR5 (F13): the connect and the statement
+    // carry explicit timeouts, so a wedged database can never hold the finished scan open.
     try {
-      const writer = await (deps.connectDedicated ?? defaultConnectDedicated)();
+      const writer = await connectBounded(() => (deps.connectDedicated ?? defaultConnectDedicated)({ connectTimeoutMs: A8_CONNECT_TIMEOUT_MS, statementTimeoutMs: A8_STATEMENT_TIMEOUT_MS }), A8_CONNECT_TIMEOUT_MS);
       try {
-        await writer.query('UPDATE ic_scan_runs SET stats = stats || $2::jsonb WHERE id = $1', [runId, JSON.stringify({ targets: /** @type {any} */ (stats).targets })]);
+        await writer.query('UPDATE ic_scan_runs SET stats = stats || $2::jsonb WHERE id = $1', [runId, JSON.stringify({ targets: /** @type {any} */ (stats).targets, ...(/** @type {any} */ (stats).target_drafts ? { target_drafts: /** @type {any} */ (stats).target_drafts } : {}) })]);
       } finally {
         await writer.end().catch(() => {});
       }

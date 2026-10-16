@@ -15,26 +15,9 @@ import { runTargets } from './runner.js';
 import { closedReason } from './coverage.js';
 import { isEtWeekday } from './dates.js';
 
-export const STAGE_MAX_MS = 8 * 60_000;
-export const STAGE_RESERVE_MS = 5 * 60_000;
-export const STAGE_GRACE_MS = 10_000;
+import { STAGE_MAX_MS, STAGE_RESERVE_MS, STAGE_GRACE_MS, computeStageTimeout, underTestRunner } from './stage-time.js';
+export { STAGE_MAX_MS, STAGE_RESERVE_MS, STAGE_GRACE_MS, computeStageTimeout, underTestRunner };
 const FLAG_WHITELIST = Object.freeze(['config_reset', 'suspicious_empty_released', 'day_overflow']);
-
-/**
- * @param {{ scanStartMs: number, scanTimeoutMs: number, nowMs: number, maxMs?: number, reserveMs?: number }} o
- * @returns {{ ok: true, timeoutMs: number } | { ok: false, reason: 'no_time' }}
- */
-export function computeStageTimeout({ scanStartMs, scanTimeoutMs, nowMs, maxMs = STAGE_MAX_MS, reserveMs = STAGE_RESERVE_MS }) {
-  const left = scanStartMs + scanTimeoutMs - reserveMs - nowMs;
-  const t = Math.min(maxMs, left);
-  if (!Number.isFinite(t) || Math.floor(t) < 1) return { ok: false, reason: 'no_time' };
-  return { ok: true, timeoutMs: Math.floor(t) };
-}
-
-/** True under node --test or bin/run-tests.js: the stage then refuses to use the real network. */
-export function underTestRunner() {
-  return Boolean(process.env.NODE_TEST_CONTEXT) || process.env.JOBSEARCH_TEST_GUARD === '1';
-}
 
 /**
  * @param {any} r a runTargets result

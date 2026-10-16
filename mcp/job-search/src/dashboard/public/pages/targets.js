@@ -1,8 +1,9 @@
 // @ts-check
 /**
  * Targets (plan 18): companies worth approaching directly, found by the target finder. A list with filters, a
- * detail drawer, and the human actions Reclassify, Discard and Restore. No drafting, outreach or send path
- * lives here (drafts are a later PR); nothing on this page contacts anyone.
+ * detail drawer, the human actions Reclassify, Discard and Restore, and (PR5) the outreach note: its checks,
+ * its review, the editor, and Copy and approve (lib/target-approve.js). The page never sends anything and
+ * contacts no one; approving copies the note and sets a follow-up reminder.
  *
  * Rendering rule (A6): every string that came from SEC or Gmail (company, excerpts, URLs, names, notes) is set
  * through h()'s text path (textContent), never as markup. An evidence link is live only when the server says
@@ -21,6 +22,7 @@ import { dataTable } from '../components/data-table.js';
 import { drawer } from '../components/drawer.js';
 import { chipClassName, targetClassChip, targetStatusChip, targetBadge } from '../components/chips.js';
 import { relativeTime } from '../lib/format.js';
+import { approveFlow, browserClipboard } from '../lib/target-approve.js';
 
 /** kbaction manifest: this page has no row keyboard map of its own. */
 export const KEYBOARD_ACTIONS = Object.freeze({
@@ -54,6 +56,15 @@ export function sourceLabel(s) { return SOURCE_LABELS[/** @type {string} */ (s)]
 export function reasonLabel(r) { return REASON_LABELS[/** @type {string} */ (r)] ?? (r ? String(r) : 'n/a'); }
 /** @param {string|null|undefined} a */
 export function actionLabel(a) { return ACTION_LABELS[/** @type {string} */ (a)] ?? 'Changed'; }
+
+const DRAFT_STATE_LABELS = Object.freeze({
+  queued: 'Queued for the next scan', draft: 'Being written', gate_failed: 'Parked: failed its checks', review_failed: 'Parked: failed review',
+  awaiting_approval: 'Awaiting your approval', approved: 'Approved and copied', discarded: 'Discarded',
+});
+const NOTE_FIELDS = Object.freeze([['hook', 'Hook (the trigger event)'], ['bridge', 'Bridge'], ['claim', 'Claim'], ['ask', 'Ask']]);
+
+/** @param {string|null|undefined} s */
+export function draftStateLabel(s) { return DRAFT_STATE_LABELS[/** @type {string} */ (s)] ?? 'Unknown state'; }
 
 /** @param {{ size_verified?: boolean|null }} row @returns {string} badge kind for chips.targetBadge */
 export function sizeKind(row) {
@@ -266,6 +277,87 @@ export async function render(container, params, app) {
       allowed.restore ? h('button', { className: 'btn', attrs: { type: 'button' }, text: 'Restore', on: { click: () => startAction({ action: 'restore' }) } }) : null,
     ];
 
+    /** The outreach note: the draft, its checks and review, the editor, and Copy and approve. Nothing is sent. */
+    function noteSection() {
+      const n = t.note;
+      if (t.blocked || !n) return null;
+      const cur = n.current;
+      if (!cur) {
+        return h('section', { className: 'approval-section' }, [
+          h('h3', { className: 'approval-section__title', text: 'Outreach note' }),
+          h('p', { className: 'approval-section__note', text: 'No note has been drafted for this target yet. The daily scan drafts up to five new notes per business day.' }),
+        ]);
+      }
+      /** @type {Record<string, HTMLTextAreaElement>} */
+      const inputsByField = {};
+      const rows = NOTE_FIELDS.map(([key, label]) => {
+        const ta = /** @type {HTMLTextAreaElement} */ (h('textarea', { className: 'drawer__input', attrs: { rows: 2, 'aria-label': label }, value: cur.fields?.[key] ?? '', readOnly: !cur.can.edit }));
+        inputsByField[key] = ta;
+        return h('label', { className: 'drawer__field' }, [h('span', { text: label }), ta]);
+      });
+      const failing = (cur.gates?.failing ?? []).map((/** @type {{ gate: string, code: string }} */ g) => g.code);
+      const warn = [...new Set(failing)];
+      const reviewLine = cur.review?.verdict
+        ? `Review: ${cur.review.verdict}${cur.review.before_edit ? ' (before edit)' : ''}${cur.review.reasons?.length ? `, ${cur.review.reasons.join(', ')}` : ''}`
+        : 'Review: not run';
+
+      async function save() {
+        /** @type {Record<string, string>} */
+        const fields = {};
+        for (const [key] of NOTE_FIELDS) fields[key] = inputsByField[key].value;
+        const out = handleOutcome(await postJson(`/api/targets/${t.id}/draft/edit`, { draft_id: cur.id, expected_draft_version: cur.draft_version, fields }));
+        if (out.kind === 'ok') {
+          showToast({ message: out.body.noop ? 'No change to save.' : 'Edit saved. The checks below are advisory now.' });
+          await refreshBoth();
+        } else if (out.kind === 'message') await refreshBoth();
+      }
+
+      async function copyAndApprove() {
+        const r = await approveFlow({
+          preflight: () => getJson(`/api/targets/${t.id}/draft/preflight`, { draft_id: cur.id }),
+          writeClipboard: (text) => browserClipboard.write(text),
+          clearClipboard: () => browserClipboard.clear(),
+          approve: (pre) => postJson(`/api/targets/${t.id}/draft/approve`, {
+            draft_id: cur.id, text_hash: pre.text_hash, expected_decision_version: pre.decision_version, expected_draft_version: pre.draft_version,
+          }),
+        });
+        if (r.status === 'approved') {
+          showToast({ message: `Copied. A follow-up reminder is set for ${r.outcome.kind === 'ok' ? r.outcome.body.due : 'later'}. Send the note yourself.` });
+        } else if (r.status === 'copy_failed') {
+          showToast({ message: 'The clipboard is not available, so nothing was approved.', tone: 'error' });
+        } else if (r.outcome) {
+          handleOutcome(r.outcome);
+        }
+        await refreshBoth();
+      }
+
+      /** @param {string} path @param {Record<string, unknown>} body @param {string} done */
+      async function simple(path, body, done) {
+        const out = handleOutcome(await postJson(`/api/targets/${t.id}/draft/${path}`, body));
+        if (out.kind === 'ok') showToast({ message: done });
+        await refreshBoth();
+      }
+
+      return h('section', { className: 'approval-section' }, [
+        h('h3', { className: 'approval-section__title', text: 'Outreach note' }),
+        h('p', { className: 'approval-section__note', text: `${draftStateLabel(cur.state)}${cur.edited ? ' | edited by you' : ''} | ${cur.word_count ?? 'n/a'} words | attempt ${cur.attempt}` }),
+        h('p', { className: 'approval-section__note', text: reviewLine }),
+        (cur.fail_codes ?? []).length ? h('p', { className: 'approval-section__note', text: `Parked because: ${cur.fail_codes.join(', ')}` }) : null,
+        warn.length
+          ? h('p', { className: 'approval-section__note targets-warn', text: `${cur.gates?.advisory ? 'Check warnings (advisory after your edit)' : 'Checks failed'}: ${warn.join(', ')}` })
+          : h('p', { className: 'approval-section__note', text: 'All checks pass.' }),
+        ...rows,
+        cur.note_preview ? h('pre', { className: 'targets-excerpt', text: cur.note_preview }) : null,
+        h('div', { className: 'ready-actions' }, [
+          cur.can.edit ? h('button', { className: 'btn', attrs: { type: 'button' }, text: 'Save edit', on: { click: () => { void save(); } } }) : null,
+          cur.can.approve ? h('button', { className: 'btn btn--primary', attrs: { type: 'button' }, text: 'Copy and approve', on: { click: () => { void copyAndApprove(); } } }) : null,
+          cur.can.discard ? h('button', { className: 'btn', attrs: { type: 'button' }, text: 'Discard note', on: { click: () => { void simple('discard', { draft_id: cur.id, expected_draft_version: cur.draft_version }, 'Note discarded.'); } } }) : null,
+          cur.can.regenerate ? h('button', { className: 'btn', attrs: { type: 'button' }, text: 'Regenerate', on: { click: () => { void simple('regenerate', {}, 'Queued. The next scan writes a new note.'); } } }) : null,
+        ]),
+        h('p', { className: 'approval-section__note', text: 'Approving copies the note and sets a follow-up reminder. The dashboard never sends anything.' }),
+      ]);
+    }
+
     const inputs = Object.entries(t.inputs ?? {}).map(([k, v]) => h('li', { text: `${k}: ${String(v)}` }));
     const signals = (t.signals ?? []).map((/** @type {any} */ s) => h('li', { className: 'targets-signal' }, [
       h('div', { className: 'targets-signal__head', text: `${sourceLabel(s.source)} | ${s.parse_outcome ?? 'n/a'}${s.parse_reason ? ` (${s.parse_reason})` : ''} | ${relativeTime(s.fetched_at)}` }),
@@ -294,6 +386,7 @@ export async function render(container, params, app) {
           : h('p', { className: 'approval-section__note', text: 'No action is available for this target in its current state.' }),
         formHost,
       ]),
+      noteSection(),
       h('section', { className: 'approval-section' }, [
         h('h3', { className: 'approval-section__title', text: `Signals (${signals.length})` }),
         t.signals_withheld ? h('p', { className: 'approval-section__note', text: 'Signals are withheld for a blocked row.' })

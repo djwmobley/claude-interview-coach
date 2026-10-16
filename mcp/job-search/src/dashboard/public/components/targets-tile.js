@@ -43,6 +43,7 @@ export function targetsTile(opts) {
     sources.length
       ? h('p', { className: 'approval-section__note', text: sources.map(sourceLine).join(' | ') })
       : h('p', { className: 'approval-section__note', text: 'No per-source coverage recorded yet.' }),
-    h('a', { hashHref: '#/targets', text: `Open Targets (${s.open?.targets ?? 0} targets, ${s.open?.needs_review ?? 0} needs review)` }),
+    h('p', { className: 'approval-section__note', text: `Notes awaiting your approval: ${s.drafts?.awaiting ?? 0}${s.drafts?.parked ? ` (${s.drafts.parked} parked)` : ''}` }),
+    h('a', { hashHref: '#/targets', text:`Open Targets (${s.open?.targets ?? 0} targets, ${s.open?.needs_review ?? 0} needs review)` }),
   ]);
 }

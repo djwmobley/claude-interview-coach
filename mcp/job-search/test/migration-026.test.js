@@ -45,7 +45,7 @@ describe('sql/026_target_decisions.sql', () => {
     assert.ok(AUX_MIGRATIONS.includes(FILE));
     assert.ok(BOOTSTRAP_MIGRATIONS.includes(FILE));
     assert.ok(AUX_MIGRATIONS.indexOf(FILE) > AUX_MIGRATIONS.indexOf('025_target_cursors.sql'));
-    assert.equal(AUX_MIGRATIONS.at(-1), FILE);
+    assert.ok(AUX_MIGRATIONS.indexOf(FILE) < AUX_MIGRATIONS.indexOf('027_target_drafts.sql'), 'later migrations come after 026');
   });
 
   test('new ic_targets columns and the audit table exist', async () => {

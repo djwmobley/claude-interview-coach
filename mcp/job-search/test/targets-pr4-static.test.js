@@ -68,7 +68,8 @@ describe('who writes decisions', () => {
     const posts = [...src.matchAll(/router\.register\(\s*'POST'/g)].length;
     assert.equal(posts, 1, 'one POST registration helper, instantiated for the three actions');
     for (const a of ['reclassify', 'discard', 'restore']) assert.match(src, new RegExp(`actionRoute\\('${a}'\\)`));
-    assert.ok(!/\bapprove\b|\bdraft\b|sendmail|mailto|nodemailer|smtp/i.test(src), 'no send, approve or draft path');
+    // PR5 adds the read-only note section to the detail view (imports only); the draft actions live in routes/target-drafts.js.
+    assert.ok(!/\bapprove\b|\bdraft\b|sendmail|mailto|nodemailer|smtp/i.test(src.replace(/^import .*$/gm, '')), 'no send, approve or draft path in this file beyond the imports');
   });
 });
 

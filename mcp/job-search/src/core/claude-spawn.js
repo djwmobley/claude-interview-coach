@@ -18,6 +18,9 @@
  * from its sources. Google, LinkedIn, Chrome, lease, and Claude Code nesting variables are never on it.
  */
 
+import { spawn } from 'node:child_process';
+import path from 'node:path';
+
 /** Every tool name the job-search MCP server can register (src/server.js TOOLS plus the two lease tools; headless runs deny the read-only targets tool unless a profile allows it).
  * test/claude-spawn.test.js fails when the server gains a tool that is not listed here. */
 export const JOB_SEARCH_TOOL_NAMES = Object.freeze([
@@ -48,7 +51,7 @@ const SKILL_READS = Object.freeze(['Read(./data/**)', 'Read(./memory/**)', 'Read
  * @typedef {{ name: string, allowed: readonly string[], mcpTools: readonly string[] }} SpawnProfile
  */
 
-/** @type {Readonly<Record<'write-resume'|'review-cv'|'triage', SpawnProfile>>} */
+/** @type {Readonly<Record<'write-resume'|'review-cv'|'triage'|'target-draft'|'target-review', SpawnProfile>>} */
 export const SPAWN_PROFILES = Object.freeze({
   'write-resume': Object.freeze({
     name: 'write-resume',
@@ -61,6 +64,10 @@ export const SPAWN_PROFILES = Object.freeze({
   // Fit triage is a pure text-in, JSON-out call: the listing batch arrives on stdin and the answer is the
   // schema-constrained envelope. It needs no tool at all, so nothing is allowed.
   triage: Object.freeze({ name: 'triage', mcpTools: Object.freeze([]), allowed: Object.freeze([]) }),
+  // Target outreach drafting and its independent review (plan 19.4) are the same shape: text on stdin, text out,
+  // untrusted evidence in the prompt, so no tool of any kind.
+  'target-draft': Object.freeze({ name: 'target-draft', mcpTools: Object.freeze([]), allowed: Object.freeze([]) }),
+  'target-review': Object.freeze({ name: 'target-review', mcpTools: Object.freeze([]), allowed: Object.freeze([]) }),
   'review-cv': Object.freeze({
     name: 'review-cv',
     mcpTools: Object.freeze(['get_job']),
@@ -114,6 +121,88 @@ export function buildClaudeArgs(o) {
     '--output-format', 'json',
     '--strict-mcp-config',
     '--mcp-config', o.mcpConfigPath,
+  ];
+}
+
+/**
+ * Run one tool-free `claude -p` call with the prompt on stdin. Resolves, never rejects:
+ *   { ok: true, stdout } on a clean exit; { ok: false, reason } with reason timeout, aborted, exit or spawn.
+ * The child gets only the allowlisted environment and is killed on timeout or abort.
+ * @param {string} bin
+ * @param {string[]} args
+ * @param {{ input: string, timeoutMs: number, env?: Record<string, string>, signal?: AbortSignal, maxBuffer?: number }} o
+ * @returns {Promise<{ ok: true, stdout: string } | { ok: false, reason: 'timeout'|'aborted'|'exit'|'spawn' }>}
+ */
+export function runClaudeText(bin, args, o) {
+  return new Promise((resolve) => {
+    if (o.signal?.aborted) {
+      resolve({ ok: false, reason: 'aborted' });
+      return;
+    }
+    let settled = false;
+    let stdout = '';
+    /** @type {NodeJS.Timeout|null} */
+    let timer = null;
+    /** @type {import('node:child_process').ChildProcess|null} */
+    let child = null;
+    /** @param {{ ok: true, stdout: string } | { ok: false, reason: 'timeout'|'aborted'|'exit'|'spawn' }} v */
+    const done = (v) => {
+      if (settled) return;
+      settled = true;
+      if (timer) clearTimeout(timer);
+      if (!v.ok && child && child.exitCode === null) child.kill('SIGTERM');
+      resolve(v);
+    };
+    try {
+      child = spawn(bin, args, { windowsHide: true, ...(o.env ? { env: o.env } : {}) });
+    } catch {
+      done({ ok: false, reason: 'spawn' });
+      return;
+    }
+    const cap = o.maxBuffer ?? (1 << 20);
+    child.stdout?.on('data', (d) => {
+      stdout += d;
+      if (Buffer.byteLength(stdout) > cap) done({ ok: false, reason: 'exit' });
+    });
+    child.stderr?.on('data', () => {});
+    child.on('error', () => done({ ok: false, reason: 'spawn' }));
+    child.on('exit', (code) => done(code === 0 ? { ok: true, stdout } : { ok: false, reason: 'exit' }));
+    timer = setTimeout(() => done({ ok: false, reason: 'timeout' }), Math.max(1, o.timeoutMs));
+    o.signal?.addEventListener('abort', () => done({ ok: false, reason: 'aborted' }), { once: true });
+    child.stdin?.on('error', () => {});
+    child.stdin?.write(o.input);
+    child.stdin?.end();
+  });
+}
+
+/**
+ * The real model caller for the target draft stage: one call per request, profile target-draft or
+ * target-review, empty strict MCP config, model sonnet. The draft call is schema-constrained; the review call
+ * is free text (it must carry the nonce verdict line).
+ * @param {{ configDir: string, schemaJson: string, bin?: string, model?: string, env?: Record<string, unknown> }} o
+ * @returns {(req: { kind: 'draft'|'review', prompt: string, timeoutMs: number, signal?: AbortSignal }) => ReturnType<typeof runClaudeText>}
+ */
+export function makeClaudeCaller(o) {
+  const bin = o.bin ?? (process.env.JOBSEARCH_TARGET_CLAUDE_BIN || 'claude');
+  const model = o.model ?? (process.env.JOBSEARCH_TARGET_MODEL || 'sonnet');
+  const env = buildChildEnv(o.env ?? process.env);
+  return (req) => runClaudeText(bin, targetCallArgs(req.kind, { configDir: o.configDir, schemaJson: o.schemaJson, model }), { input: req.prompt, timeoutMs: req.timeoutMs, env, signal: req.signal });
+}
+
+/**
+ * The argv of one target draft or review call. No tool is allowed (the profiles list none), the MCP config is
+ * the empty strict one, and the prompt travels on stdin, never as an argument.
+ * @param {'draft'|'review'} kind
+ * @param {{ configDir: string, schemaJson: string, model: string }} o
+ * @returns {string[]}
+ */
+export function targetCallArgs(kind, o) {
+  const profile = kind === 'review' ? SPAWN_PROFILES['target-review'] : SPAWN_PROFILES['target-draft'];
+  return [
+    '-p', '--model', o.model, '--output-format', 'json',
+    ...(kind === 'draft' ? ['--json-schema', o.schemaJson] : []),
+    '--strict-mcp-config', '--mcp-config', path.join(o.configDir, 'triage-mcp-empty.json'),
+    ...permissionArgs(profile),
   ];
 }
 
