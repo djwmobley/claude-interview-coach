@@ -1,0 +1,11 @@
+{
+  "_comment": "Candidate facts for target outreach drafts (src/targets/pitch-facts.js). Copy to target-pitch-facts.json (gitignored, personal data) in this directory and fill it in. Drafts may state candidate facts ONLY from this file. Rules: one plain sentence per fact; ids c1..c12; NO current-employer detail (the loader refuses a fact tagged employer, a fact that talks about the current employer, or a fact that names a blocked party); no compensation figures. signoff is added by code on copy and is not counted in the 90 words. candidate_names are never allowed in a draft body. denylist phrases are never allowed in a draft body. While _placeholder is true the file is refused (facts_placeholder).",
+  "_placeholder": true,
+  "facts": [
+    { "id": "c1", "text": "Placeholder fact one: replace with a verifiable statement about your past work.", "tags": ["example"] },
+    { "id": "c2", "text": "Placeholder fact two: replace with another verifiable statement about your past work.", "tags": ["example"] }
+  ],
+  "signoff": "Best,\nYour Name",
+  "candidate_names": ["Your Name"],
+  "denylist": []
+}

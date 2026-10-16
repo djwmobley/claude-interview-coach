@@ -21,6 +21,9 @@ import { makeLeakGuard } from '../../targets/leak-guard.js';
 import { blockedSql, effectiveClassSql, CLASSES } from '../../targets/effective.js';
 import { applyDecision, stateOf, allowedActions, DecisionError, REASONS } from '../../targets/decisions.js';
 import { closedReason } from '../../targets/coverage.js';
+import { loadDraftConfig, isEligibleTarget } from '../../targets/draft-context.js';
+import { draftCounts } from '../../targets/drafts.js';
+import { loadDraftView } from '../draft-view.js';
 
 export const STATUS_FILTERS = Object.freeze(['active', 'open', 'reclassified', 'discarded', 'approved', 'any']);
 const KINDS = Object.freeze(['pe_deal', 'exec_departure', 'leadership_gap']);
@@ -183,8 +186,9 @@ async function loadDetail(q, id) {
  * @param {any} q
  * @param {number} id
  * @param {ReturnType<typeof makeLeakGuard>} g
+ * @param {string} [configDir]
  */
-async function buildDetail(q, id, g) {
+async function buildDetail(q, id, g, configDir) {
   const r = await loadDetail(q, id);
   if (!r) return null;
   const base = formatListRow(r, g);
@@ -212,8 +216,12 @@ async function buildDetail(q, id, g) {
     const intact = text === r.evidence_url;
     evidence = { text, url: chk.ok && intact && chk.url?.startsWith('https:') ? chk.url : null, url_ok: Boolean(chk.ok && intact && chk.url?.startsWith('https:')), host: chk.host };
   }
+  // PR5: the note section (null for a blocked row, which never has one shown).
+  const cfg = blocked ? null : loadDraftConfig(configDir);
+  const note = blocked ? null : await loadDraftView(q, { ...r, id }, g, { eligible: isEligibleTarget(r), signoff: cfg && cfg.ok ? cfg.facts.signoff : '' });
   return {
     ...base,
+    note,
     machine_class: r.class,
     reason: r.reason,
     inputs,
@@ -289,6 +297,7 @@ async function buildSummary(q) {
   return {
     since: since.toISOString(),
     since_basis: sent instanceof Date ? 'last_digest' : 'last_7_days',
+    drafts: await draftCounts(q),
     new_targets: nw.rows[0].new_targets,
     new_needs_review: nw.rows[0].new_needs_review,
     open: { targets: open.rows[0].targets, needs_review: open.rows[0].needs_review },
@@ -353,7 +362,7 @@ export function register(router, deps) {
   router.register('GET', '/api/targets/:id', async (ctx) => {
     const id = idParam(ctx.params.id);
     const g = guard();
-    const detail = await deps.withClient((c) => inReadOnlyTx(c, (q) => buildDetail(q, id, g)));
+    const detail = await deps.withClient((c) => inReadOnlyTx(c, (q) => buildDetail(q, id, g, deps.env?.JOBSEARCH_CONFIG_DIR || undefined)));
     if (!detail) throw new DashboardError(404, 'NOT_FOUND', 'target not found');
     sendJson(ctx.res, 200, { ok: true, target: detail });
   });
@@ -371,7 +380,7 @@ export function register(router, deps) {
         if (err instanceof DecisionError) throw new DashboardError(err.status, err.code, err.message, { details: err.details });
         throw err;
       }
-      const detail = await deps.withClient((c) => inReadOnlyTx(c, (q) => buildDetail(q, id, g)));
+      const detail = await deps.withClient((c) => inReadOnlyTx(c, (q) => buildDetail(q, id, g, deps.env?.JOBSEARCH_CONFIG_DIR || undefined)));
       sendJson(ctx.res, 200, { ok: true, noop: res.noop, decision_version: res.decision_version, target: detail });
     });
   }

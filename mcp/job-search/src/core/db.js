@@ -41,14 +41,20 @@ export async function closePool() {
 
 /**
  * Open a dedicated, non-pooled client (advisory lock holder, migrations).
- * @param {{ dsn?: string|null }} [opts]
+ * @param {{ dsn?: string|null, connectTimeoutMs?: number, statementTimeoutMs?: number }} [opts]
+ *   connectTimeoutMs and statementTimeoutMs bound the connect and every statement on this connection; both
+ *   default to unbounded (the long-lived scan lock client relies on that).
  * @returns {Promise<import('pg').Client>}
  */
 export async function connectDedicated(opts = {}) {
   const cfg = pgConnectionConfig(opts.dsn ?? null);
   // See the comment in getPool() above: redundant with pgConnectionConfig()'s own enforcement.
   assertTestDbGuard(cfg);
-  const client = new Client(cfg);
+  const client = new Client({
+    ...cfg,
+    ...(opts.connectTimeoutMs ? { connectionTimeoutMillis: opts.connectTimeoutMs } : {}),
+    ...(opts.statementTimeoutMs ? { statement_timeout: opts.statementTimeoutMs } : {}),
+  });
   try {
     await client.connect();
   } catch (err) {

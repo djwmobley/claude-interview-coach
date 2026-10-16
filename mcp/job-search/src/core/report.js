@@ -946,10 +946,42 @@ export function targetsExpected(r, timezone = 'America/Chicago') {
  * A source with a backlog over 3 business days is flagged. Sources that are disabled by config are left out,
  * and a complete gap source is not listed.
  * @param {any} t
- * @param {{ expected?: boolean }} [ctx]
+ * @param {{ expected?: boolean, drafts?: unknown }} [ctx]
  * @returns {string|null}
  */
 export function renderTargetsLine(t, ctx = {}) {
+  const line = renderTargetsLineBase(t, ctx);
+  // The draft stage result rides beside stats.targets (stats.target_drafts), so the targets stats keep their shape.
+  const d = /** @type {any} */ (ctx).drafts !== undefined ? /** @type {any} */ (ctx).drafts : (t && typeof t === 'object' ? t.drafts : undefined);
+  const drafts = line !== null ? renderDraftsClause(d) : '';
+  return drafts ? `${line}; ${drafts}` : line;
+}
+
+const DRAFT_SKIP_CODES = Object.freeze([
+  'test_guard', 'no_time', 'facts_missing', 'facts_invalid', 'facts_placeholder', 'blocklist_unavailable', 'locked', 'stage_failed', 'stage_timeout',
+]);
+
+/**
+ * The draft stage clause of the targets line (plan 19.2): counts when it ran, a closed code when it did not.
+ * A weekend skip is silent. No draft or evidence text can reach it: numbers and closed codes only.
+ * @param {any} d stats.targets.drafts
+ * @returns {string}
+ */
+function renderDraftsClause(d) {
+  if (!d || typeof d !== 'object') return '';
+  const n = (/** @type {unknown} */ v) => (typeof v === 'number' && Number.isFinite(v) ? Math.max(0, Math.floor(v)) : 0);
+  if (d.ran === true) return `drafts: ${n(d.awaiting)} awaiting, ${n(d.parked)} parked`;
+  const why = d.skipped ?? d.error;
+  if (why === 'weekend' || why === undefined) return '';
+  return `drafts skipped (${DRAFT_SKIP_CODES.includes(why) ? why : 'other'})`;
+}
+
+/**
+ * @param {any} t
+ * @param {{ expected?: boolean }} ctx
+ * @returns {string|null}
+ */
+function renderTargetsLineBase(t, ctx) {
   const expected = ctx.expected !== false;
   if (!t || typeof t !== 'object') return expected ? 'targets: [NO TARGETS RUN]' : null;
   if (t.ran !== true) {
@@ -1153,7 +1185,7 @@ export function renderReportText(data, registry, googleAuthState, dashboardHealt
     if (blockedLine) lines.push(`  ${blockedLine}`);
     const triageLine = renderTriageLine(s.triage);
     if (triageLine) lines.push(`  ${triageLine}`);
-    const targetsLine = renderTargetsLine(s.targets, { expected: targetsExpected(r, data.timezone) });
+    const targetsLine = renderTargetsLine(s.targets, { expected: targetsExpected(r, data.timezone), drafts: s.target_drafts });
     if (targetsLine) lines.push(`  ${targetsLine}`);
     for (const e of r.errors.slice(0, 5)) lines.push(`  error: ${e.source ?? 'run'} ${e.code}: ${errorLineMessage(e).slice(0, 200)}`);
   }
@@ -1238,7 +1270,7 @@ export function renderReportHtml(data, registry, googleAuthState, dashboardHealt
       const banner = (r.status !== 'ok' ? `<strong>[${esc(String(r.status).toUpperCase())}]</strong> ` : '') + (hasWallclockMarker(r) ? '<strong>[WALLCLOCK]</strong> ' : '');
       const errs = r.errors.slice(0, 5).map((e) => `<br>error: ${esc(e.source ?? 'run')} ${esc(e.code)}: ${esc(errorLineMessage(e).slice(0, 200))}`).join('');
       const triageLine = renderTriageLine(s.triage);
-      const targetsLine = renderTargetsLine(s.targets, { expected: targetsExpected(r, data.timezone) });
+      const targetsLine = renderTargetsLine(s.targets, { expected: targetsExpected(r, data.timezone), drafts: s.target_drafts });
       const triageHtml = (triageLine ? `<br>${esc(triageLine)}` : '') + (targetsLine ? `<br>${esc(targetsLine)}` : '');
       const blockedHtmlLine = blockedDetailLine(s);
       const detailsHtml = detailsBySourceLines(s).map((dline) => `<br>${esc(dline)}`).join('') + (blockedHtmlLine ? `<br>${esc(blockedHtmlLine)}` : '');
@@ -1321,7 +1353,7 @@ export function renderReportMarkdown(data, registry, googleAuthState, dashboardH
     if (blockedLine2) lines.push(`  ${blockedLine2}`);
     const triageLine = renderTriageLine(s.triage);
     if (triageLine) lines.push(`  ${triageLine}`);
-    const targetsLine = renderTargetsLine(s.targets, { expected: targetsExpected(r, data.timezone) });
+    const targetsLine = renderTargetsLine(s.targets, { expected: targetsExpected(r, data.timezone), drafts: s.target_drafts });
     if (targetsLine) lines.push(`  ${targetsLine}`);
     for (const e of r.errors.slice(0, 5)) lines.push(`  error: ${e.source ?? 'run'} ${e.code}: ${errorLineMessage(e).slice(0, 200)}`);
   }

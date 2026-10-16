@@ -492,7 +492,8 @@ describe('static: no send, mail or outbound path in the route, page or tile', ()
     test(`${f}`, () => {
       const src = strip(fs.readFileSync(path.join(HERE, '..', ...f.split('/')), 'utf8'));
       assert.ok(!/node:child_process|\bspawn\s*\(|\bexecFile?(?:Sync)?\s*\(|powershell|pwsh|EncodedCommand/i.test(src), 'shell');
-      assert.ok(!/sendmail|nodemailer|smtp|messages\/send|drafts\.create|clipboard|mailto:/i.test(src), 'mail');
+      assert.ok(!/sendmail|nodemailer|smtp|messages\/send|drafts\.create|mailto:/i.test(src), 'mail');
+      assert.ok(!/navigator\.clipboard|execCommand/i.test(src), 'the clipboard is touched only by lib/target-approve.js');
       assert.ok(!/(?<![.\w])fetch\s*\(|XMLHttpRequest|WebSocket|sendBeacon/.test(src), 'outbound request');
       assert.ok(!/innerHTML|insertAdjacentHTML|outerHTML|document\.write/.test(src), 'markup sink');
       assert.ok(!/DELETE\s+FROM\s+ic_target_decisions|UPDATE\s+ic_target_decisions/i.test(src), 'audit is append only');

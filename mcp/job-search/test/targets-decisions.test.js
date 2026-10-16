@@ -287,8 +287,9 @@ describe('audit table constraints (A5)', () => {
   test('action CHECK, UNIQUE (target_id, decision_version), and append-only', async () => {
     const id = await seedTarget(client, { tag: TAG, n: 'chk' });
     const ins = (/** @type {string} */ action, /** @type {number} */ v) => client.query(`INSERT INTO ic_target_decisions (target_id, action, decision_version) VALUES ($1, $2, $3)`, [id, action, v]);
-    for (const [i, a] of ['reclassify', 'discard', 'restore', 'blocked_refused'].entries()) await ins(a, i + 1);
-    await assert.rejects(ins('approve', 9), /check constraint/);
+    // PR5 (migration 027) adds 'approve' to the vocabulary; anything else is still refused.
+    for (const [i, a] of ['reclassify', 'discard', 'restore', 'blocked_refused', 'approve'].entries()) await ins(a, i + 1);
+    await assert.rejects(ins('send', 9), /check constraint/);
     await assert.rejects(ins('reclassify', 1), /unique|duplicate/);
     await assert.rejects(client.query(`INSERT INTO ic_target_decisions (target_id, action, decision_version, actor) VALUES ($1, 'discard', 20, 'someone')`, [id]), /check constraint/);
     await assert.rejects(client.query(`UPDATE ic_target_decisions SET note = 'edit' WHERE target_id = $1`, [id]), /append-only/);

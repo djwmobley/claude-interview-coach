@@ -294,3 +294,63 @@ describe('the report', () => {
     assert.doesNotMatch(buildReportSubject(dry), /TARGETS/);
   });
 });
+
+describe('the draft stage in the scan (PR5, plan 19.2)', () => {
+  const ZZ_MAP = DEFAULT_MAP.filter((m) => m.prefix.includes('zztest') || m.prefix.includes('/gitlab/'));
+  const args = () => ({ profile: PROFILE, sources: ['greenhouse'], dryRun: false, wait: true });
+
+  test('the stage result rides in stats.target_drafts, is persisted, and renders as the drafts clause; stats.targets keeps its shape', async () => {
+    const calls = { n: 0 };
+    const deps = offlineDeps({
+      fetch: makeFixtureFetch(ZZ_MAP),
+      runTargetDraftStage: /** @type {any} */ (async (/** @type {any} */ p) => { calls.n += 1; assert.equal(typeof p.connect, 'function'); assert.equal(typeof p.scanStartMs, 'number'); return { ran: true, awaiting: 2, parked: 1, claimed: 3 }; }),
+    });
+    const r = await runScanWaiting(args(), deps, { trigger: 'cli', log: () => {}, now: FIXTURE_NOW });
+    assert.equal(calls.n, 1);
+    assert.equal(r.status, 'ok', JSON.stringify(r.errors));
+    assert.deepEqual(r.stats.targets, { ran: false, skipped: 'test_guard' }, 'the targets stats are untouched');
+    assert.deepEqual(r.stats.target_drafts, { ran: true, awaiting: 2, parked: 1, claimed: 3 });
+    const stored = (await client.query('SELECT stats->\'target_drafts\' AS d FROM ic_scan_runs WHERE id = $1', [r.run_id])).rows[0].d;
+    assert.deepEqual(stored, { ran: true, awaiting: 2, parked: 1, claimed: 3 });
+    await client.query(`UPDATE ic_scan_runs SET started_at = $2, finished_at = now() WHERE id = $1`, [r.run_id, WEEKDAY]);
+    const data = await buildScanReport(client, { now: WEEKDAY, timezone: 'America/Chicago', sinceOverride: null });
+    for (const text of [renderReportText(data), renderReportMarkdown(data), renderReportHtml(data)]) assert.match(text, /targets: \[NO TARGETS RUN\] \(test_guard\); drafts: 2 awaiting, 1 parked/);
+  });
+
+  test('a throwing draft stage never changes the scan: status ok, no target_drafts stat, targets stats untouched', async () => {
+    const deps = offlineDeps({ fetch: makeFixtureFetch(ZZ_MAP), runTargetDraftStage: /** @type {any} */ (async () => { throw new Error('kaboom'); }) });
+    const r = await runScanWaiting(args(), deps, { trigger: 'cli', log: () => {}, now: FIXTURE_NOW });
+    assert.equal(r.status, 'ok', JSON.stringify(r.errors));
+    assert.equal('target_drafts' in r.stats, false);
+    assert.deepEqual(r.stats.targets, { ran: false, skipped: 'test_guard' });
+    assert.equal((await client.query('SELECT status FROM ic_scan_runs WHERE id = $1', [r.run_id])).rows[0].status, 'ok');
+  });
+
+  test('the real draft stage under a test runner with no injected model skips with test_guard (a test can never start claude)', async () => {
+    const deps = offlineDeps({ fetch: makeFixtureFetch(ZZ_MAP) });
+    const r = await runScanWaiting(args(), deps, { trigger: 'cli', log: () => {}, now: FIXTURE_NOW });
+    assert.equal(r.status, 'ok', JSON.stringify(r.errors));
+    assert.deepEqual(r.stats.target_drafts, { ran: false, skipped: 'test_guard' });
+  });
+
+  test('a dry-run scan never calls the draft stage', async () => {
+    const calls = { n: 0 };
+    const deps = offlineDeps({ fetch: makeFixtureFetch(ZZ_MAP), runTargetDraftStage: /** @type {any} */ (async () => { calls.n += 1; return { ran: true }; }) });
+    const r = await runScanWaiting({ ...args(), dryRun: true }, deps, { trigger: 'cli', log: () => {}, now: FIXTURE_NOW });
+    assert.notEqual(r.status, 'failed');
+    assert.equal(calls.n, 0);
+  });
+
+  test('the draft stage still runs when the targets stage failed (they are independent)', async () => {
+    const calls = { n: 0 };
+    const deps = offlineDeps({
+      fetch: makeFixtureFetch(ZZ_MAP),
+      runTargetsStage: /** @type {any} */ (async () => { throw new Error('boom'); }),
+      runTargetDraftStage: /** @type {any} */ (async () => { calls.n += 1; return { ran: false, skipped: 'facts_missing' }; }),
+    });
+    const r = await runScanWaiting(args(), deps, { trigger: 'cli', log: () => {}, now: FIXTURE_NOW });
+    assert.equal(calls.n, 1);
+    assert.deepEqual(r.stats.targets, { ran: false, error: 'stage_failed' });
+    assert.deepEqual(r.stats.target_drafts, { ran: false, skipped: 'facts_missing' });
+  });
+});
