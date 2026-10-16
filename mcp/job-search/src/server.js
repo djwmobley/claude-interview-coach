@@ -27,6 +27,7 @@ import { tool as renderDoc } from './tools/render_doc.js';
 import { tool as followups } from './tools/followups.js';
 import { tool as scanReport } from './tools/scan_report.js';
 import { tool as restartDashboard } from './tools/restart_dashboard.js';
+import { tool as targets } from './tools/targets.js';
 import { tool as assistedApply } from './tools/assisted_apply.js';
 import { tool as easyApply } from './tools/easy_apply.js';
 import { LEASE_ENV, ASSISTED_LEASE_ENV } from './core/easy-apply-state.js';
@@ -34,7 +35,7 @@ import { LEASE_ENV, ASSISTED_LEASE_ENV } from './core/easy-apply-state.js';
 export const SERVER_INFO = Object.freeze({ name: 'job-search', version: '0.1.0' });
 
 /** Registration order is the tools/list order. */
-export const TOOLS = Object.freeze([searchJobs, queryJobs, getJob, markJobs, profiles, scans, review, renderDoc, followups, scanReport, restartDashboard]);
+export const TOOLS = Object.freeze([searchJobs, queryJobs, getJob, markJobs, profiles, scans, review, renderDoc, followups, scanReport, restartDashboard, targets]);
 
 /**
  * Assisted apply lease mode (src/apply/assisted/runner.js). Total, first match wins:
@@ -50,7 +51,7 @@ export function toolsForEnv(env = process.env) {
 }
 
 /**
- * Build the McpServer with all nine tools registered.
+ * Build the McpServer with every ordinary tool registered (TOOLS: twelve, including the read-only targets tool).
  * @param {Partial<import('./tools/_shared.js').ToolDeps> & { processEnv?: NodeJS.ProcessEnv }} [overrides]
  */
 export function buildServer(overrides = {}) {

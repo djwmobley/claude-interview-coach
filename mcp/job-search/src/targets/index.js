@@ -29,7 +29,7 @@ export { OUTCOMES, urlHash, summarizeStats } from './outcomes.js';
  * One guard for the whole run (global request counter). The SEC contact comes from the gitignored
  * config/target-sec-contact.json; with no valid contact, `edgar` is null and every EDGAR adapter skips
  * itself with sec_contact_missing (zero requests) while the run proceeds.
- * @param {{ configDir?: string, fetch?: typeof fetch, maxRequests?: number, timing?: Parameters<typeof createEdgarClient>[0]['timing'] }} [opts]
+ * @param {{ configDir?: string, fetch?: typeof fetch, maxRequests?: number, timing?: Parameters<typeof createEdgarClient>[0]['timing'], control?: { deadlineAt?: number|null, signal?: AbortSignal|null } }} [opts]
  */
 export function createTargetNetwork(opts = {}) {
   const sec = secContactOrSkip(opts.configDir);
@@ -38,6 +38,6 @@ export function createTargetNetwork(opts = {}) {
     userAgent: sec.ok ? sec.userAgent : null,
     ...(opts.maxRequests ? { maxRequests: opts.maxRequests } : {}),
   });
-  const edgar = sec.ok ? createEdgarClient({ guard, timing: opts.timing }) : null;
+  const edgar = sec.ok ? createEdgarClient({ guard, timing: opts.timing, control: opts.control }) : null;
   return { guard, edgar, sec };
 }

@@ -60,6 +60,7 @@ import { connectSession as defaultConnectSession, applyTargetMarkerPath } from '
 import { makeCapability } from '../browser/capability.js';
 import { ADAPTERS, getAdapter } from '../adapters/index.js';
 import { runTriage } from './triage.js';
+import { runTargetsStage } from '../targets/stage.js';
 import { createSnapshotSaver } from './linkedin-snapshot.js';
 import { persistApplyTargetForListing, buildScanProbeRegistry } from './apply-target-persist.js';
 
@@ -96,6 +97,9 @@ export const CLOSE_ALL_TIMEOUT_MS = 10000;
  * @property {(ms: number, signal?: AbortSignal) => Promise<void>} [sleep]
  * @property {() => number} [random]
  * @property {typeof reserveBudget} [reserveBudget] tests inject an in-memory reservation so fixture runs never consume the real daily budget
+ * @property {typeof runTargetsStage} [runTargetsStage] test seam over the target finder stage (src/targets/stage.js)
+ * @property {typeof fetch} [targetsFetch] explicit fetch for the target finder stage; without it the stage refuses to run
+ *   under a test runner (so no test can reach the real SEC or Gmail by accident)
  * @property {typeof defaultSpawn} [spawn] unattended Google re-auth (spec A6): the child_process.spawn
  *   used to fire-and-forget bin/google-reauth.js. Tests inject a fake to assert the spawn args (command,
  *   detached/windowsHide/stdio) without actually launching a process.
@@ -1798,6 +1802,29 @@ async function executeRun(p) {
     // whichever caller is waiting (bin/scan.js's JSON summary, or search_jobs.js's tool result) without a
     // second DB round trip.
     stats.triage = triageStats;
+
+    // Target finder stage (plan 17.3). After triage, on its own dedicated connection, weekdays only, with its
+    // own deadline: the smaller of 8 minutes and (this run's wall-clock cap minus a 5-minute report reserve),
+    // computed from runStartMs and runTimeoutMs. It never throws and never changes this run's status or exit
+    // code; stats.targets carries ran:false plus a closed code for a skip, a throw, a hang or a timeout. The
+    // daily report is built separately from the database, so it is built and sent regardless.
+    try {
+      const stage = deps.runTargetsStage ?? runTargetsStage;
+      /** @type {any} */ (stats).targets = await stage({
+        connect: () => (deps.connectDedicated ?? defaultConnectDedicated)(),
+        now,
+        runId,
+        scanStartMs: runStartMs,
+        scanTimeoutMs: runTimeoutMs,
+        configDir: env.JOBSEARCH_CONFIG_DIR,
+        fetch: deps.targetsFetch,
+        tokenFile: env.GOOGLE_TOKEN_FILE || null,
+        log,
+      });
+    } catch (err) {
+      log({ evt: 'targets_stage_failed', run_id: runId, ...errFields(err) });
+      /** @type {any} */ (stats).targets = { ran: false, error: 'stage_failed' };
+    }
   }
 
   log({ evt: 'run_finished', run_id: runId, status, fetched: stats.fetched, new: stats.new, updated: stats.updated, errors: errors.length });

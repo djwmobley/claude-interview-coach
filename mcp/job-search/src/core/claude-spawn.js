@@ -18,11 +18,11 @@
  * from its sources. Google, LinkedIn, Chrome, lease, and Claude Code nesting variables are never on it.
  */
 
-/** Every tool name the job-search MCP server can register (src/server.js TOOLS plus the two lease tools).
+/** Every tool name the job-search MCP server can register (src/server.js TOOLS plus the two lease tools; headless runs deny the read-only targets tool unless a profile allows it).
  * test/claude-spawn.test.js fails when the server gains a tool that is not listed here. */
 export const JOB_SEARCH_TOOL_NAMES = Object.freeze([
   'search_jobs', 'query_jobs', 'get_job', 'mark_jobs', 'profiles', 'scans', 'review', 'render_doc', 'followups',
-  'scan_report', 'restart_dashboard', 'assisted_apply', 'easy_apply',
+  'scan_report', 'restart_dashboard', 'targets', 'assisted_apply', 'easy_apply',
 ]);
 
 /** Denied for every profile, whatever its allow list says. */

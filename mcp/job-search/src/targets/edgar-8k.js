@@ -25,7 +25,7 @@
 import { normalizeCompany } from '../core/normalize.js';
 import { validCik, validAdsh, indexUrl, daysBefore } from './edgar-client.js';
 import {
-  discoverByForm, formsToRequests, groupByAccession, primaryFiler, chooseDocs, readDocs, evidenceOf,
+  discoverByForm, formsToRequests, groupByAccession, primaryFiler, chooseDocs, readDocs, evidenceOf, fetchStatusWithInvalid,
 } from './edgar-shared.js';
 import { createCollector } from './outcomes.js';
 import {
@@ -50,22 +50,26 @@ export const EIGHT_K_PAGE_SIZE = 100;
  * @param {Date} ctx.now
  * @param {string[]} ctx.blocked
  * @param {number} [ctx.blockedMinLength]
+ * @param {{ start: string, end: string }} [ctx.window] one-day slice from the runner (YYYY-MM-DD, ET)
+ * @param {number} [ctx.maxPages]
+ * @param {(adsh: string) => boolean} [ctx.covered] accession already stored with a read document (resume)
  */
 export async function run8k(ctx) {
   const c = createCollector(EIGHT_K_SOURCE, EIGHT_K_REASONS, EIGHT_K_PARSER_VERSION);
   if (!ctx.edgar) { c.skip('sec_contact_missing'); return { items: c.items, stats: c.stats }; }
   if (ctx.edgar.blocked) { c.skip('sec_blocked'); return { items: c.items, stats: c.stats }; }
   const edgar = ctx.edgar;
-  const enddt = daysBefore(ctx.now, 0);
-  const startdt = daysBefore(ctx.now, EIGHT_K_WINDOW_DAYS);
+  const enddt = ctx.window?.end ?? daysBefore(ctx.now, 0);
+  const startdt = ctx.window?.start ?? daysBefore(ctx.now, EIGHT_K_WINDOW_DAYS);
 
   const disc = await discoverByForm({
     edgar,
     forms: formsToRequests('8-K,8-K/A'),
     params: { q: '"Item 5.02"', dateRange: 'custom', startdt, enddt },
     budget: 'discovery_8k',
-    maxPages: EIGHT_K_MAX_PAGES,
+    maxPages: ctx.maxPages ?? EIGHT_K_MAX_PAGES,
   });
+  c.stats.overflow = disc.overflow;
   c.stats.coverage = disc.coverage;
   c.stats.discovery_total = disc.total;
   for (const p of disc.problems) c.warn(p);
@@ -106,7 +110,10 @@ export async function run8k(ctx) {
     const cik = validCik(who.cik);
     if (!cik) { c.add('unparseable', 'cik_malformed', { key: `${adsh}|5.02` }); return; }
     const key = `${adsh}|5.02`;
-    const rawNames = who.all_names.slice(0, 10);
+    if (ctx.covered?.(adsh)) { c.bump('covered_skip'); return; }
+    // D5: exclusion runs over ALL display names; the 10-name cap applies only to what is stored.
+    const allNames = who.all_names;
+    const rawNames = allNames.slice(0, 10);
     const cleaned = rawNames.map(cleanDisplayName).filter(Boolean);
     const itemsAll = group.every((h) => h.items === null) ? null : [...new Set(group.flatMap((h) => h.items ?? []))];
     const form = group.find((h) => h.form)?.form ?? null;
@@ -121,7 +128,9 @@ export async function run8k(ctx) {
     const chosen = chooseDocs(group);
     if (chosen.chosen.length === 0) { c.add('unparseable', 'hit_shape_unknown', { key, url: indexUrl(cik, adsh), extracted: { ...base, issue: 'filename_missing_or_invalid' } }); return; }
     if (!edgar.hasBudget('8k')) { c.add('out_of_scope', 'run_cap', { key, url: indexUrl(cik, adsh), extracted: base }); return; }
-    const read = await readDocs(edgar, '8k', cik, adsh, chosen.chosen);
+    const read0 = await readDocs(edgar, '8k', cik, adsh, chosen.chosen);
+    // D6: a hit document with an invalid filename marks an otherwise clean filing partial (needs-review).
+    const read = { ...read0, status: fetchStatusWithInvalid(read0.status, chosen.invalid) };
     if (read.status === 'failed' && read.docs.every((d) => d.reason === 'capped')) { c.add('out_of_scope', 'run_cap', { key, url: indexUrl(cik, adsh), extracted: base }); return; }
     const evidence = evidenceOf(read.docs);
     const okDocs = read.docs.filter((d) => d.ok).map((d) => ({ ...d, plain: htmlToPlain(d.text) }));
@@ -136,8 +145,9 @@ export async function run8k(ctx) {
       if (sec) { section = sec; sectionDoc = d; break; }
     }
     const eventDate = okDocs.map((d) => extractCoverDate(d.plain)).find(Boolean) ?? null;
-    const scan = findBlockedHits([...rawNames, ...okDocs.map((d) => d.plain)].join(' \n '), ctx.blocked, { minLength: ctx.blockedMinLength });
-    const fetchNote = { doc_fetch: read.status, unread_hit_docs: chosen.unread, evidence };
+    const scan = findBlockedHits([...allNames, ...okDocs.map((d) => d.plain)].join(' \n '), ctx.blocked, { minLength: ctx.blockedMinLength });
+    const unreadHitDocs = chosen.unread + chosen.invalid;
+    const fetchNote = { doc_fetch: read.status, unread_hit_docs: unreadHitDocs, invalid_hit_docs: chosen.invalid, evidence };
 
     if (read.status === 'ok') {
       if (!section) { c.add('unparseable', 'section_not_found', { key, url: indexUrl(cik, adsh), extracted: { ...base, ...fetchNote, doc_truncated: okDocs.some((d) => d.truncated) } }); return; }
@@ -170,7 +180,7 @@ export async function run8k(ctx) {
       role: a.role,
       departure_ambiguous: a.ambiguous,
       doc_fetch: read.status,
-      unread_hit_docs: chosen.unread,
+      unread_hit_docs: unreadHitDocs,
     };
     c.add('parsed', 'ok', {
       key,

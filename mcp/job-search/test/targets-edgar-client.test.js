@@ -126,14 +126,14 @@ describe('request pacing, budgets, and blocking', () => {
     assert.ok(sleeps.every((ms) => ms >= 250));
   });
   test('budgets: per-source documents and per-source discovery, 200 total; over budget makes no request', async () => {
-    assert.deepEqual({ ...EDGAR_BUDGETS }, { form_d: 80, '8k': 45, fts: 45, discovery_form_d: 6, discovery_8k: 6, discovery_fts: 18 });
-    assert.equal(Object.values(EDGAR_BUDGETS).reduce((a, b) => a + b, 0), 200);
-    assert.equal(EDGAR_TOTAL_CAP, 200);
+    assert.deepEqual({ ...EDGAR_BUDGETS }, { form_d: 400, '8k': 200, fts: 200, discovery_form_d: 60, discovery_8k: 40, discovery_fts: 60 });
+    assert.ok(Object.values(EDGAR_BUDGETS).reduce((a, b) => a + b, 0) <= EDGAR_TOTAL_CAP);
+    assert.equal(EDGAR_TOTAL_CAP, 1000);
     const { edgar, calls } = make([{ match: () => true, body: '{}' }]);
-    for (let i = 0; i < 18; i += 1) assert.equal((await edgar.search(`https://efts.sec.gov/LATEST/search-index?q=${i}`, 'discovery_fts')).ok, true);
+    for (let i = 0; i < EDGAR_BUDGETS.discovery_fts; i += 1) assert.equal((await edgar.search(`https://efts.sec.gov/LATEST/search-index?q=${i}`, 'discovery_fts')).ok, true);
     const over = await edgar.search('https://efts.sec.gov/LATEST/search-index?q=over', 'discovery_fts');
     assert.deepEqual([over.ok, over.reason], [false, 'capped']);
-    assert.equal(calls.length, 18);
+    assert.equal(calls.length, EDGAR_BUDGETS.discovery_fts);
     assert.equal(edgar.hasBudget('discovery_fts'), false);
     // PR2b: full-text queries cannot use up Form D or 8-K discovery.
     assert.equal(edgar.hasBudget('discovery_form_d'), true);
@@ -144,8 +144,8 @@ describe('request pacing, budgets, and blocking', () => {
     assert.equal(edgar.hasBudget('form_d'), true);
     assert.equal(edgar.hasBudget('nonsense'), false);
   });
-  test('the 200 total cap holds even when each budget still has room', async () => {
-    const { edgar, calls } = make([{ match: () => true, body: '{}' }], { budgets: { form_d: 150, '8k': 150, fts: 150, discovery_fts: 150 } });
+  test('the total cap holds even when each budget still has room', async () => {
+    const { edgar, calls } = make([{ match: () => true, body: '{}' }], { totalCap: 200, budgets: { form_d: 150, '8k': 150, fts: 150, discovery_fts: 150 } });
     let ok = 0;
     for (let i = 0; i < 260; i += 1) if ((await edgar.document(`https://www.sec.gov/Archives/edgar/data/1/000000000000000001/f${i}.htm`, i % 2 ? 'form_d' : '8k')).ok) ok += 1;
     assert.equal(ok, 200);

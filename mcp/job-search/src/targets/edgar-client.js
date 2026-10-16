@@ -24,10 +24,13 @@ import { FetchRefused } from './fetch-guard.js';
 import { sanitizeText } from './signal-text.js';
 
 export const SEC_CONTACT_FILE = 'target-sec-contact.json';
+// PR3 (plan 17.2): raised so the steady state is at least 1.5 times the observed daily volume (about 200 Form D
+// a weekday, most pruned by the fund prefilter before any document fetch). At 4 requests a second the whole
+// 960 fits inside the 8 minute stage deadline; the deadline, not these numbers, is the hard stop.
 export const EDGAR_BUDGETS = Object.freeze({
-  form_d: 80, '8k': 45, fts: 45, discovery_form_d: 6, discovery_8k: 6, discovery_fts: 18,
+  form_d: 400, '8k': 200, fts: 200, discovery_form_d: 60, discovery_8k: 40, discovery_fts: 60,
 });
-export const EDGAR_TOTAL_CAP = 200;
+export const EDGAR_TOTAL_CAP = 1000;
 export const MIN_REQUEST_GAP_MS = 250;
 export const BACKOFF_MS = 2000;
 export const DOC_READ_BYTES = 300 * 1024;
@@ -204,7 +207,7 @@ export function parseSearchResponse(text) {
 /**
  * @typedef {Object} EdgarResult
  * @property {boolean} ok
- * @property {'capped'|'blocked'|'refused'|'http_error'|'network_error'|null} reason
+ * @property {'capped'|'blocked'|'refused'|'http_error'|'network_error'|'deadline'|null} reason
  * @property {number|null} status
  * @property {string} text
  * @property {boolean} truncated
@@ -214,8 +217,11 @@ export function parseSearchResponse(text) {
  * @param {Object} opts
  * @param {import('./fetch-guard.js').FetchGuard} opts.guard
  * @param {{ sleep?: (ms: number) => Promise<void>, now?: () => number, minGapMs?: number, backoffMs?: number, budgets?: Record<string, number>, totalCap?: number }} [opts.timing]
+ * @param {{ deadlineAt?: number|null, signal?: AbortSignal|null }} [opts.control] deadlineAt is an absolute epoch ms
+ *   (the stage deadline); once it passes, or the signal aborts, every request returns reason 'deadline' with no I/O.
+ *   A per-request timeout is never zero or negative: it is min(20 s, time left), and no time left means no request.
  */
-export function createEdgarClient({ guard, timing = {} }) {
+export function createEdgarClient({ guard, timing = {}, control = {} }) {
   const sleep = timing.sleep ?? ((/** @type {number} */ ms) => realSleep(ms));
   const clock = timing.now ?? Date.now;
   const minGap = timing.minGapMs ?? MIN_REQUEST_GAP_MS;
@@ -228,8 +234,15 @@ export function createEdgarClient({ guard, timing = {} }) {
   let total = 0;
   let lastAt = -Infinity;
   let blocked = false;
+  let deadlineHit = false;
   /** @type {string[]} */
   const warnings = [];
+
+  /** @returns {number} ms left before the deadline (Infinity when none) */
+  function msLeft() {
+    if (control.signal?.aborted) return 0;
+    return typeof control.deadlineAt === 'number' && Number.isFinite(control.deadlineAt) ? control.deadlineAt - Date.now() : Infinity;
+  }
 
   /** @param {string} budget @returns {boolean} true when one more request is allowed */
   function hasBudget(budget) {
@@ -248,14 +261,17 @@ export function createEdgarClient({ guard, timing = {} }) {
     if (blocked) return { ...fail, reason: 'blocked' };
     for (let attempt = 0; attempt < 2; attempt += 1) {
       if (!hasBudget(budget)) return { ...fail, reason: 'capped' };
+      if (msLeft() <= 0) { deadlineHit = true; return { ...fail, reason: 'deadline' }; }
       const wait = lastAt + minGap - clock();
       if (wait > 0) await sleep(wait);
+      const left = msLeft();
+      if (left <= 0) { deadlineHit = true; return { ...fail, reason: 'deadline' }; }
       used[budget] += 1;
       total += 1;
       lastAt = clock();
       let res;
       try {
-        res = await guard.get(url, { accept: '*/*', maxBytes: o.maxBytes ?? SEARCH_READ_BYTES });
+        res = await guard.get(url, { accept: '*/*', maxBytes: o.maxBytes ?? SEARCH_READ_BYTES, timeoutMs: Math.max(1, Math.min(20_000, Math.floor(left))) });
       } catch (err) {
         if (err instanceof FetchRefused) return { ...fail, reason: 'refused' };
         return { ...fail, reason: 'network_error' };
@@ -279,6 +295,8 @@ export function createEdgarClient({ guard, timing = {} }) {
     request,
     hasBudget,
     get blocked() { return blocked; },
+    get deadlineHit() { return deadlineHit; },
+    msLeft,
     get used() { return { ...used, total }; },
     get warnings() { return [...warnings]; },
     budgets,

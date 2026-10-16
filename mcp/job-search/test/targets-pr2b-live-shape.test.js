@@ -82,7 +82,7 @@ describe('Form D discovery', () => {
     assert.equal(new Set(items.map((i) => i.key)).size, 4);
     assert.equal(stats.coverage?.source, 'complete');
     assert.deepEqual(Object.keys(stats.coverage?.forms ?? {}), ['D', 'D/A']);
-    assert.deepEqual(stats.coverage?.forms['D/A'], { status: 'complete', total: 3, read: 3, pages: [{ from: 0, hits: 3, ok: true, reason: null }] });
+    assert.deepEqual(stats.coverage?.forms['D/A'], { status: 'complete', total: 3, read: 3, distinct: 3, pages: [{ from: 0, hits: 3, ok: true, reason: null }] });
     assert.equal(stats.discovery_total, 5);
   });
 
