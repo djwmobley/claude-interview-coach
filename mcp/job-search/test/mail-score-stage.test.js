@@ -203,6 +203,20 @@ describe('listing upsert', () => {
     assert.match(l2.notes, /Recruiter mail/, 'the new auto note is appended');
   });
 
+  test('a human-edited location, remote mode and salary survive a reply; untouched auto fields still update', async () => {
+    const first = await addItem(ORBIT, { thread: `th${P}prov3` });
+    await run(runner([score({ client_clues: { industry: null, size: null, ownership: null, location: 'Houston', remote: 'unknown' } })]));
+    const l1 = await listing(first.thread);
+    assert.equal(l1.location, 'Houston');
+    await client.query(`UPDATE ic_job_listings SET location = 'Remote (my edit)', location_norm = 'my-edit', salary_min = 111000, salary_max = 222000, remote_mode = 'hybrid' WHERE id = $1`, [l1.id]);
+    await addItem(ORBIT, { thread: first.thread, date: '2026-10-24T10:00:00.000Z' });
+    await run(runner([score({ comp_range: { min: 320000, max: 360000, currency: 'USD', period: 'year' }, client_clues: { industry: null, size: null, ownership: null, location: 'Dallas', remote: 'remote' } })]));
+    const l2 = await listing(first.thread);
+    assert.deepEqual([l2.location, l2.location_norm, l2.salary_min, l2.salary_max, l2.remote_mode], ['Remote (my edit)', 'my-edit', 111000, 222000, 'hybrid'], 'human edits kept');
+    assert.equal(l2.salary_raw !== l1.salary_raw, true, 'the untouched auto salary_raw still updates');
+    assert.equal(l2.title, 'Chief Information Officer');
+  });
+
   test('an untouched auto title is updated by a reply', async () => {
     const first = await addItem(ORBIT, { thread: `th${P}prov2` });
     await run(runner([score()]));

@@ -343,28 +343,41 @@ export async function upsertRecruiterMailListing(client, item, score, exclusion,
 
   return withTransaction(client, async (db) => {
     const existing = (await db.query(
-      `SELECT id, status, fit_score, title, company, notes, mail_auto_fields FROM ic_job_listings WHERE source = $1 AND external_id = $2 AND duplicate_of IS NULL FOR UPDATE`,
+      `SELECT id, status, fit_score, title, company, location, remote_mode, salary_min, salary_max, salary_raw, salary_period, company_norm, title_norm, location_norm, notes, mail_auto_fields FROM ic_job_listings WHERE source = $1 AND external_id = $2 AND duplicate_of IS NULL FOR UPDATE`,
       [MAIL_SOURCE, key],
     )).rows[0];
     if (existing) {
       const id = Number(existing.id);
-      // Per-field provenance (sql/031): title and company are overwritten only while they still hold the value the
-      // scorer last wrote (mail_auto_fields); any human edit changes the stored value, so the field is left alone.
-      // Notes are appended, never replaced. A row with no provenance (NULL) keeps all three.
+      // Per-field provenance (sql/031): every field the scorer writes is overwritten only while it still holds the
+      // value the scorer last wrote (mail_auto_fields); any human edit changes the stored value, so the field is left
+      // alone. A field with no recorded auto value (NULL provenance, or a key never recorded) is kept. The derived
+      // *_norm columns follow their field. Notes are appended, never replaced.
       const auto = existing.mail_auto_fields && typeof existing.mail_auto_fields === 'object' ? existing.mail_auto_fields : {};
-      const ownTitle = typeof auto.title === 'string' && auto.title === existing.title;
-      const ownCompany = typeof auto.company === 'string' && auto.company === existing.company;
-      const nextTitle = ownTitle ? title : existing.title;
-      const nextCompany = ownCompany ? company : existing.company;
+      /** @type {Record<string, any>} */
+      const fresh = { title, company, location: loc ?? null, remote_mode: remoteMode, salary_min: salary.min, salary_max: salary.max, salary_raw: compText(score), salary_period: c?.period ?? null };
+      const same = (/** @type {any} */ a, /** @type {any} */ b) => (a == null ? null : String(a)) === (b == null ? null : String(b));
+      /** @type {Record<string, any>} */
+      const next = {};
+      /** @type {Record<string, any>} */
+      const nextAuto = {};
+      for (const k of Object.keys(fresh)) {
+        const tracked = Object.prototype.hasOwnProperty.call(auto, k);
+        const own = tracked && same(auto[k], existing[k]);
+        next[k] = own ? fresh[k] : existing[k];
+        if (tracked) nextAuto[k] = own ? fresh[k] : auto[k];
+      }
+      const ownOf = (/** @type {string} */ k) => Object.prototype.hasOwnProperty.call(auto, k) && same(auto[k], existing[k]);
+      const nextCompanyNorm = ownOf('company') ? companyNorm : existing.company_norm;
+      const nextTitleNorm = ownOf('title') ? titleNorm : existing.title_norm;
+      const nextLocationNorm = ownOf('location') ? locationNorm : existing.location_norm;
       const prevNotes = typeof existing.notes === 'string' ? existing.notes : '';
       const nextNotes = prevNotes.includes(notes) ? prevNotes : (prevNotes ? `${prevNotes}\n${notes}` : notes);
-      const nextAuto = { ...(typeof auto.title === 'string' ? { title: ownTitle ? title : auto.title } : {}), ...(typeof auto.company === 'string' ? { company: ownCompany ? company : auto.company } : {}) };
       await db.query(
         `UPDATE ic_job_listings SET title = $2, company = $3, company_norm = $4, title_norm = $5, location = $6, location_norm = $7, remote_mode = $8,
            salary_min = $9, salary_max = $10, salary_raw = $11, salary_period = $12, notes = $13, last_seen = $14, times_seen = coalesce(times_seen, 0) + 1,
            mail_auto_fields = $15::jsonb
          WHERE id = $1`,
-        [id, nextTitle, nextCompany, ownCompany ? companyNorm : normalizeCompany(nextCompany).company_norm, ownTitle ? titleNorm : normalizeTitle(nextTitle).title_norm, loc, locationNorm, remoteMode, salary.min, salary.max, compText(score), c?.period ?? null, nextNotes, ctx.now, JSON.stringify(nextAuto)],
+        [id, next.title, next.company, nextCompanyNorm, nextTitleNorm, next.location, nextLocationNorm, next.remote_mode, next.salary_min, next.salary_max, next.salary_raw, next.salary_period, nextNotes, ctx.now, JSON.stringify(nextAuto)],
       );
       const humanFit = await db.query(`SELECT 1 FROM ic_job_events WHERE listing_id = $1 AND kind = 'fit' AND actor <> 'auto' LIMIT 1`, [id]);
       if ((humanFit.rowCount ?? 0) === 0) {
@@ -410,7 +423,7 @@ export async function upsertRecruiterMailListing(client, item, score, exclusion,
           salary_min, salary_max, salary_raw, salary_period, posted_at, first_seen, last_seen, times_seen, absent_runs, fit_score, fit_basis, noise_class, detail_skipped, mail_auto_fields)
        VALUES ($1,$2,$3,$4,$5,$6,'listing',$7,$8,$9,$10,$11,$12,$13,$14,$15,$16,$17,$18,$19,$19,1,0,$20,'description','ok_manual',false,$21::jsonb)
        ON CONFLICT DO NOTHING RETURNING id`,
-      [title, company, status, link, link, notes, MAIL_SOURCE, key, companyNorm, titleNorm, loc, locationNorm, remoteMode, salary.min, salary.max, compText(score), c?.period ?? null, postedAt, ctx.now, score.fit_score, JSON.stringify({ title, company })],
+      [title, company, status, link, link, notes, MAIL_SOURCE, key, companyNorm, titleNorm, loc, locationNorm, remoteMode, salary.min, salary.max, compText(score), c?.period ?? null, postedAt, ctx.now, score.fit_score, JSON.stringify({ title, company, location: loc ?? null, remote_mode: remoteMode, salary_min: salary.min, salary_max: salary.max, salary_raw: compText(score), salary_period: c?.period ?? null })],
     );
     if ((ins.rowCount ?? 0) === 0) return { action: /** @type {const} */ ('none'), listingId: null, flags: ['insert_conflict'] };
     const id = Number(ins.rows[0].id);
