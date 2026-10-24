@@ -172,6 +172,28 @@ export function linkedinSearchShell() {
 }
 
 /**
+ * LinkedIn hydration probe, polled by the capability's waitForHydration while the Ember app is still a
+ * loading skeleton. `cards` counts unique job ids that look like a card mapCard would accept (numeric id of
+ * 6+ digits and a non-empty title); `empty` is LinkedIn's own no-results selector; `shell` is the same
+ * search-shell evidence linkedinSearchShell reads. Booleans and a count only, never page text.
+ */
+export function linkedinHydration() {
+  const seen = new Set();
+  for (const c of document.querySelectorAll('[data-job-id], [data-occludable-job-id]')) {
+    const id = c.getAttribute('data-job-id') || c.getAttribute('data-occludable-job-id');
+    if (!id || !/^\d{6,}$/.test(id) || seen.has(id)) continue;
+    const title = c.querySelector('a[href*="/jobs/view/"] strong, .job-card-list__title, a.job-card-container__link');
+    if (!title || !String(title.textContent || '').trim()) continue;
+    seen.add(id);
+  }
+  return {
+    cards: seen.size,
+    empty: !!document.querySelector('.jobs-search-no-results-banner, .jobs-search-no-results, [class*="no-results"]'),
+    shell: !!document.querySelector('.jobs-search-results-list, .scaffold-layout__list, .jobs-search-pagination, .artdeco-pagination, .jobs-search-results-list__subtitle, .jobs-search-results-list__title-heading'),
+  };
+}
+
+/**
  * LinkedIn empty-state marker.
  */
 export function linkedinEmptyState() {
@@ -285,6 +307,7 @@ export const EXTRACTORS = Object.freeze({
   indeedEmptyState,
   linkedinJobCards,
   linkedinSearchShell,
+  linkedinHydration,
   linkedinEmptyState,
   linkedinJobDetail,
   linkedinGuestJobDetail,

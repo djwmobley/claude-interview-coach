@@ -111,9 +111,9 @@ describe('approved-driver, reroute, and prepare lines (Items 1-3)', () => {
 });
 
 describe('SOURCE DISABLED headline (Item 6)', () => {
-  const latched = [{ source: 'linkedin', since: '2026-10-01T12:00:00.000Z', reason: '3 consecutive walls' }];
+  const latched = [{ source: 'linkedin', since: '2026-10-01T12:00:00.000Z', reason: 'auto-disabled after 3 failed scans (2026-09-29, 2026-09-30, 2026-10-01): unhydrated_after_retry' }];
   test('latchedSourceLines: one line per latched source; none gives none', () => {
-    assert.deepEqual(latchedSourceLines(latched), ['SOURCE DISABLED: linkedin since 2026-10-01T12:00:00.000Z (3 consecutive walls); re-enable on dashboard Scans']);
+    assert.deepEqual(latchedSourceLines(latched), ['SOURCE DISABLED: linkedin, auto-disabled after 3 failed scans (2026-09-29, 2026-09-30, 2026-10-01): unhydrated_after_retry; last failed 2026-10-01T12:00:00.000Z; re-enable on dashboard Scans']);
     assert.deepEqual(latchedSourceLines([]), []);
     assert.deepEqual(latchedSourceLines(undefined), []);
   });
@@ -125,7 +125,7 @@ describe('SOURCE DISABLED headline (Item 6)', () => {
   });
   test('the scan report opens with the line in text, markdown, and html; none gives none', () => {
     const text = renderReportText(/** @type {any} */ (scanData(latched)));
-    assert.match(text.split('\n')[0], /^SOURCE DISABLED: linkedin since 2026-10-01T12:00:00.000Z \(3 consecutive walls\); re-enable on dashboard Scans$/);
+    assert.match(text.split('\n')[0], /^SOURCE DISABLED: linkedin, auto-disabled after 3 failed scans .*unhydrated_after_retry; last failed 2026-10-01T12:00:00.000Z; re-enable on dashboard Scans$/);
     assert.match(renderReportMarkdown(/** @type {any} */ (scanData(latched))).split('\n')[0], /SOURCE DISABLED: linkedin/);
     assert.match(renderReportHtml(/** @type {any} */ (scanData(latched))), /^<p><strong>SOURCE DISABLED: linkedin/);
     assert.doesNotMatch(renderReportText(/** @type {any} */ (scanData([]))), /SOURCE DISABLED/);
@@ -163,7 +163,8 @@ describe('SOURCE DISABLED headline (Item 6)', () => {
       );
       const rows = await collectLatchedSources(client);
       const mine = rows.filter((r) => r.source === SRC);
-      assert.deepEqual(mine, [{ source: SRC, since: '2026-10-01T12:00:00.000Z', reason: '3 consecutive walls' }]);
+      // No wall history (a row from before sql/028): the count and date fall back to the row itself.
+      assert.deepEqual(mine, [{ source: SRC, since: '2026-10-01T12:00:00.000Z', reason: 'auto-disabled after 3 failed scans (2026-10-01): reason not recorded' }]);
       const report = await buildScanReport(client, { sinceOverride: null });
       assert.ok(report.latchedSources.some((r) => r.source === SRC));
       await client.query('UPDATE ic_source_state SET manual_disable = false WHERE source = $1', [SRC]);

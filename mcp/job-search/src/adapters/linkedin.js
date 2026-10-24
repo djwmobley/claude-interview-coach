@@ -9,8 +9,10 @@
  *
  * The list is scrolled through the capability (a read of the rendered
  * list, no clicks) and parsed with the named `linkedinJobCards` extractor.
- * Zero cards yields a `wall` event (login wall, authwall, challenge, or
- * empty state) for the run loop to classify, EXCEPT a verified end of results
+ * The list is client-rendered: after navigation the page is waited on (up to 15 s) for cards or the explicit
+ * empty state, and reloaded once if nothing appears (see fetchListPage). Zero cards yields a `wall` event
+ * (login wall, authwall, challenge, empty state, or a page that never hydrated) for the run loop to
+ * classify, EXCEPT a verified end of results
  * (see classifyLinkedInPage in core/linkedin-listclass.js), which ends the query quietly. Detail fetches appear as job
  * views on the logged-in account; they run only under the prescore gate
  * and the details budget.
@@ -131,13 +133,92 @@ export function mapCard(card) {
  * @param {{ query: string, pageIndex: number, classification: string }} meta
  */
 async function saveSnapshot(ctx, cap, meta) {
-  if (typeof ctx.saveSnapshot !== 'function') return;
+  if (typeof ctx.saveSnapshot !== 'function') return null;
   try {
     const html = await cap.readHtml();
-    await ctx.saveSnapshot(html, meta);
+    const saved = await ctx.saveSnapshot(html, meta);
+    // Only the file NAME travels on (into the wall event and ic_source_state); the directory is the host's.
+    return typeof saved === 'string' && saved ? saved.split(/[\\/]/).pop() ?? null : null;
   } catch (err) {
     ctx.log({ evt: 'linkedin_snapshot_failed', err_message: errFields(err).err_message });
+    return null;
   }
+}
+
+/** How long a list page may take to render job cards before it counts as not hydrated (spec B). */
+export const HYDRATION_MAX_MS = 15000;
+/** Page 2+ of a query whose page 1 parsed: the search shell with no cards must hold this long to be an end of results. */
+export const SHELL_SETTLE_MS = 2000;
+
+/**
+ * Navigate to one list page and read it, with the hydration wait and at most one reload. Order, per the
+ * total classification in core/linkedin-listclass.js: a login or block is decided from the URL, status and
+ * markers BEFORE any wait (a skeleton carries none of them, so it always waits); otherwise wait up to
+ * HYDRATION_MAX_MS for cards or the explicit empty state (the search shell alone does not end the wait,
+ * except on page 2+ after a parsed page 1, after SHELL_SETTLE_MS); then classify. A page that is still
+ * `unknown` is reloaded ONCE (when ctx.reserveReload grants it: a per-run cap), waited on again and
+ * re-classified; the reload does not reserve page budget. Every wait honors the run abort signal inside the
+ * capability, which the run deadline also fires.
+ * @param {import('../browser/capability.js').Capability} cap
+ * @param {import('./base.js').AdapterCtx} ctx
+ * @param {string} url
+ * @param {{ pageIndex: number, page1Parsed: number, requested: { keywords: string, location: string } }} o
+ */
+async function fetchListPage(cap, ctx, url, o) {
+  let nav = await cap.goto(url);
+  let retried = false;
+  let reloadRefused = false;
+  let pg = await readListPage(cap, nav, o, false);
+  if (pg.verdict.classification === 'unknown' && typeof cap.reload === 'function') {
+    const granted = typeof ctx.reserveReload === 'function' ? await ctx.reserveReload() : false;
+    if (granted) {
+      ctx.log({ evt: 'linkedin_reload', page_index: o.pageIndex, first: pg.verdict.reason });
+      nav = await cap.reload();
+      retried = true;
+      pg = await readListPage(cap, nav, o, true);
+    } else {
+      reloadRefused = true;
+    }
+  }
+  return { nav, retried, reloadRefused, ...pg };
+}
+
+/**
+ * @param {import('../browser/capability.js').Capability} cap
+ * @param {{ status: number|null, url: string, cfMitigated: string|null }} nav
+ * @param {{ pageIndex: number, page1Parsed: number, requested: { keywords: string, location: string } }} o
+ * @param {boolean} retried
+ */
+async function readListPage(cap, nav, o, retried) {
+  let finalPath = '';
+  try {
+    finalPath = new URL(String(nav.url)).pathname;
+  } catch {
+    finalPath = '';
+  }
+  let markers = /** @type {any} */ ((await cap.readJson('wallMarkers')) ?? {});
+  const base = { pageIndex: o.pageIndex, page1Parsed: o.page1Parsed, status: nav.status, finalPath, cfMitigated: nav.cfMitigated, requested: o.requested, retried };
+  const pre = classifyLinkedInPage({ ...base, deduped: 0, markers });
+  if (pre.classification === 'login' || pre.classification === 'throttle_or_block') {
+    return { verdict: pre, cards: /** @type {any[]} */ ([]), markers, emptyState: false, hydration: null };
+  }
+  const afterParsedPage1 = o.pageIndex > 1 && o.page1Parsed > 0;
+  const hydration = typeof cap.waitForHydration === 'function'
+    ? await cap.waitForHydration({ maxMs: HYDRATION_MAX_MS, settleShellMs: afterParsedPage1 ? SHELL_SETTLE_MS : null })
+    : null;
+  // A page that rendered nothing has nothing to scroll; a list that did render needs it for lazy cards.
+  if (!hydration || hydration.cards > 0) await cap.scrollToBottom(6);
+  const cardsRaw = /** @type {any[]} */ (await cap.readJson('linkedinJobCards'));
+  const cards = Array.isArray(cardsRaw) ? cardsRaw : [];
+  // The page may have raised a challenge or interstitial while it rendered: read the markers again.
+  markers = /** @type {any} */ ((await cap.readJson('wallMarkers')) ?? {});
+  const validIds = new Set();
+  for (const c of cards) if (c && typeof c.id === 'string' && mapCard(c)) validIds.add(c.id);
+  const emptyState = validIds.size === 0 ? Boolean(await cap.readJson('linkedinEmptyState')) : false;
+  // Affirmative search-shell evidence decides end of results and unhydrated-vs-unknown, so it is read for any card-less page.
+  const shell = validIds.size === 0 ? /** @type {any} */ (await cap.readJson('linkedinSearchShell')) : null;
+  const verdict = classifyLinkedInPage({ ...base, deduped: validIds.size, markers, emptyState, shell });
+  return { verdict, cards, markers, emptyState, hydration: hydration ? { reason: hydration.reason, waited_ms: hydration.waitedMs } : null };
 }
 
 export const linkedin = defineAdapter({
@@ -153,6 +234,7 @@ export const linkedin = defineAdapter({
   ],
   blindSpots: [
     'card selectors in the linkedinJobCards extractor are from prior knowledge; a markup change yields zero cards and the wall classifier reports UNRECOGNIZED_PAGE rather than a login wall',
+    'the hydration wait (15 s, one reload, 3 reloads per run) is a guess at how slow the Ember app can be: a list slower than two 15 s waits still counts as a wall (unhydrated_after_retry), and from the second result set on the 2 s shell settle can read a slow second result set as a quiet end of results (the SUSPECTED_THROTTLE headline is the backstop)',
     'a logged-out profile lands on the authwall; the source is then disabled for 24 h by the cross-run backoff',
     'list cards carry no description or salary; detail fetches count as job views on the account',
     'the hard cap of 3 pages per query bounds recall for broad terms',
@@ -187,38 +269,24 @@ export const linkedin = defineAdapter({
         let page1Parsed = 0;
         for (let pageIndex = 1; pageIndex <= maxPages; pageIndex++) {
           await ctx.reservePage();
-          const nav = await cap.goto(listUrl(term, location, days, pageIndex, profile.remote));
-          await cap.scrollToBottom(6);
-          const cardsRaw = /** @type {any[]} */ (await cap.readJson('linkedinJobCards'));
-          const cards = Array.isArray(cardsRaw) ? cardsRaw : [];
+          const fetched = await fetchListPage(cap, ctx, listUrl(term, location, days, pageIndex, profile.remote), { pageIndex, page1Parsed, requested: { keywords: term, location } });
+          const { nav, cards, verdict, markers, emptyState, retried, reloadRefused } = fetched;
           // Duplicate job ids (data-job-id on a card and data-occludable-job-id on its wrapper) inflate the
           // raw count; every count below is over unique ids.
           const uniqueIds = new Set(cards.map((c) => (c && typeof c.id === 'string' ? c.id : '')).filter(Boolean));
-          if (uniqueIds.size === 0) {
-            const markers = /** @type {any} */ (await cap.readJson('wallMarkers'));
-            const emptyState = Boolean(await cap.readJson('linkedinEmptyState'));
-            // Affirmative search-shell evidence is only needed (and only read) where end of results is possible.
-            const shell = pageIndex > 1 && page1Parsed > 0 ? /** @type {any} */ (await cap.readJson('linkedinSearchShell')) : null;
-            let finalPath = '';
-            try {
-              finalPath = new URL(String(nav.url)).pathname;
-            } catch {
-              finalPath = '';
-            }
-            const verdict = classifyLinkedInPage({
-              pageIndex, page1Parsed, deduped: 0, status: nav.status, finalPath, cfMitigated: nav.cfMitigated,
-              requested: { keywords: term, location }, shell, markers, emptyState,
-            });
-            ctx.log({ evt: 'linkedin_page', query, page_index: pageIndex, deduped_cards: 0, parsed: 0, classification: verdict.classification, reason: verdict.reason });
-            if (verdict.classification === 'wall' || verdict.classification === 'unrecognized' || verdict.classification === 'end_of_results') {
-              await saveSnapshot(ctx, cap, { query, pageIndex, classification: verdict.classification });
+          if (verdict.classification !== 'results') {
+            ctx.log({ evt: 'linkedin_page', query, page_index: pageIndex, deduped_cards: 0, parsed: 0, classification: verdict.classification, reason: verdict.reason, retried, hydration: fetched.hydration });
+            let snapshot = null;
+            if (verdict.classification !== 'explicit_empty') {
+              snapshot = await saveSnapshot(ctx, cap, { query, pageIndex, classification: verdict.classification });
             }
             if (verdict.classification === 'end_of_results') {
               if (pageIndex === 2) eorOnPage2++;
               yield { kind: 'batch', query, pageIndex, parsed: 0, status: nav.status, url: nav.url };
               break;
             }
-            yield { kind: 'wall', query, pageIndex, signals: { parsed: 0, status: nav.status, cfMitigated: nav.cfMitigated, url: nav.url, challengeCloudflare: !!markers.challengeCloudflare, challengeForm: !!markers.challengeForm, recaptcha: !!markers.recaptcha, guestInterstitial: !!markers.guestInterstitial, loginForm: !!markers.loginForm, emptyState } };
+            const detail = `${verdict.reason}${retried ? ' after one reload' : ''}${reloadRefused ? '; reload cap reached' : ''}`;
+            yield { kind: 'wall', query, pageIndex, wallKind: verdict.classification, detail, snapshot, signals: { parsed: 0, status: nav.status, cfMitigated: nav.cfMitigated, url: nav.url, challengeCloudflare: !!markers.challengeCloudflare, challengeForm: !!markers.challengeForm, recaptcha: !!markers.recaptcha, guestInterstitial: !!markers.guestInterstitial, loginForm: !!markers.loginForm, emptyState } };
             yield { kind: 'batch', query, pageIndex, parsed: 0, status: nav.status, url: nav.url };
             break;
           }
@@ -240,7 +308,7 @@ export const linkedin = defineAdapter({
             page1Parsed = parsed;
             if (parsed > 0) page1NonEmpty++;
           }
-          ctx.log({ evt: 'linkedin_page', query, page_index: pageIndex, deduped_cards: uniqueIds.size, parsed, classification: 'cards', reason: 'parsed' });
+          ctx.log({ evt: 'linkedin_page', query, page_index: pageIndex, deduped_cards: uniqueIds.size, parsed, classification: 'results', reason: 'parsed' });
           const d = yield { kind: 'batch', query, pageIndex, parsed, status: nav.status, url: nav.url };
           if (stop || (d && d.stopQuery) || parsed < pageStopThreshold(page1Parsed)) break;
         }

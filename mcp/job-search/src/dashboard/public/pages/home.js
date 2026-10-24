@@ -8,6 +8,7 @@ import { actionBar } from '../components/action-bar.js';
 import { scanProgressPanel } from '../components/scan-progress.js';
 import { agenda } from '../components/agenda.js';
 import { targetsTile } from '../components/targets-tile.js';
+import { disabledSourcesPanel } from '../components/disabled-sources.js';
 import { skeleton, emptyState } from '../components/empty-state.js';
 import { actorBadge, chipClassName, stageChip } from '../components/chips.js';
 import { normalizeAgendaTime, shortDateTime } from '../lib/format.js';
@@ -73,6 +74,7 @@ export async function render(container, params, app) {
     setChildren(container, [
       h('h1', { className: 'page-title', text: 'Home' }),
       statusStrip({ summary }),
+      disabledSourcesPanel({ sources: summary.disabled_sources, onChanged: load }),
       targetsOutcome.kind === 'ok' ? targetsTile({ summary: targetsOutcome.body }) : null,
       actionBar({
         running,

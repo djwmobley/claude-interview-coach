@@ -112,27 +112,90 @@ export function backoffFor(consecutiveWalls) {
   return { hours: null, manual: true };
 }
 
+/** Wall history entries kept per source (the last N, oldest first). */
+export const WALL_HISTORY_MAX = 5;
+
 /**
- * Record a wall in ic_source_state and return the disable decision.
+ * @typedef {Object} WallInfo
+ * @property {string|null} [kind] closed classification of the wall (e.g. unhydrated_after_retry)
+ * @property {string|null} [detail] short human detail
+ * @property {string|null} [url] final page URL (query already stripped)
+ * @property {string|null} [snapshot] snapshot file name; only the basename is stored
+ * @property {number|string|null} [runId] the scan run that saw it
+ * @property {boolean} [dryRun] refused: a dry run never records a wall
+ */
+
+/** @param {unknown} v @param {number} max */
+const clip = (v, max) => (typeof v === 'string' && v ? v.slice(0, max) : null);
+
+/**
+ * Record a wall in ic_source_state and return the disable decision. The counter, the flags, the last-wall
+ * columns and the capped history append are ONE statement, so two writers cannot interleave a stale read.
+ * The backoff thresholds in the CASE below mirror backoffFor() (1 -> 24 h, 2 -> 72 h, 3+ -> manual); a test
+ * pins the two together. `info` is optional so the other sources sharing this function behave unchanged.
  * @param {import('pg').ClientBase} client
  * @param {string} source
  * @param {Date} [now]
+ * @param {WallInfo} [info]
  */
-export async function recordWall(client, source, now = new Date()) {
+export async function recordWall(client, source, now = new Date(), info = {}) {
+  if (info.dryRun) throw new Error('recordWall: a dry run must never record a wall');
+  const kind = clip(info.kind, 80);
+  const detail = clip(info.detail, 300);
+  const url = clip(info.url, 300);
+  const snapshot = clip(typeof info.snapshot === 'string' ? info.snapshot.split(/[\\/]/).pop() : null, 200);
+  const runId = info.runId !== undefined && info.runId !== null && /^\d+$/.test(String(info.runId)) ? String(info.runId) : null;
+  const entry = JSON.stringify({ at: now.toISOString(), kind, detail, url, snapshot, run_id: runId === null ? null : Number(runId) });
   const r = await client.query(
-    `INSERT INTO ic_source_state (source, consecutive_walls, last_wall_at) VALUES ($1, 1, $2)
-     ON CONFLICT (source) DO UPDATE SET consecutive_walls = ic_source_state.consecutive_walls + 1, last_wall_at = EXCLUDED.last_wall_at
+    `INSERT INTO ic_source_state AS s (source, consecutive_walls, last_wall_at, disabled_until, manual_disable, last_wall_kind, last_wall_detail, last_wall_url, last_wall_snapshot, last_wall_run_id, wall_history)
+     VALUES ($1, 1, $2::timestamptz, $3::timestamptz, false, $5, $6, $7, $8, $9::bigint, jsonb_build_array($10::jsonb))
+     ON CONFLICT (source) DO UPDATE SET
+       consecutive_walls = s.consecutive_walls + 1,
+       last_wall_at = EXCLUDED.last_wall_at,
+       manual_disable = s.manual_disable OR s.consecutive_walls + 1 >= 3,
+       disabled_until = CASE WHEN s.consecutive_walls + 1 >= 3 THEN NULL WHEN s.consecutive_walls + 1 = 2 THEN $4::timestamptz ELSE EXCLUDED.disabled_until END,
+       last_wall_kind = EXCLUDED.last_wall_kind,
+       last_wall_detail = EXCLUDED.last_wall_detail,
+       last_wall_url = EXCLUDED.last_wall_url,
+       last_wall_snapshot = EXCLUDED.last_wall_snapshot,
+       last_wall_run_id = EXCLUDED.last_wall_run_id,
+       wall_history = (
+         SELECT coalesce(jsonb_agg(x.e ORDER BY x.i), '[]'::jsonb)
+         FROM (SELECT t.e, t.i FROM jsonb_array_elements(s.wall_history || jsonb_build_array($10::jsonb)) WITH ORDINALITY AS t(e, i) ORDER BY t.i DESC LIMIT ${WALL_HISTORY_MAX}) x
+       )
      RETURNING consecutive_walls`,
-    [source, now],
+    [source, now, new Date(now.getTime() + 24 * 3600000), new Date(now.getTime() + 72 * 3600000), kind, detail, url, snapshot, runId, entry],
   );
   const n = Number(r.rows[0].consecutive_walls);
-  const b = backoffFor(n);
-  if (b.manual) {
-    await client.query('UPDATE ic_source_state SET manual_disable = true, disabled_until = NULL WHERE source = $1', [source]);
-  } else {
-    await client.query('UPDATE ic_source_state SET disabled_until = $2 WHERE source = $1', [source, new Date(now.getTime() + (b.hours ?? 0) * 3600000)]);
+  return { consecutiveWalls: n, ...backoffFor(n) };
+}
+
+/**
+ * Re-enable a source in one transaction: reset the counter and both disable flags, stamp reset_at, keep the
+ * history (only entries after reset_at count toward the next "N failed scans"). last_wall_* stay as audit.
+ * @param {import('pg').ClientBase} client
+ * @param {string} source
+ * @returns {Promise<string>} the stored source key
+ */
+export async function reenableSource(client, source) {
+  await client.query('BEGIN');
+  try {
+    const r = await client.query(
+      `INSERT INTO ic_source_state (source, consecutive_walls, disabled_until, manual_disable, reset_at) VALUES ($1, 0, NULL, false, now())
+       ON CONFLICT (source) DO UPDATE SET consecutive_walls = 0, disabled_until = NULL, manual_disable = false, reset_at = now(), last_wall_at = ic_source_state.last_wall_at
+       RETURNING source`,
+      [source],
+    );
+    await client.query('COMMIT');
+    return r.rows[0].source;
+  } catch (err) {
+    try {
+      await client.query('ROLLBACK');
+    } catch {
+      /* the original error is the one to surface */
+    }
+    throw err;
   }
-  return { consecutiveWalls: n, ...b };
 }
 
 /**

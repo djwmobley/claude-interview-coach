@@ -58,6 +58,7 @@ export const KEYWORD_RE = /^[\p{L}\p{N} .,+'/&-]{1,80}$/u;
  * @property {(url: string, opts?: { method?: 'GET'|'POST', headers?: Record<string, string>, body?: string, source?: string }) => Promise<FetchResult>} fetchText guarded, rate-limited fetch; `source` overrides the registry scope (exec boards)
  * @property {(url: string, opts?: { method?: 'GET'|'POST', headers?: Record<string, string>, body?: string, source?: string }) => Promise<{ status: number, url: string, json: unknown }>} fetchJson same, parsed as JSON (json is null when unparseable)
  * @property {() => Promise<void>} reservePage throws BUDGET_EXHAUSTED when the daily page cap is hit
+ * @property {() => boolean|Promise<boolean>} [reserveReload] browser sources only: true when this run may still reload a page once (per-run cap, 3 for LinkedIn); a reload reserves no page budget
  * @property {() => Promise<void>} reserveDetail throws BUDGET_EXHAUSTED when the daily detail cap is hit
  * @property {(source: string) => Promise<import('../browser/capability.js').Capability|null>} capFor frozen capability scoped to a registry source; null when the scan Chrome is unreachable (connects lazily on first call)
  * @property {import('../core/config.js').LoadedConfig} config
@@ -78,7 +79,7 @@ export const KEYWORD_RE = /^[\p{L}\p{N} .,+'/&-]{1,80}$/u;
  * @typedef {{ kind: 'batch', query: string, pageIndex: number, parsed: number, status?: number|null, url?: string|null }} PageEvent
  * @typedef {{ kind: 'listing', query: string, pageIndex: number, listing: RawListing }} ListingEvent
  * @typedef {{ kind: 'warning', code: string, message: string, query?: string }} WarningEvent
- * @typedef {{ kind: 'wall', query: string, pageIndex: number, signals: import('../browser/wall.js').PageSignals }} WallEvent
+ * @typedef {{ kind: 'wall', query: string, pageIndex: number, signals: import('../browser/wall.js').PageSignals, wallKind?: string, detail?: string, snapshot?: string|null }} WallEvent
  * @typedef {PageEvent|ListingEvent|WarningEvent|WallEvent} AdapterEvent
  * @typedef {{ stopQuery?: boolean }|undefined} Directive
  */

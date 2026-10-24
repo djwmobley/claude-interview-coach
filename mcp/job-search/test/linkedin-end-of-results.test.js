@@ -5,6 +5,7 @@ import fs from 'node:fs';
 import os from 'node:os';
 import path from 'node:path';
 import { linkedin, classifyLinkedInPage, pageStopThreshold, listUrl } from '../src/adapters/linkedin.js';
+import { LIST_CLASSES } from '../src/core/linkedin-listclass.js';
 import { classifyPage } from '../src/browser/wall.js';
 import { EXTRACTORS, linkedinSearchShell, wallMarkers } from '../src/browser/extractors.js';
 import { sanitizeSnapshotHtml, createSnapshotSaver, MAX_SNAPSHOTS_PER_RUN } from '../src/core/linkedin-snapshot.js';
@@ -120,19 +121,19 @@ describe('linkedin end of results (S1)', () => {
     assert.equal(h.gotos.length, 2, 'no page 3 after end of results');
     assert.deepEqual(r.batches.map((b) => b.parsed), [50, 0]);
     const logs = pageLogs(h.sink.logs ?? []);
-    assert.deepEqual(logs.map((l) => l.classification), ['cards', 'end_of_results']);
+    assert.deepEqual(logs.map((l) => l.classification), ['results', 'end_of_results']);
     assert.equal(h.sink.snapshots?.length, 1, 'END_OF_RESULTS saves a snapshot');
     assert.equal(h.sink.snapshots?.[0].meta.classification, 'end_of_results');
   });
 
-  test('soft-block blank page 2 without search shell is a wall (unrecognized path), snapshot saved', async () => {
+  test('soft-block blank page 2 without search shell is a wall (unknown, no reload available here), snapshot saved', async () => {
     const h = harness([page({ ids: ids(50) }), page({ ids: [], shell: false })]);
     const r = await run(h.ctx, ['CTO']);
     assert.equal(r.walls.length, 1);
     assert.equal(r.walls[0].pageIndex, 2);
     assert.equal(classifyPage(r.walls[0].signals).kind, 'unrecognized');
     assert.equal(h.sink.snapshots?.length, 1);
-    assert.equal(pageLogs(h.sink.logs ?? [])[1].classification, 'unrecognized');
+    assert.equal(pageLogs(h.sink.logs ?? [])[1].classification, 'unknown');
   });
 
   test('guest interstitial on page 2 is a wall even with a search shell', async () => {
@@ -142,7 +143,7 @@ describe('linkedin end of results (S1)', () => {
     const v = classifyPage(r.walls[0].signals);
     assert.equal(v.kind, 'wall');
     assert.equal(v.reason, 'guest_interstitial');
-    assert.equal(pageLogs(h.sink.logs ?? [])[1].classification, 'wall');
+    assert.equal(pageLogs(h.sink.logs ?? [])[1].classification, 'login');
   });
 
   test('redirect to a different query is a wall', async () => {
@@ -184,7 +185,7 @@ describe('linkedin end of results (S1)', () => {
     const r = await run(h.ctx, ['CTO']);
     assert.equal(r.walls.length, 1);
     assert.equal(classifyPage(r.walls[0].signals).kind, 'empty');
-    assert.equal(pageLogs(h.sink.logs ?? [])[1].classification, 'empty');
+    assert.equal(pageLogs(h.sink.logs ?? [])[1].classification, 'explicit_empty');
   });
 
   test('S2: page 1 with zero cards and no marker keeps today wall behavior', async () => {
@@ -193,7 +194,7 @@ describe('linkedin end of results (S1)', () => {
     assert.equal(r.walls.length, 1);
     assert.equal(r.walls[0].pageIndex, 1);
     assert.equal(classifyPage(r.walls[0].signals).kind, 'unrecognized');
-    assert.equal(pageLogs(h.sink.logs ?? [])[0].classification, 'unrecognized');
+    assert.equal(pageLogs(h.sink.logs ?? [])[0].classification, 'unknown');
   });
 
   test('page 3 empty after a non-empty page 2 is also end of results', async () => {
@@ -239,8 +240,8 @@ describe('linkedin pagination stop (S3) and duplicate-id inflation', () => {
 
 describe('classifyLinkedInPage (total)', () => {
   const base = { pageIndex: 2, page1Parsed: 50, deduped: 0, status: 200, finalPath: '/jobs/search/', requested: { keywords: 'CTO', location: 'Houston, TX' }, shell: { shell: true, path: '/jobs/search/', keywords: 'CTO', location: 'Houston, TX' }, markers: {}, emptyState: false };
-  test('every input maps to one of the five classes', () => {
-    const classes = new Set(['cards', 'end_of_results', 'empty', 'wall', 'unrecognized']);
+  test('every input maps to one of the seven classes', () => {
+    const classes = new Set(LIST_CLASSES);
     const variants = [
       { deduped: 3 }, {}, { emptyState: true }, { pageIndex: 1 }, { page1Parsed: 0 }, { status: 403 }, { status: null }, { shell: null },
       { shell: { shell: false } }, { markers: { guestInterstitial: true } }, { finalPath: '/login' }, { shell: { shell: true, path: '/jobs/search/', keywords: 'X', location: 'Houston, TX' } },
@@ -252,8 +253,8 @@ describe('classifyLinkedInPage (total)', () => {
   });
   test('only the all-conditions case is end_of_results', () => {
     assert.equal(classifyLinkedInPage(/** @type {any} */ (base)).classification, 'end_of_results');
-    assert.equal(classifyLinkedInPage(/** @type {any} */ ({ ...base, pageIndex: 1 })).classification, 'unrecognized');
-    assert.equal(classifyLinkedInPage(/** @type {any} */ ({ ...base, page1Parsed: 0 })).classification, 'unrecognized');
+    assert.equal(classifyLinkedInPage(/** @type {any} */ ({ ...base, pageIndex: 1 })).classification, 'unknown');
+    assert.equal(classifyLinkedInPage(/** @type {any} */ ({ ...base, page1Parsed: 0 })).classification, 'unknown');
   });
   test('keyword comparison ignores case and surrounding whitespace', () => {
     const c = classifyLinkedInPage(/** @type {any} */ ({ ...base, shell: { ...base.shell, keywords: ' cto ' } }));
@@ -302,7 +303,7 @@ describe('page event logging and snapshots (S6)', () => {
     const logs = pageLogs(h.sink.logs ?? []);
     assert.equal(logs.length, 3);
     assert.deepEqual(logs.map((l) => [l.query, l.page_index, l.deduped_cards, l.classification]), [
-      ['CTO|Houston, TX', 1, 50, 'cards'], ['CTO|Houston, TX', 2, 45, 'cards'], ['CTO|Houston, TX', 3, 0, 'end_of_results'],
+      ['CTO|Houston, TX', 1, 50, 'results'], ['CTO|Houston, TX', 2, 45, 'results'], ['CTO|Houston, TX', 3, 0, 'end_of_results'],
     ]);
   });
   test('ok pages save no snapshot', async () => {

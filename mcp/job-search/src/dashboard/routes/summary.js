@@ -8,6 +8,7 @@ import { sendJson } from '../http.js';
 import { recentEvents } from '../../core/events.js';
 import { groupOf, STATUS_GROUPS } from '../../core/statuses.js';
 import { nextScheduledScan } from '../next-scheduled-scan.js';
+import { collectDisabledSourceStates, disabledSourceView } from '../../core/source-state.js';
 
 /** @param {any} r */
 function formatRun(r) {
@@ -60,9 +61,9 @@ export function register(router, deps) {
       const liveRun = await c.query(`SELECT id, status, trigger, started_at, finished_at, heartbeat_at, stats FROM ic_scan_runs WHERE status = 'running' ORDER BY started_at DESC LIMIT 1`);
       const openReview = await c.query(`SELECT count(*)::int AS n FROM ic_job_review_queue WHERE resolved_at IS NULL`);
       const budgetToday = await c.query(`SELECT source, pages, details FROM ic_scan_budget WHERE day = current_date ORDER BY source`);
-      const disabledSources = await c.query(`SELECT source, disabled_until, manual_disable FROM ic_source_state WHERE manual_disable = true OR disabled_until > now() ORDER BY source`);
+      const disabledSources = await collectDisabledSourceStates(c);
       const events = await recentEvents(c, { limit: 50 });
-      return { statusCounts: statusCounts.rows, followupCounts: followupCounts.rows[0], lastRun: lastRun.rows[0] ?? null, liveRun: liveRun.rows[0] ?? null, openReview: openReview.rows[0].n, budgetToday: budgetToday.rows, disabledSources: disabledSources.rows, events };
+      return { statusCounts: statusCounts.rows, followupCounts: followupCounts.rows[0], lastRun: lastRun.rows[0] ?? null, liveRun: liveRun.rows[0] ?? null, openReview: openReview.rows[0].n, budgetToday: budgetToday.rows, disabledSources, events };
     });
 
     /** @type {Record<string, number>} */
@@ -90,7 +91,7 @@ export function register(router, deps) {
       live_scan: data.liveRun ? formatRun(data.liveRun) : null,
       open_review: data.openReview,
       budget_today: data.budgetToday,
-      disabled_sources: data.disabledSources.map((s) => ({ source: s.source, manual: s.manual_disable, until: s.manual_disable ? null : s.disabled_until ? new Date(s.disabled_until).toISOString() : null })),
+      disabled_sources: data.disabledSources.map(disabledSourceView),
       next_scheduled_scan: nextScan,
       recent_events: data.events.map(formatEvent),
     });
