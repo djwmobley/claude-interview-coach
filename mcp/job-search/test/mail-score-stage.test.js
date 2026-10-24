@@ -11,7 +11,7 @@ import { pgConnectionConfig } from '../src/core/config.js';
 import { ensureAuxSchema } from '../src/core/schema.js';
 import { testConfig } from './helpers/scan-fixtures.js';
 import { persistMailIntake } from '../src/core/mail-intake-store.js';
-import { runMailScoreStage, MAIL_SOURCE, mailScoreUsedToday } from '../src/core/mail-score.js';
+import { runMailScoreStage, sweepMailScoreText, MAIL_SOURCE, mailScoreUsedToday } from '../src/core/mail-score.js';
 import { buildScoreText } from '../src/adapters/gmail-intake.js';
 import { fetchCandidateRows, classifyCandidate } from '../src/core/auto-apply-select.js';
 import { loadBacklogIds, loadRescoreIds, loadAutoSkipLowIds, TRIAGE_CANDIDATE_QUERY } from '../src/core/triage.js';
@@ -189,6 +189,45 @@ describe('listing upsert', () => {
     assert.equal((await listing(first.thread)).fit_score, 88);
   });
 
+  test('a human-edited title survives a reply; an untouched auto company still tracks; notes are appended, never replaced', async () => {
+    const first = await addItem(ORBIT, { thread: `th${P}prov` });
+    await run(runner([score()]));
+    const l1 = await listing(first.thread);
+    await client.query(`UPDATE ic_job_listings SET title = 'My Own Title', notes = 'my private note' WHERE id = $1`, [l1.id]);
+    await addItem(ORBIT, { thread: first.thread, date: '2026-10-24T10:00:00.000Z' });
+    await run(runner([score({ role_title: 'Chief Information Officer' })]));
+    const l2 = await listing(first.thread);
+    assert.equal(l2.title, 'My Own Title', 'human title kept');
+    assert.equal(l2.company, `${P} Orbit`);
+    assert.ok(l2.notes.startsWith('my private note'), 'human note kept');
+    assert.match(l2.notes, /Recruiter mail/, 'the new auto note is appended');
+  });
+
+  test('a human-edited location, remote mode and salary survive a reply; untouched auto fields still update', async () => {
+    const first = await addItem(ORBIT, { thread: `th${P}prov3` });
+    await run(runner([score({ client_clues: { industry: null, size: null, ownership: null, location: 'Houston', remote: 'unknown' } })]));
+    const l1 = await listing(first.thread);
+    assert.equal(l1.location, 'Houston');
+    await client.query(`UPDATE ic_job_listings SET location = 'Remote (my edit)', location_norm = 'my-edit', salary_min = 111000, salary_max = 222000, remote_mode = 'hybrid' WHERE id = $1`, [l1.id]);
+    await addItem(ORBIT, { thread: first.thread, date: '2026-10-24T10:00:00.000Z' });
+    await run(runner([score({ comp_range: { min: 320000, max: 360000, currency: 'USD', period: 'year' }, client_clues: { industry: null, size: null, ownership: null, location: 'Dallas', remote: 'remote' } })]));
+    const l2 = await listing(first.thread);
+    assert.deepEqual([l2.location, l2.location_norm, l2.salary_min, l2.salary_max, l2.remote_mode], ['Remote (my edit)', 'my-edit', 111000, 222000, 'hybrid'], 'human edits kept');
+    assert.equal(l2.salary_raw !== l1.salary_raw, true, 'the untouched auto salary_raw still updates');
+    assert.equal(l2.title, 'Chief Information Officer');
+  });
+
+  test('an untouched auto title is updated by a reply', async () => {
+    const first = await addItem(ORBIT, { thread: `th${P}prov2` });
+    await run(runner([score()]));
+    const text = bodyText(`My client ${P} Orbit is hiring a Chief Technology Officer. Base $300,000 per year.`);
+    await addItem(text, { thread: first.thread, date: '2026-10-25T10:00:00.000Z' });
+    await run(runner([score({ role_title: 'Chief Technology Officer', comp_range: { min: 300000, max: 300000, currency: 'USD', period: 'year' } })]));
+    const l2 = await listing(first.thread);
+    assert.equal(l2.title, 'Chief Technology Officer', 'auto title updated');
+    assert.equal(l2.title_norm, (await import('../src/core/normalize.js')).normalizeTitle('Chief Technology Officer').title_norm);
+  });
+
   test('dedup against a manual listing: the existing row is linked through an auto note, no second row is created', async () => {
     const manual = (await client.query(
       `INSERT INTO ic_job_listings (title, company, status, record_kind, source, company_norm, title_norm, noise_class) VALUES ('Chief Information Officer', $1, 'shortlisted', 'listing', 'manual', $2, $3, 'ok_manual') RETURNING id`,
@@ -285,6 +324,37 @@ describe('the failure ladder: unscored but still surfaced', () => {
       assert.equal((await collectUnsurfacedItems(client, 25)).items.some((i) => i.message_id === id), true, 'still surfaced');
       assert.equal(scoreSummary({ score_status: 'failed', score_flags: row.score_flags, score: null }).startsWith('unscored'), true);
     }
+  });
+
+  test('an apply error on the final attempt ends in failed with the text cleared, not pending forever', async () => {
+    const { id } = await addItem(ORBIT);
+    await client.query('UPDATE ic_mail_intake SET score_attempts = 1 WHERE message_id = $1', [id]);
+    const bad = /** @type {any} */ ({ query: (/** @type {string} */ sql, /** @type {any[]} */ p) => (/ic_job_listings/.test(sql) ? Promise.reject(new Error('boom')) : client.query(sql, p)) });
+    await runMailScoreStage(bad, { config: stageConfig(), now: NOW, execFile: runner([score()]).fn, candidateSummary: 'RUBRIC', runId: null });
+    const row = await intake(id);
+    assert.deepEqual([row.score_status, row.score_attempts, row.score_text], ['failed', 2, null]);
+    assert.ok(row.score_flags.includes('score_failed:apply_error'));
+    assert.equal(scoreSummary({ score_status: 'failed', score_flags: row.score_flags, score: null }).startsWith('unscored'), true);
+    assert.equal((await collectUnsurfacedItems(client, 25)).items.some((i) => i.message_id === id), true, 'still surfaced');
+  });
+
+  test('the sweep fails an exhausted pending row and clears score_text on any row older than 14 days, whatever its state', async () => {
+    const old = await addItem(ORBIT);
+    const fresh = await addItem(ORBIT);
+    const stuck = await addItem(ORBIT);
+    const sc = await addItem(ORBIT);
+    await client.query(`UPDATE ic_mail_intake SET first_seen_at = $2::timestamptz - interval '15 days' WHERE message_id = $1`, [old.id, NOW.toISOString()]);
+    await client.query(`UPDATE ic_mail_intake SET first_seen_at = $2::timestamptz - interval '3 days' WHERE message_id = $1`, [fresh.id, NOW.toISOString()]);
+    await client.query(`UPDATE ic_mail_intake SET score_attempts = 2 WHERE message_id = $1`, [stuck.id]);
+    await client.query(`UPDATE ic_mail_intake SET score_status = 'scored', first_seen_at = $2::timestamptz - interval '20 days' WHERE message_id = $1`, [sc.id, NOW.toISOString()]);
+    await sweepMailScoreText(client, NOW);
+    const o = await intake(old.id);
+    assert.deepEqual([o.score_status, o.score_text], ['failed', null]);
+    assert.equal((await intake(fresh.id)).score_text !== null, true, 'a recent pending row keeps its text');
+    const s = await intake(stuck.id);
+    assert.deepEqual([s.score_status, s.score_text], ['failed', null]);
+    const r = await intake(sc.id);
+    assert.deepEqual([r.score_status, r.score_text], ['scored', null]);
   });
 
   test('a failed item is not attempted a third time', async () => {
