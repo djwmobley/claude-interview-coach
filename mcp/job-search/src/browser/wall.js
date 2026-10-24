@@ -133,27 +133,31 @@ const clip = (v, max) => (typeof v === 'string' && v ? v.slice(0, max) : null);
  * columns and the capped history append are ONE statement, so two writers cannot interleave a stale read.
  * The backoff thresholds in the CASE below mirror backoffFor() (1 -> 24 h, 2 -> 72 h, 3+ -> manual); a test
  * pins the two together. `info` is optional so the other sources sharing this function behave unchanged.
+ * The wall is stamped with the database clock when it is recorded, never the run's start time, so a wall
+ * recorded after a mid-run re-enable counts after reset_at. `at` exists only so a test can pin the time.
  * @param {import('pg').ClientBase} client
  * @param {string} source
- * @param {Date} [now]
+ * @param {Date|null} [at] test seam: pin the wall time; null or undefined means now()
  * @param {WallInfo} [info]
  */
-export async function recordWall(client, source, now = new Date(), info = {}) {
+export async function recordWall(client, source, at = null, info = {}) {
   if (info.dryRun) throw new Error('recordWall: a dry run must never record a wall');
   const kind = clip(info.kind, 80);
   const detail = clip(info.detail, 300);
   const url = clip(info.url, 300);
   const snapshot = clip(typeof info.snapshot === 'string' ? info.snapshot.split(/[\\/]/).pop() : null, 200);
   const runId = info.runId !== undefined && info.runId !== null && /^\d+$/.test(String(info.runId)) ? String(info.runId) : null;
-  const entry = JSON.stringify({ at: now.toISOString(), kind, detail, url, snapshot, run_id: runId === null ? null : Number(runId) });
+  const entry = JSON.stringify({ kind, detail, url, snapshot, run_id: runId === null ? null : Number(runId) });
+  const T = 'coalesce($2::timestamptz, now())';
+  const ENTRY = `($8::jsonb || jsonb_build_object('at', to_char(${T} AT TIME ZONE 'UTC', 'YYYY-MM-DD"T"HH24:MI:SS.MS"Z"')))`;
   const r = await client.query(
     `INSERT INTO ic_source_state AS s (source, consecutive_walls, last_wall_at, disabled_until, manual_disable, last_wall_kind, last_wall_detail, last_wall_url, last_wall_snapshot, last_wall_run_id, wall_history)
-     VALUES ($1, 1, $2::timestamptz, $3::timestamptz, false, $5, $6, $7, $8, $9::bigint, jsonb_build_array($10::jsonb))
+     VALUES ($1, 1, ${T}, ${T} + interval '24 hours', false, $3, $4, $5, $6, $7::bigint, jsonb_build_array(${ENTRY}))
      ON CONFLICT (source) DO UPDATE SET
        consecutive_walls = s.consecutive_walls + 1,
        last_wall_at = EXCLUDED.last_wall_at,
        manual_disable = s.manual_disable OR s.consecutive_walls + 1 >= 3,
-       disabled_until = CASE WHEN s.consecutive_walls + 1 >= 3 THEN NULL WHEN s.consecutive_walls + 1 = 2 THEN $4::timestamptz ELSE EXCLUDED.disabled_until END,
+       disabled_until = CASE WHEN s.consecutive_walls + 1 >= 3 THEN NULL WHEN s.consecutive_walls + 1 = 2 THEN ${T} + interval '72 hours' ELSE EXCLUDED.disabled_until END,
        last_wall_kind = EXCLUDED.last_wall_kind,
        last_wall_detail = EXCLUDED.last_wall_detail,
        last_wall_url = EXCLUDED.last_wall_url,
@@ -161,10 +165,10 @@ export async function recordWall(client, source, now = new Date(), info = {}) {
        last_wall_run_id = EXCLUDED.last_wall_run_id,
        wall_history = (
          SELECT coalesce(jsonb_agg(x.e ORDER BY x.i), '[]'::jsonb)
-         FROM (SELECT t.e, t.i FROM jsonb_array_elements(s.wall_history || jsonb_build_array($10::jsonb)) WITH ORDINALITY AS t(e, i) ORDER BY t.i DESC LIMIT ${WALL_HISTORY_MAX}) x
+         FROM (SELECT t.e, t.i FROM jsonb_array_elements(s.wall_history || jsonb_build_array(${ENTRY})) WITH ORDINALITY AS t(e, i) ORDER BY t.i DESC LIMIT ${WALL_HISTORY_MAX}) x
        )
      RETURNING consecutive_walls`,
-    [source, now, new Date(now.getTime() + 24 * 3600000), new Date(now.getTime() + 72 * 3600000), kind, detail, url, snapshot, runId, entry],
+    [source, at, kind, detail, url, snapshot, runId, entry],
   );
   const n = Number(r.rows[0].consecutive_walls);
   return { consecutiveWalls: n, ...backoffFor(n) };

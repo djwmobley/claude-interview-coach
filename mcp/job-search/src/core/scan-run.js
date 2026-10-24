@@ -891,7 +891,7 @@ async function executeRun(p) {
     if (!blockedDetailSources.has(s.name)) {
       blockedDetailSources.add(s.name);
       if (!dryRun) {
-        const w = await recordWall(client, detailWallKey(s.name), now, { kind: 'detail_blocked', detail: String(cur.outcome).slice(0, 120), runId });
+        const w = await recordWall(client, detailWallKey(s.name), null, { kind: 'detail_blocked', detail: String(cur.outcome).slice(0, 120), runId });
         log({ evt: 'detail_blocked', run_id: runId, source: s.name, reason: cur.outcome, consecutive: w.consecutiveWalls });
       }
     }
@@ -1627,7 +1627,7 @@ async function executeRun(p) {
               errors.push({ source: s.name, code: verdict.code, message: `${verdict.reason}; dry run, source state not changed` });
               return { stopSource: true };
             }
-            const w = await recordWall(client, s.name, now, {
+            const w = await recordWall(client, s.name, null, {
               kind: ev.wallKind ?? verdict.kind, detail: ev.detail ?? verdict.reason, url: ev.signals.url ?? null, snapshot: ev.snapshot ?? null, runId,
             });
             errors.push({ source: s.name, code: verdict.code, message: `${verdict.reason}; source disabled ${w.manual ? 'until manual re-enable' : w.hours + ' h'}` });

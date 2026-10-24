@@ -147,15 +147,14 @@ async function saveSnapshot(ctx, cap, meta) {
 
 /** How long a list page may take to render job cards before it counts as not hydrated (spec B). */
 export const HYDRATION_MAX_MS = 15000;
-/** Page 2+ of a query whose page 1 parsed: the search shell with no cards must hold this long to be an end of results. */
-export const SHELL_SETTLE_MS = 2000;
 
 /**
  * Navigate to one list page and read it, with the hydration wait and at most one reload. Order, per the
  * total classification in core/linkedin-listclass.js: a login or block is decided from the URL, status and
  * markers BEFORE any wait (a skeleton carries none of them, so it always waits); otherwise wait up to
- * HYDRATION_MAX_MS for cards or the explicit empty state (the search shell alone does not end the wait,
- * except on page 2+ after a parsed page 1, after SHELL_SETTLE_MS); then classify. A page that is still
+ * HYDRATION_MAX_MS for cards or the explicit empty state (the search shell alone never ends the wait, on any
+ * page: a slow second result set must not read as a quiet end of results, so a real end of results costs one
+ * full wait per query); then classify. A page that is still
  * `unknown` is reloaded ONCE (when ctx.reserveReload grants it: a per-run cap), waited on again and
  * re-classified; the reload does not reserve page budget. Every wait honors the run abort signal inside the
  * capability, which the run deadline also fires.
@@ -202,9 +201,8 @@ async function readListPage(cap, nav, o, retried) {
   if (pre.classification === 'login' || pre.classification === 'throttle_or_block') {
     return { verdict: pre, cards: /** @type {any[]} */ ([]), markers, emptyState: false, hydration: null };
   }
-  const afterParsedPage1 = o.pageIndex > 1 && o.page1Parsed > 0;
   const hydration = typeof cap.waitForHydration === 'function'
-    ? await cap.waitForHydration({ maxMs: HYDRATION_MAX_MS, settleShellMs: afterParsedPage1 ? SHELL_SETTLE_MS : null })
+    ? await cap.waitForHydration({ maxMs: HYDRATION_MAX_MS, settleShellMs: null })
     : null;
   // A page that rendered nothing has nothing to scroll; a list that did render needs it for lazy cards.
   if (!hydration || hydration.cards > 0) await cap.scrollToBottom(6);
@@ -234,7 +232,7 @@ export const linkedin = defineAdapter({
   ],
   blindSpots: [
     'card selectors in the linkedinJobCards extractor are from prior knowledge; a markup change yields zero cards and the wall classifier reports UNRECOGNIZED_PAGE rather than a login wall',
-    'the hydration wait (15 s, one reload, 3 reloads per run) is a guess at how slow the Ember app can be: a list slower than two 15 s waits still counts as a wall (unhydrated_after_retry), and from the second result set on the 2 s shell settle can read a slow second result set as a quiet end of results (the SUSPECTED_THROTTLE headline is the backstop)',
+    'the hydration wait (15 s, one reload, 3 reloads per run) is a guess at how slow the Ember app can be: a list slower than two 15 s waits still counts as a wall (unhydrated_after_retry), and a second result set slower than 15 s can still read as a quiet end of results (the SUSPECTED_THROTTLE headline is the backstop); no pagination or results-count marker exists in the extractor set, so end of results has no positive evidence beyond the search shell',
     'a logged-out profile lands on the authwall; the source is then disabled for 24 h by the cross-run backoff',
     'list cards carry no description or salary; detail fetches count as job views on the account',
     'the hard cap of 3 pages per query bounds recall for broad terms',

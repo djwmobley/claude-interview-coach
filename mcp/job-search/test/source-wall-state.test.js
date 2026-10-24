@@ -198,6 +198,22 @@ describe('reenableSource and the count after a reset', () => {
     assert.match(rows[0].text, /^paused until \S+ after 1 failed scan: unknown, shell_no_cards$/);
   });
 
+  test('a re-enable DURING a run, then a wall: the wall is stamped at record time (database now), so N = 1 after the reset', async () => {
+    const s = fresh();
+    const runStart = Date.now() - 20 * 60000; // the run began 20 minutes ago
+    for (let i = 0; i < 3; i++) await recordWall(client, s, new Date(runStart - (3 - i) * DAY), { kind: 'throttle_or_block', detail: 'old' });
+    await reenableSource(client, s); // someone re-enables mid-run
+    const w = await recordWall(client, s, null, { kind: 'unhydrated_after_retry', detail: 'late wall' }); // scan-run passes no run-start time
+    assert.equal(w.consecutiveWalls, 1);
+    const r = await row(s);
+    assert.ok(new Date(r.wall_history.at(-1).at).getTime() > r.reset_at.getTime(), 'stamped after reset_at');
+    assert.ok(Math.abs(new Date(r.last_wall_at).getTime() - Date.now()) < 60000, 'last_wall_at is the record time, not the run start');
+    const d = (await collectDisabledSourceStates(client)).find((x) => x.source === s);
+    assert.ok(d);
+    assert.equal(d.count, 1);
+    assert.match(d.text, /^paused until \S+ after 1 failed scan: unhydrated_after_retry, late wall$/);
+  });
+
   test('a rolled-back re-enable leaves the row as it was', async () => {
     const s = fresh();
     await recordWall(client, s, new Date(), { kind: 'k' });

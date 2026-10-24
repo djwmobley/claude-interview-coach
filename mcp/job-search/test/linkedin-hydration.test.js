@@ -198,6 +198,14 @@ describe('capability.waitForHydration', () => {
     assert.equal(st.slept, 15000);
     assert.equal(st.polls, 31);
   });
+  test('page 2 with the shell up and cards arriving at 5 s (the adapter\'s real options): the wait keeps going and reports cards, not an end of results', async () => {
+    const script = [...Array.from({ length: 10 }, () => ({ shell: true })), { shell: true, cards: 22 }];
+    const { page, st } = fakePage(script);
+    const r = await capOf(page).waitForHydration({ maxMs: 15000, settleShellMs: null });
+    assert.equal(r.reason, 'cards');
+    assert.equal(r.cards, 22);
+    assert.equal(st.slept, 5000);
+  });
   test('page 2+ (settleShellMs): the shell must hold with no cards for the settle time, then the wait ends', async () => {
     const { page, st } = fakePage([{ shell: true }]);
     const r = await capOf(page).waitForHydration({ maxMs: 15000, settleShellMs: 2000 });
@@ -316,10 +324,17 @@ describe('linkedin adapter: hydration wait, one reload, one wall', () => {
     assert.equal(h.st.reloads, 0);
     assert.deepEqual(h.st.waits, [{ maxMs: 15000, settleShellMs: null }]);
   });
-  test('page 2 after a parsed page 1 asks for the 2 s shell settle', async () => {
+  test('page 2 after a parsed page 1 waits the same full window as page 1: the shell never ends the wait early', async () => {
     const h = harness([{ ids: ids(25) }, { ids: [], shell: true }]);
     await run(h.ctx, ['CTO']);
-    assert.deepEqual(h.st.waits[1], { maxMs: 15000, settleShellMs: 2000 });
+    assert.deepEqual(h.st.waits[1], { maxMs: 15000, settleShellMs: null });
+  });
+  test('page 2 whose cards render during the wait is parsed, never an end of results', async () => {
+    const h = harness([{ ids: ids(25) }, { ids: ids(12), shell: true }]);
+    const r = await run(h.ctx, ['CTO']);
+    assert.equal(r.listings.length, 37);
+    assert.equal(r.walls.length, 0);
+    assert.equal(h.st.logs.filter((l) => l.evt === 'linkedin_page').at(1)?.classification, 'results');
   });
   test('a permanent skeleton yields exactly ONE wall after exactly one reload, with a snapshot basename and the reason', async () => {
     const h = harness([{ ids: [], renderAfterWait: false }]);
