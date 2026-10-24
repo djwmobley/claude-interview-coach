@@ -8,7 +8,7 @@
  *   1  one list (newer_than:Nd -in:trash -in:sent -in:draft, includeSpamTrash=true) plus a short sent-mail list
  *      (sent thread ids, and the profile address from the newest sent message's From)
  *   2  format=metadata for every id not already settled in ic_mail_intake (capped at cfg.maxMetadata)
- *   3  format=full ONLY for candidates (non-bulk, a known search firm, a title term in the subject, or the
+ *   3  format=full ONLY for candidates (non-bulk, a known search firm, a title term in the subject, bulk mail with a recruiting cue (read last), or the
  *      LinkedIn InMail sender), capped at cfg.maxBodies; the overflow is reported, never dropped
  * A budget refusal ends the pass early (outcome partial_budget) and keeps what was read.
  *
@@ -175,7 +175,11 @@ export async function runMailIntake(p) {
     }
 
     // ---- Bodies (candidates only, capped) ----
-    const candidates = entries.filter((e) => e.verdict.candidate);
+    // Stronger candidates first (stable within a rank, newest first); bulk-with-cue candidates only use what is left of the cap.
+    const candidates = [
+      ...entries.filter((e) => e.verdict.candidate && !e.verdict.lowPriority),
+      ...entries.filter((e) => e.verdict.candidate && e.verdict.lowPriority),
+    ];
     stats.not_read_beyond_cap = Math.max(0, candidates.length - cfg.maxBodies);
     if (stats.outcome === 'ok' || stats.outcome === 'partial_budget') {
       try {

@@ -137,6 +137,37 @@ describe('runMailIntake: staged reads', () => {
     assert.match(row?.snippet ?? '', /recruiting for a Chief Information Officer/);
   });
 
+  test('an UNLISTED firm, List-Unsubscribe, the Simon subject, title only in the body: found by the body read as STRONG', async () => {
+    const m = metaMessage({
+      id: 'bbbbbbbb00000009', from: 'Simon Wilkinson <simon@unlistedsearch.example>', subject: 'Exciting New Opportunity \u2013 Let\u2019s Catch Up',
+      snippet: 'Hi Damian, hope you are well and have a moment this week.', headers: { 'List-Unsubscribe': '<mailto:u@unlistedsearch.example>' },
+    });
+    const body = 'Hi Damian, I am recruiting for a Chief Information Officer role with a client in Houston.';
+    const { ctx, urls } = harness({ inbox: { [m.id]: { meta: m, full: full(m.id, body, m) } } });
+    const r = await run(ctx);
+    const row = r.rows.find((x) => x.message_id === m.id);
+    assert.deepEqual([row?.bucket, row?.signal], ['recruiter_like', 'strong']);
+    assert.equal(urls.filter((u) => u.includes('format=full')).length, 1);
+  });
+
+  test('bulk mail without any recruiting cue is still not read in full', async () => {
+    const m = FIXTURES.newsletter();
+    const { ctx, urls } = harness({ inbox: { [m.id]: { meta: m } } });
+    await run(ctx);
+    assert.equal(urls.filter((u) => u.includes('format=full')).length, 0);
+  });
+
+  test('cue-only bulk candidates are read AFTER the stronger ones and only within the cap', async () => {
+    const cue = metaMessage({ id: 'bbbbbbbb0000000a', from: 'F <f@firm.example>', subject: 'New opportunity', snippet: 'x', headers: { 'List-Unsubscribe': '<mailto:u@firm.example>' } });
+    const plain = metaMessage({ id: 'bbbbbbbb0000000b', from: 'P <p@family.example>', subject: 'Hello', snippet: 'Hi', labels: ['INBOX'] });
+    const { ctx, urls } = harness({ inbox: { [cue.id]: { meta: cue }, [plain.id]: { meta: plain } } });
+    const r = await run(ctx, { maxBodies: 1 });
+    const fulls = urls.filter((u) => u.includes('format=full'));
+    assert.equal(fulls.length, 1);
+    assert.ok(fulls[0].includes(plain.id), 'the stronger candidate used the single body slot');
+    assert.equal(r.stats.not_read_beyond_cap, 1);
+  });
+
   test('a body that cannot be decoded is recruiter_like with body_unreadable, never silently unsorted', async () => {
     const quiet = metaMessage({ id: 'bbbbbbbb00000002', from: 'Someone <s@elsewhere.example>', subject: 'Hello', snippet: 'Hi', labels: ['INBOX'] });
     const broken = { ...quiet, payload: { ...quiet.payload, mimeType: 'text/plain', body: { data: '!!! not base64url !!!' } } };

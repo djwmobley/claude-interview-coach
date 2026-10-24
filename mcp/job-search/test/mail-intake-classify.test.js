@@ -144,6 +144,16 @@ describe('each bucket and its priority conflicts', () => {
     assert.equal(v.candidate, true);
   });
 
+  test('bulk mail with a recruiting cue in the subject or snippet is a LOW-priority body-read candidate', () => {
+    const m = FIXTURES.newsletter();
+    m.payload.headers[1].value = 'Exciting New Opportunity';
+    const v = classify(m);
+    assert.deepEqual([v.bucket, v.candidate, v.lowPriority], ['bulk_noise', true, true]);
+    assert.equal(classify(FIXTURES.weakBulk()).lowPriority, false, 'a title term in the subject is a stronger candidate');
+    const strong = classify(FIXTURES.personalPlain());
+    assert.equal(strong.lowPriority, false);
+  });
+
   test('bulk mail with no title or firm signal is not a body-read candidate', () => {
     assert.equal(classify(FIXTURES.newsletter()).candidate, false);
   });

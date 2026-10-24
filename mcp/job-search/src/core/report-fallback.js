@@ -43,6 +43,19 @@ export function buildToastPayload(o) {
   };
 }
 
+/** The script no longer deletes its payload; payload files older than a day are pruned here (best effort). @param {string} dir @param {number} nowMs */
+function pruneOldPayloads(dir, nowMs) {
+  try {
+    for (const name of fs.readdirSync(dir)) {
+      if (!/^jobsearch-report-fallback-\d+\.json$/.test(name)) continue;
+      const full = path.join(dir, name);
+      if (nowMs - fs.statSync(full).mtimeMs > 86400000) fs.unlinkSync(full);
+    }
+  } catch {
+    /* pruning is best effort */
+  }
+}
+
 /**
  * @typedef {{ path: 'toast_browser'|'none', spawned: boolean, html_opened: boolean, error: string|null, reason: string|null }} FallbackResult
  */
@@ -61,6 +74,7 @@ export async function deliverFallback(o) {
     const payload = buildToastPayload(o);
     const stamp = (o.now ?? new Date()).getTime();
     const payloadPath = path.join(o.tmpDir ?? os.tmpdir(), `jobsearch-report-fallback-${stamp}.json`);
+    pruneOldPayloads(o.tmpDir ?? os.tmpdir(), stamp);
     fs.writeFileSync(payloadPath, JSON.stringify(payload));
     const script = o.scriptPath ?? path.join(packageRoot(), 'scripts', 'report-fallback.ps1');
     const child = spawnImpl('powershell', ['-NoProfile', '-File', script, payloadPath], { detached: true, stdio: 'ignore', windowsHide: true });

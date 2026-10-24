@@ -143,6 +143,8 @@ export function isAutoReply(h) {
 /** Chief * Officer, CIO, CTO, CDO, CAIO, COO, VP, SVP, EVP, Head of (plus the spelled-out "vice president"). */
 const TITLE_RE = /\b(?:chief\s+(?:[a-z&-]+\s+){0,3}officer|cio|cto|cdo|caio|coo|vp|svp|evp|vice\s+president|head\s+of)\b/gi;
 const RECRUIT_RE = /\b(?:recruit\w*|executive\s+search|retained\s+search|search\s+firm|your\s+profile|your\s+background|confidential\s+search|candidates?)\b/gi;
+/** Recruiting cues that earn a body read for bulk mail (subject or snippet). */
+const RECRUITING_CUE_RE = /\b(?:opportunit\w*|role|position|search|confidential|recruit\w*|your\s+profile|your\s+background|executive)\b/i;
 const OPPORTUNITY_RE = /\b(?:opportunity|opportunities|role|position)\b/gi;
 
 /**
@@ -280,6 +282,7 @@ export function parseInmail(bodyText, fromName, subject) {
  * @property {typeof BUCKETS[number]} bucket
  * @property {string|null} signal strong | known_firm | inmail | weak | body_unreadable | thread_reply | ...
  * @property {boolean} candidate true when a full body read could change the outcome
+ * @property {boolean} [lowPriority] candidate only because of a recruiting cue on bulk mail; read after the stronger candidates
  * @property {boolean} bodyUnreadable
  * @property {string|null} fromAddr
  * @property {string|null} fromName
@@ -333,12 +336,18 @@ export function classifyMail(msg, env) {
   if (!bulk && weakMatch(text)) return v('recruiter_like', 'weak');
   // Unresolved so far. A full read can still change the answer for: non-bulk mail, a known firm, a subject with
   // a title term, and the InMail sender (handled above).
-  const candidate = !msg.body && (!bulk || knownFirm || hasTitleTerm(subject));
+  const strongCandidate = !msg.body && (!bulk || knownFirm || hasTitleTerm(subject));
+  // Bulk mail from a firm NOT on the domain list: a recruiting cue in the subject or snippet earns a (lower
+  // priority) body read, because a template with List-Unsubscribe may carry the title only in the body.
+  const cue = bulk && RECRUITING_CUE_RE.test(`${subject} ${msg.snippet || ''}`);
+  const candidate = strongCandidate || (!msg.body && cue);
+  /** @param {MailVerdict['bucket']} bucket */
+  const unresolved = (bucket) => ({ ...v(bucket, null, candidate), lowPriority: candidate && !strongCandidate });
   // A body we tried and could not read is never silently filed: a human looks.
-  if (msg.body && msg.body.unreadable && (!bulk || knownFirm || hasTitleTerm(subject))) return v('recruiter_like', 'body_unreadable');
+  if (msg.body && msg.body.unreadable && (!bulk || knownFirm || hasTitleTerm(subject) || cue)) return v('recruiter_like', 'body_unreadable');
   // 7 bulk noise, 8 default.
-  if (bulk) return v('bulk_noise', null, candidate);
-  return v('unsorted', null, candidate);
+  if (bulk) return unresolved('bulk_noise');
+  return unresolved('unsorted');
 }
 
 /**
