@@ -540,3 +540,6 @@ textarea.notes-textarea { min-height: 100px; }
 .disabled-sources__name { color: var(--text-strong); }
 .disabled-sources__text { flex: 1 1 320px; word-break: break-word; }
 .disabled-sources__link { color: var(--muted); font-size: 12px; }
+.google-capability-banner { border: 1px solid var(--red); border-radius: 6px; margin-bottom: 14px; }
+.google-capability-banner__text { display: flex; flex-direction: column; gap: 6px; }
+.mail-intake-row + .mail-intake-row { margin-top: 6px; }

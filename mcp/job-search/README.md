@@ -408,6 +408,35 @@ resets the next day.
    normalization, since only the title side is expanded. Spelling out the
    keywords closes that gap.
 
+### Personal mail intake (recruiter mail, `sql/029_mail_intake.sql`)
+
+The Gmail pass also classifies EVERY message in the window (not only the 12 alert senders) into exactly one bucket,
+in this priority: `self`, `registered_alert`, `application_mail`, `internal`, `thread_reply`, `recruiter_like`,
+`bulk_noise`, `unsorted` (the default). `recruiter_like` and `thread_reply` become review items: a "Recruiter mail"
+section at the top of the Review page and at the top of the scan report (below the Google capability line).
+Reading is staged: one list (`newer_than:Nd -in:trash -in:sent -in:draft`, spam included), `format=metadata` for each
+id not already settled in `ic_mail_intake`, then `format=full` only for candidates, at most `maxBodies` (150) per run;
+the overflow is reported as "N not read beyond the cap" and retried next run. Bodies are decoded (multipart, base64url,
+quoted-printable, charset) and cut to 4 KB; a body that cannot be read surfaces as recruiter-like with a flag, never as
+silently unsorted. Nothing here replies, applies, labels or sends, and no model ever receives intake text (triage and
+every Claude step are structurally separate; `test/mail-intake-no-model.test.js`).
+
+Privacy: the emailed and markdown report carries recruiter-like items plus COUNTS per bucket and the top 10 senders for
+`unsorted` and `bulk_noise` (addresses only). Subject-level detail for unsorted mail is on the dashboard only.
+
+`config/mail-intake.json` is optional and deliberately NOT config-locked (defaults apply when absent): `selfAddresses`,
+`employerDomains` (default `advisicon.com`), `searchFirmDomains`, `linkedinInmailSenders`, `maxBodies`, `maxMetadata`,
+`reviewCap` (25), `snippetMax`, `topSenders`. A hash of its content is part of `rules_version`, so an edit reprocesses
+unsorted and bulk mail on the next scan.
+
+Google health is tracked per capability (`read`, `send`, `calendar`; table `ic_google_capability`). When one is broken
+the report's FIRST line says so ("Gmail send BROKEN since 2026-10-20 (4 days): read OK, last good send <time>. ...
+Re-authorize on dashboard."), and Home shows a red banner with the existing Re-authorize Google control. When the report
+cannot be emailed (auth broken or a send error) `bin/remind.js` still writes `output/reports/<day>.md` and `.html`, shows
+a Windows toast naming the problem and the report path, opens the HTML report (one plain `powershell -NoProfile -File
+scripts/report-fallback.ps1 <payload.json>` spawn), keeps a nonzero exit code, and reports the delivery path
+(`email`, `fallback_toast_browser` or `fallback_unavailable`) in its result and log.
+
 ### Task Scheduler (weekdays, random delay, interactive logon)
 
 Run from an elevated PowerShell. Both tasks run as the interactive user, not

@@ -21,6 +21,8 @@ import { UNCONFIRMED_SUBMIT_KINDS } from './applications.js';
 import { collectGmailManualApply } from './gmail-detail.js';
 import { collectDisabledSourceStates } from './source-state.js';
 import { closedReason } from '../targets/coverage.js';
+import { collectMailIntakeReport, mailIntakeLines, mailIntakeHtml, DEFAULT_REVIEW_CAP } from './mail-intake-report.js';
+import { collectGoogleCapability, capabilityBannerLine } from './google-capability.js';
 
 // Ready to apply section (spec-ready-to-apply-v1 section 8): lives in its own module, re-exported here.
 export { collectReadyToApply, readyView, renderReadyToApplyText, renderReadyToApplyHtml, renderReadyToApplyMarkdown } from './report-ready.js';
@@ -747,7 +749,7 @@ export async function collectDisabledSources(client) {
 
 /**
  * @param {import('pg').ClientBase} client
- * @param {{ now?: Date, timezone?: string, topN?: number, homeLocationNorms?: string[], homeMinPrescore?: number, profile?: string, sinceOverride?: Date|null }} [opts]
+ * @param {{ now?: Date, timezone?: string, topN?: number, homeLocationNorms?: string[], homeMinPrescore?: number, profile?: string, sinceOverride?: Date|null, mailIntakeCap?: number }} [opts]
  *   sinceOverride bypasses the DB marker read entirely (test seam / on-demand scan_report with an explicit
  *   date, spec R1.4): when provided (including explicitly null, meaning "no lower bound"), it is used as
  *   `since` instead of ic_report_state.last_report_sent_at. homeMinPrescore defaults to 40
@@ -789,7 +791,25 @@ export async function buildScanReport(client, opts = {}) {
   // Gmail intake addendum B2: gmail rows that cannot get a description automatically, worth a human look.
   const gmailManualApply = await collectGmailManualApply(client);
   const worstStatus = runs.reduce((worst, r) => (REPORT_STATUS_PRIORITY[r.status] ?? 0) > (REPORT_STATUS_PRIORITY[worst] ?? 0) ? r.status : worst, 'ok');
+  // Personal mail intake and per-capability Google health (sql/029). A failure here (a database that has not
+  // been migrated yet) never fails the report: the section says it is unavailable.
+  /** @type {import('./mail-intake-report.js').MailIntakeReport} */
+  let mailIntake;
+  try {
+    mailIntake = await collectMailIntakeReport(client, runs, { cap: opts.mailIntakeCap ?? DEFAULT_REVIEW_CAP });
+  } catch (err) {
+    mailIntake = { error: String(err instanceof Error ? err.message : err).slice(0, 120) };
+  }
+  /** @type {string|null} */
+  let googleCapabilityLine = null;
+  try {
+    googleCapabilityLine = capabilityBannerLine(await collectGoogleCapability(client), now);
+  } catch {
+    googleCapabilityLine = null;
+  }
   return {
+    mailIntake,
+    googleCapabilityLine,
     now,
     timezone,
     since: since.toISOString(),
@@ -1149,6 +1169,10 @@ export function blockedDetailLine(stats) {
  */
 export function renderReportText(data, registry, googleAuthState, dashboardHealthState) {
   const lines = [];
+  // The Google capability line is the FIRST line when a capability is broken; the recruiter mail section follows.
+  const capLine = /** @type {any} */ (data).googleCapabilityLine;
+  if (capLine) lines.push(capLine, '');
+  lines.push(...mailIntakeLines(/** @type {any} */ (data).mailIntake));
   // Item 6: a latched source opens the report, every run, until re-enabled.
   const latched = latchedSourceLines(/** @type {any} */ (data).latchedSources);
   if (latched.length) lines.push(...latched, '');
@@ -1252,6 +1276,8 @@ export function renderReportHtml(data, registry, googleAuthState, dashboardHealt
     return `<li>#${r.id} ${linkOrText(r)} at ${esc(r.company)}, ${esc(r.location ?? 'n/a')}, ${esc(salaryText(r))}, ps ${r.prescore ?? 0}, ${esc(r.source)}${also}${alsoPosted}</li>`;
   };
   const parts = [];
+  if (/** @type {any} */ (data).googleCapabilityLine) parts.push(`<p><strong>${esc(/** @type {any} */ (data).googleCapabilityLine)}</strong></p>`);
+  parts.push(...mailIntakeHtml(/** @type {any} */ (data).mailIntake, esc));
   for (const line of latchedSourceLines(/** @type {any} */ (data).latchedSources)) parts.push(`<p><strong>${esc(line)}</strong></p>`);
   parts.push(`<h2>Job scan report for ${esc(data.dayKey)} (times ${esc(data.timezone)})</h2>`);
   if (data.lockMismatch) {
@@ -1315,6 +1341,8 @@ export function renderReportHtml(data, registry, googleAuthState, dashboardHealt
 export function renderReportMarkdown(data, registry, googleAuthState, dashboardHealthState) {
   const reg = registry ?? { entries: [], httpAllowedHosts: new Set() };
   const lines = [];
+  if (/** @type {any} */ (data).googleCapabilityLine) lines.push(`**${/** @type {any} */ (data).googleCapabilityLine}**`, '');
+  lines.push(...mailIntakeLines(/** @type {any} */ (data).mailIntake, { markdown: true }));
   const latched = latchedSourceLines(/** @type {any} */ (data).latchedSources);
   if (latched.length) lines.push(...latched.map((l) => `**${l}**`), '');
   lines.push(`# Job scan report for ${data.dayKey}`);

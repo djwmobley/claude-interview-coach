@@ -50,6 +50,9 @@ import { embedSafe, embeddingText } from './embed.js';
 import { compactRows, capResponse, MAX_ROWS, MAX_RESPONSE_CHARS, untrustedRows, ROWS_WRAP_OVERHEAD_CHARS } from './compact.js';
 import { buildRegistry, guardedFetch, guardUrl } from './urlguard.js';
 import { runGmailDetail } from './gmail-detail.js';
+import { loadKnownMailIds, persistMailIntake } from './mail-intake-store.js';
+import { recordCapabilityOutcomes, outcomesFromTokenState } from './google-capability.js';
+import { SCOPE_GMAIL_READONLY } from './google.js';
 import { planPages, assertPlanWithinCap, reserveBudget } from './budget.js';
 import { makeRateLimiter } from './ratelimit.js';
 import { runSearch } from './scheduler.js';
@@ -706,6 +709,19 @@ async function executeRun(p) {
   }
 
   /**
+   * Per-capability Google health (sql/029). Skipped on a dry run; a failure here is logged and never fails the scan.
+   * @param {import('./google-capability.js').CapabilityOutcome[]} outcomes
+   */
+  async function recordCapabilitySafe(outcomes) {
+    if (dryRun || outcomes.length === 0) return;
+    try {
+      await recordCapabilityOutcomes(client, outcomes, new Date());
+    } catch (err) {
+      log({ evt: 'google_capability_record_failed', run_id: runId, ...errFields(err) });
+    }
+  }
+
+  /**
    * @param {{ name: string, adapter: import('../adapters/base.js').Adapter, cfg: any }} s
    * @returns {import('../adapters/base.js').AdapterCtx}
    */
@@ -779,6 +795,8 @@ async function executeRun(p) {
       config,
       env: { GOOGLE_TOKEN_FILE: env.GOOGLE_TOKEN_FILE },
       interactive,
+      // Personal mail intake (sql/029): the ids the Gmail intake pass can skip. Gmail only.
+      ...(s.name === 'gmail' ? { mailIntakeKnown: (/** @type {string} */ rulesVersion) => loadKnownMailIds(client, rulesVersion) } : {}),
       // LinkedIn diagnosability: a sanitized snapshot of any wall / unrecognized / end-of-results page,
       // under the gitignored logs tree, capped per run inside the saver.
       ...(s.name === 'linkedin' && env.JOBSEARCH_LOG_DIR ? { saveSnapshot: createSnapshotSaver({ dir: path.join(env.JOBSEARCH_LOG_DIR, 'linkedin-snapshots'), runId }) } : {}),
@@ -1530,6 +1548,7 @@ async function executeRun(p) {
         const state = await doClassify(env.GOOGLE_TOKEN_FILE, { gmail: true, gmailRead: true });
         if (state.state !== 'ok') {
           unattendedGmailReauthTriggered = true;
+          await recordCapabilitySafe(outcomesFromTokenState(state));
           const spawnImpl = deps.spawn ?? defaultSpawn;
           try {
             const child = spawnImpl(
@@ -1604,6 +1623,11 @@ async function executeRun(p) {
             const msg = `${ev.code}: ${ev.message}`;
             if (!warnings.includes(msg)) warnings.push(msg);
             if (ev.code === 'BROWSER_UNAVAILABLE' || ev.code === 'UNRENDERABLE' || ev.code === 'AUTH_UNAVAILABLE' || ev.code === 'SUSPECTED_THROTTLE') partial = true;
+            if (ev.code === 'AUTH_UNAVAILABLE' && s.name === 'gmail') {
+              // Gmail read is down: record it per capability so the report can say how long (sql/029).
+              const slug = /gmail: (broken_[a-z_]+)/.exec(ev.message)?.[1] ?? 'auth_unavailable';
+              await recordCapabilitySafe([{ capability: 'read', ok: false, state: slug, missing: slug === 'broken_missing_scopes' ? [SCOPE_GMAIL_READONLY] : [] }]);
+            }
             if (ev.code === 'BOARD_NOT_FOUND' || ev.code === 'BAD_RESPONSE') {
               // A configured board that does not answer is a config defect: visible as partial, never silent.
               partial = true;
@@ -1615,6 +1639,18 @@ async function executeRun(p) {
           // stored at stats.<source> (stats.gmail) for the report's gmail line and PARSER BROKEN headline.
           async onSourceStats(ev) {
             /** @type {any} */ (stats)[s.name] = ev.stats;
+            // A Gmail pass that reached its end proves the read grant works.
+            if (s.name === 'gmail') await recordCapabilitySafe([{ capability: 'read', ok: true, state: 'ok', missing: [] }]);
+          },
+          // Personal mail intake (sql/029): persist the classified rows. Never fails the scan.
+          async onMailIntake(ev) {
+            if (dryRun || s.name !== 'gmail') return;
+            try {
+              const n = await persistMailIntake(client, ev.rows, ev.rulesVersion);
+              log({ evt: 'mail_intake_persisted', run_id: runId, rows: n, rules_version: ev.rulesVersion });
+            } catch (err) {
+              log({ evt: 'mail_intake_persist_failed', run_id: runId, ...errFields(err) });
+            }
           },
           async onWall(ev) {
             const verdict = classifyPage(ev.signals);

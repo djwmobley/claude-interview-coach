@@ -17,6 +17,7 @@ import { confirmButton } from '../components/confirm-button.js';
 import { skeleton, emptyState } from '../components/empty-state.js';
 import { renderApprovalSection } from '../components/approval-section.js';
 import { renderSubmissionsSection } from '../components/submissions-section.js';
+import { renderMailIntakeSection } from '../components/mail-intake-section.js';
 import { on, off } from '../lib/bus.js';
 import { createListCursor } from '../lib/list-cursor.js';
 
@@ -63,7 +64,7 @@ export async function render(container, params, app) {
   }
 
   async function load() {
-    const [reviewOutcome, reasonsOutcome, docsReadyOutcome, parkedOutcome, submissionsOutcome] = await Promise.all([
+    const [reviewOutcome, reasonsOutcome, docsReadyOutcome, parkedOutcome, submissionsOutcome, mailOutcome] = await Promise.all([
       getJson('/api/review'), getJson('/api/review/reasons'),
       // Applications awaiting approval / parked (needs human), review-approvals-list PR spec A3. Fetched
       // as two separate state calls (each with its own accurate 200-cap and total), not one combined
@@ -73,6 +74,8 @@ export async function render(container, params, app) {
       getJson('/api/applications', { state: 'docs_ready' }), getJson('/api/applications', { state: 'needs_human,failed,drafting' }),
       // Unattended submit spec item 7: submissions read from the database, plus unconfirmed submits.
       getJson('/api/submissions'),
+      // Recruiter mail (sql/029): advisory, a failure shows an empty section via handleOutcome's own toast.
+      getJson('/api/mail-intake'),
     ]);
     const outcome = handleOutcome(reviewOutcome);
     if (outcome.kind !== 'ok') {
@@ -86,6 +89,9 @@ export async function render(container, params, app) {
     const parkedRows = parkedResult.kind === 'ok' ? parkedResult.body.rows : [];
     const approvalHost = h('div', { className: 'review-approvals-host' });
     renderApprovalSection(approvalHost, { docsReadyRows, parkedRows, total: docsReadyTotal, onChanged: load });
+    const mailResult = handleOutcome(mailOutcome);
+    const mailHost = h('div', { className: 'review-approvals-host' });
+    renderMailIntakeSection(mailHost, mailResult.kind === 'ok' ? /** @type {any} */ (mailResult.body) : null, { onChanged: load });
     const submissionsResult = handleOutcome(submissionsOutcome);
     const submissionsHost = h('div', { className: 'review-approvals-host' });
     renderSubmissionsSection(submissionsHost, submissionsResult.kind === 'ok' ? submissionsResult.body : { submitted: [], unconfirmed: [] });
@@ -146,6 +152,7 @@ export async function render(container, params, app) {
 
     setChildren(container, [
       h('h1', { className: 'page-title', text: 'Review' }),
+      mailHost,
       approvalHost,
       submissionsHost,
       autoNote,

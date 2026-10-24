@@ -31,6 +31,7 @@ import { readTokenFile, makeOAuthClient, getAccessToken, classifyAndConnect } fr
 import { errFields } from '../core/errors.js';
 import { PARSER_SPECS, PARSER_INPUT } from './gmail-parsers.js';
 import { discoverySubjectRegex, DISCOVERY_DEFAULT_KEYWORDS } from '../core/config.js';
+import { runMailIntake } from './gmail-intake.js';
 
 export const GMAIL_MESSAGES_URL = 'https://gmail.googleapis.com/gmail/v1/users/me/messages';
 export const LIST_PAGE_SIZE = 50;
@@ -117,6 +118,7 @@ export const gmail = defineAdapter({
   pathPatterns: ['^/gmail/v1/users/me/messages(/[0-9a-f]{8,32})?(\\?|$)'],
   blindSpots: [
     'alerts from senders not listed in config/alert-senders.json are never parsed; discovery only counts likely alert senders by From/Subject/List-Unsubscribe (English keywords), so an alert without that header or with an unusual subject stays invisible',
+    'the personal mail intake (recruiter-like and thread-reply mail) matches English title and recruiting terms only, reads at most 4 KB of at most 150 candidate bodies per run, and cannot see recruiter mail whose subject, snippet and body carry no title term near a recruiting term (or a known search-firm domain)',
     'a template change that defeats both a parser and its job-marker predicate shows only as no_job_markers drift, not a PARSER BROKEN headline',
     'job links behind third-party click trackers are stored as the tracker URL; src/core/gmail-detail.js unwraps them cookie-less after the scan, and destination pages behind the trackers are unmeasured',
     'duplicate alerts for the same job sent through two different senders (e.g. the same role via Lensa and LinkedIn) are recognized only when their normalized title, company, and location match exactly, or when the description phase resolves both to one canonical id',
@@ -180,6 +182,8 @@ export const gmail = defineAdapter({
     const stats = newIntakeStats();
     /** @type {Set<string>} */
     const seenIds = new Set();
+    /** Ids of messages from a configured alert sender (the intake pass counts them as registered_alert without reading them again). @type {Set<string>} */
+    const registeredIds = new Set();
     /** @param {string} address @param {any} cfg */
     const bucket = (address, cfg) => {
       if (!stats.by_sender[address]) {
@@ -240,6 +244,7 @@ export const gmail = defineAdapter({
           yield { kind: 'warning', code: 'UNKNOWN_SENDER', message: `gmail message ${id}: From "${fromHeader ?? ''}" is not a configured sender`, query: q };
           continue;
         }
+        registeredIds.add(id);
         const b = bucket(senderCfg.address, senderCfg);
         b.emails++;
         /** @type {{ text: string|null, html: string|null }} */
@@ -308,6 +313,22 @@ export const gmail = defineAdapter({
     stats.discovery = await runDiscovery({
       ctx, authHeader, windowDays, registered: senders.map((s) => s.address.toLowerCase()), seenIds, cfg: intake?.discovery ?? null, stats,
     });
+    // Personal mail intake (sql/029): classify every message in the window, persisted by the scan through the
+    // mail_intake event below. A failure here never fails the source; it shows as stats.mail_intake.outcome.
+    // loadConfig() always sets config.mailIntake (defaults when config/mail-intake.json is absent); a
+    // hand-built config without the key skips the pass.
+    if (ctx.config.mailIntake) {
+      try {
+        const intakeResult = await runMailIntake({
+          ctx, authHeader, windowDays, registeredAddresses: new Set(senders.map((s) => s.address.toLowerCase())), registeredIds, cfg: ctx.config.mailIntake,
+        });
+        stats.mail_intake = intakeResult.stats;
+        yield { kind: 'mail_intake', rows: intakeResult.rows, rulesVersion: intakeResult.rulesVersion };
+      } catch (err) {
+        if (/** @type {any} */ (err)?.code === 'CANCELLED') throw err;
+        stats.mail_intake = { outcome: 'failed', error: errFields(err).err_message.slice(0, 200) };
+      }
+    }
     yield { kind: 'source_stats', stats };
   },
 });

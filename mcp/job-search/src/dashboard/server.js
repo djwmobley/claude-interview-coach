@@ -29,6 +29,7 @@ import { register as registerSources } from './routes/sources.js';
 import { register as registerWallSnapshots } from './routes/wall-snapshots.js';
 import { register as registerGoogle } from './routes/google.js';
 import { register as registerGoogleReauth } from './routes/google-reauth.js';
+import { register as registerMailIntake } from './routes/mail-intake.js';
 import { register as registerEasyApply } from './routes/easy-apply.js';
 import { register as registerReady } from './routes/ready.js';
 import { register as registerTargets } from './routes/targets.js';
@@ -307,6 +308,7 @@ export function createDashboardServer(deps, opts = {}) {
   registerWallSnapshots(router, deps);
   registerGoogle(router, deps);
   registerGoogleReauth(router, deps);
+  registerMailIntake(router, deps, streamHub);
   registerStreamRoute(router, streamHub);
 
   const httpServer = http.createServer((req, res) => {

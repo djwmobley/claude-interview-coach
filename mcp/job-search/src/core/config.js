@@ -632,6 +632,33 @@ export function discoverySubjectRegex(keywords) {
   return new RegExp(`\\b(?:${words.join('|') || '(?!)'})\\b`, 'i');
 }
 
+// Personal recruiter-mail intake (sql/029): config/mail-intake.json is OPTIONAL and deliberately NOT in
+// CONFIG_FILES (an edit must not trip the config lock). Its content hash feeds the classifier's rules_version,
+// so any edit reprocesses unsorted and bulk mail on the next scan. Absent file means these defaults.
+const intakeDomain = z.string().min(3).max(120).regex(/^[a-z0-9][a-z0-9.-]*\.[a-z]{2,}$/, 'domain must be lowercase, like example.com');
+export const DEFAULT_SEARCH_FIRM_DOMAINS = Object.freeze([
+  'forsythbarnes.com', 'heidrick.com', 'spencerstuart.com', 'kornferry.com', 'russellreynolds.com', 'egonzehnder.com',
+  'kingsleygate.com', 'diversifiedsearch.com', 'stantonchase.com',
+]);
+export const DEFAULT_LINKEDIN_INMAIL_SENDERS = Object.freeze(['inmail-hit-reply@linkedin.com', 'messages-noreply@linkedin.com']);
+export const mailIntakeSchema = z.object({
+  enabled: z.boolean().default(true),
+  /** Extra addresses that count as Damian (the Gmail profile address is learned from the sent folder). Reply-To and Sender never grant self. */
+  selfAddresses: z.array(emailAddress).default([]),
+  /** The current employer's domains: mail from them is counted as internal, never surfaced. */
+  employerDomains: z.array(intakeDomain).default(['advisicon.com']),
+  searchFirmDomains: z.array(intakeDomain).default([...DEFAULT_SEARCH_FIRM_DOMAINS]),
+  linkedinInmailSenders: z.array(emailAddress).default([...DEFAULT_LINKEDIN_INMAIL_SENDERS]),
+  /** Full bodies fetched per run (candidates only). The overflow is reported as "N not read beyond the cap". */
+  maxBodies: z.number().int().min(0).max(500).default(150),
+  /** Metadata reads per run; the remainder is reported, never silently dropped. */
+  maxMetadata: z.number().int().min(0).max(2000).default(400),
+  /** Review items surfaced per run; the rest are a count. */
+  reviewCap: z.number().int().min(1).max(200).default(25),
+  snippetMax: z.number().int().min(50).max(500).default(500),
+  topSenders: z.number().int().min(1).max(50).default(10),
+}).default({});
+
 export const alertSendersSchema = z.object({
   senders: z.array(z.object({
     address: emailAddress,
@@ -752,6 +779,7 @@ const TRIAGE_CANDIDATE_LOCK_FILE = 'triage-candidate.lock';
  * @property {z.infer<typeof alertSendersSchema>['senders']} alertSenders
  * @property {{ discovery: z.infer<typeof alertSendersSchema>['discovery'], health: z.infer<typeof alertSendersSchema>['health'] }} [alertIntake]
  *   Gmail intake addendum: unhandled-sender discovery and the PARSER BROKEN threshold (alert-senders.json)
+ * @property {import('./mail-intake-config.js').MailIntakeConfig} [mailIntake] config/mail-intake.json (optional, NOT config-locked; defaults when absent)
  * @property {z.infer<typeof noiseRulesSchema>} noiseRules
  * @property {z.infer<typeof triageSchema> & { present: boolean }} triage present=false means no
  *   config/triage.json was found at all (schema defaults applied silently); present=true with both
@@ -921,6 +949,7 @@ export function loadConfig(opts = {}) {
   const alertSendersFile = readValidated(dir, 'alert-senders.json', alertSendersSchema);
   const noiseRules = readValidated(dir, 'noise-rules.json', noiseRulesSchema);
   const triageFile = readOptionalValidated(dir, 'triage.json', triageSchema);
+  const mailIntakeFile = readOptionalValidated(dir, 'mail-intake.json', mailIntakeSchema);
   /** @type {LoadedConfig} */
   const cfg = {
     adapters,
@@ -932,6 +961,7 @@ export function loadConfig(opts = {}) {
     alertSenders: alertSendersFile.senders,
     alertIntake: { discovery: alertSendersFile.discovery, health: alertSendersFile.health },
     noiseRules,
+    mailIntake: mailIntakeFile.data,
     triage: { ...triageFile.data, present: triageFile.present },
     configDir: dir,
     hash: computeConfigHash(dir),

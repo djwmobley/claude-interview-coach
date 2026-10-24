@@ -179,7 +179,7 @@ export function nextGoogleReauthClickState(outcome) {
  * @param {import('../lib/api.js').ApiOutcome} authOutcome
  * @param {string|null} [inlineText] message carried over a re-render (e.g. after a Re-authorize click)
  */
-function renderGoogleAuthRow(host, authOutcome, inlineText = null) {
+export function renderGoogleAuthRow(host, authOutcome, inlineText = null) {
   const body = authOutcome.kind === 'ok' ? /** @type {any} */ (authOutcome.body) : null;
   const s = computeGoogleAuthBadgeState(body);
 

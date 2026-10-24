@@ -45,6 +45,8 @@ export const STALE_LIMIT = 3;
  * @property {(ev: import('../adapters/base.js').WallEvent) => Promise<{ stopSource: boolean }>} [onWall]
  * @property {(ev: { kind: 'source_stats', stats: any }) => Promise<void>} [onSourceStats] a source's own
  *   end-of-search counters (Gmail intake addendum: stats.gmail)
+ * @property {(ev: { kind: 'mail_intake', rows: any[], rulesVersion: string }) => Promise<void>} [onMailIntake] the Gmail
+ *   source's classified personal-mail rows (sql/029), persisted by the scan run
  */
 
 /**
@@ -121,6 +123,9 @@ export async function runSearch(adapter, profile, ctx, handlers, opts) {
       } else if (ev.kind === 'source_stats') {
         // Gmail intake addendum: a source's own end-of-search counters (gmail by_sender, discovery).
         if (handlers.onSourceStats) await handlers.onSourceStats(ev);
+      } else if (/** @type {any} */ (ev).kind === 'mail_intake') {
+        // Personal mail intake rows (sql/029); not a listing, not counted as a warning.
+        if (handlers.onMailIntake) await handlers.onMailIntake(/** @type {any} */ (ev));
       } else {
         // Total: an event kind this scheduler does not know is counted and logged, never silently dropped.
         result.warnings++;
