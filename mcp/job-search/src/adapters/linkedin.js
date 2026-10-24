@@ -216,7 +216,8 @@ async function readListPage(cap, nav, o, retried) {
   // Affirmative search-shell evidence decides end of results and unhydrated-vs-unknown, so it is read for any card-less page.
   const shell = validIds.size === 0 ? /** @type {any} */ (await cap.readJson('linkedinSearchShell')) : null;
   const verdict = classifyLinkedInPage({ ...base, deduped: validIds.size, markers, emptyState, shell });
-  return { verdict, cards, markers, emptyState, hydration: hydration ? { reason: hydration.reason, waited_ms: hydration.waitedMs } : null };
+  const rawIds = new Set(cards.map((c) => (c && typeof c.id === 'string' ? c.id : '')).filter(Boolean));
+  return { verdict, cards, markers, emptyState, rawCards: rawIds.size, rejectedCards: rawIds.size - validIds.size, hydration: hydration ? { reason: hydration.reason, waited_ms: hydration.waitedMs } : null };
 }
 
 export const linkedin = defineAdapter({
@@ -273,7 +274,7 @@ export const linkedin = defineAdapter({
           // raw count; every count below is over unique ids.
           const uniqueIds = new Set(cards.map((c) => (c && typeof c.id === 'string' ? c.id : '')).filter(Boolean));
           if (verdict.classification !== 'results') {
-            ctx.log({ evt: 'linkedin_page', query, page_index: pageIndex, deduped_cards: 0, parsed: 0, classification: verdict.classification, reason: verdict.reason, retried, hydration: fetched.hydration });
+            ctx.log({ evt: 'linkedin_page', query, page_index: pageIndex, deduped_cards: fetched.rawCards, parsed: 0, mapcard_rejects: fetched.rejectedCards, classification: verdict.classification, reason: verdict.reason, retried, hydration: fetched.hydration });
             let snapshot = null;
             if (verdict.classification !== 'explicit_empty') {
               snapshot = await saveSnapshot(ctx, cap, { query, pageIndex, classification: verdict.classification });
@@ -283,7 +284,9 @@ export const linkedin = defineAdapter({
               yield { kind: 'batch', query, pageIndex, parsed: 0, status: nav.status, url: nav.url };
               break;
             }
-            const detail = `${verdict.reason}${retried ? ' after one reload' : ''}${reloadRefused ? '; reload cap reached' : ''}`;
+            // Cards were on the page but none survived mapCard: still a wall (visible friction beats silent loss), with its own reason.
+            const unparseable = fetched.rawCards > 0 && fetched.rejectedCards === fetched.rawCards && (verdict.classification === 'unknown' || verdict.classification === 'unhydrated_after_retry');
+            const detail = `${unparseable ? `cards present but unparseable (${fetched.rejectedCards} rejected by mapCard)` : verdict.reason}${retried ? ' after one reload' : ''}${reloadRefused ? '; reload cap reached' : ''}`;
             yield { kind: 'wall', query, pageIndex, wallKind: verdict.classification, detail, snapshot, signals: { parsed: 0, status: nav.status, cfMitigated: nav.cfMitigated, url: nav.url, challengeCloudflare: !!markers.challengeCloudflare, challengeForm: !!markers.challengeForm, recaptcha: !!markers.recaptcha, guestInterstitial: !!markers.guestInterstitial, loginForm: !!markers.loginForm, emptyState } };
             yield { kind: 'batch', query, pageIndex, parsed: 0, status: nav.status, url: nav.url };
             break;

@@ -350,6 +350,16 @@ describe('linkedin adapter: hydration wait, one reload, one wall', () => {
     assert.equal(h.st.waits.length, 2, 'waited before and after the reload');
     assert.equal(classifyPage(w.signals).stopSource, true);
   });
+  test('cards present but every id fails mapCard: still a wall, with its own reason, and the log reports raw count and rejects', async () => {
+    const h = harness([{ ids: ['123', '456', '789'], renderAfterReload: true }]);
+    const r = await run(h.ctx, ['CTO']);
+    assert.equal(r.listings.length, 0);
+    assert.equal(r.walls.length, 1);
+    assert.match(r.walls[0].detail, /^cards present but unparseable \(3 rejected by mapCard\)/);
+    const log = h.st.logs.filter((l) => l.evt === 'linkedin_page').at(-1);
+    assert.equal(log.deduped_cards, 3);
+    assert.equal(log.mapcard_rejects, 3);
+  });
   test('a page that hydrates after the reload is parsed with no wall', async () => {
     const h = harness([{ ids: ids(6), renderAfterWait: false, renderAfterReload: true }]);
     const r = await run(h.ctx, ['CTO']);

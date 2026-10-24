@@ -149,7 +149,7 @@ export async function recordWall(client, source, at = null, info = {}) {
   const runId = info.runId !== undefined && info.runId !== null && /^\d+$/.test(String(info.runId)) ? String(info.runId) : null;
   const entry = JSON.stringify({ kind, detail, url, snapshot, run_id: runId === null ? null : Number(runId) });
   const T = 'coalesce($2::timestamptz, now())';
-  const ENTRY = `($8::jsonb || jsonb_build_object('at', to_char(${T} AT TIME ZONE 'UTC', 'YYYY-MM-DD"T"HH24:MI:SS.MS"Z"')))`;
+  const ENTRY = `($8::jsonb || jsonb_build_object('at', to_char(${T} AT TIME ZONE 'UTC', 'YYYY-MM-DD"T"HH24:MI:SS.US"Z"')))`;
   const r = await client.query(
     `INSERT INTO ic_source_state AS s (source, consecutive_walls, last_wall_at, disabled_until, manual_disable, last_wall_kind, last_wall_detail, last_wall_url, last_wall_snapshot, last_wall_run_id, wall_history)
      VALUES ($1, 1, ${T}, ${T} + interval '24 hours', false, $3, $4, $5, $6, $7::bigint, jsonb_build_array(${ENTRY}))

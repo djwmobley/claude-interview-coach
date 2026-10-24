@@ -93,7 +93,8 @@ describe('recordWall', () => {
     assert.equal(r.wall_history.length, 1);
     assert.equal(r.wall_history[0].kind, 'unhydrated_after_retry');
     assert.equal(r.wall_history[0].snapshot, '2165-abc-p1.html');
-    assert.equal(r.wall_history[0].at, now.toISOString());
+    assert.equal(new Date(r.wall_history[0].at).getTime(), now.getTime());
+    assert.match(r.wall_history[0].at, /^\d{4}-\d\d-\d\dT\d\d:\d\d:\d\d\.\d{6}Z$/, 'microsecond precision');
   });
 
   test('a path-shaped snapshot is reduced to its last segment; a non-numeric run id is dropped', async () => {
@@ -206,7 +207,8 @@ describe('reenableSource and the count after a reset', () => {
     const w = await recordWall(client, s, null, { kind: 'unhydrated_after_retry', detail: 'late wall' }); // scan-run passes no run-start time
     assert.equal(w.consecutiveWalls, 1);
     const r = await row(s);
-    assert.ok(new Date(r.wall_history.at(-1).at).getTime() > r.reset_at.getTime(), 'stamped after reset_at');
+    const cmp = await client.query(`SELECT (wall_history->-1->>'at')::timestamptz > reset_at AS after FROM ic_source_state WHERE source = $1`, [s]);
+    assert.equal(cmp.rows[0].after, true, 'stamped after reset_at at full (microsecond) precision');
     assert.ok(Math.abs(new Date(r.last_wall_at).getTime() - Date.now()) < 60000, 'last_wall_at is the record time, not the run start');
     const d = (await collectDisabledSourceStates(client)).find((x) => x.source === s);
     assert.ok(d);
@@ -235,7 +237,7 @@ describe('describeDisabledSource: the sentence', () => {
     assert.equal(d.count, 3);
   });
   test('one failed scan is singular', () => {
-    assert.match(describeDisabledSource(base({ wall_history: hist(['2026-10-12T14:00:00Z']) })).text, /^auto-disabled after 1 failed scan \(2026-10-12\): /);
+    assert.match(describeDisabledSource(base({ consecutive_walls: 1, wall_history: hist(['2026-10-12T14:00:00Z']) })).text, /^auto-disabled after 1 failed scan \(2026-10-12\): /);
   });
   test('paused: "paused until <time> after N failed scan(s): reason"', () => {
     const d = describeDisabledSource(base({ manual_disable: false, disabled_until: '2026-10-13T14:00:00Z', consecutive_walls: 1, wall_history: hist(['2026-10-12T14:00:00Z']) }));
@@ -248,16 +250,26 @@ describe('describeDisabledSource: the sentence', () => {
     assert.match(describeDisabledSource(base({ manual_disable: false, disabled_until: '2026-10-13T14:00:00Z', last_wall_kind: null })).text, /: reason not recorded$/);
   });
   test('only history entries after reset_at count; the dates follow', () => {
-    const d = describeDisabledSource(base({ reset_at: '2026-10-09T20:00:00Z' }));
+    const d = describeDisabledSource(base({ consecutive_walls: 1, reset_at: '2026-10-09T20:00:00Z' }));
     assert.equal(d.count, 1);
     assert.deepEqual(d.dates, ['2026-10-12']);
   });
   test('a row from before sql/028 (no history) falls back to the counter and the last wall date', () => {
     const d = describeDisabledSource(base({ wall_history: [], last_wall_kind: null }));
-    assert.equal(d.text, 'auto-disabled after 3 failed scans (2026-10-12): reason not recorded');
+    assert.equal(d.text, 'auto-disabled after 3 failed scans (2026-10-12, earlier dates not recorded): reason not recorded');
+  });
+  test('a legacy row with 2 walls and no history that takes its 3rd wall reads "3 failed scans", not 1', async () => {
+    const s = fresh();
+    await client.query(`INSERT INTO ic_source_state (source, consecutive_walls, disabled_until, last_wall_at) VALUES ($1, 2, now() + interval '1 hour', now() - interval '3 days')`, [s]);
+    await recordWall(client, s, null, { kind: 'unknown', detail: 'third wall' });
+    const d = (await collectDisabledSourceStates(client)).find((x) => x.source === s);
+    assert.ok(d);
+    assert.equal(d.count, 3);
+    assert.equal(d.dates.length, 1);
+    assert.match(d.text, /^auto-disabled after 3 failed scans \(\d{4}-\d{2}-\d{2}, earlier dates not recorded\): unknown, third wall$/);
   });
   test('malformed history entries are skipped, never thrown on', () => {
-    const d = describeDisabledSource(base({ wall_history: [null, 5, { at: 'nope' }, { at: '2026-10-12T14:00:00Z' }] }));
+    const d = describeDisabledSource(base({ consecutive_walls: 1, wall_history: [null, 5, { at: 'nope' }, { at: '2026-10-12T14:00:00Z' }] }));
     assert.equal(d.count, 1);
   });
   test('a latch with no failed scans on record says so instead of "after 0 failed scans"', () => {
@@ -265,7 +277,7 @@ describe('describeDisabledSource: the sentence', () => {
     assert.equal(d.text, 'disabled with no failed scans on record: reason not recorded');
   });
   test('a detail-wall key renders sensibly', () => {
-    const d = describeDisabledSource(base({ source: 'linkedin:detail', last_wall_kind: 'detail_blocked', last_wall_detail: 'blocked:cloudflare', wall_history: hist(['2026-10-12T14:00:00Z'], 'detail_blocked') }));
+    const d = describeDisabledSource(base({ consecutive_walls: 1, source: 'linkedin:detail', last_wall_kind: 'detail_blocked', last_wall_detail: 'blocked:cloudflare', wall_history: hist(['2026-10-12T14:00:00Z'], 'detail_blocked') }));
     assert.equal(d.source, 'linkedin:detail');
     assert.equal(d.text, 'auto-disabled after 1 failed scan (2026-10-12): detail_blocked, blocked:cloudflare');
   });

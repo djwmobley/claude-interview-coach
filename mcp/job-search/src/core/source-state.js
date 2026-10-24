@@ -30,6 +30,7 @@ const NO_REASON = 'reason not recorded';
  * @property {string|null} [last_wall_snapshot]
  * @property {Date|string|null} [reset_at]
  * @property {any} [wall_history]
+ * @property {any} [counted_history] wall_history entries after reset_at, compared in the database at full precision
  */
 
 /**
@@ -67,6 +68,11 @@ function iso(v) {
  * @returns {Array<{ at: string }>}
  */
 export function countedWalls(row) {
+  // The database already compared each entry's full-precision time with reset_at (microseconds; a JS Date
+  // keeps only milliseconds), so its answer wins when the query supplied it.
+  if (Array.isArray(row.counted_history)) {
+    return row.counted_history.map((e) => ({ at: iso(e && e.at) })).filter((e) => e.at !== null).map((e) => ({ at: /** @type {string} */ (e.at) }));
+  }
   const resetMs = ms(row.reset_at);
   const hist = Array.isArray(row.wall_history) ? row.wall_history : [];
   /** @type {Array<{ at: string }>} */
@@ -96,20 +102,22 @@ export function describeDisabledSource(row) {
   const manual = Boolean(row.manual_disable);
   const until = manual ? null : iso(row.disabled_until);
   const counted = countedWalls(row);
-  let count = counted.length;
   let dates = counted.map((e) => e.at.slice(0, 10));
-  if (count === 0) {
-    const walls = Math.max(0, Number(row.consecutive_walls ?? 0));
+  // A row from before sql/028 can have more failed scans than recorded entries (its first walls left no
+  // history): the counter is the truth for N, and the dates shown are only the ones on record.
+  const walls = Math.max(0, Number(row.consecutive_walls ?? 0));
+  let count = Math.max(counted.length, walls);
+  if (counted.length === 0) {
     const last = iso(row.last_wall_at);
-    count = walls;
     dates = walls > 0 && last ? [last.slice(0, 10)] : [];
   }
+  const datesNote = count > dates.length && count > 0 ? [...dates, 'earlier dates not recorded'].join(dates.length ? ', ' : '') : dates.join(', ');
   const reason = reasonOf(row);
   const plural = `${count} failed scan${count === 1 ? '' : 's'}`;
   let text;
   if (manual) {
     text = count > 0
-      ? `auto-disabled after ${plural}${dates.length ? ` (${dates.join(', ')})` : ''}: ${reason}`
+      ? `auto-disabled after ${plural}${datesNote ? ` (${datesNote})` : ''}: ${reason}`
       : `disabled with no failed scans on record: ${reason}`;
   } else {
     text = `paused until ${until ?? 'unknown'} after ${count > 0 ? plural : 'a failed scan'}: ${reason}`;
@@ -146,7 +154,10 @@ export function disabledSourceView(s) {
 export async function collectDisabledSourceStates(client) {
   const r = await client.query(
     `SELECT source, disabled_until, manual_disable, consecutive_walls, last_wall_at, last_wall_kind, last_wall_detail,
-            last_wall_url, last_wall_snapshot, reset_at, wall_history
+            last_wall_url, last_wall_snapshot, reset_at, wall_history,
+            (SELECT coalesce(jsonb_agg(h.e ORDER BY h.i), '[]'::jsonb)
+               FROM jsonb_array_elements(wall_history) WITH ORDINALITY AS h(e, i)
+              WHERE reset_at IS NULL OR (h.e->>'at')::timestamptz > reset_at) AS counted_history
      FROM ic_source_state WHERE manual_disable = true OR disabled_until > now() ORDER BY source`,
   );
   return r.rows.map(describeDisabledSource);

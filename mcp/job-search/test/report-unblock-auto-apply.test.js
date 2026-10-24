@@ -164,7 +164,7 @@ describe('SOURCE DISABLED headline (Item 6)', () => {
       const rows = await collectLatchedSources(client);
       const mine = rows.filter((r) => r.source === SRC);
       // No wall history (a row from before sql/028): the count and date fall back to the row itself.
-      assert.deepEqual(mine, [{ source: SRC, since: '2026-10-01T12:00:00.000Z', reason: 'auto-disabled after 3 failed scans (2026-10-01): reason not recorded' }]);
+      assert.deepEqual(mine, [{ source: SRC, since: '2026-10-01T12:00:00.000Z', reason: 'auto-disabled after 3 failed scans (2026-10-01, earlier dates not recorded): reason not recorded' }]);
       const report = await buildScanReport(client, { sinceOverride: null });
       assert.ok(report.latchedSources.some((r) => r.source === SRC));
       await client.query('UPDATE ic_source_state SET manual_disable = false WHERE source = $1', [SRC]);
