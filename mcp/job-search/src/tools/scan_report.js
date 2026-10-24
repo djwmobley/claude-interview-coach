@@ -8,7 +8,7 @@ import { z } from 'zod';
 import { untrusted } from './_shared.js';
 import { buildScanReport, buildReportSubject, renderReportText, resolveReportWindow, homeLocationNormsFor } from '../core/report.js';
 import { buildRegistry } from '../core/urlguard.js';
-import { redactMailIntakeForModel } from '../core/mail-intake-report.js';
+import { fenceMailIntakeForModel, RECRUITER_MAIL_PREFACE } from '../core/mail-intake-report.js';
 import { DEFAULT_REPORT_HOME_MIN_PRESCORE } from '../core/config.js';
 import { classifyGoogleTokenState } from '../core/google.js';
 
@@ -44,9 +44,10 @@ export const tool = {
     // broken_missing_file rather than throwing.
     const googleAuthState = await classifyGoogleTokenState(deps.env?.GOOGLE_TOKEN_FILE ?? '', { gmail: true, gmailRead: true });
     const subject = buildReportSubject(report, {});
-    // No model reads intake text: the Recruiter mail section reaches this tool's output as counts per bucket
-    // plus "see dashboard Review", never a sender, subject or snippet (test/mail-intake-no-model.test.js).
-    const modelReport = { ...report, mailIntake: redactMailIntakeForModel(report.mailIntake) };
+    // The model MAY read recruiter mail, but only as fenced untrusted data: every message-derived field of the
+    // Recruiter mail section sits inside the repo's untrusted() wrapper, behind a one-line preface, and this tool
+    // has no power beyond reading (test/mail-intake-no-model.test.js).
+    const modelReport = { ...report, mailIntake: fenceMailIntakeForModel(report.mailIntake) };
     const text = renderReportText(/** @type {any} */ (modelReport), registry, googleAuthState);
     return {
       ok: true,
@@ -61,6 +62,7 @@ export const tool = {
       home_locations_count: report.homeLocations.rows.length,
       review_queue_open: report.reviewQueue.total,
       disabled_sources: report.disabledSources.map((s) => s.source),
+      recruiter_mail_notice: RECRUITER_MAIL_PREFACE,
       report: untrusted(text),
       hint: 'this call never advances the report marker; the scheduled bin/remind.js digest is unaffected',
     };

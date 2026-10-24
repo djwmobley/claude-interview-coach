@@ -1635,7 +1635,13 @@ async function executeRun(p) {
               gmailReadFailed = true;
               const http = /gmail: (40[13]) on/.exec(ev.message)?.[1];
               const slug = /gmail: (broken_[a-z_]+)/.exec(ev.message)?.[1] ?? (http ? `auth_${http}` : 'auth_unavailable');
-              await recordCapabilitySafe([{ capability: 'read', ok: false, state: slug, missing: slug === 'broken_missing_scopes' ? [SCOPE_GMAIL_READONLY] : [] }]);
+              // A dead grant (invalid_grant, no refresh token, a refresh error, a missing or malformed token file)
+              // breaks send and calendar too, because they share it; a missing scope or an HTTP refusal breaks read only.
+              if (/^broken_/.test(slug) && slug !== 'broken_missing_scopes') {
+                await recordCapabilitySafe(outcomesFromTokenState(/** @type {any} */ ({ state: slug, code: 'unknown' })));
+              } else {
+                await recordCapabilitySafe([{ capability: 'read', ok: false, state: slug, missing: slug === 'broken_missing_scopes' ? [SCOPE_GMAIL_READONLY] : [] }]);
+              }
             }
             if (ev.code === 'BOARD_NOT_FOUND' || ev.code === 'BAD_RESPONSE') {
               // A configured board that does not answer is a config defect: visible as partial, never silent.

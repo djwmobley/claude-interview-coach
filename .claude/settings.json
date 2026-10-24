@@ -17,6 +17,18 @@
         ]
       }
     ],
+    "PostToolUse": [
+      {
+        "matcher": "mcp__job-search__.*|mcp__claude_ai_Gmail__.*|mcp__google-workspace__.*gmail.*",
+        "hooks": [
+          {
+            "type": "command",
+            "command": "node \"$CLAUDE_PROJECT_DIR/.claude/hooks/post-tool-use-data-fence.cjs\"",
+            "timeout": 10000
+          }
+        ]
+      }
+    ],
     "UserPromptSubmit": [
       {
         "matcher": "",

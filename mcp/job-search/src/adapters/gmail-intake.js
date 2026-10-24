@@ -12,7 +12,8 @@
  *      LinkedIn InMail sender), capped at cfg.maxBodies; the overflow is reported, never dropped
  * A budget refusal ends the pass early (outcome partial_budget) and keeps what was read.
  *
- * No model reads anything here or downstream of here (test/mail-intake-no-model.test.js).
+ * Nothing here calls a model. Intake text reaches models only as fenced untrusted data and never with tool power
+ * (test/mail-intake-no-model.test.js).
  */
 import { classifyMail, headerMap, parseAddress, normalizeSelf, sanitizeSnippet, summarizeIntake, rulesVersionFor, parseInmail } from '../core/mail-intake.js';
 import { decodeMessageBody } from '../core/mail-mime.js';

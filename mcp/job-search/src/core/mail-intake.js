@@ -1,6 +1,6 @@
 // @ts-check
 /**
- * Personal mail intake classifier (sql/029). PURE: no network, no DB, no model. Every Gmail message in the
+ * Personal mail intake classifier (sql/029). PURE: no network, no DB, no model call. Every Gmail message in the
  * intake window maps to EXACTLY ONE bucket, checked in this fixed priority; an input nothing matches lands in
  * the default branch (`unsorted`), whose failure mode is a visible, correctable row, never a silent drop:
  *
@@ -18,8 +18,9 @@
  *   7 bulk_noise        bulk headers and no recruiter match. Counted, top senders listed.
  *   8 unsorted          the default.
  *
- * Privacy: nothing in this module is ever passed to a model. Triage and every Claude step are structurally
- * separate (test/mail-intake-no-model.test.js asserts it).
+ * Model rule: intake text reaches a model only as fenced untrusted data (the untrusted() wrapper, behind a
+ * preface line) and never to a process with tool power. Triage and the Claude-spawning steps never receive it
+ * (test/mail-intake-no-model.test.js asserts it).
  */
 import crypto from 'node:crypto';
 import { classifyBody } from '../apply/mail-classifier.js';
