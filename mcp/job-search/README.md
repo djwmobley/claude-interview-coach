@@ -468,7 +468,10 @@ an `excluded` flag. Invalid output, a timeout or a refusal leaves the item unsco
 A real opportunity becomes a listing with `source='recruiter_mail'`, key = Gmail thread, status `new` (the dashboard New list),
 idempotent. `is_opportunity=false` creates none. An existing listing with the same company and title (for example a manual one) is
 linked through an auto note and no second row is made. A reply in the thread updates the extracted fields and an automatic fit,
-never a human status or a human fit event. Recruiter-mail listings are excluded from auto-apply selection, every triage loader and
+never a human status or a human fit event. Title and company are overwritten only while they still equal the value the scorer last
+wrote (`ic_job_listings.mail_auto_fields`, `sql/031`); notes are appended, never replaced. An item that spends its last attempt
+(including an apply error) ends `failed` (unscored, still surfaced, text cleared), and a sweep clears `score_text` on any row
+first seen more than 14 days ago. Recruiter-mail listings are excluded from auto-apply selection, every triage loader and
 the dedup lookups, and the expiry sweep is source-scoped, so no scan expires or merges them. Budget: its own reserve,
 `scoreMaxPerRun` 20 and `scoreMaxPerDay` 40 in `config/mail-intake.json` (separate from triage `maxBatchesPerRun`); body
 truncated at 4 KB. Items show fit, role, employer and client clues, comp and flags on the Review page and in the report; in

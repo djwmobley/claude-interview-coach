@@ -343,16 +343,28 @@ export async function upsertRecruiterMailListing(client, item, score, exclusion,
 
   return withTransaction(client, async (db) => {
     const existing = (await db.query(
-      `SELECT id, status, fit_score FROM ic_job_listings WHERE source = $1 AND external_id = $2 AND duplicate_of IS NULL FOR UPDATE`,
+      `SELECT id, status, fit_score, title, company, notes, mail_auto_fields FROM ic_job_listings WHERE source = $1 AND external_id = $2 AND duplicate_of IS NULL FOR UPDATE`,
       [MAIL_SOURCE, key],
     )).rows[0];
     if (existing) {
       const id = Number(existing.id);
+      // Per-field provenance (sql/031): title and company are overwritten only while they still hold the value the
+      // scorer last wrote (mail_auto_fields); any human edit changes the stored value, so the field is left alone.
+      // Notes are appended, never replaced. A row with no provenance (NULL) keeps all three.
+      const auto = existing.mail_auto_fields && typeof existing.mail_auto_fields === 'object' ? existing.mail_auto_fields : {};
+      const ownTitle = typeof auto.title === 'string' && auto.title === existing.title;
+      const ownCompany = typeof auto.company === 'string' && auto.company === existing.company;
+      const nextTitle = ownTitle ? title : existing.title;
+      const nextCompany = ownCompany ? company : existing.company;
+      const prevNotes = typeof existing.notes === 'string' ? existing.notes : '';
+      const nextNotes = prevNotes.includes(notes) ? prevNotes : (prevNotes ? `${prevNotes}\n${notes}` : notes);
+      const nextAuto = { ...(typeof auto.title === 'string' ? { title: ownTitle ? title : auto.title } : {}), ...(typeof auto.company === 'string' ? { company: ownCompany ? company : auto.company } : {}) };
       await db.query(
         `UPDATE ic_job_listings SET title = $2, company = $3, company_norm = $4, title_norm = $5, location = $6, location_norm = $7, remote_mode = $8,
-           salary_min = $9, salary_max = $10, salary_raw = $11, salary_period = $12, notes = $13, last_seen = $14, times_seen = coalesce(times_seen, 0) + 1
+           salary_min = $9, salary_max = $10, salary_raw = $11, salary_period = $12, notes = $13, last_seen = $14, times_seen = coalesce(times_seen, 0) + 1,
+           mail_auto_fields = $15::jsonb
          WHERE id = $1`,
-        [id, title, company, companyNorm, titleNorm, loc, locationNorm, remoteMode, salary.min, salary.max, compText(score), c?.period ?? null, notes, ctx.now],
+        [id, nextTitle, nextCompany, ownCompany ? companyNorm : normalizeCompany(nextCompany).company_norm, ownTitle ? titleNorm : normalizeTitle(nextTitle).title_norm, loc, locationNorm, remoteMode, salary.min, salary.max, compText(score), c?.period ?? null, nextNotes, ctx.now, JSON.stringify(nextAuto)],
       );
       const humanFit = await db.query(`SELECT 1 FROM ic_job_events WHERE listing_id = $1 AND kind = 'fit' AND actor <> 'auto' LIMIT 1`, [id]);
       if ((humanFit.rowCount ?? 0) === 0) {
@@ -395,10 +407,10 @@ export async function upsertRecruiterMailListing(client, item, score, exclusion,
     const ins = await db.query(
       `INSERT INTO ic_job_listings
          (title, company, status, url, url_normalized, notes, record_kind, source, external_id, company_norm, title_norm, location, location_norm, remote_mode,
-          salary_min, salary_max, salary_raw, salary_period, posted_at, first_seen, last_seen, times_seen, absent_runs, fit_score, fit_basis, noise_class, detail_skipped)
-       VALUES ($1,$2,$3,$4,$5,$6,'listing',$7,$8,$9,$10,$11,$12,$13,$14,$15,$16,$17,$18,$19,$19,1,0,$20,'description','ok_manual',false)
+          salary_min, salary_max, salary_raw, salary_period, posted_at, first_seen, last_seen, times_seen, absent_runs, fit_score, fit_basis, noise_class, detail_skipped, mail_auto_fields)
+       VALUES ($1,$2,$3,$4,$5,$6,'listing',$7,$8,$9,$10,$11,$12,$13,$14,$15,$16,$17,$18,$19,$19,1,0,$20,'description','ok_manual',false,$21::jsonb)
        ON CONFLICT DO NOTHING RETURNING id`,
-      [title, company, status, link, link, notes, MAIL_SOURCE, key, companyNorm, titleNorm, loc, locationNorm, remoteMode, salary.min, salary.max, compText(score), c?.period ?? null, postedAt, ctx.now, score.fit_score],
+      [title, company, status, link, link, notes, MAIL_SOURCE, key, companyNorm, titleNorm, loc, locationNorm, remoteMode, salary.min, salary.max, compText(score), c?.period ?? null, postedAt, ctx.now, score.fit_score, JSON.stringify({ title, company })],
     );
     if ((ins.rowCount ?? 0) === 0) return { action: /** @type {const} */ ('none'), listingId: null, flags: ['insert_conflict'] };
     const id = Number(ins.rows[0].id);
@@ -426,6 +438,29 @@ export async function upsertRecruiterMailListing(client, item, score, exclusion,
  * @property {string|null} last_failure_reason
  */
 
+/** Stored message text is kept at most this long, whatever the item's state. */
+export const MAIL_SCORE_TEXT_TTL_DAYS = 14;
+
+/**
+ * Bounded sweep: an item that spent every attempt but is still pending becomes failed (unscored, still surfaced),
+ * and score_text is cleared on any row first seen more than 14 days ago whatever its state (a pending row that
+ * loses its text becomes failed so it does not look retryable). Idempotent; returns the rows touched.
+ * @param {import('pg').ClientBase} client
+ * @param {Date} now
+ */
+export async function sweepMailScoreText(client, now) {
+  const r = await client.query(
+    `UPDATE ic_mail_intake
+        SET score_flags = CASE WHEN score_status = 'pending' THEN ARRAY['score_failed:expired']::text[] ELSE score_flags END,
+            score_status = CASE WHEN score_status = 'pending' THEN 'failed' ELSE score_status END,
+            score_text = NULL
+      WHERE (score_status = 'pending' AND score_attempts >= $1)
+         OR (score_text IS NOT NULL AND first_seen_at < $2::timestamptz - make_interval(days => $3::int))`,
+    [MAIL_SCORE_MAX_ATTEMPTS, now.toISOString(), MAIL_SCORE_TEXT_TTL_DAYS],
+  );
+  return r.rowCount ?? 0;
+}
+
 /**
  * Score the pending recruiter-mail items of this run, one headless tool-less model call each.
  * @param {import('pg').ClientBase} client
@@ -435,6 +470,7 @@ export async function upsertRecruiterMailListing(client, item, score, exclusion,
 export async function runMailScoreStage(client, o) {
   const now = o.now ?? new Date();
   const cfg = o.config.mailIntake;
+  await sweepMailScoreText(client, now).catch((err) => o.log?.({ evt: 'mail_score_sweep_failed', ...errFields(err) }));
   /** @type {MailScoreStats} */
   const stats = { enabled: false, reason: null, considered: 0, attempted: 0, scored: 0, failed: 0, capped_run: 0, capped_day: 0, last_failure_reason: null };
   if (!cfg || cfg.enabled === false || cfg.scoreEnabled === false) {
@@ -536,6 +572,11 @@ export async function runMailScoreStage(client, o) {
     } catch (err) {
       stats.failed++;
       stats.last_failure_reason = 'apply_error';
+      // The attempt is spent; on the final one the item ends in the terminal failed state (unscored, still surfaced,
+      // text cleared) instead of sitting pending with its stored text forever.
+      if (item.score_attempts + 1 >= MAIL_SCORE_MAX_ATTEMPTS) {
+        await client.query(`UPDATE ic_mail_intake SET score_status = 'failed', score_flags = ARRAY['score_failed:apply_error']::text[], score_text = NULL WHERE message_id = $1`, [item.message_id]).catch(() => {});
+      }
       o.log?.({ evt: 'mail_score_apply_failed', message_id: item.message_id, ...errFields(err) });
     }
   }
