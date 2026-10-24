@@ -19,6 +19,7 @@ import { normalizeLocation } from './normalize.js';
 import { JobSearchError } from './errors.js';
 import { UNCONFIRMED_SUBMIT_KINDS } from './applications.js';
 import { collectGmailManualApply } from './gmail-detail.js';
+import { collectDisabledSourceStates } from './source-state.js';
 import { closedReason } from '../targets/coverage.js';
 
 // Ready to apply section (spec-ready-to-apply-v1 section 8): lives in its own module, re-exported here.
@@ -588,15 +589,8 @@ export async function collectReviewQueueSummary(client, since) {
  * @returns {Promise<Array<{ source: string, since: string|null, reason: string }>>}
  */
 export async function collectLatchedSources(client) {
-  const r = await client.query('SELECT source, last_wall_at, consecutive_walls FROM ic_source_state WHERE manual_disable = true ORDER BY source');
-  return r.rows.map((row) => {
-    const walls = Number(row.consecutive_walls ?? 0);
-    return {
-      source: String(row.source),
-      since: row.last_wall_at ? new Date(row.last_wall_at).toISOString() : null,
-      reason: walls > 0 ? `${walls} consecutive wall${walls === 1 ? '' : 's'}` : 'manual disable',
-    };
-  });
+  const all = await collectDisabledSourceStates(client);
+  return all.filter((s) => s.manual).map((s) => ({ source: s.source, since: s.since, reason: s.text }));
 }
 
 /**
@@ -606,7 +600,7 @@ export async function collectLatchedSources(client) {
  */
 export function latchedSourceLines(latched) {
   if (!Array.isArray(latched)) return [];
-  return latched.map((s) => `SOURCE DISABLED: ${s.source} since ${s.since ?? 'unknown'} (${s.reason}); re-enable on dashboard Scans`);
+  return latched.map((s) => `SOURCE DISABLED: ${s.source}, ${s.reason}; last failed ${s.since ?? 'at an unknown time'}; re-enable on dashboard Scans`);
 }
 
 /** Per-sender counters summed across every run in the report (Gmail intake addendum). */
@@ -731,10 +725,20 @@ export function gmailManualApplyLines(items) {
   return ['', `Gmail jobs to apply to by hand: ${items.length}; see Ready to apply`];
 }
 
+/**
+ * The sentence for one disabled or paused source (see source-state.js). Total over data built without a
+ * `text` (older callers, hand-built report data): it still says whether the source is latched or paused.
+ * @param {{ text?: string, manual?: boolean, until?: string|null }} s
+ */
+function disabledSourceText(s) {
+  if (typeof s.text === 'string' && s.text) return s.text;
+  return s.manual ? 'disabled: reason not recorded' : `paused until ${s.until ?? 'unknown'}: reason not recorded`;
+}
+
 /** @param {import('pg').ClientBase} client */
 export async function collectDisabledSources(client) {
-  const r = await client.query(`SELECT source, disabled_until, manual_disable FROM ic_source_state WHERE manual_disable = true OR disabled_until > now() ORDER BY source`);
-  return r.rows.map((row) => ({ source: row.source, until: row.manual_disable ? null : row.disabled_until ? new Date(row.disabled_until).toISOString() : null, manual: row.manual_disable }));
+  const all = await collectDisabledSourceStates(client);
+  return all.map((s) => ({ source: s.source, until: s.until, manual: s.manual, text: s.text }));
 }
 
 // ---------------------------------------------------------------------------
@@ -1224,7 +1228,7 @@ export function renderReportText(data, registry, googleAuthState, dashboardHealt
   lines.push('');
   lines.push('== Disabled sources ==');
   if (data.disabledSources.length === 0) lines.push('(none)');
-  for (const s of data.disabledSources) lines.push(`  ${s.source}: ${s.manual ? 'manual disable' : `until ${s.until}`}`);
+  for (const s of data.disabledSources) lines.push(`  ${s.source}: ${disabledSourceText(s)}`);
   return lines.join('\n');
 }
 
@@ -1296,7 +1300,7 @@ export function renderReportHtml(data, registry, googleAuthState, dashboardHealt
   parts.push(data.reviewQueue.topReasons.length ? `<ul>${data.reviewQueue.topReasons.map((t) => `<li>${esc(t.reason)}: ${t.count}</li>`).join('')}</ul>` : '<p>(none)</p>');
   for (const b of data.reviewQueue.bulkToday ?? []) parts.push(`<p>Review queue: ${b.count} returned to untriaged by bulk ${esc(b.mode)}</p>`);
   parts.push('<h3>Disabled sources</h3>');
-  parts.push(data.disabledSources.length ? `<ul>${data.disabledSources.map((s) => `<li>${esc(s.source)}: ${s.manual ? 'manual disable' : `until ${esc(s.until)}`}</li>`).join('')}</ul>` : '<p>(none)</p>');
+  parts.push(data.disabledSources.length ? `<ul>${data.disabledSources.map((s) => `<li>${esc(s.source)}: ${esc(disabledSourceText(s))}</li>`).join('')}</ul>` : '<p>(none)</p>');
   return parts.join('\n');
 }
 
@@ -1399,7 +1403,7 @@ export function renderReportMarkdown(data, registry, googleAuthState, dashboardH
   lines.push('## Disabled sources');
   lines.push('');
   if (data.disabledSources.length === 0) lines.push('(none)');
-  for (const s of data.disabledSources) lines.push(`- ${s.source}: ${s.manual ? 'manual disable' : `until ${s.until}`}`);
+  for (const s of data.disabledSources) lines.push(`- ${s.source}: ${disabledSourceText(s)}`);
   return lines.join('\n');
 }
 

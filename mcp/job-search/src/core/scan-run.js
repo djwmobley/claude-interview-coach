@@ -65,6 +65,24 @@ import { runDraftStage } from '../targets/draft-stage.js';
 import { createSnapshotSaver } from './linkedin-snapshot.js';
 import { persistApplyTargetForListing, buildScanProbeRegistry } from './apply-target-persist.js';
 
+/** Hydration reloads a source may use per run (LinkedIn's Ember list is client-rendered); sources not listed get none. */
+const RELOAD_CAP_BY_SOURCE = Object.freeze(/** @type {Record<string, number>} */ ({ linkedin: 3 }));
+
+/**
+ * One reserver per source per run: true while the source has reloads left, false once its cap is spent.
+ * @param {string} sourceName
+ * @returns {() => boolean}
+ */
+export function makeReloadReserver(sourceName) {
+  const cap = RELOAD_CAP_BY_SOURCE[sourceName] ?? 0;
+  let used = 0;
+  return () => {
+    if (used >= cap) return false;
+    used++;
+    return true;
+  };
+}
+
 /** Advisory lock key shared by MCP and CLI (spec section 5). */
 export const LOCK_KEY = 730193001;
 
@@ -700,6 +718,7 @@ async function executeRun(p) {
     // budget below; reuses the same BUDGET_EXHAUSTED code so the scheduler/adapter stop this source the
     // same way they already do for the daily cap.
     let pagesThisRun = 0;
+    const reserveReload = makeReloadReserver(s.name);
     /** @type {import('../adapters/base.js').AdapterCtx['fetchText']} */
     const fetchText = async (url, o = {}) => {
       const method = o.method ?? 'GET';
@@ -750,6 +769,8 @@ async function executeRun(p) {
         if (!r.ok) throw new JobSearchError('BUDGET_EXHAUSTED', `daily page budget exhausted for ${s.name}`, { details: { source: s.name, remaining_pages: r.remainingPages } });
         pagesThisRun++;
       },
+      // A hydration reload (LinkedIn): bounded per run, reserves no page budget (the page was already paid for).
+      reserveReload,
       async reserveDetail() {
         const r = await reserve(client, s.name, { details: 1 }, caps_, now);
         if (!r.ok) throw new JobSearchError('BUDGET_EXHAUSTED', `daily detail budget exhausted for ${s.name}`, { details: { source: s.name, remaining_details: r.remainingDetails } });
@@ -870,7 +891,7 @@ async function executeRun(p) {
     if (!blockedDetailSources.has(s.name)) {
       blockedDetailSources.add(s.name);
       if (!dryRun) {
-        const w = await recordWall(client, detailWallKey(s.name), now);
+        const w = await recordWall(client, detailWallKey(s.name), null, { kind: 'detail_blocked', detail: String(cur.outcome).slice(0, 120), runId });
         log({ evt: 'detail_blocked', run_id: runId, source: s.name, reason: cur.outcome, consecutive: w.consecutiveWalls });
       }
     }
@@ -1601,7 +1622,14 @@ async function executeRun(p) {
             if (!verdict.stopSource) return { stopSource: false };
             walled = true;
             partial = true;
-            const w = await recordWall(client, s.name, now);
+            // A dry run still reports the wall (errors[], walled) but never writes ic_source_state.
+            if (dryRun) {
+              errors.push({ source: s.name, code: verdict.code, message: `${verdict.reason}; dry run, source state not changed` });
+              return { stopSource: true };
+            }
+            const w = await recordWall(client, s.name, null, {
+              kind: ev.wallKind ?? verdict.kind, detail: ev.detail ?? verdict.reason, url: ev.signals.url ?? null, snapshot: ev.snapshot ?? null, runId,
+            });
             errors.push({ source: s.name, code: verdict.code, message: `${verdict.reason}; source disabled ${w.manual ? 'until manual re-enable' : w.hours + ' h'}` });
             return { stopSource: true };
           },
@@ -1687,7 +1715,7 @@ async function executeRun(p) {
       if (result) {
         stats.stale_dropped += result.stale;
         if (result.completed && !walled) {
-          await recordClean(client, s.name);
+          if (!dryRun) await recordClean(client, s.name);
           // Pagination boundary (spec 3.2): rows on the deepest page get `stale`, not an absence, but only when some
           // query was actually cut off by maxPages. A source that listed everything (Greenhouse board, Lever tail,
           // Workday total reached) has no boundary, so every unseen row counts as absent.

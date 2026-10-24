@@ -26,6 +26,7 @@ import { register as registerCredentials } from './routes/credentials.js';
 import { register as registerMemory } from './routes/memory.js';
 import { register as registerAnalytics } from './routes/analytics.js';
 import { register as registerSources } from './routes/sources.js';
+import { register as registerWallSnapshots } from './routes/wall-snapshots.js';
 import { register as registerGoogle } from './routes/google.js';
 import { register as registerGoogleReauth } from './routes/google-reauth.js';
 import { register as registerEasyApply } from './routes/easy-apply.js';
@@ -52,6 +53,7 @@ import { register as registerTargetDrafts } from './routes/target-drafts.js';
  * @property {(() => Promise<import('../core/followups.js').CalendarDeps|null>)|null} calendar
  * @property {ReturnType<typeof import('./calendar-cache.js').createCalendarCache>} calendarCache
  * @property {ReturnType<typeof import('./scan-runner.js').createScanRunner>} scanRunner
+ * @property {string} [snapshotDir] test seam only: overrides <JOBSEARCH_LOG_DIR>/linkedin-snapshots for GET /api/wall-snapshots/:file
  * @property {string} outputRoot absolute path to output/
  * @property {{ read: (target: string) => Promise<{username:string,password:string}|null>, write: (target: string, username: string, password: string) => Promise<void>, delete: (target: string) => Promise<boolean>, list: () => Promise<string[]> }} [credentials]
  *   apply pipeline slice 4 (src/core/credentials.js's createCredentials()). bin/dashboard.js always wires
@@ -302,6 +304,7 @@ export function createDashboardServer(deps, opts = {}) {
   registerMemory(router, deps);
   registerAnalytics(router, deps);
   registerSources(router, deps);
+  registerWallSnapshots(router, deps);
   registerGoogle(router, deps);
   registerGoogleReauth(router, deps);
   registerStreamRoute(router, streamHub);

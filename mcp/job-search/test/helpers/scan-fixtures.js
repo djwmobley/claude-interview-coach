@@ -170,7 +170,7 @@ export const fakeLookup = async () => [{ address: '93.184.216.34', family: 4 }];
  * @param {{ recorder?: RecordedRequest[], indeedCards?: any[], linkedinCards?: any[], jsonld?: any[], listItems?: any[], html?: string, emptyState?: boolean }} [o]
  */
 export function makeFakeSession(o = {}) {
-  const state = { attached: 0, closed: 0, reconciled: 0, disconnected: false };
+  const state = { attached: 0, closed: 0, reconciled: 0, disconnected: false, reloads: 0, hydrationPolls: 0 };
   const connectSession = async () => {
     const session = {
       async attachPage() {
@@ -183,6 +183,11 @@ export function makeFakeSession(o = {}) {
             return { status: () => 200, headers: () => ({}) };
           },
           url: () => current,
+          async reload() {
+            state.reloads++;
+            if (o.recorder) o.recorder.push({ method: 'GET', url: current });
+            return { status: () => 200, headers: () => ({}) };
+          },
           async content() {
             return o.html ?? '<html><body></body></html>';
           },
@@ -193,6 +198,9 @@ export function makeFakeSession(o = {}) {
               case 'indeedEmptyState': return o.emptyState ?? true;
               case 'linkedinJobCards': return o.linkedinCards ?? [];
               case 'linkedinEmptyState': return o.emptyState ?? true;
+              // LinkedIn hydration probe and search shell: by default the page never renders anything (a permanent skeleton).
+              case 'linkedinHydration': state.hydrationPolls++; return { cards: (o.linkedinCards ?? []).length, empty: o.emptyState ?? true, shell: false };
+              case 'linkedinSearchShell': return { shell: false, path: '/jobs/search/', keywords: null, location: null };
               case 'linkedinJobDetail': return { title: 't', company: 'c', location: 'l', description: 'Fake LinkedIn detail description text.' };
               case 'wallMarkers': return { challengeCloudflare: false, challengeForm: false, recaptcha: false, title: 'x', url: current.split('?')[0] };
               case 'scrollStep': return { before: 100, after: 100, atBottom: true };

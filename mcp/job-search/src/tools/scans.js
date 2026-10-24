@@ -7,6 +7,7 @@
  */
 import { z } from 'zod';
 import { JobSearchError } from '../core/errors.js';
+import { reenableSource } from '../browser/wall.js';
 
 export const schema = {
   action: z.enum(['status', 'enable_source', 'cancel']),
@@ -63,13 +64,8 @@ export const tool = {
     }
     if (a.action === 'enable_source') {
       if (!a.source) throw new JobSearchError('VALIDATION', 'source is required');
-      const r = await deps.withClient((c) => c.query(
-        `INSERT INTO ic_source_state (source, consecutive_walls, disabled_until, manual_disable) VALUES ($1, 0, NULL, false)
-         ON CONFLICT (source) DO UPDATE SET consecutive_walls = 0, disabled_until = NULL, manual_disable = false, last_wall_at = ic_source_state.last_wall_at
-         RETURNING source`,
-        [a.source],
-      ));
-      return { ok: true, source: r.rows[0].source, enabled: true };
+      const stored = await deps.withClient((c) => reenableSource(c, a.source));
+      return { ok: true, source: stored, enabled: true };
     }
     if (!a.run_id) throw new JobSearchError('VALIDATION', 'run_id is required for cancel');
     const r = await deps.withClient((c) => c.query(

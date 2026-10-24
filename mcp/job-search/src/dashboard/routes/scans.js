@@ -8,6 +8,8 @@ import { JobSearchError } from '../../core/errors.js';
 import { cdpReachable, launchChrome } from '../../../bin/scan.js';
 import { sendJson } from '../http.js';
 import { adapterNames } from '../../adapters/index.js';
+import { reenableSource } from '../../browser/wall.js';
+import { collectDisabledSourceStates, disabledSourceView } from '../../core/source-state.js';
 
 /** @param {any} r */
 function formatRunFull(r) {
@@ -110,7 +112,10 @@ export function register(router, deps) {
     const name = raw.trim().toLowerCase();
     if (deps.config) {
       const known = new Set(Object.keys(deps.config.adapters.adapters));
-      if (!known.has(name)) throw new JobSearchError('NOT_FOUND', `unknown source: ${name}`, { hint: `known: ${[...known].join(', ')}` });
+      // A detail-fetch latch lives under its own "<source>:detail" key (wall.js detailWallKey); it is
+      // re-enabled the same way as the list latch of the adapter it belongs to.
+      const base = name.endsWith(':detail') ? name.slice(0, -':detail'.length) : name;
+      if (!known.has(base)) throw new JobSearchError('NOT_FOUND', `unknown source: ${name}`, { hint: `known: ${[...known].join(', ')}` });
     }
     const existing = await deps.withClient((c) => c.query('SELECT manual_disable, disabled_until FROM ic_source_state WHERE source = $1', [name]));
     const row = existing.rows[0];
@@ -120,14 +125,14 @@ export function register(router, deps) {
       // or a row that is not currently disabled, has nothing to re-enable.
       return sendJson(ctx.res, 200, { ok: true, source: name, enabled: true, already_enabled: true });
     }
-    const r = await deps.withClient((c) => c.query(
-      `INSERT INTO ic_source_state (source, consecutive_walls, disabled_until, manual_disable) VALUES ($1, 0, NULL, false)
-       ON CONFLICT (source) DO UPDATE SET consecutive_walls = 0, disabled_until = NULL, manual_disable = false, last_wall_at = ic_source_state.last_wall_at
-       RETURNING source`,
-      [name],
-    ));
-    sendJson(ctx.res, 200, { ok: true, source: r.rows[0].source, enabled: true, already_enabled: false });
+    const stored = await deps.withClient((c) => reenableSource(c, name));
+    sendJson(ctx.res, 200, { ok: true, source: stored, enabled: true, already_enabled: false });
   }, { allowEmptyBody: true });
+
+  router.register('GET', '/api/sources/disabled', async (ctx) => {
+    const rows = await deps.withClient((c) => collectDisabledSourceStates(c));
+    sendJson(ctx.res, 200, { ok: true, sources: rows.map(disabledSourceView) });
+  });
 
   router.register('GET', '/api/profiles', async (ctx) => {
     const r = await deps.withClient((c) => c.query(

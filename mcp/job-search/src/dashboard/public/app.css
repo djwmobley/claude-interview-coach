@@ -533,3 +533,10 @@ textarea.notes-textarea { min-height: 100px; }
 .targets-excerpt { white-space: pre-wrap; word-break: break-word; background: var(--surface); border: 1px solid var(--border); border-radius: 4px; padding: 6px 8px; margin: 4px 0 0; font-size: 12px; max-height: 160px; overflow: auto; }
 .targets-form { margin-top: 8px; }
 .targets-tile__row { display: grid; grid-template-columns: repeat(3, 1fr); gap: 8px; margin-bottom: 8px; }
+/* Disabled and paused sources (Home, Runs): reuses .approval-section; no color beyond the accent. */
+.disabled-sources__list { list-style: none; margin: 0; padding: 0; }
+.disabled-sources__row { display: flex; flex-wrap: wrap; align-items: baseline; gap: 8px; padding: 4px 0; border-top: 1px solid var(--border); }
+.disabled-sources__row:first-child { border-top: 0; }
+.disabled-sources__name { color: var(--text-strong); }
+.disabled-sources__text { flex: 1 1 320px; word-break: break-word; }
+.disabled-sources__link { color: var(--muted); font-size: 12px; }

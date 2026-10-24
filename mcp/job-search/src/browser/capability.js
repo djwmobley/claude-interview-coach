@@ -19,6 +19,8 @@ import { PAGE_MARKER } from './session.js';
 /**
  * @typedef {Object} Capability
  * @property {(url: string) => Promise<{ status: number|null, url: string, cfMitigated: string|null }>} goto
+ * @property {() => Promise<{ status: number|null, url: string, cfMitigated: string|null }>} [reload] reload the current page once (LinkedIn hydration retry); no page budget
+ * @property {(o?: { maxMs?: number, settleShellMs?: number|null }) => Promise<{ reason: string, waitedMs: number, cards: number, empty: boolean, shell: boolean }>} [waitForHydration] wait for a client-rendered list (cards or the explicit empty state)
  * @property {() => Promise<string>} readHtml
  * @property {() => Promise<void>} [bringToFront] bring the page to the front of the scan Chrome window
  * @property {(name: string, arg?: unknown) => Promise<unknown>} readJson
@@ -79,6 +81,18 @@ export function makeCapability(page, opts) {
   const checkAbort = () => {
     if (signal.aborted) throw new JobSearchError('INTERNAL', 'run aborted', { details: { source } });
   };
+  /**
+   * Shared tail of goto() and reload(): re-check the landing URL after any navigation-time redirect and
+   * reduce the response to scalars.
+   * @param {import('playwright-core').Response|null} res
+   */
+  const landed = async (res) => {
+    checkAbort();
+    const finalUrl = page.url();
+    await guardUrl(finalUrl, registry, { source, lookup: opts.lookup });
+    const cf = res ? res.headers()['cf-mitigated'] ?? null : null;
+    return { status: res ? res.status() : null, url: finalUrl.split('?')[0], cfMitigated: cf };
+  };
   /** @type {Capability} */
   const cap = {
     source,
@@ -91,12 +105,53 @@ export function makeCapability(page, opts) {
       const target = new URL(g.url.toString());
       target.hash = PAGE_MARKER;
       const res = await page.goto(target.toString(), { waitUntil: 'domcontentloaded', timeout: 45000 });
+      return landed(res);
+    },
+    /**
+     * Reload the current page once (the LinkedIn hydration retry). Same pacing hook and landing-URL guard
+     * as goto(); it does not reserve page budget, the adapter's per-run reload cap bounds it instead.
+     */
+    async reload() {
       checkAbort();
-      // Re-check the landing URL after any navigation-time redirect.
-      const finalUrl = page.url();
-      await guardUrl(finalUrl, registry, { source, lookup: opts.lookup });
-      const cf = res ? res.headers()['cf-mitigated'] ?? null : null;
-      return { status: res ? res.status() : null, url: finalUrl.split('?')[0], cfMitigated: cf };
+      if (onPage) await onPage();
+      const res = await page.reload({ waitUntil: 'domcontentloaded', timeout: 45000 });
+      return landed(res);
+    },
+    /**
+     * Wait for a client-rendered list to hydrate: resolves as soon as the page shows job cards or the
+     * explicit empty-state selector. The search shell alone does NOT end the wait, except when
+     * `settleShellMs` is a number (page 2+ of a query whose page 1 parsed): the shell must then stay up
+     * that long with no cards. Polls the named linkedinHydration extractor every 500 ms, never longer than
+     * `maxMs` (capped at 30 s), and checks the run's abort signal (which the run deadline also fires) before
+     * every poll. Returns what it saw; it never throws for a timeout.
+     * @param {{ maxMs?: number, settleShellMs?: number|null }} [o]
+     */
+    async waitForHydration(o = {}) {
+      const maxMs = Math.max(0, Math.min(30000, Number.isFinite(o.maxMs) ? /** @type {number} */ (o.maxMs) : 15000));
+      const settle = typeof o.settleShellMs === 'number' && o.settleShellMs >= 0 ? o.settleShellMs : null;
+      const body = /** @type {any} */ (EXTRACTORS.linkedinHydration);
+      const started = Date.now();
+      let elapsed = 0;
+      /** @type {number|null} */
+      let shellSince = null;
+      for (;;) {
+        checkAbort();
+        const s = /** @type {{ cards: number, empty: boolean, shell: boolean }} */ (await page.evaluate(body));
+        const done = (/** @type {string} */ reason) => ({ reason, waitedMs: elapsed, cards: s.cards, empty: s.empty, shell: s.shell });
+        if (s.cards > 0) return done('cards');
+        if (s.empty) return done('empty');
+        if (settle !== null && s.shell) {
+          if (shellSince === null) shellSince = elapsed;
+          if (elapsed - shellSince >= settle) return done('shell_settled');
+        } else {
+          shellSince = null;
+        }
+        if (elapsed >= maxMs) return done('timeout');
+        const step = Math.min(500, maxMs - elapsed);
+        await page.waitForTimeout(step);
+        // Real time can run ahead of the requested sleeps (a slow evaluate); never undercount it.
+        elapsed = Math.max(elapsed + step, Date.now() - started);
+      }
     },
     /** Bring this capability's page to the front of the scan Chrome window (interactive detail verification). */
     async bringToFront() {

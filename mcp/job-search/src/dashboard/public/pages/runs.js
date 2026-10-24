@@ -4,6 +4,7 @@ import { h, setChildren } from '../lib/dom.js';
 import { getJson } from '../lib/api.js';
 import { handleOutcome } from '../lib/outcome.js';
 import { dataTable } from '../components/data-table.js';
+import { disabledSourcesPanel } from '../components/disabled-sources.js';
 import { skeleton, emptyState } from '../components/empty-state.js';
 import { runStatusChip, triggerBadge, chipClassName } from '../components/chips.js';
 import { shortDateTime } from '../lib/format.js';
@@ -32,8 +33,11 @@ export async function render(container, params, app) {
       return;
     }
     const runs = outcome.body.runs;
+    // Advisory: a failure to load the disabled-sources list never blocks the runs list.
+    const offOutcome = await getJson('/api/sources/disabled');
     setChildren(container, [
       h('h1', { className: 'page-title', text: 'Runs' }),
+      offOutcome.kind === 'ok' ? disabledSourcesPanel({ sources: offOutcome.body.sources, onChanged: load }) : null,
       runs.length === 0 ? emptyState({ message: 'No scan runs recorded yet.' }) : dataTable({
         columns: ['Run', 'Started', 'Trigger', 'Status'],
         rows: runs.map((r) => {

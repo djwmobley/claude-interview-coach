@@ -42,13 +42,13 @@ async function columns(table) {
 }
 
 describe('sql/027_target_drafts.sql', () => {
-  test('registered in bin/migrate.js, schema.js AUX_MIGRATIONS and bootstrap-test-db.js, last after 026', () => {
+  test('registered in bin/migrate.js, schema.js AUX_MIGRATIONS and bootstrap-test-db.js, after 026', () => {
     const migrateSrc = fs.readFileSync(path.join(HERE, '..', 'bin', 'migrate.js'), 'utf8');
     assert.ok(migrateSrc.includes(`'${FILE}'`));
     assert.ok(AUX_MIGRATIONS.includes(FILE));
     assert.ok(BOOTSTRAP_MIGRATIONS.includes(FILE));
     assert.ok(AUX_MIGRATIONS.indexOf(FILE) > AUX_MIGRATIONS.indexOf('026_target_decisions.sql'));
-    assert.equal(AUX_MIGRATIONS.at(-1), FILE);
+    assert.ok(AUX_MIGRATIONS.indexOf(FILE) < AUX_MIGRATIONS.indexOf('028_source_wall_reason.sql'), 'later migrations come after 027');
   });
 
   test('the new columns and the edits table exist', async () => {
