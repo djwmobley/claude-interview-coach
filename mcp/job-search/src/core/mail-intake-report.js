@@ -69,6 +69,42 @@ export async function collectMailIntakeReport(client, runs, opts = {}) {
  * @typedef {Awaited<ReturnType<typeof collectMailIntakeReport>>|{ error: string }} MailIntakeReport
  */
 
+/**
+ * Escape markdown control characters in untrusted text (sender, subject, snippet) so a message cannot inject
+ * links, emphasis, headings, tables or HTML into the markdown report.
+ * @param {unknown} text
+ */
+export function escapeMarkdown(text) {
+  return String(text ?? '').replace(/[\\`*_{}()#+!|<>~&[\]]/g, (c) => `\\${c}`).replace(/^(\s*)([-=]{2,})/gm, '$1\\$2');
+}
+
+/**
+ * The model-safe view of the intake data: counts per bucket and a pointer to the dashboard, NO sender, subject,
+ * snippet or address. Every MCP tool output path that renders the report passes its data through this first, so
+ * no model ever receives intake text (test/mail-intake-no-model.test.js).
+ * @param {MailIntakeReport|null|undefined} data
+ * @returns {any}
+ */
+export function redactMailIntakeForModel(data) {
+  if (!data) return null;
+  if ('error' in data) return { error: 'unavailable' };
+  return {
+    ran: data.ran, items: [], more: 0, countsOnly: true, waiting: data.items.length + data.more, counts: data.counts,
+    topUnsorted: [], topBulk: [], notReadBeyondCap: data.notReadBeyondCap, metadataUnread: data.metadataUnread, outcomes: data.outcomes,
+  };
+}
+
+/**
+ * The model-safe view of a run's stats object: gmail.mail_intake keeps counts and outcome only (no sender lists).
+ * @param {any} stats
+ */
+export function redactRunStatsForModel(stats) {
+  const m = stats && stats.gmail && stats.gmail.mail_intake;
+  if (!m || typeof m !== 'object') return stats;
+  const { top_unsorted: _u, top_bulk: _b, error: _e, ...rest } = m;
+  return { ...stats, gmail: { ...stats.gmail, mail_intake: rest } };
+}
+
 /** @param {any} it */
 function itemHeader(it) {
   const who = it.from_name ? `${it.from_name} <${it.from_addr ?? 'unknown'}>` : (it.from_addr ?? 'unknown sender');
@@ -91,16 +127,24 @@ export function mailIntakeLines(data, opts = {}) {
     lines.push(`Recruiter mail: unavailable (${data.error})`, '');
     return lines;
   }
+  if (/** @type {any} */ (data).countsOnly) {
+    const d = /** @type {any} */ (data);
+    lines.push(`${d.waiting} recruiter-like or reply item${d.waiting === 1 ? '' : 's'} waiting; see dashboard Review.`);
+    lines.push(`Mail intake counts: ${BUCKETS.map((b) => `${b} ${d.counts?.[b] ?? 0}`).join(', ')}.`);
+    lines.push('');
+    return lines;
+  }
   const inbox = data.items.filter((i) => !i.spam);
   const spam = data.items.filter((i) => i.spam);
+  const e = md ? escapeMarkdown : (/** @type {unknown} */ x) => String(x ?? '');
   const itemLines = (/** @type {any[]} */ list) => {
     const out = [];
     for (const it of list) {
       const h = itemHeader(it);
-      out.push(`- ${h.date} | ${h.who} | ${h.subject} | ${h.tab} | ${h.kind}`);
-      if (it.reply_to_differs && it.reply_to) out.push(`  From ${it.from_addr ?? 'unknown'} but Reply-To ${it.reply_to}`);
+      out.push(`- ${h.date} | ${e(h.who)} | ${e(h.subject)} | ${h.tab} | ${h.kind}`);
+      if (it.reply_to_differs && it.reply_to) out.push(`  From ${e(it.from_addr ?? 'unknown')} but Reply-To ${e(it.reply_to)}`);
       if (it.body_unreadable) out.push('  body unreadable: review by hand');
-      if (it.snippet) out.push(`  ${it.snippet}`);
+      if (it.snippet) out.push(`  ${e(it.snippet)}`);
       if (h.link) out.push(md ? `  [Open in Gmail](${h.link})` : `  ${h.link}`);
     }
     return out;
@@ -115,7 +159,7 @@ export function mailIntakeLines(data, opts = {}) {
   if (data.outcomes.length) lines.push(`Mail intake outcome: ${data.outcomes.join(', ')}.`);
   if (data.ran) {
     lines.push(`Mail intake counts: ${BUCKETS.map((b) => `${b} ${data.counts[b] ?? 0}`).join(', ')}.`);
-    const fmt = (/** @type {Array<[string, number]>} */ l) => l.map(([a, n]) => `${a} (${n})`).join(', ');
+    const fmt = (/** @type {Array<[string, number]>} */ l) => l.map(([a, n]) => `${e(a)} (${n})`).join(', ');
     if (data.topUnsorted.length) lines.push(`Top unsorted senders: ${fmt(data.topUnsorted)}. Subjects are on the dashboard.`);
     if (data.topBulk.length) lines.push(`Top bulk senders: ${fmt(data.topBulk)}.`);
   }
@@ -134,6 +178,12 @@ export function mailIntakeHtml(data, esc) {
   const parts = ['<h3>Recruiter mail</h3>'];
   if ('error' in data) {
     parts.push(`<p>Recruiter mail: unavailable (${esc(data.error)})</p>`);
+    return parts;
+  }
+  if (/** @type {any} */ (data).countsOnly) {
+    const d = /** @type {any} */ (data);
+    parts.push(`<p>${Number(d.waiting)} recruiter-like or reply item${d.waiting === 1 ? '' : 's'} waiting; see dashboard Review.</p>`);
+    parts.push(`<p>Mail intake counts: ${esc(BUCKETS.map((b) => `${b} ${d.counts?.[b] ?? 0}`).join(', '))}.</p>`);
     return parts;
   }
   const li = (/** @type {any} */ it) => {

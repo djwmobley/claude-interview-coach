@@ -1600,6 +1600,8 @@ async function executeRun(p) {
       }
       const ctx = makeCtx(s);
       let walled = false;
+      /** Set once the Gmail alert or intake pass was refused (401/403 or an auth error); a later clean end must not clear it. */
+      let gmailReadFailed = false;
       /** @type {import('./scheduler.js').ScheduleResult|null} */
       let result = null;
       /** @type {Array<{ ev: import('../adapters/base.js').ListingEvent, rec: import('./normalize.js').NormalizedListing, decision: import('./dedup.js').Decision, ps: number, psRaw: number, noiseClass: string, seq: number }>} */
@@ -1623,9 +1625,16 @@ async function executeRun(p) {
             const msg = `${ev.code}: ${ev.message}`;
             if (!warnings.includes(msg)) warnings.push(msg);
             if (ev.code === 'BROWSER_UNAVAILABLE' || ev.code === 'UNRENDERABLE' || ev.code === 'AUTH_UNAVAILABLE' || ev.code === 'SUSPECTED_THROTTLE') partial = true;
+            if (ev.code === 'BAD_RESPONSE' && s.name === 'gmail' && /HTTP (401|403)/.test(ev.message)) {
+              // The alert pass got an auth refusal on a list call: Gmail read is broken, with the status as the reason.
+              gmailReadFailed = true;
+              await recordCapabilitySafe([{ capability: 'read', ok: false, state: `auth_${/HTTP (401|403)/.exec(ev.message)?.[1]}`, missing: [] }]);
+            }
             if (ev.code === 'AUTH_UNAVAILABLE' && s.name === 'gmail') {
               // Gmail read is down: record it per capability so the report can say how long (sql/029).
-              const slug = /gmail: (broken_[a-z_]+)/.exec(ev.message)?.[1] ?? 'auth_unavailable';
+              gmailReadFailed = true;
+              const http = /gmail: (40[13]) on/.exec(ev.message)?.[1];
+              const slug = /gmail: (broken_[a-z_]+)/.exec(ev.message)?.[1] ?? (http ? `auth_${http}` : 'auth_unavailable');
               await recordCapabilitySafe([{ capability: 'read', ok: false, state: slug, missing: slug === 'broken_missing_scopes' ? [SCOPE_GMAIL_READONLY] : [] }]);
             }
             if (ev.code === 'BOARD_NOT_FOUND' || ev.code === 'BAD_RESPONSE') {
@@ -1640,7 +1649,17 @@ async function executeRun(p) {
           async onSourceStats(ev) {
             /** @type {any} */ (stats)[s.name] = ev.stats;
             // A Gmail pass that reached its end proves the read grant works.
-            if (s.name === 'gmail') await recordCapabilitySafe([{ capability: 'read', ok: true, state: 'ok', missing: [] }]);
+            if (s.name === 'gmail') {
+              // ...unless the intake pass itself hit an auth refusal (401/403): that is Gmail read BROKEN, with the reason.
+              const intakeOutcome = String(ev.stats?.mail_intake?.outcome ?? 'ok');
+              const authFailed = /^auth_\d+$/.test(intakeOutcome) || /^list_http_(401|403)$/.test(intakeOutcome);
+              if (authFailed) {
+                gmailReadFailed = true;
+                await recordCapabilitySafe([{ capability: 'read', ok: false, state: intakeOutcome, missing: [] }]);
+              } else if (!gmailReadFailed) {
+                await recordCapabilitySafe([{ capability: 'read', ok: true, state: 'ok', missing: [] }]);
+              }
+            }
           },
           // Personal mail intake (sql/029): persist the classified rows. Never fails the scan.
           async onMailIntake(ev) {

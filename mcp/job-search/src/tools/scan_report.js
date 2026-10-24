@@ -8,6 +8,7 @@ import { z } from 'zod';
 import { untrusted } from './_shared.js';
 import { buildScanReport, buildReportSubject, renderReportText, resolveReportWindow, homeLocationNormsFor } from '../core/report.js';
 import { buildRegistry } from '../core/urlguard.js';
+import { redactMailIntakeForModel } from '../core/mail-intake-report.js';
 import { DEFAULT_REPORT_HOME_MIN_PRESCORE } from '../core/config.js';
 import { classifyGoogleTokenState } from '../core/google.js';
 
@@ -43,7 +44,10 @@ export const tool = {
     // broken_missing_file rather than throwing.
     const googleAuthState = await classifyGoogleTokenState(deps.env?.GOOGLE_TOKEN_FILE ?? '', { gmail: true, gmailRead: true });
     const subject = buildReportSubject(report, {});
-    const text = renderReportText(report, registry, googleAuthState);
+    // No model reads intake text: the Recruiter mail section reaches this tool's output as counts per bucket
+    // plus "see dashboard Review", never a sender, subject or snippet (test/mail-intake-no-model.test.js).
+    const modelReport = { ...report, mailIntake: redactMailIntakeForModel(report.mailIntake) };
+    const text = renderReportText(/** @type {any} */ (modelReport), registry, googleAuthState);
     return {
       ok: true,
       subject,

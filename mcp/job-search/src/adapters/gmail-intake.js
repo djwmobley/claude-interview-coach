@@ -118,8 +118,8 @@ export async function runMailIntake(p) {
     let token = /** @type {string|null} */ (null);
     for (let n = 0; n < MAX_LIST_PAGES; n++) {
       const res = await get(listUrl(`newer_than:${p.windowDays}d -in:trash -in:sent -in:draft`, true, token));
-      if (res.status === 401) {
-        stats.outcome = 'auth_401';
+      if (res.status === 401 || res.status === 403) {
+        stats.outcome = `auth_${res.status}`;
         break;
       }
       if (res.status !== 200 || !res.json) {
@@ -152,8 +152,8 @@ export async function runMailIntake(p) {
     try {
       for (const t of todo) {
         const res = await get(messageUrl(t.id, 'metadata'));
-        if (res.status === 401) {
-          stats.outcome = 'auth_401';
+        if (res.status === 401 || res.status === 403) {
+          stats.outcome = `auth_${res.status}`;
           break;
         }
         if (res.status !== 200 || !res.json) {
@@ -185,6 +185,10 @@ export async function runMailIntake(p) {
       try {
         for (const e of candidates.slice(0, cfg.maxBodies)) {
           const res = await get(messageUrl(e.input.id, 'full'));
+          if (res.status === 401 || res.status === 403) {
+            stats.outcome = `auth_${res.status}`;
+            break;
+          }
           if (res.status !== 200 || !res.json) {
             stats.body_fetch_error++;
             retry.add(e.input.id);
