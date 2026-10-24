@@ -172,6 +172,7 @@ describe('classifyCandidate: one reason per test, closed enum', () => {
       classifyCandidate(row({ fitScore: 50, fitActor: 'dashboard' }), CTX),
       classifyCandidate(row({ fitBasis: 'no_description' }), CTX),
       classifyCandidate(row({ duplicateOf: 42 }), CTX),
+      classifyCandidate(row({ source: 'recruiter_mail' }), CTX),
       classifyCandidate(row({ locationNorm: 'country-de' }), CTX),
       classifyCandidate(row({ locationNorm: 'denver-co', salaryMax: 100000 }), CTX),
       classifyCandidate(row({ hasActiveApplication: true }), CTX),
@@ -435,6 +436,7 @@ describe('computeFunnel: sequential funnel derived from a single classify() pass
       { row: row({ listingId: 1 }), reason: 'exclusion_blocked_company' },
       { row: row({ listingId: 2 }), reason: 'not_scored' },
       { row: row({ listingId: 3 }), reason: 'duplicate_of' },
+      { row: row({ listingId: 17 }), reason: 'recruiter_mail_source' },
       { row: row({ listingId: 4 }), reason: 'not_us' },
       { row: row({ listingId: 5 }), reason: 'salary_below_floor' },
       { row: row({ listingId: 6 }), reason: 'active_application' },
@@ -450,7 +452,7 @@ describe('computeFunnel: sequential funnel derived from a single classify() pass
       { row: row({ listingId: 16 }), reason: 'director_level' },
     ];
     const funnel = computeFunnel(classified);
-    assert.equal(funnel.considered, 16);
+    assert.equal(funnel.considered, 17);
     for (const gate of GATES) assert.equal(funnel.eliminated[gate.name], 1, `gate ${gate.name}`);
     assert.equal(funnel.eligible, 2);
     const eliminated = Object.values(funnel.eliminated).reduce((a, b) => a + b, 0);

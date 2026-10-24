@@ -27,6 +27,20 @@ const MAX_LIST_PAGES = 20;
 const MAX_SENT_PAGES = 3;
 
 /**
+ * The text the recruiter-mail scoring call sees and its grounding checks against: the From, Reply-To, Subject and
+ * Date headers, a blank line, then the body (at most 4 KB) or, when no body was read, the Gmail snippet.
+ * @param {Record<string, string>} headers lowercase-name header map
+ * @param {string} body
+ */
+export function buildScoreText(headers, body) {
+  const clean = (/** @type {string|undefined} */ s) => String(s ?? '').replace(/[\p{Cc}\p{Cf}]+/gu, ' ').replace(/\s+/g, ' ').trim();
+  const head = [['From', headers.from], ['Reply-To', headers['reply-to']], ['Subject', headers.subject], ['Date', headers.date]]
+    .filter(([, v]) => v)
+    .map(([k, v]) => `${k}: ${clean(v)}`);
+  return `${head.join('\n')}\n\n${String(body ?? '').slice(0, 4096)}`;
+}
+
+/**
  * @param {{ ctx: any, authHeader: Record<string, string>, windowDays: number, registeredAddresses: Set<string>, registeredIds: Set<string>, cfg?: import('../core/mail-intake-config.js').MailIntakeConfig|null }} p
  * @returns {Promise<{ rows: import('../core/mail-intake-store.js').IntakeRow[], rulesVersion: string, stats: Record<string, any> }>}
  */
@@ -231,6 +245,8 @@ export async function runMailIntake(p) {
       subject: sanitizeSnippet(subject, 200), snippet: sanitizeSnippet(bodyText || input.snippet, cfg.snippetMax),
       msg_date: input.internalDate ? new Date(input.internalDate).toISOString() : null, labels: input.labelIds,
       spam: input.labelIds.includes('SPAM'), body_unreadable: verdict.bodyUnreadable,
+      // The scoring stage's input (sql/030): headers plus at most 4 KB of body, for surfaced items only.
+      score_text: verdict.bucket === 'recruiter_like' || verdict.bucket === 'thread_reply' ? buildScoreText(input.headers, bodyText || input.snippet) : null,
     });
   }
 

@@ -51,7 +51,7 @@ const SKILL_READS = Object.freeze(['Read(./data/**)', 'Read(./memory/**)', 'Read
  * @typedef {{ name: string, allowed: readonly string[], mcpTools: readonly string[] }} SpawnProfile
  */
 
-/** @type {Readonly<Record<'write-resume'|'review-cv'|'triage'|'target-draft'|'target-review', SpawnProfile>>} */
+/** @type {Readonly<Record<'write-resume'|'review-cv'|'triage'|'target-draft'|'target-review'|'mail-score', SpawnProfile>>} */
 export const SPAWN_PROFILES = Object.freeze({
   'write-resume': Object.freeze({
     name: 'write-resume',
@@ -68,6 +68,9 @@ export const SPAWN_PROFILES = Object.freeze({
   // untrusted evidence in the prompt, so no tool of any kind.
   'target-draft': Object.freeze({ name: 'target-draft', mcpTools: Object.freeze([]), allowed: Object.freeze([]) }),
   'target-review': Object.freeze({ name: 'target-review', mcpTools: Object.freeze([]), allowed: Object.freeze([]) }),
+  // Recruiter-mail scoring: one message per call, text on stdin (fenced untrusted data), a schema-constrained answer.
+  // Third-party email text is in the prompt, so no tool of any kind.
+  'mail-score': Object.freeze({ name: 'mail-score', mcpTools: Object.freeze([]), allowed: Object.freeze([]) }),
   'review-cv': Object.freeze({
     name: 'review-cv',
     mcpTools: Object.freeze(['get_job']),
@@ -203,6 +206,22 @@ export function targetCallArgs(kind, o) {
     ...(kind === 'draft' ? ['--json-schema', o.schemaJson] : []),
     '--strict-mcp-config', '--mcp-config', path.join(o.configDir, 'triage-mcp-empty.json'),
     ...permissionArgs(profile),
+  ];
+}
+
+/**
+ * The argv of one recruiter-mail scoring call. No tool is allowed (the profile lists none), the MCP config is the
+ * empty strict one, the answer is constrained by `--json-schema` (read back from `structured_output`), and the
+ * prompt, which carries third-party email text, travels on stdin.
+ * @param {{ configDir: string, schemaJson: string, model: string }} o
+ * @returns {string[]}
+ */
+export function mailScoreArgs(o) {
+  return [
+    '-p', '--model', o.model, '--output-format', 'json',
+    '--json-schema', o.schemaJson,
+    '--strict-mcp-config', '--mcp-config', path.join(o.configDir, 'triage-mcp-empty.json'),
+    ...permissionArgs(SPAWN_PROFILES['mail-score']),
   ];
 }
 

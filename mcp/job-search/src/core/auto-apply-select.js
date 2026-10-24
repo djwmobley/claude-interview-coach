@@ -84,6 +84,8 @@ export const CLOSED_REASONS = Object.freeze([
   // prefixed reason per non-eligible EXCLUSION_BRANCHES entry (its own 'eligible' branch simply falls
   // through to the checks below, never adding a reason of its own).
   ...EXCLUSION_BRANCHES.filter((b) => b !== 'eligible').map((b) => `exclusion_${b}`),
+  // Recruiter-mail listings (source 'recruiter_mail') are never applied to automatically: a human replies.
+  'recruiter_mail_source',
   'duplicate_of', 'director_level', 'non_tech_function',
   'not_scored', 'below_fit', 'human_fit_override', 'fit_unverified', 'not_us', 'salary_below_floor',
   'active_application', 'no_description', 'apply_target_unresolved', 'easy_apply_only', 'easy_apply_assisted', 'ats_not_allowed',
@@ -102,6 +104,7 @@ export const CLOSED_REASONS = Object.freeze([
 export const GATES = Object.freeze([
   { name: 'exclusions', reasons: Object.freeze(EXCLUSION_BRANCHES.filter((b) => b !== 'eligible').map((b) => `exclusion_${b}`)) },
   { name: 'fit', reasons: Object.freeze(['not_scored', 'below_fit', 'human_fit_override', 'fit_unverified']) },
+  { name: 'recruiter_mail_source', reasons: Object.freeze(['recruiter_mail_source']) },
   { name: 'duplicate_of', reasons: Object.freeze(['duplicate_of']) },
   { name: 'title_gate', reasons: Object.freeze(['director_level', 'non_tech_function']) },
   { name: 'not_us', reasons: Object.freeze(['not_us']) },
@@ -201,6 +204,7 @@ export function computeFunnel(classified) {
  * @returns {Exclude<typeof CLOSED_REASONS[number], 'daily_cap'>}
  */
 export function classifyCandidate(row, ctx) {
+  if (row.source === 'recruiter_mail') return 'recruiter_mail_source';
   if (row.duplicateOf !== null && row.duplicateOf !== undefined) return 'duplicate_of';
   // Title gate (src/core/title-gate.js). Applies only when the caller loaded the latest status-event actor
   // (statusActor !== undefined): null (no status event) or 'auto' is gated; any other actor is a human
@@ -379,6 +383,7 @@ export async function fetchCandidateRows(client) {
     WHERE coalesce(l.record_kind, 'listing') = 'listing'
       AND l.duplicate_of IS NULL
       AND l.expired_at IS NULL
+      AND coalesce(l.source, '') <> 'recruiter_mail'
       AND (l.status IS NULL OR l.status IN ('new', 'maybe', 'shortlisted'))
     ORDER BY l.fit_score DESC NULLS LAST, l.id ASC
   `);

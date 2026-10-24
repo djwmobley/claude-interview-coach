@@ -25,7 +25,7 @@ import { ensureAuxSchema } from '../src/core/schema.js';
 import { persistMailIntake } from '../src/core/mail-intake-store.js';
 import { collectMailIntakeReport, mailIntakeLines, fenceMailIntakeForModel, fenceRunStatsForModel, RECRUITER_MAIL_PREFACE } from '../src/core/mail-intake-report.js';
 import { untrusted } from '../src/core/compact.js';
-import { SPAWN_PROFILES, targetCallArgs } from '../src/core/claude-spawn.js';
+import { SPAWN_PROFILES, targetCallArgs, mailScoreArgs } from '../src/core/claude-spawn.js';
 import { tool as scanReport } from '../src/tools/scan_report.js';
 
 const ROOT = path.resolve(path.dirname(fileURLToPath(import.meta.url)), '..');
@@ -168,7 +168,9 @@ describe('2. tool-less: no model process with tool access receives intake text',
       const text = fs.readFileSync(f, 'utf8');
       if (!INTAKE_NAME.test(text)) continue;
       // If a spawner-importing module ever does touch the intake, it must use the tool-less call shape.
-      assert.match(text, /targetCallArgs|tools disabled/, `${rel(f)} references the intake but does not use the tool-less call shape`);
+      assert.match(text, /targetCallArgs|mailScoreArgs/, `${rel(f)} references the intake but does not use a tool-less call shape`);
+      // ...and it spawns nothing else: no other permission profile, no hand-built argv.
+      assert.equal(/permissionArgs\(|buildClaudeArgs\(/.test(text), false, `${rel(f)} builds its own claude argv`);
     }
   });
 
@@ -186,6 +188,21 @@ describe('2. tool-less: no model process with tool access receives intake text',
     assert.equal(draft[draft.indexOf('--permission-mode') + 1], 'dontAsk');
     const review = targetCallArgs('review', { configDir: '/cfg', schemaJson: '{}', model: 'sonnet' });
     assert.equal(review.includes('--allowedTools'), false);
+  });
+
+  test('the scoring spawn is the tool-less call shape: no allowed tools, empty strict MCP config, a fixed schema, prompt on stdin', () => {
+    const p = SPAWN_PROFILES['mail-score'];
+    assert.deepEqual([...p.allowed], []);
+    assert.deepEqual([...p.mcpTools], []);
+    const args = mailScoreArgs({ configDir: '/cfg', schemaJson: '{"type":"object"}', model: 'sonnet' });
+    assert.equal(args.includes('--allowedTools'), false);
+    assert.equal(args[args.indexOf('--json-schema') + 1], '{"type":"object"}');
+    assert.ok(args.includes('--strict-mcp-config'));
+    assert.ok(args.some((a) => a.endsWith('triage-mcp-empty.json')));
+    assert.equal(args.includes('-p'), true);
+    assert.equal(args.some((a) => a.includes('BEGIN_DATA')), false, 'the message never travels as an argument');
+    const disallowed = args.slice(args.indexOf('--disallowedTools') + 1);
+    for (const t of ['Bash', 'PowerShell', 'WebFetch', 'mcp__claude_ai_Gmail', 'mcp__google-workspace']) assert.ok(disallowed.includes(t), `${t} is denied`);
   });
 
   test('the intake modules import nothing that reaches a model', () => {

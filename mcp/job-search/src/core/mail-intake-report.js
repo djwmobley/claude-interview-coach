@@ -120,6 +120,27 @@ export function fenceRunStatsForModel(stats) {
   return { ...stats, gmail: { ...stats.gmail, mail_intake: next } };
 }
 
+/**
+ * One plain-text line of what the scoring stage extracted for an item (model-derived text: callers escape it for
+ * their format and, in tool output, it sits inside the item's untrusted wrapper). Null when there is nothing.
+ * @param {any} it
+ * @returns {string|null}
+ */
+export function scoreSummary(it) {
+  const flags = Array.isArray(it.score_flags) ? it.score_flags : [];
+  const s = it.score;
+  if (!s || it.score_status !== 'scored') {
+    return it.score_status === 'failed' || flags.some((/** @type {string} */ f) => f.startsWith('score_failed')) ? `unscored${flags.length ? ` | flags: ${flags.join(', ')}` : ''}` : null;
+  }
+  const clues = s.client_clues ? [s.client_clues.industry, s.client_clues.size, s.client_clues.ownership, s.client_clues.location, s.client_clues.remote && s.client_clues.remote !== 'unknown' ? s.client_clues.remote : null].filter(Boolean).join(', ') : '';
+  const c = s.comp_range;
+  const comp = c ? `${c.min ?? '?'}-${c.max ?? '?'}${c.currency ? ` ${c.currency}` : ''}${c.period ? `/${c.period}` : ''}` : null;
+  return [
+    `fit ${s.fit_score}`, s.role_title ?? 'role not stated', s.employer ? `at ${s.employer}` : (s.recruiter_firm ? `via ${s.recruiter_firm}` : null),
+    clues ? `clues: ${clues}` : null, comp ? `comp ${comp}` : null, s.is_opportunity === false ? 'not an opportunity' : null, flags.length ? `flags: ${flags.join(', ')}` : null,
+  ].filter(Boolean).join(' | ');
+}
+
 /** @param {any} it */
 function itemHeader(it) {
   const who = it.from_name ? `${it.from_name} <${it.from_addr ?? 'unknown'}>` : (it.from_addr ?? 'unknown sender');
@@ -155,6 +176,8 @@ export function mailIntakeLines(data, opts = {}) {
       out.push(`- ${h.date} | ${e(h.who)} | ${e(h.subject)} | ${h.tab} | ${h.kind}`);
       if (it.reply_to_differs && it.reply_to) out.push(`  From ${e(it.from_addr ?? 'unknown')} but Reply-To ${e(it.reply_to)}`);
       if (it.body_unreadable) out.push('  body unreadable: review by hand');
+      const sc = scoreSummary(it);
+      if (sc) out.push(`  ${e(sc)}`);
       if (it.snippet) out.push(`  ${e(it.snippet)}`);
       if (h.link) out.push(md ? `  [Open in Gmail](${h.link})` : `  ${h.link}`);
       // Model-facing: every message-derived line of this item sits inside the untrusted-content wrapper.
@@ -199,6 +222,8 @@ export function mailIntakeHtml(data, esc) {
     let s = `<li>${bits.join(' | ')}`;
     if (it.reply_to_differs && it.reply_to) s += `<br>From ${esc(it.from_addr ?? 'unknown')} but Reply-To ${esc(it.reply_to)}`;
     if (it.body_unreadable) s += '<br>body unreadable: review by hand';
+    const sc = scoreSummary(it);
+    if (sc) s += `<br>${esc(sc)}`;
     if (it.snippet) s += `<br>${esc(it.snippet)}`;
     if (h.link) s += `<br><a href="${esc(h.link)}">Open in Gmail</a>`;
     return `${s}</li>`;

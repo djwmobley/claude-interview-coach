@@ -44,6 +44,7 @@ export async function loadKnownMailIds(client, rulesVersion) {
  * @property {string[]} labels
  * @property {boolean} spam
  * @property {boolean} body_unreadable
+ * @property {string|null} [score_text] headers plus at most 4 KB of body for the scoring stage (sql/030); surfaced buckets only
  */
 
 /**
@@ -64,19 +65,21 @@ export async function persistMailIntake(client, rows, rulesVersion) {
       from_name: detail ? r.from_name : null, reply_to: detail ? r.reply_to : null, reply_to_differs: detail ? r.reply_to_differs : false,
       subject: detail ? r.subject : null, snippet: detail ? r.snippet : null, msg_date: r.msg_date,
       labels: detail ? r.labels : [], spam: r.spam, body_unreadable: r.body_unreadable,
+      score_text: (r.bucket === 'recruiter_like' || r.bucket === 'thread_reply') ? (r.score_text ?? null) : null,
     };
   });
   const res = await client.query(
-    `INSERT INTO ic_mail_intake (message_id, thread_id, bucket, rules_version, signal, from_addr, from_name, reply_to, reply_to_differs, subject, snippet, msg_date, labels, spam, body_unreadable)
+    `INSERT INTO ic_mail_intake (message_id, thread_id, bucket, rules_version, signal, from_addr, from_name, reply_to, reply_to_differs, subject, snippet, msg_date, labels, spam, body_unreadable, score_text)
      SELECT x.message_id, x.thread_id, x.bucket, $2, x.signal, x.from_addr, x.from_name, x.reply_to, x.reply_to_differs, x.subject, x.snippet, x.msg_date::timestamptz,
-            coalesce(ARRAY(SELECT jsonb_array_elements_text(x.labels)), '{}'), x.spam, x.body_unreadable
+            coalesce(ARRAY(SELECT jsonb_array_elements_text(x.labels)), '{}'), x.spam, x.body_unreadable, x.score_text
      FROM jsonb_to_recordset($1::jsonb) AS x(message_id text, thread_id text, bucket text, signal text, from_addr text, from_name text, reply_to text,
-          reply_to_differs boolean, subject text, snippet text, msg_date text, labels jsonb, spam boolean, body_unreadable boolean)
+          reply_to_differs boolean, subject text, snippet text, msg_date text, labels jsonb, spam boolean, body_unreadable boolean, score_text text)
      ON CONFLICT (message_id) DO UPDATE SET
        thread_id = EXCLUDED.thread_id, bucket = EXCLUDED.bucket, rules_version = EXCLUDED.rules_version, signal = EXCLUDED.signal,
        from_addr = EXCLUDED.from_addr, from_name = EXCLUDED.from_name, reply_to = EXCLUDED.reply_to, reply_to_differs = EXCLUDED.reply_to_differs,
        subject = EXCLUDED.subject, snippet = EXCLUDED.snippet, msg_date = EXCLUDED.msg_date, labels = EXCLUDED.labels, spam = EXCLUDED.spam,
-       body_unreadable = EXCLUDED.body_unreadable, last_seen_at = now()`,
+       body_unreadable = EXCLUDED.body_unreadable, last_seen_at = now(),
+       score_text = CASE WHEN ic_mail_intake.score_status = 'pending' THEN coalesce(EXCLUDED.score_text, ic_mail_intake.score_text) ELSE ic_mail_intake.score_text END`,
     [JSON.stringify(prepared), rulesVersion],
   );
   return res.rowCount ?? 0;
@@ -99,6 +102,10 @@ function viewOf(r) {
     labels: Array.isArray(r.labels) ? r.labels.map(String) : [],
     spam: Boolean(r.spam),
     body_unreadable: Boolean(r.body_unreadable),
+    score_status: r.score_status ?? 'pending',
+    score: r.score ?? null,
+    score_flags: Array.isArray(r.score_flags) ? r.score_flags.map(String) : [],
+    listing_id: r.listing_id ?? null,
   };
 }
 

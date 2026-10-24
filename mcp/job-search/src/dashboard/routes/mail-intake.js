@@ -16,11 +16,13 @@ import { JobSearchError } from '../../core/errors.js';
 import { sendJson } from '../http.js';
 import { listMailIntakeForDashboard, dismissMailIntake } from '../../core/mail-intake-store.js';
 import { gmailMessageUrl, gmailTab } from '../../core/mail-intake.js';
+import { scoreSummary } from '../../core/mail-intake-report.js';
 import { collectGoogleCapability, capabilityBannerLine } from '../../core/google-capability.js';
 
 /** @param {any} v */
 function decorate(v) {
-  return { ...v, tab: gmailTab(v.labels), link: gmailMessageUrl(v.message_id) };
+  // score_summary is model-derived plain text; the page renders it with textContent only.
+  return { ...v, tab: gmailTab(v.labels), link: gmailMessageUrl(v.message_id), score_summary: scoreSummary(v) };
 }
 
 /**

@@ -657,6 +657,13 @@ export const mailIntakeSchema = z.object({
   reviewCap: z.number().int().min(1).max(200).default(25),
   snippetMax: z.number().int().min(50).max(500).default(500),
   topSenders: z.number().int().min(1).max(50).default(10),
+  /** Recruiter-mail scoring (sql/030): its own reserve, separate from triage's maxBatchesPerRun. */
+  scoreEnabled: z.boolean().default(true),
+  scoreMaxPerRun: z.number().int().min(0).max(200).default(20),
+  scoreMaxPerDay: z.number().int().min(0).max(1000).default(40),
+  scoreTimeoutMs: z.number().int().min(1000).max(600000).default(120000),
+  /** Model for the scoring call; absent means triage's model. */
+  scoreModel: z.string().min(1).optional(),
 }).default({});
 
 export const alertSendersSchema = z.object({

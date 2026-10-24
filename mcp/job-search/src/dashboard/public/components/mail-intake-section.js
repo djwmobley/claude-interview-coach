@@ -12,6 +12,7 @@
  */
 import { h, hLink, setChildren } from '../lib/dom.js';
 import { postJson } from '../lib/api.js';
+import { buildHash } from '../lib/router.js';
 import { handleOutcome } from '../lib/outcome.js';
 import { showToast } from '../lib/toast.js';
 import { emptyState } from './empty-state.js';
@@ -57,6 +58,8 @@ function itemRow(it, o) {
       it.link ? hLink({ url: it.link, urlOk: true, text: 'Open in Gmail', target: '_blank' }) : null,
       dismiss,
     ]),
+    it.score_summary ? h('div', { className: 'approval-section__note mail-intake-row__score', text: it.score_summary }) : null,
+    it.listing_id ? h('div', { className: 'approval-section__note' }, [h('a', { hashHref: buildHash('job-detail', { id: it.listing_id }), text: `Listing #${it.listing_id}` })]) : null,
     it.reply_to_differs && it.reply_to ? h('div', { className: 'approval-section__note', text: `From ${it.from_addr ?? 'unknown'} but Reply-To ${it.reply_to}` }) : null,
     it.body_unreadable ? h('div', { className: 'approval-section__note', text: 'Body unreadable: review by hand.' }) : null,
     it.snippet ? h('div', { className: 'approval-section__note', text: it.snippet }) : null,

@@ -327,7 +327,8 @@ export function classifyMail(msg, env) {
   if (domainInList(domain, cfg.employerDomains)) return v('internal', 'employer');
   if (calendarHeader || (msg.body && msg.body.calendar) || /^\s*(?:updated\s+)?invitation\b/i.test(subject)) return v('internal', 'calendar');
   // 5 thread reply.
-  if (msg.threadId && env.sentThreads.has(msg.threadId) && !isAutoReply(h)) return v('thread_reply', 'thread_reply');
+  // A reply is read in full (candidate) so the scoring stage sees the body, not only the snippet.
+  if (msg.threadId && env.sentThreads.has(msg.threadId) && !isAutoReply(h)) return v('thread_reply', 'thread_reply', !msg.body);
   // 6 recruiter-like.
   const inmail = Boolean(from.addr && cfg.linkedinInmailSenders.includes(from.addr));
   const knownFirm = domainInList(domain, cfg.searchFirmDomains);

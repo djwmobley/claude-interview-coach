@@ -128,10 +128,10 @@ describe('front-end files', () => {
     }
   });
 
-  test('the Gmail link goes through hLink only, and the section imports no raw anchor builder', () => {
+  test('the Gmail link goes through hLink only; the only raw anchor is an internal hash link', () => {
     const text = fs.readFileSync(files[0], 'utf8');
     assert.match(text, /hLink\(/);
-    assert.equal(/h\('a'/.test(text), false);
+    for (const m of text.match(/h\('a'[^\n]*/g) ?? []) assert.match(m, /hashHref/);
   });
 
   test('the Home banner reuses the existing Re-authorize control instead of building a second flow', () => {

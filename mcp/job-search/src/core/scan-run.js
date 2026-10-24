@@ -51,6 +51,7 @@ import { compactRows, capResponse, MAX_ROWS, MAX_RESPONSE_CHARS, untrustedRows, 
 import { buildRegistry, guardedFetch, guardUrl } from './urlguard.js';
 import { runGmailDetail } from './gmail-detail.js';
 import { loadKnownMailIds, persistMailIntake } from './mail-intake-store.js';
+import { runMailScoreStage } from './mail-score.js';
 import { recordCapabilityOutcomes, outcomesFromTokenState } from './google-capability.js';
 import { SCOPE_GMAIL_READONLY } from './google.js';
 import { planPages, assertPlanWithinCap, reserveBudget } from './budget.js';
@@ -1922,6 +1923,29 @@ async function executeRun(p) {
     // whichever caller is waiting (bin/scan.js's JSON summary, or search_jobs.js's tool result) without a
     // second DB round trip.
     stats.triage = triageStats;
+
+    // Recruiter-mail scoring (sql/030): one headless tool-less model call per pending recruiter_like or
+    // thread_reply item, with its own budget (mailIntake.scoreMaxPerRun / scoreMaxPerDay), on its own dedicated
+    // connection after triage. It never changes this run's status or exit code; stats.mail_score describes it.
+    if (sources.some((src) => src.name === 'gmail')) {
+      try {
+        const msClient = await (deps.connectDedicated ?? defaultConnectDedicated)();
+        try {
+          const ms = await runMailScoreStage(msClient, { runId, config, now, execFile: deps.mailScoreExecFile ?? deps.execFile, log });
+          /** @type {any} */ (stats).mail_score = ms;
+          try {
+            await msClient.query('UPDATE ic_scan_runs SET stats = stats || $2::jsonb WHERE id = $1', [runId, JSON.stringify({ mail_score: ms })]);
+          } catch (err) {
+            log({ evt: 'mail_score_stats_write_failed', run_id: runId, ...errFields(err) });
+          }
+        } finally {
+          await msClient.end().catch(() => {});
+        }
+      } catch (err) {
+        log({ evt: 'mail_score_failed', run_id: runId, ...errFields(err) });
+        /** @type {any} */ (stats).mail_score = { enabled: true, error: errFields(err).err_code ?? 'error' };
+      }
+    }
 
     // Target finder stage (plan 17.3). After triage, on its own dedicated connection, weekdays only, with its
     // own deadline: the smaller of 8 minutes and (this run's wall-clock cap minus a 5-minute report reserve),
