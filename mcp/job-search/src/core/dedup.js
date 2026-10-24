@@ -514,7 +514,8 @@ export function makePgLookups(client, opts = {}) {
   const table = opts.table ?? 'ic_job_listings';
   if (!/^[a-z_][a-z0-9_]*$/.test(table)) throw new Error('invalid table name');
   const cols = LISTING_COLUMNS.join(', ');
-  const listing = `coalesce(record_kind,'listing') = 'listing'`;
+  // Recruiter-mail listings (source 'recruiter_mail') are never dedup candidates: no scan merges into or expires them.
+  const listing = `coalesce(record_kind,'listing') = 'listing' AND coalesce(source, '') <> 'recruiter_mail'`;
   const LIMIT = 200;
   return {
     async byExternalId(source, externalId) {

@@ -136,6 +136,7 @@ export const TRIAGE_CANDIDATE_QUERY = `
   FROM ic_job_listings l
   JOIN ic_scan_run_items i ON i.listing_id = l.id AND i.run_id = $1
   WHERE coalesce(l.record_kind,'listing') = 'listing'
+    AND coalesce(l.source, '') <> 'recruiter_mail'
     AND l.duplicate_of IS NULL
     AND l.expired_at IS NULL
     AND (
@@ -394,6 +395,7 @@ export async function loadBacklogIds(client, runId, limit, maxAgeDays = null) {
   const r = await client.query(
     `SELECT l.id FROM ic_job_listings l
       WHERE coalesce(l.record_kind,'listing') = 'listing' AND l.duplicate_of IS NULL AND l.expired_at IS NULL
+        AND coalesce(l.source, '') <> 'recruiter_mail'
         AND l.status IS NULL AND l.triage_model_failures < $3
         AND NOT EXISTS (SELECT 1 FROM ic_job_review_queue q WHERE q.candidate_id = l.id AND q.resolved_at IS NULL)
         AND NOT EXISTS (SELECT 1 FROM ic_scan_run_items i WHERE i.listing_id = l.id AND i.run_id = $1)
@@ -437,6 +439,7 @@ export async function loadAutoSkipLowIds(client, runId, limit, cfg) {
   const r = await client.query(
     `SELECT l.id FROM ic_job_listings l
       WHERE coalesce(l.record_kind,'listing') = 'listing' AND l.duplicate_of IS NULL AND l.expired_at IS NULL
+        AND coalesce(l.source, '') <> 'recruiter_mail'
         AND l.status = 'skip' AND l.fit_score IS NULL
         AND l.noise_class IN ('ok', 'ok_manual') AND l.prescore IS NOT NULL AND l.prescore >= $3 AND l.prescore < $4
         AND l.triage_model_failures < $5
@@ -472,6 +475,7 @@ export async function loadRescoreIds(client, limit) {
     `SELECT l.id FROM ic_job_listings l
       WHERE l.fit_basis = 'no_description' AND l.description IS NOT NULL AND btrim(l.description) <> ''
         AND coalesce(l.record_kind,'listing') = 'listing' AND l.duplicate_of IS NULL AND l.expired_at IS NULL
+        AND coalesce(l.source, '') <> 'recruiter_mail'
         AND (l.status IS NULL OR l.status IN ('new', 'maybe', 'shortlisted'))
         AND l.triage_model_failures < $2
       ORDER BY l.fit_score DESC NULLS LAST, l.id ASC

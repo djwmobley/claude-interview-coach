@@ -18,6 +18,7 @@ import { setBanner } from '../lib/toast.js';
 import { openAddOpportunityDrawer } from '../components/add-opportunity-drawer.js';
 import { openNewFollowupDrawer } from '../components/new-followup-drawer.js';
 import { openRunScanDrawer } from '../components/run-scan-drawer.js';
+import { googleCapabilityBanner } from '../components/google-capability-banner.js';
 
 /** @param {HTMLElement} container */
 export async function render(container, params, app) {
@@ -70,8 +71,11 @@ export async function render(container, params, app) {
 
     // The Targets tile is advisory: a failure to load it never blocks Home and never raises a toast.
     const targetsOutcome = await getJson('/api/targets/summary');
+    // Same for the per-capability Google banner: a failed fetch simply shows no banner.
+    const capabilityOutcome = await getJson('/api/google/capabilities');
 
     setChildren(container, [
+      capabilityOutcome.kind === 'ok' ? googleCapabilityBanner(/** @type {any} */ (capabilityOutcome.body)) : null,
       h('h1', { className: 'page-title', text: 'Home' }),
       statusStrip({ summary }),
       disabledSourcesPanel({ sources: summary.disabled_sources, onChanged: load }),

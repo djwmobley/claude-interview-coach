@@ -17,6 +17,7 @@ const ROOT = path.join(path.dirname(fileURLToPath(import.meta.url)), '..');
 const ROUTED = Object.freeze({
   'src/core/store-description.js': 'the chokepoint itself (storeDescription, purgeJunkDescription, clearRejectedDescription)',
   'src/core/upsert.js': 'insertListing/updateListing screen the payload with screenPayload() before the SQL runs; covers the scan detail pass, the fit sweep and bin/backfill-detail.js',
+  'src/core/mail-score.js': 'inserts recruiter_mail listings WITHOUT a description (the column stays NULL; the email body is never stored on a listing)',
 });
 
 /** @param {string} dir @returns {string[]} */

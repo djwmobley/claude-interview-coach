@@ -8,6 +8,7 @@
 import { z } from 'zod';
 import { JobSearchError } from '../core/errors.js';
 import { reenableSource } from '../browser/wall.js';
+import { fenceRunStatsForModel } from '../core/mail-intake-report.js';
 
 export const schema = {
   action: z.enum(['status', 'enable_source', 'cancel']),
@@ -27,7 +28,8 @@ function runSummary(r) {
     started_at: new Date(r.started_at).toISOString(),
     finished_at: r.finished_at ? new Date(r.finished_at).toISOString() : null,
     heartbeat_at: r.heartbeat_at ? new Date(r.heartbeat_at).toISOString() : null,
-    stats: r.stats ?? {},
+    // Model-facing: the Gmail intake sender addresses and error text are fenced in the untrusted wrapper.
+    stats: fenceRunStatsForModel(r.stats ?? {}),
     pages_by_source: r.pages_by_source ?? {},
     errors: Array.isArray(r.errors) ? r.errors.slice(0, 5) : [],
   };

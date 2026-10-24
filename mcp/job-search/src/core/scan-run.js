@@ -50,6 +50,10 @@ import { embedSafe, embeddingText } from './embed.js';
 import { compactRows, capResponse, MAX_ROWS, MAX_RESPONSE_CHARS, untrustedRows, ROWS_WRAP_OVERHEAD_CHARS } from './compact.js';
 import { buildRegistry, guardedFetch, guardUrl } from './urlguard.js';
 import { runGmailDetail } from './gmail-detail.js';
+import { loadKnownMailIds, persistMailIntake } from './mail-intake-store.js';
+import { runMailScoreStage } from './mail-score.js';
+import { recordCapabilityOutcomes, outcomesFromTokenState } from './google-capability.js';
+import { SCOPE_GMAIL_READONLY } from './google.js';
 import { planPages, assertPlanWithinCap, reserveBudget } from './budget.js';
 import { makeRateLimiter } from './ratelimit.js';
 import { runSearch } from './scheduler.js';
@@ -706,6 +710,19 @@ async function executeRun(p) {
   }
 
   /**
+   * Per-capability Google health (sql/029). Skipped on a dry run; a failure here is logged and never fails the scan.
+   * @param {import('./google-capability.js').CapabilityOutcome[]} outcomes
+   */
+  async function recordCapabilitySafe(outcomes) {
+    if (dryRun || outcomes.length === 0) return;
+    try {
+      await recordCapabilityOutcomes(client, outcomes, new Date());
+    } catch (err) {
+      log({ evt: 'google_capability_record_failed', run_id: runId, ...errFields(err) });
+    }
+  }
+
+  /**
    * @param {{ name: string, adapter: import('../adapters/base.js').Adapter, cfg: any }} s
    * @returns {import('../adapters/base.js').AdapterCtx}
    */
@@ -779,6 +796,8 @@ async function executeRun(p) {
       config,
       env: { GOOGLE_TOKEN_FILE: env.GOOGLE_TOKEN_FILE },
       interactive,
+      // Personal mail intake (sql/029): the ids the Gmail intake pass can skip. Gmail only.
+      ...(s.name === 'gmail' ? { mailIntakeKnown: (/** @type {string} */ rulesVersion) => loadKnownMailIds(client, rulesVersion) } : {}),
       // LinkedIn diagnosability: a sanitized snapshot of any wall / unrecognized / end-of-results page,
       // under the gitignored logs tree, capped per run inside the saver.
       ...(s.name === 'linkedin' && env.JOBSEARCH_LOG_DIR ? { saveSnapshot: createSnapshotSaver({ dir: path.join(env.JOBSEARCH_LOG_DIR, 'linkedin-snapshots'), runId }) } : {}),
@@ -1530,6 +1549,7 @@ async function executeRun(p) {
         const state = await doClassify(env.GOOGLE_TOKEN_FILE, { gmail: true, gmailRead: true });
         if (state.state !== 'ok') {
           unattendedGmailReauthTriggered = true;
+          await recordCapabilitySafe(outcomesFromTokenState(state));
           const spawnImpl = deps.spawn ?? defaultSpawn;
           try {
             const child = spawnImpl(
@@ -1581,6 +1601,8 @@ async function executeRun(p) {
       }
       const ctx = makeCtx(s);
       let walled = false;
+      /** Set once the Gmail alert or intake pass was refused (401/403 or an auth error); a later clean end must not clear it. */
+      let gmailReadFailed = false;
       /** @type {import('./scheduler.js').ScheduleResult|null} */
       let result = null;
       /** @type {Array<{ ev: import('../adapters/base.js').ListingEvent, rec: import('./normalize.js').NormalizedListing, decision: import('./dedup.js').Decision, ps: number, psRaw: number, noiseClass: string, seq: number }>} */
@@ -1604,6 +1626,24 @@ async function executeRun(p) {
             const msg = `${ev.code}: ${ev.message}`;
             if (!warnings.includes(msg)) warnings.push(msg);
             if (ev.code === 'BROWSER_UNAVAILABLE' || ev.code === 'UNRENDERABLE' || ev.code === 'AUTH_UNAVAILABLE' || ev.code === 'SUSPECTED_THROTTLE') partial = true;
+            if (ev.code === 'BAD_RESPONSE' && s.name === 'gmail' && /HTTP (401|403)/.test(ev.message)) {
+              // The alert pass got an auth refusal on a list call: Gmail read is broken, with the status as the reason.
+              gmailReadFailed = true;
+              await recordCapabilitySafe([{ capability: 'read', ok: false, state: `auth_${/HTTP (401|403)/.exec(ev.message)?.[1]}`, missing: [] }]);
+            }
+            if (ev.code === 'AUTH_UNAVAILABLE' && s.name === 'gmail') {
+              // Gmail read is down: record it per capability so the report can say how long (sql/029).
+              gmailReadFailed = true;
+              const http = /gmail: (40[13]) on/.exec(ev.message)?.[1];
+              const slug = /gmail: (broken_[a-z_]+)/.exec(ev.message)?.[1] ?? (http ? `auth_${http}` : 'auth_unavailable');
+              // A dead grant (invalid_grant, no refresh token, a refresh error, a missing or malformed token file)
+              // breaks send and calendar too, because they share it; a missing scope or an HTTP refusal breaks read only.
+              if (/^broken_/.test(slug) && slug !== 'broken_missing_scopes') {
+                await recordCapabilitySafe(outcomesFromTokenState(/** @type {any} */ ({ state: slug, code: 'unknown' })));
+              } else {
+                await recordCapabilitySafe([{ capability: 'read', ok: false, state: slug, missing: slug === 'broken_missing_scopes' ? [SCOPE_GMAIL_READONLY] : [] }]);
+              }
+            }
             if (ev.code === 'BOARD_NOT_FOUND' || ev.code === 'BAD_RESPONSE') {
               // A configured board that does not answer is a config defect: visible as partial, never silent.
               partial = true;
@@ -1615,6 +1655,28 @@ async function executeRun(p) {
           // stored at stats.<source> (stats.gmail) for the report's gmail line and PARSER BROKEN headline.
           async onSourceStats(ev) {
             /** @type {any} */ (stats)[s.name] = ev.stats;
+            // A Gmail pass that reached its end proves the read grant works.
+            if (s.name === 'gmail') {
+              // ...unless the intake pass itself hit an auth refusal (401/403): that is Gmail read BROKEN, with the reason.
+              const intakeOutcome = String(ev.stats?.mail_intake?.outcome ?? 'ok');
+              const authFailed = /^auth_\d+$/.test(intakeOutcome) || /^list_http_(401|403)$/.test(intakeOutcome);
+              if (authFailed) {
+                gmailReadFailed = true;
+                await recordCapabilitySafe([{ capability: 'read', ok: false, state: intakeOutcome, missing: [] }]);
+              } else if (!gmailReadFailed) {
+                await recordCapabilitySafe([{ capability: 'read', ok: true, state: 'ok', missing: [] }]);
+              }
+            }
+          },
+          // Personal mail intake (sql/029): persist the classified rows. Never fails the scan.
+          async onMailIntake(ev) {
+            if (dryRun || s.name !== 'gmail') return;
+            try {
+              const n = await persistMailIntake(client, ev.rows, ev.rulesVersion);
+              log({ evt: 'mail_intake_persisted', run_id: runId, rows: n, rules_version: ev.rulesVersion });
+            } catch (err) {
+              log({ evt: 'mail_intake_persist_failed', run_id: runId, ...errFields(err) });
+            }
           },
           async onWall(ev) {
             const verdict = classifyPage(ev.signals);
@@ -1861,6 +1923,29 @@ async function executeRun(p) {
     // whichever caller is waiting (bin/scan.js's JSON summary, or search_jobs.js's tool result) without a
     // second DB round trip.
     stats.triage = triageStats;
+
+    // Recruiter-mail scoring (sql/030): one headless tool-less model call per pending recruiter_like or
+    // thread_reply item, with its own budget (mailIntake.scoreMaxPerRun / scoreMaxPerDay), on its own dedicated
+    // connection after triage. It never changes this run's status or exit code; stats.mail_score describes it.
+    if (sources.some((src) => src.name === 'gmail')) {
+      try {
+        const msClient = await (deps.connectDedicated ?? defaultConnectDedicated)();
+        try {
+          const ms = await runMailScoreStage(msClient, { runId, config, now, execFile: deps.mailScoreExecFile ?? deps.execFile, log });
+          /** @type {any} */ (stats).mail_score = ms;
+          try {
+            await msClient.query('UPDATE ic_scan_runs SET stats = stats || $2::jsonb WHERE id = $1', [runId, JSON.stringify({ mail_score: ms })]);
+          } catch (err) {
+            log({ evt: 'mail_score_stats_write_failed', run_id: runId, ...errFields(err) });
+          }
+        } finally {
+          await msClient.end().catch(() => {});
+        }
+      } catch (err) {
+        log({ evt: 'mail_score_failed', run_id: runId, ...errFields(err) });
+        /** @type {any} */ (stats).mail_score = { enabled: true, error: errFields(err).err_code ?? 'error' };
+      }
+    }
 
     // Target finder stage (plan 17.3). After triage, on its own dedicated connection, weekdays only, with its
     // own deadline: the smaller of 8 minutes and (this run's wall-clock cap minus a 5-minute report reserve),

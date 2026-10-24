@@ -21,6 +21,9 @@ import {
 import { readWatchdogState, ackWatchdogRestarts } from './watchdog-state.js';
 import { readAutoApplySummary } from './auto-apply-state.js';
 import { cleanupWithdrawnNudgeCalendar } from './applications.js';
+import { outcomesFromTokenState, recordCapabilityOutcomes, collectGoogleCapability, capabilityBannerLine } from './google-capability.js';
+import { markSurfaced } from './mail-intake-store.js';
+import { deliverFallback } from './report-fallback.js';
 
 /**
  * One line per item, plain text.
@@ -72,7 +75,9 @@ export function buildDigestHtml(rows, now) {
  *   watchdogStateFile?: string|null, autoApplySummaryFile?: string|null,
  *   calendar?: (() => Promise<import('./followups.js').CalendarDeps|null>)|null,
  *   readyDashboardUrl?: string,
- * }} opts readyDashboardUrl: the dashboard's Ready page link printed in the Ready to apply section. calendar (withdraw calendar cleanup): the lazy calendar client getter bin/remind.js wires to
+ *   deliverFallback?: typeof deliverFallback,
+ * }} opts deliverFallback (spec G): test seam for the non-Gmail delivery (toast plus opening the HTML report);
+ *   production uses src/core/report-fallback.js, whose real spawn is blocked under the test runner. readyDashboardUrl: the dashboard's Ready page link printed in the Ready to apply section. calendar (withdraw calendar cleanup): the lazy calendar client getter bin/remind.js wires to
  *   makeCalendarProvider(env); when present, the retry pass for withdrawn nudges' calendar events runs
  *   first (applications.js cleanupWithdrawnNudgeCalendar). Omitted means no retry pass. reportSinceOverride, when the key is present (including explicitly `null`), bypasses the
  *   ic_report_state marker read (test seam; see report.js's buildScanReport). logError defaults to `log`
@@ -85,7 +90,7 @@ export function buildDigestHtml(rows, now) {
  *   stable JSON summary file; bin/remind.js wires it to defaultAutoApplySummaryFile(env.JOBSEARCH_LOG_DIR).
  *   Omitted or unreadable means "no auto-apply run to report", rendered as a distinct empty state, never
  *   omitted (report.js's collectAutoApply/renderAutoApply*).
- * @returns {Promise<{ code: number, due: number, flipped: number, sent: boolean, stamped: number, subject: string|null, body: string|null, reason: string|null, scopes_ok: boolean|null, expiry: string|null, report_file: string|null, no_scan: boolean, worst_status: string|null, google_auth_state: string|null }>}
+ * @returns {Promise<{ code: number, due: number, flipped: number, sent: boolean, stamped: number, subject: string|null, body: string|null, reason: string|null, scopes_ok: boolean|null, expiry: string|null, report_file: string|null, no_scan: boolean, worst_status: string|null, google_auth_state: string|null, delivery?: string }>}
  */
 export async function runRemind(opts) {
   if (!opts.tokenFile) {
@@ -128,7 +133,7 @@ export async function runRemind(opts) {
   const homeLocationNorms = await homeLocationNormsFor(opts.client, reportProfile);
   /** @type {{ sinceOverride?: Date|null }} */
   const sinceOpt = Object.prototype.hasOwnProperty.call(opts, 'reportSinceOverride') ? { sinceOverride: opts.reportSinceOverride } : {};
-  const report = await buildScanReport(opts.client, { now, timezone, topN, homeMinPrescore, homeLocationNorms, ...sinceOpt });
+  const report = await buildScanReport(opts.client, { now, timezone, topN, homeMinPrescore, homeLocationNorms, mailIntakeCap: config?.mailIntake?.reviewCap, ...sinceOpt });
   say({
     evt: 'remind_select', due: rows.length, flipped: flippedIds.length, dry_run: Boolean(opts.dryRun),
     scan_runs: report.runs.length, no_scan: report.noScan, worst_status: report.worstStatus,
@@ -171,9 +176,12 @@ export async function runRemind(opts) {
   let googleAuthState;
   /** @type {{ err_code: string, err_message: string }|null} */
   let googleAuthError = null;
+  /** Scope flags of the token (no secrets), for the per-capability record below. @type {{ gmail_read_ok: boolean, gmail_send_ok: boolean, calendar_ok: boolean }|null} */
+  let tokenScopeFlags = null;
   try {
     const g = await (opts.googleHttp ?? googleHttp)({ tokenFile: opts.tokenFile, fetch: opts.fetch, need: { gmail: true } });
     googleDeps = g.deps;
+    tokenScopeFlags = g.info ?? null;
     googleScopesOk = g.info.gmail_send_ok;
     googleExpiry = g.expiry;
     googleAuthState = /** @type {any} */ (g).tokenState ?? { state: 'ok', expiry: g.expiry };
@@ -182,11 +190,22 @@ export async function runRemind(opts) {
     googleAuthError = errFields(err);
     googleAuthState = /** @type {any} */ (err)?.tokenState ?? { state: 'broken_refresh_error', code: 'unknown' };
     try {
-      googleScopesOk = tokenInfo(readTokenFile(opts.tokenFile)).gmail_send_ok;
+      const ti = tokenInfo(readTokenFile(opts.tokenFile));
+      googleScopesOk = ti.gmail_send_ok;
+      tokenScopeFlags = ti;
     } catch {
       googleScopesOk = null;
     }
     say({ evt: 'remind_token_failed', ...googleAuthError, scopes_ok: googleScopesOk, state: googleAuthState.state });
+  }
+
+  // Per-capability Google health (sql/029): record this attempt, then re-read the table so the report's first
+  // line reflects it. A dry run records nothing. Failures here never stop the report.
+  try {
+    if (!opts.dryRun) await recordCapabilityOutcomes(opts.client, outcomesFromTokenState(googleAuthState, tokenScopeFlags), now);
+    /** @type {any} */ (report).googleCapabilityLine = capabilityBannerLine(await collectGoogleCapability(opts.client), now);
+  } catch (err) {
+    say({ evt: 'remind_capability_record_failed', ...errFields(err) });
   }
 
   // Auto-apply PR B, GAP 2: read bin/auto-apply.js's stable summary file (I/O lives here, not in
@@ -233,6 +252,25 @@ export async function runRemind(opts) {
     }
   }
 
+  /**
+   * Non-Gmail delivery (spec G): the report files are already written; show a toast naming the problem and the
+   * report path, and open the HTML report. Never throws; the caller keeps the nonzero exit code. Returns the
+   * delivery path used, recorded in the run's result and log.
+   * @param {string} problem
+   * @returns {Promise<string>}
+   */
+  async function fallbackDelivery(problem) {
+    try {
+      const r = await (opts.deliverFallback ?? deliverFallback)({ problem, reportFile });
+      const used = r.path === 'toast_browser' ? 'fallback_toast_browser' : 'fallback_unavailable';
+      say({ evt: 'remind_fallback_delivery', delivery: used, spawned: r.spawned, html_opened: r.html_opened, error: r.error, reason: r.reason, report_file: reportFile });
+      return used;
+    } catch (err) {
+      say({ evt: 'remind_fallback_delivery', delivery: 'fallback_unavailable', error: errFields(err).err_message.slice(0, 200) });
+      return 'fallback_unavailable';
+    }
+  }
+
   if (opts.dryRun) {
     // A dry run always exercises the token file (load + in-memory refresh) even with nothing due, so the
     // scheduled job can be proven healthy without sending anything. The marker is never advanced here
@@ -254,7 +292,8 @@ export async function runRemind(opts) {
         missing_scopes: googleAuthState.state === 'broken_missing_scopes' ? googleAuthState.missing.join(',') : null,
       });
     }
-    return { code: 1, due: rows.length, flipped: flippedIds.length, sent: false, stamped: 0, subject, body: text, reason: googleAuthError ? googleAuthError.err_message : 'google auth unavailable', scopes_ok: false, expiry: googleExpiry, report_file: reportFile, no_scan: report.noScan, worst_status: report.worstStatus, google_auth_state: googleAuthState.state };
+    const delivery = await fallbackDelivery(`Gmail ${googleAuthState.state === 'ok' ? 'send unavailable' : `auth is ${googleAuthState.state}`}`);
+    return { code: 1, due: rows.length, flipped: flippedIds.length, sent: false, stamped: 0, subject, body: text, reason: googleAuthError ? googleAuthError.err_message : 'google auth unavailable', scopes_ok: false, expiry: googleExpiry, report_file: reportFile, no_scan: report.noScan, worst_status: report.worstStatus, google_auth_state: googleAuthState.state, delivery };
   }
   try {
     const msg = buildRfc2822Multipart({ to: opts.to, from: opts.from, subject, text, html, date: now });
@@ -263,7 +302,23 @@ export async function runRemind(opts) {
   } catch (err) {
     const f = errFields(err);
     say({ evt: 'remind_send_failed', ...f });
-    return { code: 1, due: rows.length, flipped: flippedIds.length, sent: false, stamped: 0, subject, body: text, reason: f.err_message, scopes_ok: googleScopesOk, expiry: googleExpiry, report_file: reportFile, no_scan: report.noScan, worst_status: report.worstStatus, google_auth_state: googleAuthState.state };
+    // A send that fails after a good refresh is a send problem even though the token is fine.
+    try {
+      await recordCapabilityOutcomes(opts.client, [{ capability: 'send', ok: false, state: 'send_error', missing: [] }], now);
+    } catch (recErr) {
+      say({ evt: 'remind_capability_record_failed', ...errFields(recErr) });
+    }
+    const delivery = await fallbackDelivery(`Gmail send failed (${f.err_message.slice(0, 80)})`);
+    return { code: 1, due: rows.length, flipped: flippedIds.length, sent: false, stamped: 0, subject, body: text, reason: f.err_message, scopes_ok: googleScopesOk, expiry: googleExpiry, report_file: reportFile, no_scan: report.noScan, worst_status: report.worstStatus, google_auth_state: googleAuthState.state, delivery };
+  }
+  // The confirmed send is the strongest evidence the send capability works.
+  try {
+    await recordCapabilityOutcomes(opts.client, [{ capability: 'send', ok: true, state: 'ok', missing: [] }], now);
+    // The recruiter mail items this email listed are marked surfaced, so the next report skips them.
+    const mi = /** @type {any} */ (report).mailIntake;
+    if (mi && Array.isArray(mi.items)) await markSurfaced(opts.client, mi.items.map((/** @type {any} */ i) => i.message_id), report.lastRunIdIncluded ?? 0);
+  } catch (err) {
+    say({ evt: 'remind_post_send_record_failed', ...errFields(err) });
   }
   const stamped = await stampReminded(opts.client, rows.map((r) => r.id), now);
   // Decision 23: the marker advances only after the confirmed send above, mirroring stampReminded.
@@ -274,5 +329,5 @@ export async function runRemind(opts) {
   if (opts.watchdogStateFile && dashboardHealthState && dashboardHealthState.restarts_since_ack > 0) {
     ackWatchdogRestarts(opts.watchdogStateFile, now);
   }
-  return { code: 0, due: rows.length, flipped: flippedIds.length, sent: true, stamped, subject, body: text, reason: null, scopes_ok: googleScopesOk, expiry: googleExpiry, report_file: reportFile, no_scan: report.noScan, worst_status: report.worstStatus, google_auth_state: googleAuthState.state };
+  return { code: 0, due: rows.length, flipped: flippedIds.length, sent: true, stamped, subject, body: text, reason: null, scopes_ok: googleScopesOk, expiry: googleExpiry, report_file: reportFile, no_scan: report.noScan, worst_status: report.worstStatus, google_auth_state: googleAuthState.state, delivery: 'email' };
 }
