@@ -75,7 +75,7 @@ describe('computeGoogleAuthBadgeState(): category -> badge/button total classifi
     const last = { running: false, lastOutcome: 'timeout', lastOutcomeAt: '2026-09-17T14:00:00.000Z' };
     for (const category of ['ok', 'broken', 'weird']) {
       const s = computeGoogleAuthBadgeState({ category, state: 'x', reauth: last });
-      assert.match(/** @type {string} */ (s.lastAttemptLine), /Last reauth: timeout at 2026-09-17/);
+      assert.match(/** @type {string} */ (s.lastAttemptLine), /Last reauth: timeout at 2026-09-1[678] \d\d:\d\d/);
     }
     assert.match(/** @type {string} */ (computeGoogleAuthBadgeState(null).lastAttemptLine), /No reauth on record/);
 
@@ -89,6 +89,15 @@ describe('computeGoogleAuthBadgeState(): category -> badge/button total classifi
       assert.equal(s.lastAttemptLine, 'No reauth on record');
       assert.equal(s.showReauthButton, true);
     }
+  });
+
+  test('near UTC midnight: date and time both come from the local zone', () => {
+    const at = '2026-10-26T03:30:00.000Z';
+    const d = new Date(at);
+    const pad = (n) => String(n).padStart(2, '0');
+    const expected = `${d.getFullYear()}-${pad(d.getMonth() + 1)}-${pad(d.getDate())} ${pad(d.getHours())}:${pad(d.getMinutes())}`;
+    const s = computeGoogleAuthBadgeState({ category: 'ok', state: 'ok', reauth: { running: false, lastOutcome: 'reauthorized', lastOutcomeAt: at } });
+    assert.equal(s.lastAttemptLine, `Last reauth: reauthorized at ${expected}`);
   });
 
   test('unparsable lastOutcomeAt does not throw', () => {

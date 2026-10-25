@@ -101,7 +101,9 @@ export function computeGoogleAuthBadgeState(body) {
 function lastReauthWhen(at) {
   const d = new Date(at);
   if (Number.isNaN(d.getTime())) return 'unknown time';
-  return `${d.toISOString().slice(0, 10)} ${hhmm(at)}`;
+  const pad = (/** @type {number} */ n) => String(n).padStart(2, '0');
+  // Local getters for the date, matching hhmm()'s local getters, so date and time share one zone.
+  return `${d.getFullYear()}-${pad(d.getMonth() + 1)}-${pad(d.getDate())} ${hhmm(d)}`;
 }
 
 export const CONSENT_UNAVAILABLE_MESSAGE = 'Consent link unavailable; check logs/google-reauth-helper.out.log';
