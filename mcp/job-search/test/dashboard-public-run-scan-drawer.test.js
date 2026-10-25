@@ -12,17 +12,19 @@ import assert from 'node:assert/strict';
 import { computeGoogleAuthBadgeState, nextGoogleReauthClickState } from '../src/dashboard/public/components/run-scan-drawer.js';
 
 describe('computeGoogleAuthBadgeState(): category -> badge/button total classification', () => {
-  test('category "ok": green/ok tone, no Re-authorize button', () => {
+  test('category "ok": green/ok tone, Re-authorize button still present but quiet and enabled', () => {
     const s = computeGoogleAuthBadgeState({ category: 'ok', state: 'ok', reauth: { running: false } });
     assert.equal(s.tone, 'ok');
-    assert.equal(s.showReauthButton, false);
-    assert.equal(s.reauthButtonEnabled, false);
+    assert.equal(s.showReauthButton, true);
+    assert.equal(s.reauthButtonQuiet, true);
+    assert.equal(s.reauthButtonEnabled, true);
     assert.match(s.message, /connected/i);
   });
 
   test('category "broken": error tone, message includes the raw state text, Re-authorize enabled', () => {
     const s = computeGoogleAuthBadgeState({ category: 'broken', state: 'broken_invalid_grant', reauth: { running: false } });
     assert.equal(s.tone, 'error');
+    assert.equal(s.reauthButtonQuiet, false);
     assert.equal(s.showReauthButton, true);
     assert.equal(s.reauthButtonEnabled, true);
     assert.match(s.message, /broken_invalid_grant/);
@@ -69,19 +71,29 @@ describe('computeGoogleAuthBadgeState(): category -> badge/button total classifi
     assert.equal(s.runningLine, null);
   });
 
-  test('lastAttemptLine shows only when NOT running AND category is not ok AND lastOutcome is set', () => {
-    const shown = computeGoogleAuthBadgeState({ category: 'broken', state: 'broken_invalid_grant', reauth: { running: false, lastOutcome: 'timeout', lastOutcomeAt: '2026-09-17T14:00:00.000Z' } });
-    assert.ok(shown.lastAttemptLine);
-    assert.match(/** @type {string} */ (shown.lastAttemptLine), /timeout/);
+  test('lastAttemptLine shows in every health state when NOT running; hidden while running', () => {
+    const last = { running: false, lastOutcome: 'timeout', lastOutcomeAt: '2026-09-17T14:00:00.000Z' };
+    for (const category of ['ok', 'broken', 'weird']) {
+      const s = computeGoogleAuthBadgeState({ category, state: 'x', reauth: last });
+      assert.match(/** @type {string} */ (s.lastAttemptLine), /Last reauth: timeout at 2026-09-17/);
+    }
+    assert.match(/** @type {string} */ (computeGoogleAuthBadgeState(null).lastAttemptLine), /No reauth on record/);
 
-    const hiddenWhileRunning = computeGoogleAuthBadgeState({ category: 'broken', state: 'broken_invalid_grant', reauth: { running: true, lastOutcome: 'timeout', lastOutcomeAt: '2026-09-17T14:00:00.000Z' } });
+    const hiddenWhileRunning = computeGoogleAuthBadgeState({ category: 'broken', state: 'broken_invalid_grant', reauth: { ...last, running: true } });
     assert.equal(hiddenWhileRunning.lastAttemptLine, null);
+  });
 
-    const hiddenWhenOk = computeGoogleAuthBadgeState({ category: 'ok', state: 'ok', reauth: { running: false, lastOutcome: 'reauthorized', lastOutcomeAt: '2026-09-17T14:00:00.000Z' } });
-    assert.equal(hiddenWhenOk.lastAttemptLine, null);
+  test('no last.json on record (lastOutcome null/missing): "No reauth on record", button still shown', () => {
+    for (const reauth of [{ running: false, lastOutcome: null, lastOutcomeAt: null }, { running: false }]) {
+      const s = computeGoogleAuthBadgeState({ category: 'ok', state: 'ok', reauth });
+      assert.equal(s.lastAttemptLine, 'No reauth on record');
+      assert.equal(s.showReauthButton, true);
+    }
+  });
 
-    const hiddenWhenNoOutcome = computeGoogleAuthBadgeState({ category: 'broken', state: 'broken_invalid_grant', reauth: { running: false, lastOutcome: null } });
-    assert.equal(hiddenWhenNoOutcome.lastAttemptLine, null);
+  test('unparsable lastOutcomeAt does not throw', () => {
+    const s = computeGoogleAuthBadgeState({ category: 'ok', state: 'ok', reauth: { running: false, lastOutcome: 'reauthorized', lastOutcomeAt: 'garbage' } });
+    assert.match(/** @type {string} */ (s.lastAttemptLine), /reauthorized at unknown time/);
   });
 });
 

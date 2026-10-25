@@ -115,6 +115,8 @@ table { border-collapse: collapse; width: 100%; }
 .btn--primary:hover { background: var(--accent); filter: brightness(1.1); }
 .btn--danger { background: var(--red-dim); color: var(--red); border-color: var(--red); }
 .btn--small { padding: 3px 8px; font-size: 12px; }
+.btn--quiet { background: transparent; color: var(--muted, inherit); border-color: transparent; }
+.btn--quiet:hover { border-color: var(--border, currentColor); }
 .btn--active { border-color: var(--accent); color: var(--accent); }
 .btn--confirming { background: var(--red-dim); border-color: var(--red); color: var(--red); }
 

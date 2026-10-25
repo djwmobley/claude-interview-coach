@@ -11,9 +11,9 @@
  * Google auth row (spec A9, extended 2026-09-17 incident follow-up): ALWAYS rendered, branching on
  * GET /api/google/auth's `category` field (never the raw `state` string -- see computeGoogleAuthBadgeState
  * below). A "Recheck" button (re-GETs /api/google/auth) is always present; a "Re-authorize Google" button
- * (POSTs /api/google/reauth) is added alongside it only when category is not 'ok' -- spec: "ok -> ...
- * Recheck button only; broken -> ... plus enabled Re-authorize Google button; anything else -> ... plus
- * enabled Re-authorize Google button".
+ * (POSTs /api/google/reauth) is rendered in EVERY state (2026-10-25: operator needs to re-issue a token
+ * while health is good); quiet styling (btn--quiet) when ok, current styling otherwise. A last-reauth
+ * line (outcome + time, or "No reauth on record") sits beside it.
  *
  * The badge/button classification and the post-click classification are both pure, DOM-free functions
  * (this codebase has no jsdom -- see test/dashboard-public-linksafety.test.js's note on
@@ -64,7 +64,7 @@ export function computeGoogleAuthBadgeState(body) {
   if (category === 'ok') {
     tone = 'ok';
     message = 'Google auth is connected.';
-    showReauthButton = false;
+    showReauthButton = true; // always available (2026-10-25): re-issuing a token must not need a broken state
   } else if (category === 'broken') {
     tone = 'error';
     const stateText = body && typeof body.state === 'string' ? body.state : 'broken';
@@ -80,18 +80,28 @@ export function computeGoogleAuthBadgeState(body) {
   const runningLine = running
     ? `Consent helper running since ${hhmm(reauth.startedAt)}${Number.isFinite(reauth.pid) ? ` (pid ${reauth.pid})` : ''}, waits until ${hhmm(reauth.waitsUntil)}`
     : null;
-  // Only shown when NOT currently running and the token is not already ok (spec: "If reauth.lastOutcome
-  // is set and category is not ok").
-  const lastAttemptLine = (!running && category !== 'ok' && reauth.lastOutcome)
-    ? `Last attempt: ${reauth.lastOutcome} at ${hhmm(reauth.lastOutcomeAt)}`
-    : null;
+  // Shown in every health state while NOT running; a missing/unreadable last.json (server sends
+  // lastOutcome null) reads "No reauth on record".
+  let lastAttemptLine = null;
+  if (!running) {
+    lastAttemptLine = typeof reauth.lastOutcome === 'string' && reauth.lastOutcome
+      ? `Last reauth: ${reauth.lastOutcome}${reauth.lastOutcomeAt ? ` at ${lastReauthWhen(reauth.lastOutcomeAt)}` : ''}`
+      : 'No reauth on record';
+  }
 
   // Persistent "Open Google sign-in" link (2026-10-04, spec S6): whenever a helper is waiting and the
   // server handed back a consent URL that ALSO classifies OPEN here, so lock_held and scan-spawned
   // helpers complete with one click.
   const consentUrl = running ? consentLinkFrom(reauth) : null;
 
-  return { tone, message, showReauthButton, reauthButtonEnabled: showReauthButton && !running, runningLine, lastAttemptLine, consentUrl };
+  return { tone, message, showReauthButton, reauthButtonQuiet: tone === 'ok', reauthButtonEnabled: showReauthButton && !running, runningLine, lastAttemptLine, consentUrl };
+}
+
+/** Date and time for the last-reauth line (the last attempt may be days old, so HH:MM alone is not enough). */
+function lastReauthWhen(at) {
+  const d = new Date(at);
+  if (Number.isNaN(d.getTime())) return 'unknown time';
+  return `${d.toISOString().slice(0, 10)} ${hhmm(at)}`;
 }
 
 export const CONSENT_UNAVAILABLE_MESSAGE = 'Consent link unavailable; check logs/google-reauth-helper.out.log';
@@ -211,7 +221,7 @@ export function renderGoogleAuthRow(host, authOutcome, inlineText = null) {
 
   if (s.showReauthButton) {
     const reauthBtn = h('button', {
-      className: 'btn btn--small',
+      className: s.reauthButtonQuiet ? 'btn btn--small btn--quiet' : 'btn btn--small',
       text: 'Re-authorize Google',
       disabled: !s.reauthButtonEnabled,
       on: {
