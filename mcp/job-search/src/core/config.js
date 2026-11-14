@@ -318,8 +318,9 @@ export const adaptersSchema = z.object({
      * RUN_WALLCLOCK_EXCEEDED warning is recorded, and the run still proceeds to triage/report/run_finished
      * rather than being marked failed. Defaulted to 40 minutes (bumped from 20; independent review
      * Finding 2 corrected an initial 50-minute default): observed Task Scheduler jitter has pushed the
-     * 06:30 run to start as late as 07:08, and 07:08 + 50min = 07:58 is already past the 07:55 auto-apply
-     * HARD deadline; 07:08 + 40min = 07:48 still clears it with margin. config/adapters.json may still
+     * scan run to start 38 minutes late (07:08 against a 06:30 trigger), which against the 09:00 trigger is
+     * 09:38; 09:38 + 50min = 10:28 is already past the 10:25 auto-apply HARD deadline; 09:38 + 40min = 10:18
+     * still clears it with margin. config/adapters.json may still
      * override it explicitly. */
     runTimeoutMinutes: z.number().int().positive().default(40),
     heartbeatStaleMinutes: z.number().int().positive(),
@@ -465,8 +466,8 @@ export const autoApplySchema = z.object({
   // 10) but is a SEPARATE key here since auto-apply's wait loop is a distinct consumer that should not
   // silently start tracking scan.js's own reaper threshold if that one is ever retuned independently.
   waitForScan: z.boolean().default(true),
-  waitDeadlineLocal: z.string().regex(/^\d{1,2}:\d{2}$/, 'waitDeadlineLocal must be "HH:MM"').default('07:40'),
-  waitHardDeadlineLocal: z.string().regex(/^\d{1,2}:\d{2}$/, 'waitHardDeadlineLocal must be "HH:MM"').default('07:55'),
+  waitDeadlineLocal: z.string().regex(/^\d{1,2}:\d{2}$/, 'waitDeadlineLocal must be "HH:MM"').default('10:10'),
+  waitHardDeadlineLocal: z.string().regex(/^\d{1,2}:\d{2}$/, 'waitHardDeadlineLocal must be "HH:MM"').default('10:25'),
   waitPollSeconds: z.number().int().positive().default(60),
   waitStaleHeartbeatMinutes: z.number().int().positive().default(10),
   // Probe throughput fix: probeFitFloor/probeRowCapWithBrowser widen the prepare-phase query beyond the

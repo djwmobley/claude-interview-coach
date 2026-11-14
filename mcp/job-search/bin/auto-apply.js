@@ -1,7 +1,7 @@
 #!/usr/bin/env node
 // @ts-check
 /**
- * Auto-apply CLI (auto-apply PR B, docs/auto-apply-spec.md), scheduled 06:55 daily as Windows Scheduled
+ * Auto-apply CLI (auto-apply PR B, docs/auto-apply-spec.md), scheduled 09:25 daily as Windows Scheduled
  * Task "job-search auto-apply" via scripts/register-auto-apply-task.ps1.
  *
  *   node bin/auto-apply.js [--dry-run] [--json [out]] [--application <id>]
@@ -17,7 +17,7 @@
  *     data and select would report hundreds of rows as below_fit when the real blocker was simply that
  *     top-fit rows had no resolved apply target yet) -- src/core/scan-wait.js's waitForScan() polls
  *     ic_scan_runs against TWO America/Chicago local deadlines (config/auto-apply.json's waitDeadlineLocal,
- *     default 07:40, and waitHardDeadlineLocal, default 07:55). A scan that finished today lets this run
+ *     default 10:10, and waitHardDeadlineLocal, default 10:25). A scan that finished today lets this run
  *     proceed immediately. A scan that never started, already failed, or is unclassifiable is waited on
  *     only until the SOFT deadline, then this run self-heals the scan Chrome (bin/scan.js's own
  *     launchChrome) and proceeds anyway. A scan that IS actively running (or stalled -- heartbeat gone
@@ -84,7 +84,7 @@
  * been selected.
  *
  * auto-apply-latest.json (src/core/auto-apply-state.js) is written at process start (phase "waiting") and
- * rewritten at every phase change (spec amendment A2), so bin/remind.js's 08:00 digest always shows THIS
+ * rewritten at every phase change (spec amendment A2), so bin/remind.js's 10:30 digest always shows THIS
  * run in progress rather than a stale summary from a previous day when auto-apply is still mid-flight at
  * digest time. A separate, never-overwritten logs/auto-apply-YYYY-MM-DD-HHMM.json (America/Chicago local
  * time, HHMM fixed at process start; a same-minute collision gets a -2/-3 suffix, never clobbers the

@@ -5,7 +5,7 @@ does not have to re-derive interfaces from the diff alone.
 
 ## 1. Goal and non-goals
 
-**Goal.** A daily unattended pipeline (`bin/auto-apply.js`, scheduled 06:55 via
+**Goal.** A daily unattended pipeline (`bin/auto-apply.js`, scheduled 09:25 via
 `scripts/register-auto-apply-task.ps1`) that: (a) opportunistically resolves a scanned listing's REAL apply
 target when it differs from the listing's own URL (LinkedIn/Indeed/exec-board/aggregator postings), (b)
 selects a bounded number of listings per day that clear a fit floor, a US-only location gate, a

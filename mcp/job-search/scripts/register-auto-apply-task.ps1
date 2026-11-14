@@ -1,10 +1,11 @@
 <#
 .SYNOPSIS
   Registers (or unregisters) the "job-search auto-apply" Windows Scheduled Task: runs bin/auto-apply.js
-  once daily at 06:55, so the prepare/select/apply pipeline runs unattended every morning shortly before
-  the "job-search remind" digest email (08:00) and after the "job-search scan" run (06:30 + delay) and the
-  "job-search confirm" run (07:45), so the report those two produce reflects the SAME day's auto-apply
-  activity (docs/auto-apply-spec.md's own report-timing note).
+  once daily at 09:25, so the prepare/select/apply pipeline runs unattended every morning shortly before
+  the "job-search remind" digest email (10:30) and after the "job-search scan" run (09:00 + up to 10 min
+  delay), so the digest reflects the SAME day's auto-apply activity (docs/auto-apply-spec.md's own
+  report-timing note). Its wait-on-scan deadlines (soft 10:10, hard 10:25) live in config/auto-apply.json.
+  scripts/apply-schedule.ps1 re-registers scan, auto-apply and remind together.
 
 .DESCRIPTION
   Auto-apply PR B. Mirrors scripts/register-dashboard-task.ps1's own structure and settings (StartWhen
@@ -30,7 +31,7 @@
   (mcp/job-search/scripts -> mcp/job-search -> mcp -> repo root).
 
 .PARAMETER Time
-  Daily run time, HH:mm (24-hour). Defaults to "06:55".
+  Daily run time, HH:mm (24-hour). Defaults to "09:25".
 
 .PARAMETER Unregister
   Remove the task instead of registering it.
@@ -54,7 +55,7 @@
   setting additionally stops Task Scheduler itself from ever starting a second instance of the task in the
   same tick.
   -StartWhenAvailable / -AllowStartIfOnBatteries / -DontStopIfGoingOnBatteries: an unattended morning run
-  must not be silently skipped because the laptop was off, asleep, or on battery at 06:55 (the exact
+  must not be silently skipped because the laptop was off, asleep, or on battery at 09:25 (the exact
   "silently skipped" incident this repo's own CLAUDE.md and 2026-08-29 fix history call out for the other
   scheduled job-search tasks) -- this task follows the same "warn and proceed" floor rather than the
   earlier, since-corrected "block on battery" default.
@@ -63,7 +64,7 @@
 param(
   [string]$TaskName = "job-search auto-apply",
   [string]$RepoRoot = (Resolve-Path (Join-Path $PSScriptRoot "..\..\..")).Path,
-  [string]$Time = "06:55",
+  [string]$Time = "09:25",
   [switch]$Unregister
 )
 

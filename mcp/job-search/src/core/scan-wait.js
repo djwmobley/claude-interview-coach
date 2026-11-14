@@ -7,9 +7,9 @@
  *
  * One deadline-aware wait loop, two deadlines, both America/Chicago local times read from
  * config/auto-apply.json:
- *   - waitDeadlineLocal (soft, default "07:40"): the point past which a scan that never even started
+ *   - waitDeadlineLocal (soft, default "10:10"): the point past which a scan that never even started
  *     (or already failed) is no longer worth waiting on -- auto-apply self-heals Chrome and proceeds.
- *   - waitHardDeadlineLocal (hard, default "07:55"): the point past which a scan that IS actively running
+ *   - waitHardDeadlineLocal (hard, default "10:25"): the point past which a scan that IS actively running
  *     (or stalled -- heartbeat gone stale) is no longer worth waiting on either -- but since Chrome and the
  *     advisory lock belong to that scan, auto-apply never touches prepare/apply in this case; it runs
  *     select read-only for the report and stops.

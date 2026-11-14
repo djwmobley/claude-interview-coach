@@ -1,5 +1,5 @@
 {
-  "sha256": "ed8e6291434914ade204768004764336607cf4cb008dfdee2ee4bcbccc0913dc",
+  "sha256": "0b636c938b14ae0ea078fb31383c4fbc9b7fd6bd717c4c21c53e247d1ff2f261",
   "files": [
     "adapters.json",
     "ats-boards.json",
@@ -16,5 +16,5 @@
     "target-fts-queries.json",
     "target-alert-patterns.json"
   ],
-  "updated_at": "2026-10-15T23:03:53.053Z"
+  "updated_at": "2026-11-13T23:51:42.327Z"
 }

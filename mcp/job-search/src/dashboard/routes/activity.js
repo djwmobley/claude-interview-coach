@@ -23,7 +23,7 @@
  * only ever reflects a scan THIS process spawned (bin/scan.js is always invoked with `--trigger dashboard`
  * from there -- see scan-runner.js's own doc comment), so "the scanRunner this process is tracking right
  * now" is exactly "a scan the operator started from this dashboard's Run scan button". Every OTHER running
- * `ic_scan_runs` row -- the 06:30 scheduled task (`trigger` 'cli', the CLI default when no --trigger flag
+ * `ic_scan_runs` row -- the 09:00 scheduled task (`trigger` 'cli', the CLI default when no --trigger flag
  * is passed), an MCP-tool-started scan (`trigger` 'mcp'), or even a `trigger` 'dashboard' row this process
  * lost track of after a restart -- is classified as background instead. This is deliberately NOT the same
  * thing as "trigger 'dashboard' means operator, anything else means background": classifying by whether

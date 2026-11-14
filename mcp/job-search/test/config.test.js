@@ -136,9 +136,9 @@ describe('detailDelayMs / maxDetailsPerRun (detail-pacing fix: LinkedIn detail p
     // run.runTimeoutMinutes was bumped 20 -> 40 by the scan-hang-timeouts fix (spec item B: the wall-clock
     // cap now degrades gracefully -- skip remaining work, warn, still finish -- rather than aborting
     // outright, so a longer cap is safe). Independent review Finding 2 corrected an initial 50-minute
-    // default: observed Task Scheduler jitter pushed a 06:30 run to start as late as 07:08, and
-    // 07:08 + 50min = 07:58 is already past the 07:55 auto-apply HARD deadline; 40 minutes clears it with
-    // margin (07:08 + 40min = 07:48). See test/scan-run.test.js's (F2)/(F4) for the cap's own behavior.
+    // default: observed Task Scheduler jitter pushed a run to start 38 minutes late (09:38 against the 09:00
+    // trigger), and 09:38 + 50min = 10:28 is already past the 10:25 auto-apply HARD deadline; 40 minutes
+    // clears it with margin (09:38 + 40min = 10:18). See test/scan-run.test.js's (F2)/(F4) for the cap's own behavior.
     assert.equal(cfg.adapters.run.runTimeoutMinutes, 40);
     for (const [name, a] of Object.entries(cfg.adapters.adapters)) {
       if (name === 'linkedin') continue;
