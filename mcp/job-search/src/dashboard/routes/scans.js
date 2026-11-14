@@ -9,7 +9,8 @@ import { cdpReachable, launchChrome } from '../../../bin/scan.js';
 import { sendJson } from '../http.js';
 import { adapterNames } from '../../adapters/index.js';
 import { reenableSource, normalizeSourceName, pairOf } from '../../browser/wall.js';
-import { collectDisabledSourceStates, disabledSourceView } from '../../core/source-state.js';
+import { collectDisabledSourceStates, disabledSourceView, getParkedIndeed } from '../../core/source-state.js';
+import { connectCdp } from '../../browser/cdp-target.js';
 
 /** @param {any} r */
 function formatRunFull(r) {
@@ -135,8 +136,58 @@ export function register(router, deps) {
 
   router.register('GET', '/api/sources/disabled', async (ctx) => {
     const rows = await deps.withClient((c) => collectDisabledSourceStates(c));
-    sendJson(ctx.res, 200, { ok: true, sources: rows.map(disabledSourceView) });
+    const parked = await deps.withClient((c) => getParkedIndeed(c));
+    sendJson(ctx.res, 200, { ok: true, sources: rows.map(disabledSourceView), parked_source: parked });
   });
+
+  // Indeed parked on a human-verification challenge (sql/032). Open: bring the parked tab to the front of the
+  // scan Chrome; when the tab or the Chrome is gone, start the Chrome and open the stored address in a new tab
+  // and store its target id. deps.parkedTab is a test seam (production: raw CDP to SCAN_CDP_URL).
+  router.register('POST', '/api/sources/indeed/open-page', async (ctx) => {
+    const parked = await deps.withClient((c) => getParkedIndeed(c));
+    if (!parked) throw new JobSearchError('NOT_FOUND', 'indeed is not waiting for a click');
+    const seam = deps.parkedTab ?? {};
+    const connect = seam.connect ?? (() => connectCdp({ cdpHttpUrl: deps.env.SCAN_CDP_URL, timeoutMs: 10000 }));
+    const launch = seam.launchChrome ?? launchChrome;
+    let cdp;
+    try {
+      cdp = await connect();
+    } catch {
+      try {
+        await launch(deps.env, deps.log ?? (() => {}));
+        cdp = await connect();
+      } catch (err) {
+        throw new JobSearchError('BROWSER_UNAVAILABLE', err instanceof Error ? err.message : 'the scan Chrome could not be started');
+      }
+    }
+    try {
+      const live = (await cdp.listPageTargets()).some((t) => t.targetId === parked.target_id);
+      if (parked.target_id && live) {
+        await cdp.send('Target.activateTarget', { targetId: parked.target_id });
+        return sendJson(ctx.res, 200, { ok: true, reopened: false, target_id: parked.target_id });
+      }
+      if (!parked.url) throw new JobSearchError('VALIDATION', 'the parked tab is gone and no page address was stored');
+      const created = await cdp.send('Target.createTarget', { url: parked.url });
+      const newId = String(created.targetId ?? '');
+      if (!newId) throw new JobSearchError('BROWSER_UNAVAILABLE', 'the scan Chrome did not open the page');
+      await deps.withClient((c) => c.query("UPDATE ic_source_state SET park_target_id = $1 WHERE source = 'indeed' AND parked_at IS NOT NULL", [newId]));
+      await cdp.send('Target.activateTarget', { targetId: newId });
+      sendJson(ctx.res, 200, { ok: true, reopened: true, target_id: newId });
+    } finally {
+      cdp.close();
+    }
+  }, { allowEmptyBody: true });
+
+  // Resume: clear the park through the existing re-enable path, then start a real scan limited to Indeed.
+  // A scan already running is a visible no-op (LOCKED, the same 409 POST /api/scans gives) and the park stays.
+  router.register('POST', '/api/sources/indeed/resume', async (ctx) => {
+    if (deps.scanRunner.status().running) throw new JobSearchError('LOCKED', 'a scan is already running');
+    const parked = await deps.withClient((c) => getParkedIndeed(c));
+    if (!parked) throw new JobSearchError('NOT_FOUND', 'indeed is not waiting for a click');
+    await deps.withClient((c) => reenableSource(c, 'indeed'));
+    const result = await deps.scanRunner.start({ sources: ['indeed'] });
+    sendJson(ctx.res, 202, { ok: true, run_id: result.runId, pid: result.pid });
+  }, { allowEmptyBody: true });
 
   router.register('GET', '/api/profiles', async (ctx) => {
     const r = await deps.withClient((c) => c.query(

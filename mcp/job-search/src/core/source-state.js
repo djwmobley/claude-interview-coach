@@ -162,3 +162,15 @@ export async function collectDisabledSourceStates(client) {
   );
   return r.rows.map(describeDisabledSource);
 }
+
+/**
+ * The parked Indeed row (sql/032) as the dashboard shows it, or null when Indeed is not parked.
+ * @param {import('pg').ClientBase} client
+ * @returns {Promise<{ source: string, parked_at: string, url: string|null, target_id: string|null }|null>}
+ */
+export async function getParkedIndeed(client) {
+  const r = await client.query("SELECT parked_at, park_url, park_target_id FROM ic_source_state WHERE source = 'indeed' AND parked_at IS NOT NULL");
+  const row = r.rows[0];
+  if (!row) return null;
+  return { source: 'indeed', parked_at: new Date(row.parked_at).toISOString(), url: row.park_url ?? null, target_id: row.park_target_id ?? null };
+}

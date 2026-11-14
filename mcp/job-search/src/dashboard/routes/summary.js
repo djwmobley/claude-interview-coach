@@ -8,7 +8,7 @@ import { sendJson } from '../http.js';
 import { recentEvents } from '../../core/events.js';
 import { groupOf, STATUS_GROUPS } from '../../core/statuses.js';
 import { nextScheduledScan } from '../next-scheduled-scan.js';
-import { collectDisabledSourceStates, disabledSourceView } from '../../core/source-state.js';
+import { collectDisabledSourceStates, disabledSourceView, getParkedIndeed } from '../../core/source-state.js';
 
 /** @param {any} r */
 function formatRun(r) {
@@ -92,6 +92,7 @@ export function register(router, deps) {
       open_review: data.openReview,
       budget_today: data.budgetToday,
       disabled_sources: data.disabledSources.map(disabledSourceView),
+      parked_source: await deps.withClient((c) => getParkedIndeed(c)),
       next_scheduled_scan: nextScan,
       recent_events: data.events.map(formatEvent),
     });

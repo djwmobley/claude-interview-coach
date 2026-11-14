@@ -37,7 +37,7 @@ export async function render(container, params, app) {
     const offOutcome = await getJson('/api/sources/disabled');
     setChildren(container, [
       h('h1', { className: 'page-title', text: 'Runs' }),
-      offOutcome.kind === 'ok' ? disabledSourcesPanel({ sources: offOutcome.body.sources, onChanged: load }) : null,
+      offOutcome.kind === 'ok' ? disabledSourcesPanel({ sources: offOutcome.body.sources, parked: offOutcome.body.parked_source, onChanged: load }) : null,
       runs.length === 0 ? emptyState({ message: 'No scan runs recorded yet.' }) : dataTable({
         columns: ['Run', 'Started', 'Trigger', 'Status'],
         rows: runs.map((r) => {

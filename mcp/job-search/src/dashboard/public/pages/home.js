@@ -78,7 +78,7 @@ export async function render(container, params, app) {
       capabilityOutcome.kind === 'ok' ? googleCapabilityBanner(/** @type {any} */ (capabilityOutcome.body)) : null,
       h('h1', { className: 'page-title', text: 'Home' }),
       statusStrip({ summary }),
-      disabledSourcesPanel({ sources: summary.disabled_sources, onChanged: load }),
+      disabledSourcesPanel({ sources: summary.disabled_sources, parked: summary.parked_source, onChanged: load }),
       targetsOutcome.kind === 'ok' ? targetsTile({ summary: targetsOutcome.body }) : null,
       actionBar({
         running,
