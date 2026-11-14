@@ -23,6 +23,7 @@ import { JobSearchError, errFields } from '../core/errors.js';
 import { log as defaultLog } from '../core/logger.js';
 import { DashboardError } from './http.js';
 import { adapterNames } from '../adapters/index.js';
+import { normalizeSourceName } from '../browser/wall.js';
 
 export const MARKER_TIMEOUT_MS = 30000;
 export const CANCEL_BACKSTOP_MS = 45000;
@@ -99,7 +100,7 @@ export function createScanRunner(deps) {
         throw new JobSearchError('VALIDATION', 'no sources selected');
       }
       const known = new Set(adapterNames());
-      const normalized = args.sources.map((s) => String(s).trim().toLowerCase());
+      const normalized = args.sources.map((s) => (String(s).trim() ? normalizeSourceName(String(s)) : ''));
       const unknown = normalized.filter((s) => !known.has(s));
       if (unknown.length > 0) {
         throw new JobSearchError('VALIDATION', `unknown source(s): ${unknown.join(', ')}`, { hint: `known sources: ${[...known].join(', ')}` });

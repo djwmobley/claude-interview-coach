@@ -74,7 +74,7 @@ export function normalizeDetailText(raw) {
  * @property {string|null} [source]
  * @property {number|null} [httpStatus]
  * @property {string|null} [cfMitigated] cf-mitigated header value
- * @property {{ challengeCloudflare?: boolean, challengeForm?: boolean, recaptcha?: boolean, loginForm?: boolean, guestInterstitial?: boolean }|null} [wallSignals]
+ * @property {{ challengeCloudflare?: boolean, challengeForm?: boolean, indeedChallenge?: boolean, recaptcha?: boolean, loginForm?: boolean, guestInterstitial?: boolean }|null} [wallSignals]
  */
 
 /**
@@ -87,6 +87,8 @@ export function normalizeDetailText(raw) {
 export function classifyDetail(input) {
   const i = input ?? {};
   const status = typeof i.httpStatus === 'number' ? i.httpStatus : null;
+  // Set only by the Indeed adapter (classifyIndeedPage CHALLENGE); evaluated before status and cf-mitigated.
+  if (i.wallSignals && i.wallSignals.indeedChallenge === true) return 'blocked:indeed_verification';
   if (status === 403) return 'blocked:http_403';
   if (i.cfMitigated) return 'blocked:cloudflare_challenge';
   if (status === 429 || status === 503) return 'transient';
