@@ -34,6 +34,8 @@ param(
 
 $ErrorActionPreference = "Stop"
 
+. (Join-Path $PSScriptRoot "task-readback.ps1")
+
 if ($Unregister) {
   Unregister-ScheduledTask -TaskName $TaskName -Confirm:$false -ErrorAction SilentlyContinue
   Write-Host "Unregistered scheduled task '$TaskName', or it was not registered."
@@ -56,13 +58,19 @@ $argLine = "mcp\job-search\bin\remind.js"
 if ($Arguments) { $argLine = "$argLine $Arguments" }
 
 $action = New-ScheduledTaskAction -Execute $nodeCmd.Source -Argument $argLine -WorkingDirectory $RepoRoot
+$days = @("Sunday", "Monday", "Tuesday", "Wednesday", "Thursday", "Friday", "Saturday")
 $trigger = New-ScheduledTaskTrigger -Weekly -DaysOfWeek Sunday,Monday,Tuesday,Wednesday,Thursday,Friday,Saturday -At $startTime
 $settings = New-ScheduledTaskSettingsSet `
   -StartWhenAvailable `
   -DontStopIfGoingOnBatteries `
   -AllowStartIfOnBatteries
 
-Register-ScheduledTask -TaskName $TaskName -Action $action -Trigger $trigger -Settings $settings -RunLevel Limited -Force | Out-Null
+try {
+  Register-ScheduledTask -TaskName $TaskName -Action $action -Trigger $trigger -Settings $settings -RunLevel Limited -Force -ErrorAction Stop | Out-Null
+  Assert-RegisteredTaskMatches -TaskName $TaskName -ExpectedTime $startTime -ExpectedDays $days -ExpectedExecute $nodeCmd.Source -ExpectedArguments $argLine
+} catch {
+  Exit-RegisterFailure -TaskName $TaskName -ErrorRecord $_
+}
 
 Write-Host "Registered scheduled task '$TaskName' (runs bin/remind.js daily at $Time)."
 Write-Host "Unregister it with:  powershell -File `"$PSCommandPath`" -Unregister"

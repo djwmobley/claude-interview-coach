@@ -104,6 +104,67 @@ describe('apply-schedule.ps1', () => {
   });
 });
 
+describe('register scripts verify the live task (read-back) and fail loudly', () => {
+  const SHARED = read('scripts/task-readback.ps1');
+  const SCRIPTS = ['register-scan-task.ps1', 'register-remind-task.ps1', 'register-auto-apply-task.ps1'];
+
+  test('shared function reads the task back and compares every requested value', () => {
+    assert.match(SHARED, /function Assert-RegisteredTaskMatches/);
+    assert.match(SHARED, /Get-ScheduledTask -TaskName \$TaskName -ErrorAction Stop/);
+    for (const f of ['StartBoundary', 'DaysOfWeek', 'RandomDelay', '\\.Execute', '\\.Arguments']) {
+      assert.match(SHARED, new RegExp(f));
+    }
+  });
+
+  test('shared failure path prints FAILED and exits non-zero', () => {
+    assert.match(SHARED, /function Exit-RegisterFailure/);
+    assert.match(SHARED, /FAILED: /);
+    assert.match(SHARED, /exit 1/);
+  });
+
+  test('access-denied message names Administrators and Run as administrator; no elevation or deletion', () => {
+    assert.match(SHARED, /Access is denied/);
+    assert.match(SHARED, /owned by Administrators/);
+    assert.match(SHARED, /Run as administrator/);
+    assert.doesNotMatch(SHARED, /Start-Process[^\n]*-Verb RunAs/i);
+    assert.doesNotMatch(SHARED, /takeown|icacls|Unregister-ScheduledTask|Remove-Item/i);
+  });
+
+  for (const f of SCRIPTS) {
+    test(`${f} dot-sources the shared file, uses -ErrorAction Stop in try/catch, then read-back, then Registered`, () => {
+      const S = read(`scripts/${f}`);
+      assert.match(S, /^\. \(Join-Path \$PSScriptRoot "task-readback\.ps1"\)/m);
+      assert.doesNotMatch(S, /function Assert-RegisteredTaskMatches/);
+      const reg = S.match(/Register-ScheduledTask -TaskName \$TaskName[^\n]*/)?.[0] ?? '';
+      assert.match(reg, /-ErrorAction Stop/);
+      const iTry = S.indexOf('try {');
+      const iReg = S.indexOf('Register-ScheduledTask -TaskName $TaskName');
+      const iRead = S.indexOf('Assert-RegisteredTaskMatches');
+      const iCatch = S.indexOf('Exit-RegisterFailure');
+      const iOk = S.indexOf('Write-Host "Registered scheduled task');
+      assert.ok(iTry >= 0 && iTry < iReg && iReg < iRead && iRead < iCatch && iCatch < iOk);
+    });
+  }
+});
+
+describe('apply-schedule.ps1 failure reporting', () => {
+  const S = read('scripts/apply-schedule.ps1');
+  test('runs every register script, collects results, prints a per-task line', () => {
+    assert.match(S, /foreach \(\$name in @\("scan", "auto-apply", "remind"\)\)/);
+    assert.match(S, /register-\$name-task\.ps1/);
+    assert.match(S, /\$LASTEXITCODE/);
+    assert.match(S, /: OK"/);
+    assert.match(S, /: FAILED - /);
+  });
+  test('final Schedule applied line comes only after a non-zero exit on any failure', () => {
+    const iExit = S.indexOf('exit 1');
+    const iFinal = S.indexOf('Write-Host "Schedule applied:');
+    assert.ok(iExit >= 0 && iFinal > iExit);
+    assert.equal(S.match(/Schedule applied:/g)?.length, 1);
+    assert.match(S, /if \(@\(\$results \| Where-Object \{ -not \$_\.Ok \}\)\.Count -gt 0\) \{\s*exit 1\s*\}/);
+  });
+});
+
 describe('no stale pre-shift times in shipped schedule docs', () => {
   test('README scan trigger is 09:00 with PT10M delay and remind is 10:30', () => {
     const r = read('README.md');
