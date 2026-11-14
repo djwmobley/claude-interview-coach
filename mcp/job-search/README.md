@@ -477,7 +477,7 @@ the dedup lookups, and the expiry sweep is source-scoped, so no scan expires or 
 truncated at 4 KB. Items show fit, role, employer and client clues, comp and flags on the Review page and in the report; in
 tool output every model-derived field is fenced, in HTML it is escaped.
 
-### Task Scheduler (weekdays, random delay, interactive logon)
+### Task Scheduler (scan and remind daily, random delay, interactive logon)
 
 Run from an elevated PowerShell. Both tasks run as the interactive user, not
 "whether user is logged on or not", so the scan Chrome is reachable.
@@ -485,19 +485,25 @@ Run from an elevated PowerShell. Both tasks run as the interactive user, not
 ```powershell
 $root = "C:\claude-interview-coach\claude-interview-coach"
 
-$a = New-ScheduledTaskAction -Execute "node" -Argument "mcp\job-search\bin\scan.js --profile exec-default --json" -WorkingDirectory $root
-$t = New-ScheduledTaskTrigger -Weekly -DaysOfWeek Monday,Tuesday,Wednesday,Thursday,Friday -At 06:30
-$t.RandomDelay = "PT45M"
+$a = New-ScheduledTaskAction -Execute "node" -Argument "mcp\job-search\bin\scan.js --profile exec-default --json --launch-chrome" -WorkingDirectory $root
+$t = New-ScheduledTaskTrigger -Weekly -DaysOfWeek Sunday,Monday,Tuesday,Wednesday,Thursday,Friday,Saturday -At 09:00
+$t.RandomDelay = "PT10M"
 Register-ScheduledTask -TaskName "job-search scan" -Action $a -Trigger $t -RunLevel Limited
 
 $a3 = New-ScheduledTaskAction -Execute "node" -Argument "mcp\job-search\bin\confirm.js" -WorkingDirectory $root
 $t3 = New-ScheduledTaskTrigger -Weekly -DaysOfWeek Monday,Tuesday,Wednesday,Thursday,Friday -At 07:45
 Register-ScheduledTask -TaskName "job-search confirm" -Action $a3 -Trigger $t3 -RunLevel Limited
 
-$a2 = New-ScheduledTaskAction -Execute "node" -Argument "mcp\job-search\bin\remind.js" -WorkingDirectory $root
-$t2 = New-ScheduledTaskTrigger -Weekly -DaysOfWeek Monday,Tuesday,Wednesday,Thursday,Friday -At 08:00
+$a2 = New-ScheduledTaskAction -Execute "node" -Argument "mcp\job-search\bin\remind.js --open-dashboard" -WorkingDirectory $root
+$t2 = New-ScheduledTaskTrigger -Weekly -DaysOfWeek Sunday,Monday,Tuesday,Wednesday,Thursday,Friday,Saturday -At 10:30
 Register-ScheduledTask -TaskName "job-search remind" -Action $a2 -Trigger $t2 -RunLevel Limited
 ```
+
+The scan time is anchored at 09:00. Auto-apply runs at 09:25 (wait-on-scan deadlines: soft 10:10, hard 10:25,
+`config/auto-apply.json`) and the remind digest at 10:30, because both consume scan output. The confirm task
+(07:45) reads only Gmail and the applications table, so it is not tied to the scan time. These times are
+also encoded in `scripts/register-scan-task.ps1`, `scripts/register-auto-apply-task.ps1` and
+`scripts/register-remind-task.ps1`; `scripts/apply-schedule.ps1` re-registers all three together.
 
 `Get-ScheduledTaskInfo "job-search scan"` shows the last run time and result
 code (`0`, `1`, `2` as above). All three scripts prune their own logs after 14

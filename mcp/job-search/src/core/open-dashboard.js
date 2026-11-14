@@ -1,6 +1,6 @@
 // @ts-check
 /**
- * Open-or-refresh the dashboard tab after bin/remind.js runs (the operator's daily 08:00 scheduled
+ * Open-or-refresh the dashboard tab after bin/remind.js runs (the operator's weekday 10:30 scheduled
  * task): the reminder email regularly gets lost in spam, so the dashboard should show up on screen
  * regardless. Three modes, tried in order, any step failing falls through to the next:
  *

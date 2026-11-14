@@ -20,8 +20,8 @@ describe('register-auto-apply-task.ps1', () => {
     assert.match(SCRIPT, /\[string\]\$TaskName = "job-search auto-apply"/);
   });
 
-  test('default run time is 06:55', () => {
-    assert.match(SCRIPT, /\[string\]\$Time = "06:55"/);
+  test('default run time is 09:25', () => {
+    assert.match(SCRIPT, /\[string\]\$Time = "09:25"/);
   });
 
   test('targets bin/auto-apply.js, never bin/scan.js or bin/apply.js', () => {

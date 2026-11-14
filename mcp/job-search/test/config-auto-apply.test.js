@@ -121,8 +121,8 @@ describe('autoApplySchema: scan-wait fields (spec amendments A2/A3)', () => {
   test('defaults apply when the whole object is empty', () => {
     const parsed = autoApplySchema.parse({});
     assert.equal(parsed.waitForScan, true);
-    assert.equal(parsed.waitDeadlineLocal, '07:40');
-    assert.equal(parsed.waitHardDeadlineLocal, '07:55');
+    assert.equal(parsed.waitDeadlineLocal, '10:10');
+    assert.equal(parsed.waitHardDeadlineLocal, '10:25');
     assert.equal(parsed.waitPollSeconds, 60);
     assert.equal(parsed.waitStaleHeartbeatMinutes, 10);
     assert.equal(parsed.probeFitFloor, 70);
