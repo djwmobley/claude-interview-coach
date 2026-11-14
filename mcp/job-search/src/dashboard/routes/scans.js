@@ -8,7 +8,7 @@ import { JobSearchError } from '../../core/errors.js';
 import { cdpReachable, launchChrome } from '../../../bin/scan.js';
 import { sendJson } from '../http.js';
 import { adapterNames } from '../../adapters/index.js';
-import { reenableSource } from '../../browser/wall.js';
+import { reenableSource, normalizeSourceName, pairOf } from '../../browser/wall.js';
 import { collectDisabledSourceStates, disabledSourceView } from '../../core/source-state.js';
 
 /** @param {any} r */
@@ -109,12 +109,16 @@ export function register(router, deps) {
     // call with s.name from a resolved adapter, never a caller's raw casing), so enabling "Greenhouse"
     // must land on the same row a scan run reads as "greenhouse" -- storing the raw casing verbatim
     // would silently create a second, dead row that never affects a real scan.
-    const name = raw.trim().toLowerCase();
+    // wall.js is the one source-name normalizer. It rejects a blank name, so a blank name is handled here
+    // exactly as before: name and base are '' and flow on (unknown source with the known: hint when
+    // deps.config is present, the same no-config flow as before otherwise).
+    const blank = !raw.trim();
+    const name = blank ? '' : normalizeSourceName(raw);
+    const base = blank ? '' : pairOf(raw).base;
     if (deps.config) {
       const known = new Set(Object.keys(deps.config.adapters.adapters));
       // A detail-fetch latch lives under its own "<source>:detail" key (wall.js detailWallKey); it is
       // re-enabled the same way as the list latch of the adapter it belongs to.
-      const base = name.endsWith(':detail') ? name.slice(0, -':detail'.length) : name;
       if (!known.has(base)) throw new JobSearchError('NOT_FOUND', `unknown source: ${name}`, { hint: `known: ${[...known].join(', ')}` });
     }
     const existing = await deps.withClient((c) => c.query('SELECT manual_disable, disabled_until FROM ic_source_state WHERE source = $1', [name]));

@@ -15,6 +15,32 @@
 
 export { classifyDetail, normalizeDetailText, isBlockedClass, detailWallKey, DETAIL_BLOCK_REASONS, DETAIL_CLASSIFICATIONS } from './detail-classify.js';
 
+export { classifyIndeedPage, isChallengeHost, hasChallengeText, INDEED_CHALLENGE_KIND } from '../core/indeed-classify.js';
+
+/**
+ * The ONE source-name normalizer (trim, then lowercase; JS only). Non-string or empty input throws.
+ * @param {unknown} name
+ * @returns {string}
+ */
+export function normalizeSourceName(name) {
+  if (typeof name !== 'string') throw new TypeError('source name must be a string');
+  const n = name.trim().toLowerCase();
+  if (!n) throw new TypeError('source name must not be empty');
+  return n;
+}
+
+/**
+ * A source's list key and its detail-latch key. `base` is the normalized name with one trailing ":detail"
+ * removed; `detail` is base + ":detail".
+ * @param {unknown} name
+ * @returns {{ base: string, detail: string }}
+ */
+export function pairOf(name) {
+  const n = normalizeSourceName(name);
+  const base = n.endsWith(':detail') ? n.slice(0, -':detail'.length) : n;
+  return { base, detail: `${base}:detail` };
+}
+
 export const KINDS = Object.freeze(['ok', 'empty', 'wall', 'unrecognized']);
 
 const WALL_PATH = /\/(login|checkpoint|authwall|uas)(\/|$|\?)/i;
@@ -31,6 +57,7 @@ const WALL_PATH = /\/(login|checkpoint|authwall|uas)(\/|$|\?)/i;
  * @property {boolean} [emptyState] a known empty-state marker for the source is present
  * @property {boolean} [guestInterstitial] "sign in to see more" / "join to view more" guest interstitial text present
  * @property {boolean} [loginForm] an inline login form is present
+ * @property {boolean} [indeedChallenge] set only by the Indeed adapter when classifyIndeedPage says CHALLENGE
  */
 
 /**
@@ -48,6 +75,8 @@ const WALL_PATH = /\/(login|checkpoint|authwall|uas)(\/|$|\?)/i;
 export function classifyPage(s) {
   const parsed = Number.isFinite(s.parsed) ? s.parsed : 0;
   if (parsed > 0) return { kind: 'ok', reason: 'parsed', stopSource: false, code: '' };
+  // Indeed challenge (set only by the indeed adapter) outranks status and cf-mitigated handling.
+  if (s.indeedChallenge === true) return { kind: 'wall', reason: 'indeed_verification', stopSource: true, code: 'LOGIN_WALL' };
   // A guest interstitial or inline login form outranks an empty-state marker: the page is gating results.
   if (s.guestInterstitial === true) return { kind: 'wall', reason: 'guest_interstitial', stopSource: true, code: 'LOGIN_WALL' };
   if (s.loginForm === true) return { kind: 'wall', reason: 'login_form', stopSource: true, code: 'LOGIN_WALL' };

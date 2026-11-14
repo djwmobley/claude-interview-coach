@@ -12,6 +12,7 @@
  * construction only (start=10, 20, ...). Results are date-sorted so the
  * scheduler may stop a query on stale results.
  */
+import { classifyIndeedPage } from '../core/indeed-classify.js';
 import { defineAdapter, rawListing, searchTerms, searchLocations, isoDate } from './base.js';
 
 const BASE = 'https://www.indeed.com';
@@ -59,6 +60,9 @@ export function mapCard(card) {
   });
 }
 
+/** @param {any} cap */
+const probeReader = (cap) => async () => /** @type {any} */ (await cap.readJson('indeedChallengeProbe'));
+
 export const indeed = defineAdapter({
   name: 'indeed',
   needsBrowser: true,
@@ -93,7 +97,8 @@ export const indeed = defineAdapter({
           if (cards.length === 0) {
             const markers = /** @type {any} */ (await cap.readJson('wallMarkers'));
             const emptyState = Boolean(await cap.readJson('indeedEmptyState'));
-            yield { kind: 'wall', query, pageIndex, signals: { parsed: 0, status: nav.status, cfMitigated: nav.cfMitigated, url: nav.url, challengeCloudflare: !!markers.challengeCloudflare, challengeForm: !!markers.challengeForm, recaptcha: !!markers.recaptcha, emptyState } };
+            const verdict = await classifyIndeedPage({ stage: 'list', parsed: 0, readProbe: probeReader(cap), sleep: ctx.sleep });
+            yield { kind: 'wall', query, pageIndex, signals: { parsed: 0, ...(verdict.kind === 'challenge' ? { indeedChallenge: true } : {}), status: nav.status, cfMitigated: nav.cfMitigated, url: nav.url, challengeCloudflare: !!markers.challengeCloudflare, challengeForm: !!markers.challengeForm, recaptcha: !!markers.recaptcha, emptyState } };
             yield { kind: 'batch', query, pageIndex, parsed: 0, status: nav.status, url: nav.url };
             break;
           }
@@ -130,8 +135,6 @@ export const indeed = defineAdapter({
     } catch {
       markers = null;
     }
-    // Detail-block fix: scalars the scan uses to classify this page (classifyDetail), never the text itself.
-    const detailSignals = { httpStatus: nav ? nav.status : null, cfMitigated: nav ? nav.cfMitigated : null, url: nav ? nav.url : null, wallSignals: markers };
     // Auto-apply PR B: Indeed's own Easy Apply ("applystart") flow never navigates externally -- observed
     // here, never clicked. An "Apply on company site" anchor off indeed.com is surfaced as externalApplyUrl.
     /** @type {any} */
@@ -144,14 +147,23 @@ export const indeed = defineAdapter({
     const externalApplyUrl = applyState && typeof applyState.href === 'string' ? applyState.href : null;
     const easyApplyOnly = Boolean(applyState ? applyState.easyApplyOnly : true);
     const docs = /** @type {any[]} */ (await cap.readJson('readJsonLd'));
+    /** @type {string|null} */
+    let ldDescription = null;
     for (const d of Array.isArray(docs) ? docs : []) {
       const nodes = Array.isArray(d) ? d : [d];
       for (const n of nodes) {
-        if (n && n['@type'] === 'JobPosting' && typeof n.description === 'string' && n.description.trim()) {
-          return { description: n.description, externalApplyUrl, easyApplyOnly, detailSignals };
-        }
+        if (ldDescription === null && n && n['@type'] === 'JobPosting' && typeof n.description === 'string' && n.description.trim()) ldDescription = n.description;
       }
     }
+    // Shared Indeed classifier (same function as the list path). Only a real JSON-LD description counts as
+    // expected content; the body-text fallback below does not, so a challenge page cannot pass as a description.
+    const verdict = await classifyIndeedPage({ stage: 'detail', descriptionExtracted: ldDescription !== null, readProbe: probeReader(cap), sleep: ctx.sleep });
+    // Detail-block fix: scalars the scan uses to classify this page (classifyDetail), never the text itself.
+    const detailSignals = {
+      httpStatus: nav ? nav.status : null, cfMitigated: nav ? nav.cfMitigated : null, url: nav ? nav.url : null,
+      wallSignals: verdict.kind === 'challenge' ? { ...(markers ?? {}), indeedChallenge: true } : markers,
+    };
+    if (ldDescription !== null) return { description: ldDescription, externalApplyUrl, easyApplyOnly, detailSignals };
     const text = /** @type {string} */ (await cap.readJson('bodyText'));
     return { description: text && text.trim() ? text : null, externalApplyUrl, easyApplyOnly, detailSignals };
   },

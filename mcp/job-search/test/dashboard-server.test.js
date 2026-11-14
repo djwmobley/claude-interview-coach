@@ -747,6 +747,37 @@ describe('sources enable', () => {
     assert.equal(row.rowCount, 0);
   });
 
+  test('a whitespace-only name with config present is 404 unknown source with the known: hint, no row', async () => {
+    const r = await req('POST', '/api/sources/%20%20/enable');
+    assert.equal(r.status, 404);
+    assert.match(r.text, /unknown source: /);
+    assert.match(r.text, /known: .*greenhouse/);
+    const row = await verifyClient.query('SELECT 1 FROM ic_source_state WHERE source = $1', ['']);
+    assert.equal(row.rowCount, 0);
+  });
+
+  test('a whitespace-only name with no config proceeds as before (no 404, visible no-op)', async () => {
+    const noCfg = createDashboardServer(/** @type {any} */ ({
+      withClient,
+      env: { OLLAMA_URL: 'http://127.0.0.1:1', OLLAMA_MODEL: 'test-model', GOOGLE_TOKEN_FILE: '', REMINDER_TO: '', SCAN_CDP_URL: 'http://127.0.0.1:1', SCAN_PROFILE_DIR: outputRoot, CHROME_EXECUTABLE: null, JOBSEARCH_LOG_DIR: outputRoot, JOBSEARCH_CONFIG_DIR: outputRoot, LOG_LEVEL: 'silent', PG_DSN: null },
+      calendar: Object.assign(async () => null, { lastState: () => null }),
+      calendarCache: createCalendarCache(),
+      scanRunner: makeStubScanRunner(),
+      outputRoot, version: 'test', startedAt: new Date().toISOString(), healthBanner: [],
+    }));
+    await noCfg.listen(0, '127.0.0.1');
+    try {
+      const p = /** @type {any} */ (noCfg.server.address()).port;
+      const res = await fetch(`http://127.0.0.1:${p}/api/sources/%20%20/enable`, { method: 'POST', headers: { 'content-type': 'application/json' } });
+      assert.equal(res.status, 200);
+      const json = await res.json();
+      assert.equal(json.already_enabled, true);
+      assert.equal(json.source, '');
+    } finally {
+      await noCfg.close();
+    }
+  });
+
   test('a source that is not currently disabled is a visible no-op, not a silent write', async () => {
     await verifyClient.query('DELETE FROM ic_source_state WHERE source = $1', [OTHER_KNOWN_SOURCE]);
     const r = await req('POST', `/api/sources/${OTHER_KNOWN_SOURCE}/enable`);

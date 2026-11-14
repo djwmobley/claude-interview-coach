@@ -269,6 +269,24 @@ export function indeedApplyState() {
 }
 
 /**
+ * Indeed challenge probe (detect only): Cloudflare/challenge-form markers, every frame URL, bounded body text.
+ */
+export function indeedChallengeProbe() {
+  const frameUrls = [];
+  for (const f of Array.from(document.querySelectorAll('iframe, frame'))) {
+    // The resolved URL (src property) handles protocol-relative and relative forms; fall back to the attribute.
+    const src = /** @type {HTMLIFrameElement} */ (f).src || f.getAttribute('src');
+    if (src) frameUrls.push(String(src).slice(0, 500));
+  }
+  return {
+    challengeCloudflare: !!document.querySelector('iframe[src*="challenges.cloudflare.com"]'),
+    challengeForm: !!document.querySelector('#challenge-form'),
+    frameUrls: frameUrls.slice(0, 50),
+    bodyText: String(document.body ? document.body.innerText || document.body.textContent || '' : '').slice(0, 20000),
+  };
+}
+
+/**
  * Generic: plain text of the page body, bounded.
  */
 export function bodyText() {
@@ -305,6 +323,7 @@ export const EXTRACTORS = Object.freeze({
   indeedMosaicJobs,
   indeedDomJobs,
   indeedEmptyState,
+  indeedChallengeProbe,
   linkedinJobCards,
   linkedinSearchShell,
   linkedinHydration,

@@ -57,7 +57,7 @@ import { SCOPE_GMAIL_READONLY } from './google.js';
 import { planPages, assertPlanWithinCap, reserveBudget } from './budget.js';
 import { makeRateLimiter } from './ratelimit.js';
 import { runSearch } from './scheduler.js';
-import { classifyPage, recordWall, recordClean, sourceEnabled, classifyDetail, isBlockedClass, detailWallKey } from '../browser/wall.js';
+import { classifyPage, recordWall, recordClean, sourceEnabled, classifyDetail, isBlockedClass, detailWallKey, normalizeSourceName } from '../browser/wall.js';
 import { DETAIL_OUTCOME_VALUES } from './store-description.js';
 import { createVerifyCoordinator } from './detail-verify.js';
 import { connectSession as defaultConnectSession, applyTargetMarkerPath } from '../browser/session.js';
@@ -314,8 +314,8 @@ async function loadProfile(client, args) {
 export function resolveSources(names, config) {
   const out = [];
   for (const raw of names) {
-    const name = String(raw).trim().toLowerCase();
-    if (!name) continue;
+    if (!String(raw).trim()) continue;
+    const name = normalizeSourceName(String(raw));
     const adapter = getAdapter(name);
     const cfg = config.adapters.adapters[name];
     if (!cfg) throw new JobSearchError('CONFIG_INVALID', `source ${name} has no entry in adapters.json`);
