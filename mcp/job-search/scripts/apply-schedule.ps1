@@ -20,8 +20,33 @@ param(
 
 $ErrorActionPreference = "Stop"
 
-& (Join-Path $PSScriptRoot "register-scan-task.ps1") -RepoRoot $RepoRoot
-& (Join-Path $PSScriptRoot "register-auto-apply-task.ps1") -RepoRoot $RepoRoot
-& (Join-Path $PSScriptRoot "register-remind-task.ps1") -RepoRoot $RepoRoot
+$results = @()
+# register-scan-task.ps1, register-auto-apply-task.ps1, register-remind-task.ps1
+foreach ($name in @("scan", "auto-apply", "remind")) {
+  $ok = $false
+  $reason = "no FAILED line reported"
+  try {
+    $global:LASTEXITCODE = 0
+    $lines = @(& (Join-Path $PSScriptRoot "register-$name-task.ps1") -RepoRoot $RepoRoot *>&1 | ForEach-Object { "$_" })
+    $lines | ForEach-Object { Write-Host $_ }
+    if ($LASTEXITCODE -eq 0) {
+      $ok = $true
+    } else {
+      $failed = @($lines | Where-Object { $_ -like "FAILED: *" })
+      if ($failed.Count -gt 0) { $reason = $failed[0].Substring(8) }
+    }
+  } catch {
+    $reason = $_.Exception.Message
+  }
+  $results += [pscustomobject]@{ Name = $name; Ok = $ok; Reason = $reason }
+}
+
+foreach ($r in $results) {
+  if ($r.Ok) { Write-Host "$($r.Name): OK" } else { Write-Host "$($r.Name): FAILED - $($r.Reason)" }
+}
+
+if (@($results | Where-Object { -not $_.Ok }).Count -gt 0) {
+  exit 1
+}
 
 Write-Host "Schedule applied: scan 09:00 (daily, +10 min delay), auto-apply 09:25, remind 10:30 (daily)."

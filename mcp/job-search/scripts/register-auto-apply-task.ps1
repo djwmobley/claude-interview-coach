@@ -70,6 +70,8 @@ param(
 
 $ErrorActionPreference = "Stop"
 
+. (Join-Path $PSScriptRoot "task-readback.ps1")
+
 if ($Unregister) {
   Unregister-ScheduledTask -TaskName $TaskName -Confirm:$false -ErrorAction SilentlyContinue
   Write-Host "Unregistered scheduled task '$TaskName', or it was not registered."
@@ -109,7 +111,12 @@ $settings = New-ScheduledTaskSettingsSet `
   -DontStopIfGoingOnBatteries `
   -AllowStartIfOnBatteries
 
-Register-ScheduledTask -TaskName $TaskName -Action $action -Trigger $trigger -Settings $settings -RunLevel Limited -Force | Out-Null
+try {
+  Register-ScheduledTask -TaskName $TaskName -Action $action -Trigger $trigger -Settings $settings -RunLevel Limited -Force -ErrorAction Stop | Out-Null
+  Assert-RegisteredTaskMatches -TaskName $TaskName -ExpectedTime $startTime -ExpectedExecute "powershell.exe" -ExpectedArguments $psArgument
+} catch {
+  Exit-RegisterFailure -TaskName $TaskName -ErrorRecord $_
+}
 
 Write-Host "Registered scheduled task '$TaskName' (runs bin/auto-apply.js daily at $Time)."
 Write-Host "Start it now with:   Start-ScheduledTask -TaskName '$TaskName'"

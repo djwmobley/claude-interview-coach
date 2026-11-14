@@ -44,6 +44,8 @@ param(
 
 $ErrorActionPreference = "Stop"
 
+. (Join-Path $PSScriptRoot "task-readback.ps1")
+
 if ($Unregister) {
   Unregister-ScheduledTask -TaskName $TaskName -Confirm:$false -ErrorAction SilentlyContinue
   Write-Host "Unregistered scheduled task '$TaskName', or it was not registered."
@@ -62,6 +64,8 @@ if (-not $nodeCmd -or -not $nodeCmd.Source) {
 
 [datetime]$startTime = [datetime]::ParseExact($Time, "HH:mm", $null)
 
+$argLine = "mcp\job-search\bin\scan.js --profile exec-default --json --launch-chrome"
+$days = @("Sunday", "Monday", "Tuesday", "Wednesday", "Thursday", "Friday", "Saturday")
 $action = New-ScheduledTaskAction -Execute $nodeCmd.Source -Argument "mcp\job-search\bin\scan.js --profile exec-default --json --launch-chrome" -WorkingDirectory $RepoRoot
 $trigger = New-ScheduledTaskTrigger -Weekly -DaysOfWeek Sunday,Monday,Tuesday,Wednesday,Thursday,Friday,Saturday -At $startTime
 $trigger.RandomDelay = "PT$($RandomDelayMinutes)M"
@@ -70,7 +74,12 @@ $settings = New-ScheduledTaskSettingsSet `
   -DontStopIfGoingOnBatteries `
   -AllowStartIfOnBatteries
 
-Register-ScheduledTask -TaskName $TaskName -Action $action -Trigger $trigger -Settings $settings -RunLevel Limited -Force | Out-Null
+try {
+  Register-ScheduledTask -TaskName $TaskName -Action $action -Trigger $trigger -Settings $settings -RunLevel Limited -Force -ErrorAction Stop | Out-Null
+  Assert-RegisteredTaskMatches -TaskName $TaskName -ExpectedTime $startTime -ExpectedDays $days -ExpectedRandomDelayMinutes $RandomDelayMinutes -ExpectedExecute $nodeCmd.Source -ExpectedArguments $argLine
+} catch {
+  Exit-RegisterFailure -TaskName $TaskName -ErrorRecord $_
+}
 
 Write-Host "Registered scheduled task '$TaskName' (runs bin/scan.js daily at $Time, random delay $RandomDelayMinutes min)."
 Write-Host "Unregister it with:  powershell -File `"$PSCommandPath`" -Unregister"
