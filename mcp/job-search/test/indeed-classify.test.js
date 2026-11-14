@@ -38,6 +38,8 @@ describe('source identity', () => {
 describe('challenge host', () => {
   const yes = ['https://challenges.cloudflare.com/cdn-cgi/x', 'https://hcaptcha.com/1', 'https://newassets.HCAPTCHA.com/x', 'https://recaptcha.net/a', 'https://www.recaptcha.net/a', 'https://www.google.com/recaptcha/api2/anchor'];
   const no = ['https://www.google.com/maps', 'https://www.google.com/', 'https://evilhcaptcha.com/', 'https://hcaptcha.com.evil.test/', 'not a url', '', null, undefined, 'https://www.indeed.com/jobs'];
+  yes.push('https://WWW.GOOGLE.COM/recaptcha/', 'https://hcaptcha.com:443/', '//challenges.cloudflare.com/x', '//hcaptcha.com/x');
+  no.push('https://nothcaptcha.com', 'https://evil-hcaptcha.com', 'https://hcaptcha.com.example.org', 'https://www.google.com/recaptchaX', '//evil-hcaptcha.com/x', '//');
   for (const u of yes) test(`host yes: ${u}`, () => assert.equal(isChallengeHost(u), true));
   for (const u of no) test(`host no: ${u}`, () => assert.equal(isChallengeHost(u), false));
 });
@@ -85,6 +87,20 @@ describe('classifyIndeedPage (table)', () => {
   test('hasChallengeText guard: long body, match late, does not fire', () => {
     assert.equal(hasChallengeText('a'.repeat(400) + ' just a moment ' + 'b'.repeat(500)), false);
     assert.equal(hasChallengeText('just a moment...'), true);
+  });
+  test('hasChallengeText body length boundary: 799 guarded-in, 800 needs an early match', () => {
+    const phrase = 'just a moment';
+    // match at index 400 (late): body length 799 fires, 800 does not
+    const late = (len) => 'a'.repeat(400) + phrase + 'b'.repeat(len - 400 - phrase.length);
+    assert.equal(late(799).length, 799);
+    assert.equal(hasChallengeText(late(799)), true);
+    assert.equal(hasChallengeText(late(800)), false);
+  });
+  test('hasChallengeText match index boundary at body length >= 800: 299 fires, 300 does not', () => {
+    const phrase = 'just a moment';
+    const at = (idx) => 'a'.repeat(idx) + phrase + 'b'.repeat(1000);
+    assert.equal(hasChallengeText(at(299)), true);
+    assert.equal(hasChallengeText(at(300)), false);
   });
 });
 
@@ -157,6 +173,20 @@ describe('both Indeed paths call the shared classifier', () => {
     const wall = events.find((e) => e.kind === 'wall');
     assert.equal(wall.signals.indeedChallenge, undefined);
     assert.equal(classifyPage(wall.signals).reason, 'http_403');
+  });
+  test('probe collects the resolved frame URL (src property), falling back to the attribute', () => {
+    const frames = [
+      { src: 'https://challenges.cloudflare.com/x', getAttribute: () => '//challenges.cloudflare.com/x' },
+      { src: '', getAttribute: () => '/relative/frame' },
+      { src: '', getAttribute: () => null },
+    ];
+    const prev = /** @type {any} */ (globalThis).document;
+    /** @type {any} */ (globalThis).document = { querySelectorAll: () => frames, querySelector: () => null, body: { innerText: 'x' } };
+    try {
+      assert.deepEqual(EXTRACTORS.indeedChallengeProbe().frameUrls, ['https://challenges.cloudflare.com/x', '/relative/frame']);
+    } finally {
+      /** @type {any} */ (globalThis).document = prev;
+    }
   });
   test('the probe extractor is registered', () => {
     assert.equal(typeof EXTRACTORS.indeedChallengeProbe, 'function');

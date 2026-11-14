@@ -274,7 +274,8 @@ export function indeedApplyState() {
 export function indeedChallengeProbe() {
   const frameUrls = [];
   for (const f of Array.from(document.querySelectorAll('iframe, frame'))) {
-    const src = f.getAttribute('src');
+    // The resolved URL (src property) handles protocol-relative and relative forms; fall back to the attribute.
+    const src = /** @type {HTMLIFrameElement} */ (f).src || f.getAttribute('src');
     if (src) frameUrls.push(String(src).slice(0, 500));
   }
   return {

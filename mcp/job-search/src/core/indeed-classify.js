@@ -31,7 +31,8 @@ export function isChallengeHost(frameUrl) {
   if (typeof frameUrl !== 'string' || !frameUrl) return false;
   let u;
   try {
-    u = new URL(frameUrl);
+    // A protocol-relative URL (//host/path) is read as https so the host is still compared.
+    u = new URL(frameUrl.startsWith('//') ? `https:${frameUrl}` : frameUrl);
   } catch {
     return false;
   }

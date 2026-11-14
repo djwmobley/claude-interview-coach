@@ -109,10 +109,12 @@ export function register(router, deps) {
     // call with s.name from a resolved adapter, never a caller's raw casing), so enabling "Greenhouse"
     // must land on the same row a scan run reads as "greenhouse" -- storing the raw casing verbatim
     // would silently create a second, dead row that never affects a real scan.
-    // wall.js is the one source-name normalizer; a blank name keeps the old unknown-source outcome.
-    if (!raw.trim()) throw new JobSearchError('NOT_FOUND', 'unknown source: ');
-    const name = normalizeSourceName(raw);
-    const { base } = pairOf(raw);
+    // wall.js is the one source-name normalizer. It rejects a blank name, so a blank name is handled here
+    // exactly as before: name and base are '' and flow on (unknown source with the known: hint when
+    // deps.config is present, the same no-config flow as before otherwise).
+    const blank = !raw.trim();
+    const name = blank ? '' : normalizeSourceName(raw);
+    const base = blank ? '' : pairOf(raw).base;
     if (deps.config) {
       const known = new Set(Object.keys(deps.config.adapters.adapters));
       // A detail-fetch latch lives under its own "<source>:detail" key (wall.js detailWallKey); it is
