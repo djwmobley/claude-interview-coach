@@ -1,7 +1,7 @@
 <#
 .SYNOPSIS
-  Registers (or unregisters) the "job-search remind" Windows Scheduled Task: runs bin/remind.js weekdays
-  (Mon-Fri) at 10:30, after the 09:00 scan and the 09:25 auto-apply run, because the digest carries the
+  Registers (or unregisters) the "job-search remind" Windows Scheduled Task: runs bin/remind.js every day
+  of the week at 10:30, after the 09:00 scan and the 09:25 auto-apply run, because the digest carries the
   scan report and the auto-apply summary.
 
 .PARAMETER TaskName
@@ -11,11 +11,11 @@
   Repository root (the directory containing mcp/job-search). Defaults to three levels above this script.
 
 .PARAMETER Time
-  Weekday run time, HH:mm (24-hour). Defaults to "10:30".
+  Daily run time, HH:mm (24-hour). Defaults to "10:30".
 
 .PARAMETER Arguments
-  Extra arguments passed to bin/remind.js (for example "--open-dashboard"). Defaults to none, matching the
-  README registration snippet.
+  Arguments passed to bin/remind.js. Defaults to "--open-dashboard", matching the live task and the README
+  registration snippet.
 
 .PARAMETER Unregister
   Remove the task instead of registering it.
@@ -28,7 +28,7 @@ param(
   [string]$TaskName = "job-search remind",
   [string]$RepoRoot = (Resolve-Path (Join-Path $PSScriptRoot "..\..\..")).Path,
   [string]$Time = "10:30",
-  [string]$Arguments = "",
+  [string]$Arguments = "--open-dashboard",
   [switch]$Unregister
 )
 
@@ -46,7 +46,7 @@ if (-not (Test-Path $remindScript)) {
 }
 
 $nodeCmd = Get-Command node -ErrorAction SilentlyContinue
-if (-not $nodeCmd) {
+if (-not $nodeCmd -or -not $nodeCmd.Source) {
   throw "node was not found on PATH. Install Node.js (>=22) or add it to PATH before registering this task."
 }
 
@@ -55,8 +55,8 @@ if (-not $nodeCmd) {
 $argLine = "mcp\job-search\bin\remind.js"
 if ($Arguments) { $argLine = "$argLine $Arguments" }
 
-$action = New-ScheduledTaskAction -Execute "node" -Argument $argLine -WorkingDirectory $RepoRoot
-$trigger = New-ScheduledTaskTrigger -Weekly -DaysOfWeek Monday,Tuesday,Wednesday,Thursday,Friday -At $startTime
+$action = New-ScheduledTaskAction -Execute $nodeCmd.Source -Argument $argLine -WorkingDirectory $RepoRoot
+$trigger = New-ScheduledTaskTrigger -Weekly -DaysOfWeek Sunday,Monday,Tuesday,Wednesday,Thursday,Friday,Saturday -At $startTime
 $settings = New-ScheduledTaskSettingsSet `
   -StartWhenAvailable `
   -DontStopIfGoingOnBatteries `
@@ -64,5 +64,5 @@ $settings = New-ScheduledTaskSettingsSet `
 
 Register-ScheduledTask -TaskName $TaskName -Action $action -Trigger $trigger -Settings $settings -RunLevel Limited -Force | Out-Null
 
-Write-Host "Registered scheduled task '$TaskName' (runs bin/remind.js Mon-Fri at $Time)."
+Write-Host "Registered scheduled task '$TaskName' (runs bin/remind.js daily at $Time)."
 Write-Host "Unregister it with:  powershell -File `"$PSCommandPath`" -Unregister"

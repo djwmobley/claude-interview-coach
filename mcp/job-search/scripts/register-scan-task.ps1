@@ -1,7 +1,7 @@
 <#
 .SYNOPSIS
-  Registers (or unregisters) the "job-search scan" Windows Scheduled Task: runs bin/scan.js weekdays
-  (Mon-Fri) at 09:00 with a 10 minute random delay, so the scan time lives in this repo.
+  Registers (or unregisters) the "job-search scan" Windows Scheduled Task: runs bin/scan.js every day
+  of the week at 09:00 with a 10 minute random delay, so the scan time lives in this repo.
 
 .DESCRIPTION
   Downstream tasks are timed against this one: "job-search auto-apply" at 09:25 (its wait-on-scan soft and
@@ -22,7 +22,7 @@
   Repository root (the directory containing mcp/job-search). Defaults to three levels above this script.
 
 .PARAMETER Time
-  Weekday run time, HH:mm (24-hour). Defaults to "09:00".
+  Daily run time, HH:mm (24-hour). Defaults to "09:00".
 
 .PARAMETER RandomDelayMinutes
   Task Scheduler random delay added to each start. Defaults to 10.
@@ -56,14 +56,14 @@ if (-not (Test-Path $scanScript)) {
 }
 
 $nodeCmd = Get-Command node -ErrorAction SilentlyContinue
-if (-not $nodeCmd) {
+if (-not $nodeCmd -or -not $nodeCmd.Source) {
   throw "node was not found on PATH. Install Node.js (>=22) or add it to PATH before registering this task."
 }
 
 [datetime]$startTime = [datetime]::ParseExact($Time, "HH:mm", $null)
 
-$action = New-ScheduledTaskAction -Execute "node" -Argument "mcp\job-search\bin\scan.js --profile exec-default --json" -WorkingDirectory $RepoRoot
-$trigger = New-ScheduledTaskTrigger -Weekly -DaysOfWeek Monday,Tuesday,Wednesday,Thursday,Friday -At $startTime
+$action = New-ScheduledTaskAction -Execute $nodeCmd.Source -Argument "mcp\job-search\bin\scan.js --profile exec-default --json --launch-chrome" -WorkingDirectory $RepoRoot
+$trigger = New-ScheduledTaskTrigger -Weekly -DaysOfWeek Sunday,Monday,Tuesday,Wednesday,Thursday,Friday,Saturday -At $startTime
 $trigger.RandomDelay = "PT$($RandomDelayMinutes)M"
 $settings = New-ScheduledTaskSettingsSet `
   -StartWhenAvailable `
@@ -72,5 +72,5 @@ $settings = New-ScheduledTaskSettingsSet `
 
 Register-ScheduledTask -TaskName $TaskName -Action $action -Trigger $trigger -Settings $settings -RunLevel Limited -Force | Out-Null
 
-Write-Host "Registered scheduled task '$TaskName' (runs bin/scan.js Mon-Fri at $Time, random delay $RandomDelayMinutes min)."
+Write-Host "Registered scheduled task '$TaskName' (runs bin/scan.js daily at $Time, random delay $RandomDelayMinutes min)."
 Write-Host "Unregister it with:  powershell -File `"$PSCommandPath`" -Unregister"

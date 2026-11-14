@@ -477,7 +477,7 @@ the dedup lookups, and the expiry sweep is source-scoped, so no scan expires or 
 truncated at 4 KB. Items show fit, role, employer and client clues, comp and flags on the Review page and in the report; in
 tool output every model-derived field is fenced, in HTML it is escaped.
 
-### Task Scheduler (weekdays, random delay, interactive logon)
+### Task Scheduler (scan and remind daily, random delay, interactive logon)
 
 Run from an elevated PowerShell. Both tasks run as the interactive user, not
 "whether user is logged on or not", so the scan Chrome is reachable.
@@ -485,8 +485,8 @@ Run from an elevated PowerShell. Both tasks run as the interactive user, not
 ```powershell
 $root = "C:\claude-interview-coach\claude-interview-coach"
 
-$a = New-ScheduledTaskAction -Execute "node" -Argument "mcp\job-search\bin\scan.js --profile exec-default --json" -WorkingDirectory $root
-$t = New-ScheduledTaskTrigger -Weekly -DaysOfWeek Monday,Tuesday,Wednesday,Thursday,Friday -At 09:00
+$a = New-ScheduledTaskAction -Execute "node" -Argument "mcp\job-search\bin\scan.js --profile exec-default --json --launch-chrome" -WorkingDirectory $root
+$t = New-ScheduledTaskTrigger -Weekly -DaysOfWeek Sunday,Monday,Tuesday,Wednesday,Thursday,Friday,Saturday -At 09:00
 $t.RandomDelay = "PT10M"
 Register-ScheduledTask -TaskName "job-search scan" -Action $a -Trigger $t -RunLevel Limited
 
@@ -494,8 +494,8 @@ $a3 = New-ScheduledTaskAction -Execute "node" -Argument "mcp\job-search\bin\conf
 $t3 = New-ScheduledTaskTrigger -Weekly -DaysOfWeek Monday,Tuesday,Wednesday,Thursday,Friday -At 07:45
 Register-ScheduledTask -TaskName "job-search confirm" -Action $a3 -Trigger $t3 -RunLevel Limited
 
-$a2 = New-ScheduledTaskAction -Execute "node" -Argument "mcp\job-search\bin\remind.js" -WorkingDirectory $root
-$t2 = New-ScheduledTaskTrigger -Weekly -DaysOfWeek Monday,Tuesday,Wednesday,Thursday,Friday -At 10:30
+$a2 = New-ScheduledTaskAction -Execute "node" -Argument "mcp\job-search\bin\remind.js --open-dashboard" -WorkingDirectory $root
+$t2 = New-ScheduledTaskTrigger -Weekly -DaysOfWeek Sunday,Monday,Tuesday,Wednesday,Thursday,Friday,Saturday -At 10:30
 Register-ScheduledTask -TaskName "job-search remind" -Action $a2 -Trigger $t2 -RunLevel Limited
 ```
 

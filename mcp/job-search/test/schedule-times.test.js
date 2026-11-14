@@ -42,12 +42,22 @@ describe('auto-apply wait deadlines', () => {
 
 describe('register-scan-task.ps1', () => {
   const S = read('scripts/register-scan-task.ps1');
-  test('task name, 09:00 default, 10 minute delay, weekdays only', () => {
+  test('task name, 09:00 default, 10 minute delay, all 7 days', () => {
     assert.match(S, /\[string\]\$TaskName = "job-search scan"/);
     assert.match(S, /\[string\]\$Time = "09:00"/);
     assert.match(S, /\[int\]\$RandomDelayMinutes = 10/);
-    assert.match(S, /-DaysOfWeek Monday,Tuesday,Wednesday,Thursday,Friday/);
+    assert.match(S, /-DaysOfWeek Sunday,Monday,Tuesday,Wednesday,Thursday,Friday,Saturday/);
     assert.match(S, /\$trigger\.RandomDelay = /);
+  });
+  test('arguments match the live task: --profile exec-default --json --launch-chrome', () => {
+    assert.match(S, /-Argument "mcp\\job-search\\bin\\scan\.js --profile exec-default --json --launch-chrome"/);
+    assert.match(S, /-WorkingDirectory \$RepoRoot/);
+  });
+  test('executes the resolved node path, not bare node, and fails if unresolved', () => {
+    assert.match(S, /-Execute \$nodeCmd\.Source/);
+    assert.doesNotMatch(S, /-Execute "node"/);
+    assert.match(S, /Get-Command node/);
+    assert.match(S, /if \(-not \$nodeCmd -or -not \$nodeCmd\.Source\) \{\s*throw/);
   });
   test('targets bin/scan.js and carries unattended-safety settings and -Unregister', () => {
     assert.match(S, /bin\\scan\.js/);
@@ -61,12 +71,23 @@ describe('register-scan-task.ps1', () => {
 
 describe('register-remind-task.ps1', () => {
   const S = read('scripts/register-remind-task.ps1');
-  test('task name, 10:30 default, weekdays, bin/remind.js', () => {
+  test('task name, 10:30 default, all 7 days, no random delay, bin/remind.js', () => {
     assert.match(S, /\[string\]\$TaskName = "job-search remind"/);
     assert.match(S, /\[string\]\$Time = "10:30"/);
-    assert.match(S, /-DaysOfWeek Monday,Tuesday,Wednesday,Thursday,Friday/);
+    assert.match(S, /-DaysOfWeek Sunday,Monday,Tuesday,Wednesday,Thursday,Friday,Saturday/);
+    assert.doesNotMatch(S, /RandomDelay/);
     assert.match(S, /bin\\remind\.js/);
     assert.match(S, /\[switch\]\$Unregister/);
+  });
+  test('default arguments include --open-dashboard', () => {
+    assert.match(S, /\[string\]\$Arguments = "--open-dashboard"/);
+    assert.match(S, /\$argLine = "mcp\\job-search\\bin\\remind\.js"/);
+  });
+  test('executes the resolved node path, not bare node, and fails if unresolved', () => {
+    assert.match(S, /-Execute \$nodeCmd\.Source/);
+    assert.doesNotMatch(S, /-Execute "node"/);
+    assert.match(S, /Get-Command node/);
+    assert.match(S, /if \(-not \$nodeCmd -or -not \$nodeCmd\.Source\) \{\s*throw/);
   });
 });
 
@@ -89,5 +110,9 @@ describe('no stale pre-shift times in shipped schedule docs', () => {
     assert.match(r, /-At 09:00\r?\n\$t\.RandomDelay = "PT10M"/);
     assert.match(r, /-At 10:30\r?\nRegister-ScheduledTask -TaskName "job-search remind"/);
     assert.doesNotMatch(r, /PT45M/);
+    assert.match(r, /scan\.js --profile exec-default --json --launch-chrome"/);
+    assert.match(r, /remind\.js --open-dashboard"/);
+    assert.match(r, /Sunday,Monday,Tuesday,Wednesday,Thursday,Friday,Saturday -At 09:00/);
+    assert.match(r, /Sunday,Monday,Tuesday,Wednesday,Thursday,Friday,Saturday -At 10:30/);
   });
 });
