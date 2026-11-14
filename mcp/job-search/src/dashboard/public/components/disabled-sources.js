@@ -32,15 +32,49 @@ export function enablePath(source) {
 }
 
 /**
- * @param {{ sources: any[]|null|undefined, onChanged: () => void }} opts
- * @returns {HTMLElement|null} null when nothing is disabled or paused
+ * The Indeed row shown while Indeed is parked on a verification challenge: the notice, when it parked, the
+ * page address (text only), Open Indeed page and Resume.
+ * @param {{ parked_at?: string, url?: string|null }} p
+ * @param {() => void} onChanged
+ */
+function parkedRow(p, onChanged) {
+  const open = h('button', { className: 'btn btn--small', attrs: { type: 'button' }, text: 'Open Indeed page' });
+  open.addEventListener('click', async () => {
+    open.disabled = true;
+    handleOutcome(await postJson('/api/sources/indeed/open-page', {}));
+    open.disabled = false;
+  });
+  const resume = h('button', { className: 'btn btn--small', attrs: { type: 'button' }, text: 'Resume' });
+  resume.addEventListener('click', async () => {
+    resume.disabled = true;
+    const outcome = handleOutcome(await postJson('/api/sources/indeed/resume', {}));
+    if (outcome.kind === 'ok') {
+      showToast({ message: 'Indeed scan started.' });
+      onChanged();
+    } else {
+      resume.disabled = false;
+    }
+  });
+  const when = p.parked_at ? new Date(p.parked_at).toLocaleString() : '';
+  return h('li', { className: 'disabled-sources__row' }, [
+    h('strong', { className: 'disabled-sources__name', text: 'indeed' }),
+    h('span', { className: 'disabled-sources__text', text: `Indeed is waiting for your click. Parked ${when}. ${p.url ?? 'no page address stored'}` }),
+    open,
+    resume,
+  ]);
+}
+
+/**
+ * @param {{ sources: any[]|null|undefined, parked?: any, onChanged: () => void }} opts
+ * @returns {HTMLElement|null} null when nothing is disabled, paused or parked
  */
 export function disabledSourcesPanel(opts) {
   const sources = Array.isArray(opts.sources) ? opts.sources : [];
-  if (sources.length === 0) return null;
+  const parked = opts.parked && opts.parked.parked_at ? opts.parked : null;
+  if (sources.length === 0 && !parked) return null;
   return h('section', { className: 'approval-section disabled-sources' }, [
     h('h2', { className: 'approval-section__title', text: 'Sources off' }),
-    h('ul', { className: 'disabled-sources__list' }, sources.map((s) => {
+    h('ul', { className: 'disabled-sources__list' }, [parked ? parkedRow(parked, opts.onChanged) : null, ...sources.map((s) => {
       const href = snapshotHref(s.snapshot);
       const button = h('button', { className: 'btn btn--small', attrs: { type: 'button' }, text: 'Re-enable' });
       button.addEventListener('click', async () => {
@@ -59,6 +93,6 @@ export function disabledSourcesPanel(opts) {
         href ? hLink({ url: href, urlOk: true, text: 'view page', target: '_blank', className: 'disabled-sources__link' }) : h('span', { className: 'disabled-sources__link', text: 'no page saved' }),
         button,
       ]);
-    })),
+    })]),
   ]);
 }

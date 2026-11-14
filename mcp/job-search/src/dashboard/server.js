@@ -77,6 +77,8 @@ import { register as registerTargetDrafts } from './routes/target-drafts.js';
  *   spec v1 F1.4: the live LinkedIn page-state check routes/applications.js's create routes run before a
  *   linkedin_easy application is created (src/apply/linkedin-button-prepare.js's createLinkedInLiveCheck).
  *   bin/dashboard.js wires the real one; route tests inject a fake. Absent means a LinkedIn listing is refused.
+ * @property {{ connect?: () => Promise<any>, launchChrome?: (env: any, log: any) => Promise<any> }} [parkedTab] test seam only:
+ *   routes/scans.js's Indeed open-page CDP connector and Chrome launcher (production: SCAN_CDP_URL, bin/scan.js launchChrome)
  * @property {typeof fetch} [fetch]
  * @property {string} [version]
  * @property {string} [startedAt] ISO, set once at process start
