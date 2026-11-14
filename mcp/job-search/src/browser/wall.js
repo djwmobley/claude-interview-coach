@@ -219,6 +219,10 @@ export async function reenableSource(client, source) {
        RETURNING source`,
       [source],
     );
+    // Re-enabling indeed or indeed:detail also clears a verification park (sql/032).
+    if (pairOf(source).base === 'indeed') {
+      await client.query("UPDATE ic_source_state SET parked_at = NULL, park_url = NULL, park_target_id = NULL WHERE source = 'indeed'");
+    }
     await client.query('COMMIT');
     return r.rows[0].source;
   } catch (err) {

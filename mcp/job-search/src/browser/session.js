@@ -170,6 +170,7 @@ export function routeDecision(req, policy = { mode: 'scan', blockedCount: 0 }) {
  * @property {() => Promise<number>} reconcile close leftover pages from a prior run (URL-fragment marker); returns count closed
  * @property {(markerFile: string) => Promise<void>} writeTargetMarker overwrite markerFile with this run's tracked pages' CDP target ids
  * @property {(markerFile: string) => Promise<{ attempted: number, closed: number }>} reconcileTargets close every target id recorded in markerFile from a prior run, by CDP target id (apply pipeline slice 5: SPA-navigation-safe, unlike the URL-fragment reconcile above)
+ * @property {(targetId: string) => void} keepOpen closeAll() will not close the tracked page with this CDP target id (a parked verification tab)
  * @property {() => Promise<void>} closeAll close every page this session created, then disconnect
  * @property {() => Promise<{ ok: boolean, failed: number }>} detachLeaveOpen unroute and forget every tracked page WITHOUT closing it, then disconnect; when any unroute fails, nothing is forgotten (ok false) so closeAll() can still close them
  * @property {(page: import('playwright-core').Page) => Promise<string|null>} targetIdOf the CDP target id of a page (cached from arming, else looked up), or null
@@ -267,6 +268,8 @@ export async function connectSession(opts = {}) {
   /** @type {Map<import('playwright-core').Page, string>} CDP targetId per tracked page, best-effort. */
   const targetIds = new Map();
   let disconnected = false;
+  /** @type {Set<string>} target ids closeAll() leaves open (a parked verification tab) */
+  const keptOpen = new Set();
   const awaitingTabs = opts.awaitingTabs ?? dbAwaitingTabs();
   /** @type {Set<string>|null} null = unknown (lookup failed): close nothing */
   let exempt = null;
@@ -543,8 +546,14 @@ export async function connectSession(opts = {}) {
       if (closed > 0) log.warn({ evt: 'targets_reconciled', attempted: ids.length, closed });
       return { attempted: ids.length, closed };
     },
+    keepOpen(targetId) {
+      keptOpen.add(targetId);
+    },
     async closeAll() {
       for (const p of [...pages.keys()]) {
+        // A parked tab (keepOpen) belongs to the owner until they click; leave it open.
+        const id = targetIds.get(p);
+        if (id && keptOpen.has(id)) continue;
         try {
           await p.close();
         } catch {

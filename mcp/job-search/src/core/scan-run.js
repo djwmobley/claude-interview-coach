@@ -64,6 +64,7 @@ import { connectSession as defaultConnectSession, applyTargetMarkerPath } from '
 import { makeCapability } from '../browser/capability.js';
 import { ADAPTERS, getAdapter } from '../adapters/index.js';
 import { runTriage } from './triage.js';
+import { pingIndeedWaiting } from './indeed-ping.js';
 import { runTargetsStage } from '../targets/stage.js';
 import { runDraftStage } from '../targets/draft-stage.js';
 import { createSnapshotSaver } from './linkedin-snapshot.js';
@@ -168,6 +169,7 @@ export const CLOSE_ALL_TIMEOUT_MS = 10000;
  *   binary NAME is separately overridable via the JOBSEARCH_TRIAGE_CLAUDE_BIN env var (mirrors
  *   JOBSEARCH_FIXTURE_MAP), for a child-process-level test that cannot pass a JS function across the
  *   process boundary.
+ * @property {import('./claude-spawn.js').runClaudeText} [indeedPingRun] test seam: the Indeed park phone-ping child (never a real claude in tests).
  * @property {(code: number) => void} [exit] independent review Finding 1, item (c): defaults to
  *   `process.exit`. Called ONLY when browser-session teardown timed out (CLOSE_ALL_TIMEOUT_MS) AND
  *   opts.trigger is not 'mcp' -- a wedged CDP connection is a live handle that can keep a one-shot
@@ -877,6 +879,57 @@ async function executeRun(p) {
     return false;
   }
 
+  // ---- Indeed verification park (sql/032) ----
+  const INDEED_WAITING_MESSAGE = 'Indeed is waiting for your click.';
+  let indeedParkedThisRun = false;
+
+  function pushIndeedWaitingWarning() {
+    errors.push({ source: 'indeed', code: 'INDEED_WAITING_FOR_CLICK', severity: /** @type {const} */ ('warning'), message: INDEED_WAITING_MESSAGE });
+  }
+
+  /** True for an unattended, real run: the only case that parks. Interactive runs pop and wait instead. */
+  function parkApplies() {
+    return !interactive && !dryRun;
+  }
+
+  /**
+   * Park Indeed on a verification challenge: record where, leave that one tab open, make no further Indeed
+   * requests this run, add the report line, and send one phone ping. No wall is recorded.
+   * @param {string|null|undefined} url
+   */
+  async function parkIndeed(url) {
+    if (indeedParkedThisRun) return;
+    indeedParkedThisRun = true;
+    blockedDetailSources.add('indeed');
+    let targetId = null;
+    try {
+      const page = capPages.get('indeed');
+      if (page && session) targetId = await session.targetIdOf(page);
+      if (targetId) session?.keepOpen(targetId);
+    } catch (err) {
+      log({ evt: 'indeed_park_target_failed', run_id: runId, ...errFields(err) });
+    }
+    try {
+      await client.query(
+        `INSERT INTO ic_source_state (source, parked_at, park_url, park_target_id) VALUES ('indeed', now(), $1, $2)
+         ON CONFLICT (source) DO UPDATE SET parked_at = now(), park_url = $1, park_target_id = $2`,
+        [url ?? null, targetId],
+      );
+    } catch (err) {
+      log({ evt: 'indeed_park_record_failed', run_id: runId, ...errFields(err) });
+    }
+    pushIndeedWaitingWarning();
+    log({ evt: 'indeed_parked', run_id: runId, url: url ?? null, target_id: targetId });
+    const ping = await pingIndeedWaiting({ configDir: config.configDir, signal, run: deps.indeedPingRun });
+    if (!ping.ok) log({ evt: 'indeed_ping_failed', run_id: runId, reason: ping.reason });
+  }
+
+  /** True when an earlier run parked Indeed and nobody has re-enabled it. */
+  async function indeedIsParked() {
+    const r = await client.query("SELECT parked_at FROM ic_source_state WHERE source = 'indeed'");
+    return r.rowCount > 0 && r.rows[0].parked_at !== null;
+  }
+
   /** @param {string} source @param {string} reason */
   function countBlocked(source, reason) {
     const by = (stats.detail_blocked_by_source[source] ??= {});
@@ -906,6 +959,10 @@ async function executeRun(p) {
       } else {
         return again;
       }
+    }
+    if (s.name === 'indeed' && cur.outcome === 'blocked:indeed_verification' && parkApplies()) {
+      await parkIndeed(url);
+      return cur;
     }
     if (!blockedDetailSources.has(s.name)) {
       blockedDetailSources.add(s.name);
@@ -1593,6 +1650,12 @@ async function executeRun(p) {
           continue;
         }
       }
+      if (s.name === 'indeed' && await indeedIsParked()) {
+        blockedDetailSources.add('indeed');
+        pushIndeedWaitingWarning();
+        log({ evt: 'indeed_parked_skip', run_id: runId });
+        continue;
+      }
       const enabled = await sourceEnabled(client, s.name, now);
       if (!enabled.enabled) {
         errors.push({ source: s.name, code: 'SOURCE_DISABLED', message: `${s.name} disabled (${enabled.reason})${enabled.disabledUntil ? ' until ' + enabled.disabledUntil.toISOString() : ''}` });
@@ -1682,6 +1745,10 @@ async function executeRun(p) {
             const verdict = classifyPage(ev.signals);
             log({ evt: 'page_classified', source: s.name, kind: verdict.kind, reason: verdict.reason, status: ev.signals.status ?? null });
             if (!verdict.stopSource) return { stopSource: false };
+            if (s.name === 'indeed' && verdict.reason === 'indeed_verification' && parkApplies()) {
+              await parkIndeed(ev.signals.url ?? null);
+              return { stopSource: true };
+            }
             walled = true;
             partial = true;
             // A dry run still reports the wall (errors[], walled) but never writes ic_source_state.

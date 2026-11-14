@@ -163,7 +163,7 @@ function describeWarning(entry) {
   // In-run Google re-auth (spec A6/A10): these two carry their own `message` (never a `remedy`), unlike
   // every other warning code above -- fall through to it rather than the bare code below, or the
   // operator-facing text (e.g. "approve it and Gmail resumes next run") would be silently dropped.
-  if (entry.code === 'AUTH_REAUTH_PENDING' || entry.code === 'AUTH_REAUTH_FAILED' || entry.code === 'DETAIL_VERIFICATION_NEEDED') {
+  if (entry.code === 'AUTH_REAUTH_PENDING' || entry.code === 'AUTH_REAUTH_FAILED' || entry.code === 'DETAIL_VERIFICATION_NEEDED' || entry.code === 'INDEED_WAITING_FOR_CLICK') {
     return entry.message ?? entry.code;
   }
   return `${entry.code}${entry.remedy ? `. ${entry.remedy}` : ''}`;

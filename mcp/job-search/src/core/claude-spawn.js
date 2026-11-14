@@ -51,7 +51,7 @@ const SKILL_READS = Object.freeze(['Read(./data/**)', 'Read(./memory/**)', 'Read
  * @typedef {{ name: string, allowed: readonly string[], mcpTools: readonly string[] }} SpawnProfile
  */
 
-/** @type {Readonly<Record<'write-resume'|'review-cv'|'triage'|'target-draft'|'target-review'|'mail-score', SpawnProfile>>} */
+/** @type {Readonly<Record<'write-resume'|'review-cv'|'triage'|'target-draft'|'target-review'|'mail-score'|'push-ping', SpawnProfile>>} */
 export const SPAWN_PROFILES = Object.freeze({
   'write-resume': Object.freeze({
     name: 'write-resume',
@@ -71,6 +71,9 @@ export const SPAWN_PROFILES = Object.freeze({
   // Recruiter-mail scoring: one message per call, text on stdin (fenced untrusted data), a schema-constrained answer.
   // Third-party email text is in the prompt, so no tool of any kind.
   'mail-score': Object.freeze({ name: 'mail-score', mcpTools: Object.freeze([]), allowed: Object.freeze([]) }),
+  // Indeed park ping: the prompt is fixed text we wrote (no untrusted content). The one tool it may use is
+  // PushNotification, plus ToolSearch so a deferred tool can be loaded.
+  'push-ping': Object.freeze({ name: 'push-ping', mcpTools: Object.freeze([]), allowed: Object.freeze(['PushNotification', 'ToolSearch']) }),
   'review-cv': Object.freeze({
     name: 'review-cv',
     mcpTools: Object.freeze(['get_job']),
@@ -206,6 +209,25 @@ export function targetCallArgs(kind, o) {
     ...(kind === 'draft' ? ['--json-schema', o.schemaJson] : []),
     '--strict-mcp-config', '--mcp-config', path.join(o.configDir, 'triage-mcp-empty.json'),
     ...permissionArgs(profile),
+  ];
+}
+
+/** The one phone ping sent when an unattended scan parks Indeed behind a human-verification challenge. */
+export const INDEED_PING_MESSAGE = 'Indeed needs your click to continue the job scan.';
+
+/** Fixed prompt for the ping child (stdin). */
+export const INDEED_PING_PROMPT = `Call the PushNotification tool exactly once with the message "${INDEED_PING_MESSAGE}" and do nothing else. Do not call any other tool.`;
+
+/**
+ * The argv of the Indeed park ping: haiku, empty strict MCP config, prompt on stdin.
+ * @param {{ configDir: string }} o
+ * @returns {string[]}
+ */
+export function indeedPingArgs(o) {
+  return [
+    '-p', '--model', 'haiku', '--output-format', 'json',
+    '--strict-mcp-config', '--mcp-config', path.join(o.configDir, 'triage-mcp-empty.json'),
+    ...permissionArgs(SPAWN_PROFILES['push-ping']),
   ];
 }
 
